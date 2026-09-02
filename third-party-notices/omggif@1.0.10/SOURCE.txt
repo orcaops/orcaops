@@ -1,0 +1,28 @@
+package:  omggif@1.0.10
+declared: "repository": "https://github.com/deanm/omggif"
+          (from the installed package's own package.json)
+
+url:      https://api.github.com/repos/deanm/omggif/contents/README?ref=0ec9069a525ec66223eadda3d62059d3685fd3b0
+ref:      default branch HEAD at fetch time — the repository carries no tags
+commit:   0ec9069a525ec66223eadda3d62059d3685fd3b0
+path:     README (repository root), whole file
+fetched:  2026-08-27 UTC
+
+Verification
+------------
+package.json at this commit is omggif version 1.0.10 with "license": "MIT" and
+the same repository URL the installed package declares, matching it exactly.
+That is what makes this pin sound despite there being no tag.
+
+The repository ships NO dedicated licence file: the tree is README,
+example_node.js, omggif.js, package.json, plask_viewer.js. Its MIT notice is the
+body of README, which is reproduced here whole and unedited — the two
+description lines and the repository URL at the top of it are part of the file
+as fetched and were not stripped.
+
+The identical notice also appears as the comment header of omggif.js at this
+commit, which is a second copy of the same text in the same repository rather
+than a different notice.
+
+The notice names Dean McNamee, 2013, and grants the MIT permissions, which
+agrees with the "license": "MIT" the installed package declares.

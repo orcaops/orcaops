@@ -1,0 +1,7 @@
+{
+  "//": "Exact versions of the bundled PUBLIC dependency closure (the eval packs are repacked from source each run and intentionally NOT pinned here). Applied as npm overrides during the staging install so reruns are reproducible. Regenerate deliberately after a closure bump.",
+  "overrides": {
+    "picomatch": "4.0.4",
+    "zod": "4.4.3"
+  }
+}

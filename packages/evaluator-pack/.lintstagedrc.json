@@ -1,0 +1,6 @@
+{
+  "*.{ts,tsx,jsx}": ["prettier --write", "eslint --fix"],
+  "packs/**/runtime/**/*.js": [],
+  "*.js": ["prettier --write", "eslint --fix"],
+  "*.{json,md,yaml,yml}": ["prettier --write"]
+}

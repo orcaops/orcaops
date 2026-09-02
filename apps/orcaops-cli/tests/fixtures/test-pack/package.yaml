@@ -1,0 +1,16 @@
+schema: orcaops.evaluator_package/v1
+id: test-pack
+name: test-fixtures/test-pack
+version: 0.0.1
+description: >-
+  Test-only evaluator pack used by the CLI integration tests. Mirrors
+  the production evaluator-pack shape (manifest + specs + runtime) so
+  tests can exercise the discoverEvaluators path with real refs.
+evaluator_dir: ./evaluators
+defaults:
+  timeout_ms: 30000
+  env:
+    inherit:
+      - PATH
+      - HOME
+      - NODE_PATH

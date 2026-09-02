@@ -1,0 +1,25 @@
+package:  @tokenizer/token@0.3.0
+declared: "repository": "https://github.com/Borewit/tokenizer-token.git"
+          (from the installed package's own package.json)
+
+url:      https://api.github.com/repos/Borewit/tokenizer-token/contents/README.md?ref=v0.3.0
+ref:      tag v0.3.0
+commit:   e068a455370090f44c757946b8571bb3fb1f117e
+path:     README.md, lines 10-19 — the whole body of the "## Licence" section
+fetched:  2026-08-27 UTC
+
+Verification
+------------
+package.json at this commit is @tokenizer/token version 0.3.0, matching the
+installed package exactly.
+
+The repository ships NO dedicated licence file, at this tag or on its default
+branch: the tree is .gitignore, README.md, index.d.ts, package.json, yarn.lock.
+Its MIT notice lives in README.md under a "## Licence" heading. The text here is
+the body of that section, copied byte-for-byte from the "(The MIT License)" line
+to the end of the file; only the "## Licence" markdown heading above it and the
+badges and description before it were left out. Nothing was reworded, and no
+template was filled in.
+
+The notice reads "(The MIT License)", copyright 2020 Borewit, which agrees with
+the "license": "MIT" the installed package declares.

@@ -1,0 +1,23 @@
+schema: orcaops.evaluator_package/v1
+id: js
+name: orcaops/js
+version: 1.0.0
+description: >-
+  First-party TypeScript/JavaScript evaluators. Ships
+  `api-signature-drift` as a TypeScript compiler-API analyzer that
+  compares exported function signatures between `plan.base_sha` and
+  the working tree.
+evaluator_dir: ./evaluators
+defaults:
+  timeout_ms: 60000
+  env:
+    inherit:
+      - PATH
+      - HOME
+      - NODE_PATH
+metadata:
+  owner: orcaops
+  tags:
+    - first-party
+    - typescript
+    - api-stability

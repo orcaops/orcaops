@@ -1,0 +1,10 @@
+{
+  "extends": "@orcaops/typescript-config/node.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "packs/**/runtime/**/*.ts", "scripts/**/*.mjs"],
+  "exclude": ["node_modules", "dist", "packs/**/lib/**/*"]
+}

@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "description": "Multi-thread ownership-derivation proof. Real attribute() inputs (chain + synthetic unified diff + per-line segment owners) run through the actual attribution pipeline; the resulting CoverageItem[] feeds derivePartOwnership. Git-free synthetic inputs, following packages/review-core/src/attribution/coverage.test.ts — the point is the real attribute() code path runs.",
+  "base": "B",
+  "worktree": "C5",
+  "checkpoints": [
+    {
+      "artifact": "a1",
+      "n": 1,
+      "openTreeSha": "B",
+      "closeTreeSha": "C1",
+      "closedAt": "2026-07-10T01:00:00.000Z",
+      "status": "closed"
+    },
+    {
+      "artifact": "a2",
+      "n": 1,
+      "openTreeSha": "C1",
+      "closeTreeSha": "C2",
+      "closedAt": "2026-07-10T02:00:00.000Z",
+      "status": "closed"
+    },
+    {
+      "artifact": "a3",
+      "n": 1,
+      "openTreeSha": "C3",
+      "closeTreeSha": "C4",
+      "closedAt": "2026-07-10T03:00:00.000Z",
+      "status": "closed"
+    },
+    {
+      "artifact": "a1",
+      "n": 2,
+      "openTreeSha": "C4",
+      "closeTreeSha": "C5",
+      "closedAt": "2026-07-10T04:00:00.000Z",
+      "status": "closed"
+    },
+    {
+      "artifact": "a2",
+      "n": 2,
+      "openTreeSha": null,
+      "closeTreeSha": null,
+      "closedAt": null,
+      "status": "abandoned"
+    }
+  ],
+  "segmentMap": {
+    "0": "checkpoint a1:cp1",
+    "1": "checkpoint a2:cp1",
+    "2": "gap a2:cp1->a3:cp1.open (uncaptured window; also covers the abandoned a2:cp2 attempt)",
+    "3": "checkpoint a3:cp1",
+    "4": "checkpoint a1:cp2"
+  },
+  "overlapSegments": [
+    { "kind": "concurrent", "changedFiles": ["src/contested.ts", "src/samepart_amb.ts"] }
+  ],
+  "diffLines": [
+    "diff --git a/src/alpha.ts b/src/alpha.ts",
+    "--- a/src/alpha.ts",
+    "+++ b/src/alpha.ts",
+    "@@ -1,2 +1,5 @@",
+    " ctxA",
+    "+a_add1",
+    "+a_add2",
+    "+a_add3",
+    " ctxB",
+    "diff --git a/src/beta.ts b/src/beta.ts",
+    "--- a/src/beta.ts",
+    "+++ b/src/beta.ts",
+    "@@ -1,1 +1,3 @@",
+    " ctxB1",
+    "+b_add1",
+    "+b_add2",
+    "diff --git a/src/gamma.ts b/src/gamma.ts",
+    "--- a/src/gamma.ts",
+    "+++ b/src/gamma.ts",
+    "@@ -1,3 +1,7 @@",
+    " ctxG1",
+    "+g_add1",
+    "+g_add2",
+    " ctxG2",
+    "+g_add3",
+    "+g_add4",
+    " ctxG3",
+    "diff --git a/src/gap_area.ts b/src/gap_area.ts",
+    "--- a/src/gap_area.ts",
+    "+++ b/src/gap_area.ts",
+    "@@ -1,2 +1,6 @@",
+    " ctxH1",
+    "+h_gap1",
+    "+h_gap2",
+    " ctxH2",
+    "+h_unowned1",
+    "+h_unowned2",
+    "diff --git a/src/contested.ts b/src/contested.ts",
+    "--- a/src/contested.ts",
+    "+++ b/src/contested.ts",
+    "@@ -1,1 +1,4 @@",
+    " ctxC1",
+    "+c_line1",
+    "+c_line2",
+    "+c_line3",
+    "diff --git a/src/samepart_amb.ts b/src/samepart_amb.ts",
+    "--- a/src/samepart_amb.ts",
+    "+++ b/src/samepart_amb.ts",
+    "@@ -1,1 +1,3 @@",
+    " ctxS1",
+    "+s_line1",
+    "+s_line2",
+    ""
+  ],
+  "lineOwners": [
+    { "file": "src/alpha.ts", "side": "add", "line": 2, "segment": 0 },
+    { "file": "src/alpha.ts", "side": "add", "line": 3, "segment": 0 },
+    { "file": "src/alpha.ts", "side": "add", "line": 4, "segment": 0 },
+    { "file": "src/beta.ts", "side": "add", "line": 2, "segment": 1 },
+    { "file": "src/beta.ts", "side": "add", "line": 3, "segment": 1 },
+    { "file": "src/gamma.ts", "side": "add", "line": 2, "segment": 3 },
+    { "file": "src/gamma.ts", "side": "add", "line": 3, "segment": 3 },
+    { "file": "src/gamma.ts", "side": "add", "line": 5, "segment": 4 },
+    { "file": "src/gamma.ts", "side": "add", "line": 6, "segment": 4 },
+    { "file": "src/gap_area.ts", "side": "add", "line": 2, "segment": 2 },
+    { "file": "src/gap_area.ts", "side": "add", "line": 3, "segment": 2 },
+    { "file": "src/contested.ts", "side": "add", "line": 2, "segment": 0 },
+    { "file": "src/contested.ts", "side": "add", "line": 3, "segment": 1 },
+    { "file": "src/contested.ts", "side": "add", "line": 4, "segment": 0 },
+    { "file": "src/samepart_amb.ts", "side": "add", "line": 2, "segment": 3 },
+    { "file": "src/samepart_amb.ts", "side": "add", "line": 3, "segment": 4 }
+  ],
+  "topology": {
+    "parts": [
+      { "id": "P1", "act": "ActI", "checkpoint_refs": ["a1:cp1"] },
+      { "id": "P2", "act": "ActI", "checkpoint_refs": ["a2:cp1"] },
+      { "id": "P3", "act": "ActII", "checkpoint_refs": ["a1:cp2", "a3:cp1"] }
+    ]
+  }
+}

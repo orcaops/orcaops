@@ -1,0 +1,42 @@
+{
+  "customTypes": {
+    "packageManager": {
+      "strategy": "name@version",
+      "path": "packageManager"
+    }
+  },
+  "dependencyTypes": ["dev", "peer", "prod", "resolutions", "packageManager"],
+  "source": ["package.json", "apps/*/package.json", "packages/*/package.json"],
+  "versionGroups": [
+    {
+      "label": "Pin TypeScript to exact version across monorepo",
+      "dependencies": ["typescript"],
+      "dependencyTypes": ["dev", "prod"],
+      "pinVersion": "5.9.2"
+    },
+    {
+      "label": "use workspace protocol for local packages",
+      "dependencies": ["$LOCAL"],
+      "dependencyTypes": ["!local", "prod", "dev"],
+      "pinVersion": "workspace:*"
+    },
+    {
+      "label": "Prettier is a tool — no subpackage needs it as a direct dep.",
+      "packages": ["!orcaops"],
+      "dependencies": ["prettier"],
+      "isBanned": true
+    },
+    {
+      "label": "TypeScript is allowed as a runtime dep for AST work (see @orcaops/core/api-signature-diff and @orcaops/evaluator-pack/js/api-signature-drift). Other packages should still avoid it.",
+      "packages": ["!orcaops", "!@orcaops/core", "!@orcaops/evaluator-pack"],
+      "dependencies": ["typescript"],
+      "isBanned": true
+    },
+    {
+      "label": "packageManager matches root",
+      "dependencies": ["pnpm"],
+      "dependencyTypes": ["packageManager"],
+      "snapTo": ["orcaops"]
+    }
+  ]
+}

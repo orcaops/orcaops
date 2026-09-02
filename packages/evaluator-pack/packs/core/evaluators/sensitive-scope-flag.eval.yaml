@@ -1,0 +1,24 @@
+schema: orcaops.evaluator/v1
+id: sensitive-scope-flag
+phase: post-plan
+severity: warn
+description: >-
+  When the plan touches a sensitive scope (auth, payments, billing,
+  PII, data-deletion), verify that idempotency, rollback, and test
+  coverage are explicitly addressed in the plan or checkpoints. The
+  cost of missing one of these in sensitive code is incident-level;
+  surfacing it before implementation is much cheaper than catching it
+  in review.
+engine:
+  kind: llm
+  prompt_file: prompts/sensitive-scope-flag.prompt.md
+  output_format: markdown
+  # The baseline block already carries plan steps and checkpoint summaries.
+  additional_context_sections: []
+filters:
+  scopes:
+    - auth
+    - payments
+    - billing
+    - pii
+    - data-deletion

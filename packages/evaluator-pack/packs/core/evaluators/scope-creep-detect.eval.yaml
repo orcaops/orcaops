@@ -1,0 +1,16 @@
+schema: orcaops.evaluator/v1
+id: scope-creep-detect
+phase: checkpoint-close
+severity: warn
+description: >-
+  Compare the files actually changed at this checkpoint against the
+  original plan_steps. Flag meaningful work that drifted from the
+  plan unless the drift is trivial (formatting, typo fixes, comment
+  edits). Catching scope creep early — at checkpoint time — is much
+  cheaper than catching it at PR review.
+engine:
+  kind: llm
+  prompt_file: prompts/scope-creep-detect.prompt.md
+  output_format: markdown
+  # The baseline block already carries plan steps and changed files.
+  additional_context_sections: []

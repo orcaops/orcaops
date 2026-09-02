@@ -1,0 +1,120 @@
+name: Production dependency audit
+
+# The weekly whole-tree check that CI's per-PR audit cannot provide: a PR only
+# audits when it touches a dependency input, but a newly published advisory
+# against an unchanged lockfile appears without any PR at all.
+
+on:
+  schedule:
+    # Mondays 06:17 UTC — off the top of the hour, where scheduled-runner
+    # contention is worst.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-dependency-audit
+  # Never cancel: a run that is midway through reconciling the tracking issue
+  # would leave it stating something that is no longer true.
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The only write grant in either workflow, scoped to this job alone.
+      issues: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: corepack enable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+
+      # continue-on-error so the tracking issue still gets reconciled when the
+      # audit fails — that is exactly when someone needs to be told. The final
+      # step re-raises the failure.
+      - name: Production dependency audit
+        id: audit
+        continue-on-error: true
+        run: >-
+          pnpm audit:prod:ci
+          --fail-on-stale-exceptions
+          --result-file "${{ runner.temp }}/audit-result.json"
+          --github-summary
+
+      - name: Plan the tracking-issue action
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT_FILE: ${{ runner.temp }}/audit-result.json
+          ISSUES_FILE: ${{ runner.temp }}/open-issues.json
+          BODY_FILE: ${{ runner.temp }}/issue-body.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # Candidates only. audit-issue-plan.mjs decides which of these this
+          # workflow owns, matching BOTH the exact title and the body marker —
+          # a human issue may legitimately carry the same label.
+          gh issue list \
+            --label production-audit \
+            --state open \
+            --limit 100 \
+            --json number,title,body > "$ISSUES_FILE"
+
+          node scripts/audit-issue-plan.mjs \
+            --result-file "$RESULT_FILE" \
+            --issues-file "$ISSUES_FILE" \
+            --run-url "$RUN_URL" \
+            --body-file "$BODY_FILE"
+
+      - name: Apply the tracking-issue action
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Via env, never interpolated into the script body.
+          ACTION: ${{ steps.plan.outputs.action }}
+          ISSUE_NUMBER: ${{ steps.plan.outputs.issue-number }}
+          BODY_FILE: ${{ runner.temp }}/issue-body.md
+        run: |
+          set -euo pipefail
+          echo "tracking issue action: $ACTION ${ISSUE_NUMBER:+(#$ISSUE_NUMBER)}"
+
+          case "$ACTION" in
+            create)
+              # Idempotent, and keeps the label's description and color stable.
+              gh label create production-audit \
+                --description 'Scheduled production dependency audit needs attention' \
+                --color B60205 --force
+              gh issue create \
+                --title 'Production dependency audit needs attention' \
+                --label production-audit \
+                --body-file "$BODY_FILE"
+              ;;
+            comment)
+              gh issue comment "$ISSUE_NUMBER" --body-file "$BODY_FILE"
+              ;;
+            close)
+              gh issue comment "$ISSUE_NUMBER" --body-file "$BODY_FILE"
+              gh issue close "$ISSUE_NUMBER"
+              ;;
+            none)
+              echo 'Nothing to report and no tracking issue open.'
+              ;;
+            *)
+              echo "::error::unrecognized tracking issue action: $ACTION"
+              exit 1
+              ;;
+          esac
+
+      # Advisory, unavailable, invalid-policy, and expired-stale all reach here
+      # as a non-zero audit exit. Unmatched configuration does not — it warned
+      # in the job summary and leaves the run green.
+      - name: Fail on unresolved audit conditions
+        if: steps.audit.outcome != 'success'
+        run: |
+          echo "::error::the production dependency audit did not pass — see the job summary and the tracking issue"
+          exit 1

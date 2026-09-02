@@ -1,0 +1,13 @@
+schema: orcaops.evaluator/v1
+id: hello
+phase: post-plan
+severity: info
+description: >-
+  Trivial command-engine demo evaluator that emits PASS with a fixed
+  greeting. Disable via `.orcaops/evaluators.yaml` once you've copied
+  the shape into your own pack.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/hello.js

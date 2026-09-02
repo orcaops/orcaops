@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "manuallyManagedDependencies": [
+    {
+      "dependency": "typescript",
+      "source": "syncpack-pin",
+      "owner": "@orcaops/maintainers",
+      "rationale": "Pinned to 5.9.2 across the monorepo by .syncpackrc.json; automated bumps must move the coordinated pin.",
+      "evidence": [".syncpackrc.json"]
+    },
+    {
+      "dependency": "@opentui/core",
+      "source": "manual",
+      "owner": "@orcaops/maintainers",
+      "rationale": "OpenTUI upgrades require controlled render, PTY, and performance validation.",
+      "evidence": ["docs/dependency-policy.md#manually-managed-dependencies"]
+    },
+    {
+      "dependency": "@opentui/react",
+      "source": "manual",
+      "owner": "@orcaops/maintainers",
+      "rationale": "Must move with @opentui/core after the same controlled render, PTY, and performance validation.",
+      "evidence": ["docs/dependency-policy.md#manually-managed-dependencies"]
+    },
+    {
+      "dependency": "conventional-commits-parser",
+      "source": "manual",
+      "owner": "@orcaops/maintainers",
+      "rationale": "Seed clustering and deterministic labels depend on parser stability; upgrades require rerunning canonical history fixtures and idempotency checks.",
+      "evidence": ["docs/dependency-policy.md#manually-managed-dependencies"]
+    }
+  ],
+  "advisoryExceptions": []
+}

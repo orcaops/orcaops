@@ -1,0 +1,23 @@
+schema: orcaops.evaluator_package/v1
+id: demo
+name: orcaops/demo
+version: 1.0.0
+description: >-
+  Explicitly installed example content for pack authors: a command-engine
+  PASS, an llm-engine info, and a deliberately always-blocking command-engine
+  VIOLATION. Orcaops never installs this pack by default. It is unsuitable for
+  normal production workflows because demo/always-block rejects every
+  checkpoint open unless that evaluator is disabled or policy-excepted.
+evaluator_dir: ./evaluators
+defaults:
+  timeout_ms: 5000
+  env:
+    inherit:
+      - PATH
+metadata:
+  owner: orcaops
+  tags:
+    - first-party
+    - demo
+    - example-only
+    - learn-by-example

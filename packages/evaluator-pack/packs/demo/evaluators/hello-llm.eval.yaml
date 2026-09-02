@@ -1,0 +1,18 @@
+schema: orcaops.evaluator/v1
+id: hello-llm
+phase: pre-pr
+severity: info
+description: >-
+  Trivial llm-engine demo evaluator. Asks the model to echo an INFO
+  verdict so first-time users can see the LLM dispatch path
+  end-to-end. Disable via `.orcaops/evaluators.yaml` once you've
+  copied the shape.
+engine:
+  kind: llm
+  prompt_file: prompts/hello-llm.prompt.md
+  output_format: markdown
+  # Declared explicitly even though empty: the field is required, and the
+  # demo is what an author copies.
+  additional_context_sections: []
+filters:
+  when_llm: required

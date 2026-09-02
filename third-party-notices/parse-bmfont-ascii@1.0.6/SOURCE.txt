@@ -1,0 +1,20 @@
+package:  parse-bmfont-ascii@1.0.6
+declared: "repository": "git://github.com/mattdesl/parse-bmfont-ascii.git"
+          (from the installed package's own package.json)
+
+url:      https://api.github.com/repos/mattdesl/parse-bmfont-ascii/contents/LICENSE.md?ref=v1.0.6
+ref:      tag v1.0.6
+commit:   5f22b037ae7460f629dd681db23cd9b543a76b06
+path:     LICENSE.md (repository root)
+fetched:  2026-08-27 UTC
+
+Verification
+------------
+package.json at this commit is parse-bmfont-ascii version 1.0.6 with
+"license": "MIT", matching the installed package exactly. The tag v1.0.6 is the
+release tag for the installed version.
+
+The notice is "The MIT License (MIT)", copyright 2015 Matt DesLauriers, which
+agrees with the licence the installed package declares. The package ships the
+notice as LICENSE.md; it is stored here as LICENSE because that is the filename
+the generator looks for.

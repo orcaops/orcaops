@@ -1,0 +1,24 @@
+schema: orcaops.evaluator_package/v1
+id: core
+name: orcaops/core
+version: 1.0.0
+description: >-
+  First-party deterministic + LLM evaluators that cover the orcaops
+  capture lifecycle: plan quality, plan-revision discipline, checkpoint
+  scope density, secret leakage, uncertainty surfacing, completion
+  claims, scope creep, and policy/non-goals discipline. The
+  api-signature-drift evaluator lives in the sibling js pack and uses
+  the TypeScript compiler API.
+evaluator_dir: ./evaluators
+defaults:
+  timeout_ms: 30000
+  env:
+    inherit:
+      - PATH
+      - HOME
+      - NODE_PATH
+metadata:
+  owner: orcaops
+  tags:
+    - first-party
+    - lifecycle

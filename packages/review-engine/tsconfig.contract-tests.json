@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": [
+    "src/confirmationFreeze.test.ts",
+    "src/runtimeIdentity.test.ts",
+    "src/semanticAnchorCli.test.ts",
+    "src/semanticAnchorGenerations.test.ts",
+    "src/semanticAnchors.test.ts",
+    "src/twolaneRunCli.test.ts",
+    "src/twolaneSlice.test.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}

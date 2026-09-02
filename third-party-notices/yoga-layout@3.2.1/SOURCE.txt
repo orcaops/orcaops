@@ -1,0 +1,30 @@
+package:  yoga-layout@3.2.1
+declared: "repository": "git@github.com:facebook/yoga.git"
+          (from the installed package's own package.json)
+
+url:      https://api.github.com/repos/facebook/yoga/contents/LICENSE?ref=v3.2.1
+ref:      tag v3.2.1
+commit:   042f5013152eb81c1552dec945b88f7b95ca350f
+path:     LICENSE (repository root)
+fetched:  2026-08-27 UTC
+
+Which licence governs this package
+----------------------------------
+This is a monorepo and it carries TWO licence files at the root: LICENSE and
+LICENSE-examples. The yoga-layout package is the javascript/ directory, which is
+not examples, so LICENSE is the one that governs it and LICENSE-examples is not
+reproduced here.
+
+javascript/ carries no licence file of its own at this tag — the directory's
+only manifest-or-licence file is package.json — so the root LICENSE governs it.
+
+Verification
+------------
+javascript/package.json at this exact tag is yoga-layout version 3.2.1 with
+"license": "MIT" and the same repository URL the installed package declares,
+matching the installed version precisely. (On the default branch that same
+manifest reads version 0.0.0, a placeholder filled in at publish time, so the
+release tag is what ties this notice to the installed version.)
+
+The notice is "MIT License", copyright Facebook, Inc. and its affiliates, which
+agrees with the licence the installed package declares.

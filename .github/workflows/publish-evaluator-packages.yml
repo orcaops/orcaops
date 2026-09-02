@@ -1,0 +1,104 @@
+name: Publish evaluator authoring packages
+
+# Publishes @orcaops/evaluator-protocol and @orcaops/evaluator-sdk so third
+# parties can author their own evaluator packs against them. Deliberately a
+# manual dispatch, separate from the tag-driven CLI publish: these packages
+# are an authoring surface, not an install dependency (the CLI bundles its
+# copies via bundleDependencies), so a missing npm-side trusted-publisher
+# registration here can never fail a CLI launch run.
+#
+# Before the first run for each package: register the trusted publisher on
+# npm naming this repository and this file (a brand-new package may instead
+# need one bootstrap publish with a short-lived granular token, as the
+# @orcaops/protocol trio did).
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Which package(s) to publish'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - evaluator-protocol
+          - evaluator-sdk
+          - both
+      dry_run:
+        description: 'Pack and verify without publishing'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-evaluator-packages
+  # Never cancel a publish midway; npm is not transactional.
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: github.repository == 'orcaops/orcaops'
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: corepack enable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: pnpm install --frozen-lockfile
+
+      # Newer than Node 22 bundles; pinned so a publish reproduces from the log.
+      - name: Use an npm that supports trusted publishing
+        run: npm install --global npm@11.6.2
+
+      - name: Build the packages
+        run: pnpm exec turbo run build --filter=@orcaops/evaluator-protocol --filter=@orcaops/evaluator-sdk
+
+      # Dependency order: sdk depends on protocol, so protocol goes first.
+      # pnpm rewrites the workspace:* specifiers to real versions at pack time.
+      - name: Publish
+        env:
+          SELECTED: ${{ inputs.package }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          for pkg in evaluator-protocol evaluator-sdk; do
+            if [ "$SELECTED" != "both" ] && [ "$SELECTED" != "$pkg" ]; then
+              continue
+            fi
+            version="$(node -p "require('./packages/${pkg}/package.json').version")"
+            published="$(npm view "@orcaops/${pkg}@${version}" version 2>/dev/null || true)"
+            if [ "$published" = "$version" ]; then
+              echo "@orcaops/${pkg}@${version} already on npm; skipping"
+              continue
+            fi
+            flags="--access public --provenance --no-git-checks"
+            if [ "$DRY_RUN" = "true" ]; then
+              flags="$flags --dry-run"
+            fi
+            echo "publishing @orcaops/${pkg}@${version} (dry_run=${DRY_RUN})"
+            pnpm --filter "@orcaops/${pkg}" publish $flags
+          done
+
+      - name: Record what ran
+        env:
+          SELECTED: ${{ inputs.package }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          {
+            echo "### Evaluator authoring packages"
+            echo
+            echo "- selection: \`${SELECTED}\`"
+            echo "- dry run: \`${DRY_RUN}\`"
+            echo "- commit: \`${{ github.sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

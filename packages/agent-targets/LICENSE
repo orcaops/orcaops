@@ -1,0 +1,39 @@
+MIT License
+
+This package vendors (copies, with modifications) source from a third-party
+project:
+
+    Project:  vercel-labs/skills
+    Upstream: https://github.com/vercel-labs/skills
+    Version:  1.5.13
+    Commit:   9a7d8ac
+    Files:    src/{agents,types,constants,sanitize}.ts and createSymlink + its
+              helpers from src/installer.ts — reduced to data + detection for
+              orcaops (see each file's `// Vendored from ...` header).
+
+The upstream project declares `"license": "MIT"` in its package.json (v1.5.13)
+but ships no LICENSE file and no explicit copyright notice. The MIT permission
+notice below is reproduced to satisfy that license's notice requirement;
+copyright is attributed to the upstream project and its contributors per its
+public git history (project began 2026). If upstream later publishes an
+authoritative copyright line, replace the line below with it.
+
+Copyright (c) 2026 Vercel Labs and the vercel-labs/skills contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

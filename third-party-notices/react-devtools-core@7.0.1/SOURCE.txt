@@ -1,0 +1,38 @@
+package:  react-devtools-core@7.0.1
+declared: "repository": "https://github.com/facebook/react.git",
+          "directory": "packages/react-devtools-core"
+          (from the installed package's own package.json)
+
+url:      https://api.github.com/repos/facebook/react/contents/LICENSE?ref=29d9d3184484b03cb0369e0494617207df777b7a
+ref:      main HEAD at fetch time — see below on why no tag was used
+commit:   29d9d3184484b03cb0369e0494617207df777b7a
+path:     LICENSE (repository root)
+fetched:  2026-08-27 UTC
+
+Which licence governs this package
+----------------------------------
+This is a monorepo, so the root LICENSE is only the right notice if the package
+directory does not carry its own. It does not: at this commit
+packages/react-devtools-core holds README.md, backend.js, package.json, src/,
+standalone.js, webpack.backend.js and webpack.standalone.js, and no licence file
+of any kind. The repository root LICENSE therefore governs it.
+
+Verification
+------------
+packages/react-devtools-core/package.json at this exact commit is
+react-devtools-core version 7.0.1 with "license": "MIT" — the installed version
+precisely. That is the link between this notice and the installed bytes.
+
+The repository publishes no tag for react-devtools-core releases (its tags track
+react's own versions, currently 19.x), so no release tag could be pinned. The
+commit is pinned explicitly instead, and it is the commit at which the package
+directory holds version 7.0.1.
+
+The notice is "MIT License", copyright Meta Platforms, Inc. and affiliates,
+which agrees with the licence the installed package declares.
+
+Note: the package.json in the repository gives the repository url as
+https://github.com/react/react.git while the installed package gives
+https://github.com/facebook/react.git. These are the same repository under an
+org rename; the fetch used facebook/react, which is what the INSTALLED package
+declares.

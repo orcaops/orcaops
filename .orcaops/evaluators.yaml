@@ -1,0 +1,45 @@
+# .orcaops/evaluators.yaml — owned by `orcaops eval add-pack`.
+# Edit by hand to tweak engine / severity / params / enable flags; full schema:
+#   https://orcaops.dev/evaluators
+schema: orcaops.evaluator_config/v2
+runtime:
+  max_concurrent: 4
+packages:
+  - id: core
+    source:
+      kind: bundled
+      package: '@orcaops/evaluator-pack'
+      pack: core
+evaluators:
+  core/checkpoint-scope-density:
+    enabled: true
+  core/completed-steps-claimed:
+    enabled: true
+  core/non-goals-info:
+    enabled: true
+  core/non-goals-violated:
+    enabled: true
+  core/plan-conformance-post-plan:
+    enabled: false
+  core/plan-conformance-pre-pr:
+    enabled: false
+  core/plan-conformance-revision:
+    enabled: false
+  core/plan-label-quality:
+    enabled: true
+  core/plan-mentions-tests:
+    enabled: true
+  core/revision-diff-bounded:
+    enabled: true
+  core/revision-non-goals-stable:
+    enabled: true
+  core/revision-rationale-required:
+    enabled: true
+  core/revision-touched-scope-stable:
+    enabled: true
+  core/scope-creep-detect:
+    enabled: false
+  core/sensitive-scope-flag:
+    enabled: false
+  core/step-coverage:
+    enabled: false

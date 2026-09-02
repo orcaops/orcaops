@@ -1,0 +1,57 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": ["**/.env.*local"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
+      "env": ["NODE_ENV"]
+    },
+    "dev": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      "persistent": true
+    },
+    "start": {
+      "cache": false
+    },
+    "stop": {
+      "cache": false
+    },
+    "lint": {
+      "inputs": ["**/*.{ts,tsx,js,jsx}", "eslint.config.*", "tsconfig.json"],
+      "outputs": [],
+      "dependsOn": ["^build"]
+    },
+    "lint:fix": {
+      "inputs": ["**/*.{ts,tsx,js,jsx}", "eslint.config.*", "tsconfig.json"],
+      "outputs": [],
+      "dependsOn": ["^build"]
+    },
+    "format": {
+      "inputs": ["**/*.{ts,tsx,js,jsx,json,md,yaml,yml,css}", ".prettierrc*", "prettier.config.*"],
+      "outputs": []
+    },
+    "format:check": {
+      "inputs": ["**/*.{ts,tsx,js,jsx,json,md,yaml,yml,css}", ".prettierrc*", "prettier.config.*"],
+      "outputs": []
+    },
+    "typecheck": {
+      "inputs": ["**/*.{ts,tsx}", "tsconfig.json", "tsconfig.*.json"],
+      "outputs": [],
+      "dependsOn": ["^build"]
+    },
+    "typecheck:tests": {
+      "inputs": ["**/*.{ts,tsx}", "tsconfig.json", "tsconfig.*.json"],
+      "outputs": [],
+      "dependsOn": ["^build"]
+    },
+    "test": {
+      "outputs": [],
+      "dependsOn": ["^build", "build"]
+    },
+    "clean": {
+      "cache": false
+    }
+  }
+}

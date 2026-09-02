@@ -1,0 +1,17 @@
+schema: orcaops.evaluator/v1
+id: plan-label-quality
+phase: post-plan
+severity: warn
+description: >-
+  Flag plan-level `label` values that are too vague to be useful as
+  the thread headline. The label is the consumer-facing name for the
+  whole capture thread — it shows up in lists, digests, and
+  downstream PR-title synthesis on the cloud — so a generic phrase
+  like "fix", "wip", or "refactor" is wasted real estate. Three
+  failure modes: too short (< 6 chars), too generic (stop-phrase
+  match), and duplicates-task (leading slice of task).
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/plan-label-quality.js

@@ -1,0 +1,17 @@
+# Vendored third-party files are kept verbatim — never reformatted. The patterns
+# below are the exclusion set; the orcaops-authored modules and the `*.test.ts`
+# files are prettier-checked.
+dist/
+node_modules/
+src/core/
+src/lib/
+src/ui/lib/
+src/ui/components/
+src/ui/themes.ts
+src/ui/themes/
+src/ui/diff/pierre.ts
+src/ui/diff/renderRows.tsx
+src/ui/diff/rowStyle.ts
+src/ui/diff/useHighlightedDiff.ts
+src/ui/diff/codeColumns.ts
+src/ui/diff/expandCollapsedRows.ts

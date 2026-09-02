@@ -1,0 +1,82 @@
+{
+  "schema_version": 5,
+  "install": {
+    "agents": [
+      "claude-code",
+      "codex"
+    ],
+    "scope": "project",
+    "link": "copy"
+  },
+  "llm": {
+    "tool": "auto",
+    "model": null,
+    "effort": "medium",
+    "default_max_cost_usd": 0.5
+  },
+  "artifacts": {
+    "path": ".orcaops/artifacts",
+    "gitignore": true
+  },
+  "cache": {
+    "path": ".orcaops/cache/orcaops.db"
+  },
+  "evaluators": {
+    "max_concurrent": 4,
+    "on_warn": "notify",
+    "on_block": "interrupt",
+    "disposition_ttl_days": 90
+  },
+  "digest": {
+    "format": "markdown",
+    "include_evaluators": true,
+    "include_open_items": true,
+    "include_reasoning": false,
+    "include_rules_applied": true,
+    "redact_secrets": true
+  },
+  "gc": {
+    "retention_days": 30
+  },
+  "diff_fingerprint": {
+    "enabled": true,
+    "max_diff_bytes": 2000000
+  },
+  "review": {
+    "max_diff_bytes": 10000000,
+    "include_untracked": [],
+    "stub_paths": [
+      "packages/review-engine/fixtures/**"
+    ]
+  },
+  "archive": {
+    "enabled": true,
+    "redact_secrets": false
+  },
+  "skills": {
+    "enabled": {
+      "task-review": true
+    }
+  },
+  "naming": {
+    "prefix": "orcaops"
+  },
+  "bootstrap": "manual",
+  "generated_files": "commit",
+  "workflow": {
+    "hints": {
+      "keys": [
+        "commit-on-checkpoint-close",
+        "open-checkpoint-before-edits",
+        "capture-on-nontrivial",
+        "checkpoint-cadence"
+      ],
+      "custom": []
+    }
+  },
+  "session_hooks": {
+    "enabled": true,
+    "payload": "static",
+    "entries": "none"
+  }
+}

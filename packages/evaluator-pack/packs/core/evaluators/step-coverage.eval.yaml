@@ -1,0 +1,33 @@
+schema: orcaops.evaluator/v1
+id: step-coverage
+phase: pre-pr
+severity: warn
+# Ships OFF by default. It reads the worktree into a prompt sent to
+# an external API, so enabling it must be its own explicit act — `eval add-pack`
+# will NOT turn it on even under `--profile llm/all`. Enable per-ref:
+# `orcaops eval enable core/step-coverage`.
+default_enabled: false
+description: >-
+  Delivery coverage: grade whether the work actually shipped in this artifact
+  meets each plan step's acceptance_criteria by inspecting the worktree diff
+  rather than trusting the binary completed_step_id claim. Catches
+  under-delivery ("plan said 42 tests, shipped 2") that plan-level conformance
+  cannot see. Steps with no acceptance_criteria are not graded. warn-only.
+engine:
+  kind: llm
+  prompt_file: prompts/step-coverage.prompt.md
+  output_format: markdown
+  # Reads + reasons over a diff; 120s headroom matches the conformance specs.
+  timeout_ms: 120000
+  # Offer file inspection through Claude's command-filter policy.
+  tool_policy:
+    mode: command-filtered
+  # Grades the delivered diff against the rubric, so it needs all three:
+  # the criteria to grade, the claims to check, and the boundary to read within.
+  additional_context_sections:
+    - acceptance-criteria
+    - delivered-checkpoints
+    - diff-boundary
+filters:
+  # Skip when no LLM is configured (mirrors the conformance specs).
+  when_llm: required

@@ -1,0 +1,15 @@
+schema: orcaops.evaluator/v1
+id: revision-touched-scope-stable
+phase: post-plan-revision
+severity: warn
+description: >-
+  Warns when a revision *adds* a `touched_scope` tag — sensitive-scope
+  additions (e.g., `auth`, `payments`, `pii`) trigger fresh evaluator
+  gating that the prior plan didn't see. Reviewers should re-look at
+  the new scopes. Removals pass silently (narrowing scope is fine;
+  the prior pass still applies).
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/revision-touched-scope-stable.js

@@ -1,0 +1,100 @@
+# Dependencies
+node_modules/
+bower_components/
+
+# Build outputs
+build/
+dist/
+lib/
+esm/
+cjs/
+
+# Framework outputs
+.next/
+out/
+.nuxt/
+.vercel/
+.svelte-kit/
+.storybook-out/
+storybook-static/
+
+# Tool caches
+.cache/
+.parcel-cache/
+.turbo/
+.eslintcache
+
+# Package managers
+.yalc/
+yalc.lock
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# Tests & coverage
+coverage/
+.nyc_output/
+cypress/screenshots/
+cypress/videos/
+playwright-report/
+test-results/
+
+# Docs sites
+.docusaurus/
+.vitepress/dist
+
+# Vite & dev server artifacts
+.vite/
+
+# Logs
+logs/
+*.log
+
+# Snapshots (usually auto-generated)
+*.snap
+
+# Minified bundles (don’t try to prettify)
+*.min.js
+*.min.css
+
+# Lockfiles (not needed for formatting)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+bun.lockb
+
+# Generated agent surfaces (orcaops-managed). Prettier single-quotes the YAML
+# frontmatter `generatedBy: "orcaops@<v>"` stamp, which doctor's
+# double-quote-only staleness regex then reads as stale. These trees are emitted
+# verbatim by `orcaops update` — never hand-formatted.
+.claude/skills/
+.claude/commands/
+.agents/
+
+# The committed install manifest is serialized canonically by the CLI
+# (`JSON.stringify(manifest, null, 2)`). Prettier collapses its short arrays,
+# and `orcaops update` then refuses to replace a file whose bytes no longer
+# match what it planned against — every install manifest edit hard-fails until
+# the file is hand-canonicalized.
+.orcaops/install.json
+
+# Root agent guides carry an orcaops-managed, marker-delimited `## Orcaops`
+# section (<!-- orcaops:start --> … <!-- orcaops:end -->) emitted by
+# `orcaops update`. Prettier reformatting the file drifts that managed block
+# from the generator output (flap on `update --force`); the user content below
+# the end marker is fine left unformatted.
+AGENTS.md
+CLAUDE.md
+
+# @orcaops/diff-render vendors third-party (MIT) diff-render source that must
+# never be reformatted. The package formats its own authored files via its
+# package-level .prettierignore + `pnpm --filter @orcaops/diff-render format`.
+packages/diff-render/
+
+# Compressed evidence — prettier cannot infer a parser and hard-errors, which
+# fails `format:check` for the whole repo.
+*.gz

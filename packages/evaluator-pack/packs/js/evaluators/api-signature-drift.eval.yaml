@@ -1,0 +1,52 @@
+schema: orcaops.evaluator/v1
+id: api-signature-drift
+phase: checkpoint-close
+severity: block
+description: >-
+  Detect silent changes to public-facing API signatures — removed
+  exports or changed function arity / declared return types —
+  between the plan's base SHA and the current working tree. Silent
+  breakage is one of the most common ways AI-authored changes ship
+  regressions to callers that don't appear in the diff narrative.
+on_block_message: |
+  Either:
+    1. Rewrite the change to keep the API stable. Add an overload, an
+       optional parameter with a default, or keep the previous export
+       alongside the new one.
+    2. Document the breaking change in this checkpoint (note it in the
+       `decisions` array with the reason) AND call
+       `orcaops block acknowledge --evaluator js/api-signature-drift`
+       with a one-line justification. The digest surfaces the
+       acknowledgement so a reviewer can see it.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/api-signature-drift.js
+resolution:
+  acknowledge:
+    enabled: true
+    label: acknowledge_breaking_change
+params_schema:
+  type: object
+  properties:
+    scope_files:
+      type: array
+      items: { type: string, minLength: 1 }
+  additionalProperties: false
+params:
+  scope_files:
+    - 'src/**'
+filters:
+  paths:
+    - '**/*.ts'
+    - '**/*.tsx'
+    - '**/*.mts'
+    - '**/*.cts'
+    - '**/*.js'
+    - '**/*.jsx'
+    - '**/*.mjs'
+    - '**/*.cjs'
+fingerprint:
+  include:
+    - 'runtime/api-signature-drift.ts'

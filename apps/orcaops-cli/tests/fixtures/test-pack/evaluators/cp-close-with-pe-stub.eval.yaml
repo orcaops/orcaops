@@ -1,0 +1,20 @@
+schema: orcaops.evaluator/v1
+id: cp-close-with-pe-stub
+phase: checkpoint-close
+severity: block
+description: >-
+  Test fixture: a checkpoint-close evaluator that ALSO opts into
+  policy_exception. Used by the checkpoint-lifecycle test that
+  asserts policy_exceptions[] naming a non-cp-open evaluator is
+  rejected even when the spec declares policy_exception opt-in.
+  Scope must be by `phase`, not by the spec's resolution opt-ins.
+on_block_message: |
+  Test fixture — production users would not see this.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/cp-close-with-pe-stub.mjs
+resolution:
+  policy_exception:
+    enabled: true

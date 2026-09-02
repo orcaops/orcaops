@@ -1,0 +1,43 @@
+{
+  "name": "@orcaops/project-scope",
+  "version": "0.0.0",
+  "license": "FSL-1.1-ALv2",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@orcaops/core": "workspace:*",
+    "@orcaops/storage": "workspace:*"
+  },
+  "devDependencies": {
+    "@orcaops/eslint-config": "workspace:*",
+    "@orcaops/prettier-config": "workspace:*",
+    "@orcaops/test-harness": "workspace:*",
+    "@orcaops/typescript-config": "workspace:*",
+    "@types/better-sqlite3": "^7.6.12",
+    "better-sqlite3": "^12.11.1",
+    "vitest": "^4.0.18"
+  }
+}

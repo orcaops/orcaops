@@ -1,0 +1,39 @@
+schema: orcaops.evaluator/v1
+id: plan-mentions-tests
+phase: post-plan
+severity: warn
+description: >-
+  Plans for functional work must record explicit, non-negated test intent
+  in step text or structured acceptance criteria. Configured tokens are
+  matched as bounded literals; a scoped plan is exempt only when every
+  declared scope is configured as exempt.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/plan-mentions.js
+params_schema:
+  type: object
+  properties:
+    tokens:
+      type: array
+      description: Case-insensitive literal tokens matched at identifier boundaries.
+      items: { type: string, minLength: 1 }
+      minItems: 1
+    exempt_scopes:
+      type: array
+      description: A plan with scope tags is exempt only when every declared tag appears here.
+      items: { type: string, minLength: 1 }
+  required: [tokens]
+  additionalProperties: false
+params:
+  tokens:
+    - test
+    - tests
+    - spec
+    - specs
+  exempt_scopes:
+    - refactor
+    - docs
+    - config
+    - chore

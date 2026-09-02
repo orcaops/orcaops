@@ -1,0 +1,18 @@
+schema: orcaops.evaluator/v1
+id: non-goals-info
+phase: checkpoint-close
+severity: info
+description: >-
+  Surface the plan's captured `non_goals` as informational text
+  whenever no LLM is configured. Pairs with `non-goals-violated`
+  (warn, llm, when_llm: required): the LLM evaluator does the
+  semantic drift check when an LLM is available; this deterministic
+  info checker keeps captured non-goals visible to the human reviewer
+  either way. Exactly one of the two runs per checkpoint.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/non-goals-info.js
+filters:
+  when_llm: absent

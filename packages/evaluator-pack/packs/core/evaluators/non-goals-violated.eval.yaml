@@ -1,0 +1,22 @@
+schema: orcaops.evaluator/v1
+id: non-goals-violated
+phase: checkpoint-close
+severity: warn
+description: >-
+  Compare the latest checkpoint's summary and `files_changed` against
+  the plan's captured `non_goals` (things this work was intentionally
+  NOT going to do). Flag changes that cross any non-goal. Catching
+  this at checkpoint time gives the agent a chance to course-correct;
+  at PR review the cost of unwinding is sunk. Paired with
+  `non-goals-info` (info, deterministic, when_llm: absent) which fills
+  in when no LLM is configured — exactly one of the two runs per
+  checkpoint.
+engine:
+  kind: llm
+  prompt_file: prompts/non-goals-violated.prompt.md
+  output_format: markdown
+  # The baseline block already carries non-goals, checkpoint summaries, and
+  # changed files — everything this prompt reads.
+  additional_context_sections: []
+filters:
+  when_llm: required

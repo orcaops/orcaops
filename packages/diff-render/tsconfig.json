@@ -1,0 +1,15 @@
+{
+  "extends": "@orcaops/typescript-config/node.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/react",
+    "noEmit": true,
+    "rootDir": "src",
+    "resolveJsonModule": true,
+    "types": ["react", "node"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"]
+}

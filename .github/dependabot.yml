@@ -1,0 +1,98 @@
+version: 2
+updates:
+  # Routine updates are minor/patch only. Majors are suppressed by the `allow`
+  # list rather than an ignore rule, because a `version-update:semver-major`
+  # ignore would also suppress MAJOR SECURITY updates for every dependency.
+  #
+  # The selector is `dependency-name: '*'`, NOT `dependency-type: 'direct'`.
+  # GitHub documents that `update-types` affects version updates only, so the
+  # minor/patch limit never touches security PRs — but it does not say whether
+  # `dependency-type` is applied to security updates. If it were, `direct` would
+  # silently drop security PRs for vulnerable TRANSITIVE dependencies, which is
+  # the exact protection `allow` was chosen to preserve. A name wildcard matches
+  # every dependency under either reading, and routine updates stay direct-only
+  # because that is the default when `dependency-type` is omitted.
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'monthly'
+    # Version updates name the dev branch. On the private repo that is the
+    # default branch, so nothing changes; on the public mirror the branch does
+    # not exist, which keeps Dependabot from opening update PRs against a repo
+    # that only receives releases. Security updates are unaffected (they always
+    # follow the default branch).
+    target-branch: 'claude-poc'
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    allow:
+      - dependency-name: '*'
+        update-types:
+          - 'version-update:semver-minor'
+          - 'version-update:semver-patch'
+    # Ignoring a dependency also suppresses its SECURITY PRs. Each name here is
+    # manually managed with a named owner in config/dependency-policy.json,
+    # and scripts/check-dependency-policy.mjs asserts the two sets stay equal.
+    # Listed by exact name, never @opentui/*: a wildcard would silently swallow
+    # a future OpenTUI package that never got its own decision or owner.
+    ignore:
+      - dependency-name: 'typescript'
+      - dependency-name: '@opentui/core'
+      - dependency-name: '@opentui/react'
+      - dependency-name: 'conventional-commits-parser'
+    # Every group is `applies-to: version-updates`, so security PRs stay
+    # ungrouped and individually reviewable. `esbuild`, `better-sqlite3`,
+    # `turbo`, `@types/*`, and unmatched runtime deps deliberately match no
+    # group and arrive as isolated PRs.
+    groups:
+      lint-tooling:
+        applies-to: 'version-updates'
+        patterns:
+          - 'eslint*'
+          - '@eslint/*'
+          - 'typescript-eslint'
+          - '@typescript-eslint/*'
+          - 'prettier*'
+          - 'syncpack'
+          - 'lint-staged'
+          - 'husky'
+        update-types: ['minor', 'patch']
+      test-tooling:
+        applies-to: 'version-updates'
+        patterns:
+          - 'vitest'
+          - '@vitest/*'
+        update-types: ['minor', 'patch']
+      docs-tooling:
+        applies-to: 'version-updates'
+        patterns:
+          - 'vitepress'
+          - 'vitepress-plugin-llms'
+        update-types: ['minor', 'patch']
+
+  # Actions stay SHA-pinned in the workflow files; Dependabot moves the SHA and
+  # its adjacent version comment together. The limit is 1 because the single
+  # catch-all version-update group yields at most one routine PR per run.
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'monthly'
+    # Version updates name the dev branch. On the private repo that is the
+    # default branch, so nothing changes; on the public mirror the branch does
+    # not exist, which keeps Dependabot from opening update PRs against a repo
+    # that only receives releases. Security updates are unaffected (they always
+    # follow the default branch).
+    target-branch: 'claude-poc'
+    open-pull-requests-limit: 1
+    cooldown:
+      default-days: 7
+    allow:
+      - dependency-name: '*'
+        update-types:
+          - 'version-update:semver-minor'
+          - 'version-update:semver-patch'
+    groups:
+      actions:
+        applies-to: 'version-updates'
+        patterns: ['*']
+        update-types: ['minor', 'patch']

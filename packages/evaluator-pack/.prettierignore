@@ -1,0 +1,4 @@
+# Defensive ignores for adjacent runtime output produced by external pack
+# authoring workflows. This package's own build writes to dist/packs/.
+packs/**/runtime/**/*.js
+packs/**/runtime/**/*.js.map

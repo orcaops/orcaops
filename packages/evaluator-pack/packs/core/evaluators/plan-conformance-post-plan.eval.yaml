@@ -1,0 +1,27 @@
+schema: orcaops.evaluator/v1
+id: plan-conformance-post-plan
+phase: post-plan
+severity: warn
+description: >-
+  At plan capture, compare the artifact's planned `plan_steps` and
+  structured `non_goals` against the pinned source plan (`--source-plan`)
+  and flag source obligations the plan silently narrowed or dropped. An
+  obligation a non-goal names (via `source_refs` / `rationale`) is a
+  *declared* exclusion — surfaced, not a gap; one that simply disappears is
+  silent narrowing. Fires at post-plan, the cheapest point — the agent
+  still sees it while it can revise. No-op when no source plan is pinned
+  (the prompt short-circuits to INFO). One of three phase siblings
+  (post-plan / post-plan-revision / pre-pr) sharing one prompt.
+engine:
+  kind: llm
+  prompt_file: prompts/plan-conformance.prompt.md
+  output_format: markdown
+  # 120s: a small slice plan finishes in seconds, but a large source-plan pin
+  # (~56KB) exceeded the 30s default — 4x headroom fits a large plan while
+  # still bounding a hang. A user's per-evaluator timeout may override it.
+  timeout_ms: 120000
+  # Compares plan text against the pinned source plan; needs nothing else.
+  additional_context_sections:
+    - source-plan
+filters:
+  when_llm: required

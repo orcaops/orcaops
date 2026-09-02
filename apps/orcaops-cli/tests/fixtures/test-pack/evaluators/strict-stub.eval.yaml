@@ -1,0 +1,17 @@
+schema: orcaops.evaluator/v1
+id: strict-stub
+phase: pre-pr
+severity: block
+description: >-
+  Test fixture: a no-ack-opt-in block-severity stub. CLI tests use
+  this evaluator's stance to assert the BLOCK_NOT_ACKNOWLEDGEABLE
+  error path — the symmetric pair to api-stub (which opts into
+  acknowledge).
+on_block_message: |
+  Test fixture — production users would not see this. Acknowledge is
+  intentionally NOT enabled; dismiss only.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/strict-stub.mjs

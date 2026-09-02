@@ -1,0 +1,22 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# Seven days, in minutes. Holds newly published releases out of any NEW
+# resolution — transitive ones included — so a compromised release has a window
+# in which to be caught and yanked. It does not re-resolve versions already in
+# the lockfile, and it is a delay, not malware detection. It can also hold back
+# a fresh security fix; docs/dependency-policy.md documents the
+# one-off bypass. Deliberately no auditConfig.ignoreGhsas/ignoreCves here:
+# advisory exceptions live in config/dependency-policy.json and are applied by
+# scripts/run-production-audit.mjs, which needs the unfiltered report.
+minimumReleaseAge: 10080
+
+onlyBuiltDependencies:
+  - better-sqlite3
+  - esbuild
+
+overrides:
+  fast-uri: 4.1.2
+  '@opentui/core>diff': 8.0.3
+  '@opentui/core>jimp': 1.6.1

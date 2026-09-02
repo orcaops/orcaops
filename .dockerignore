@@ -1,0 +1,13 @@
+# Turbo prune builds need the full monorepo, so only exclude truly unnecessary files
+**/node_modules
+.git
+**/.next
+**/dist
+**/coverage
+*.log
+.env
+.env.*
+!.env.example
+docker/
+**/.turbo
+docs/

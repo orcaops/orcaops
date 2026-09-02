@@ -1,0 +1,20 @@
+schema: orcaops.evaluator/v1
+id: api-stub
+phase: checkpoint-close
+severity: block
+description: >-
+  Test fixture: stub for api-signature-drift. CLI tests seed violation
+  runs against this ref to exercise block dismiss / acknowledge /
+  discovery paths without depending on the real ts-morph analyzer.
+on_block_message: |
+  Test fixture — production users would not see this. To resolve in
+  tests, either dismiss with `block dismiss --evaluator test-pack/api-stub`
+  or acknowledge (this evaluator opts into acknowledge).
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/api-stub.mjs
+resolution:
+  acknowledge:
+    enabled: true

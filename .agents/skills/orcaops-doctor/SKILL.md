@@ -1,0 +1,66 @@
+---
+name: "Orcaops: diagnose install"
+description: "Diagnose adapter health, env, evaluator validity, cache integrity, and watchdog signals. Use when the user asks \"is orcaops set up correctly?\", \"what's broken?\", \"diagnose orcaops\", or when an orcaops command fails unexpectedly."
+metadata:
+  generatedBy: "orcaops@0.1.0"
+  contentHash: "7795b71d15f3"
+---
+
+# When to use
+
+Invoke when something seems off with the orcaops install — a command
+errored, the SQLite cache might be stale, or the user is preparing to
+share the repo with someone else and wants a clean health check.
+
+Triggers:
+
+- "is orcaops set up correctly?", "diagnose orcaops"
+- "why is orcaops failing?", "what's broken?"
+- "run a health check", "are skills installed?"
+
+Also reasonable to invoke proactively when an `orcaops capture` /
+`orcaops digest` / etc. fails with an unfamiliar error — doctor often
+surfaces the root cause.
+
+# How to invoke
+
+```bash
+orcaops doctor          # human-readable, with ✓/⚠/✗ markers
+orcaops doctor --json   # machine-readable; same checks
+orcaops doctor --fix    # repair install drift and resume a missing/partial seed
+```
+
+# Interpreting the output
+
+Checks are reported as `pass` / `warn` / `fail`:
+
+| Check | What it verifies |
+|---|---|
+| `git-repo` | Current branch + HEAD resolvable. |
+| `init` | `.orcaops/` exists. |
+| `config` | `.orcaops/config.json` parses; agent + llm.tool resolvable. |
+| `cache` | SQLite cache opens; schema at `CURRENT_VERSION`; row counts. |
+| `evaluators` | Every pack declared in `.orcaops/evaluators.yaml` resolves + validates (manifest, specs, command runtimes, prompt files). |
+| `llm-tool` | Configured CLI (claude / codex) is on PATH. |
+| `agent-skills` | Configured adapter's skills + commands present and stamped at the current orcaops version. |
+| `seed` | Existing git history has live or imported artifact coverage; partial imports are resumable. |
+| `stale-artifacts` | No active artifact has been idle >24h (suggests a forgotten summary). |
+| `unresolved-blocks` | No evaluator's latest run is `severity:block + status:violation`. |
+
+Exit code is `0` on pass or warn (warnings don't fail CI); `1` only
+when something is genuinely broken (missing init, corrupt cache,
+not-a-repo).
+
+# Common follow-up actions
+
+- `agent-skills` warns about stale/missing files → suggest
+  `orcaops update` (or `orcaops update --force` if user-edited).
+- `seed` warns → preview with `orcaops seed --dry-run`, resume explicitly
+  with `orcaops seed --yes`, or use `orcaops doctor --fix`.
+- `cache` fails → suggest `orcaops rebuild` (rebuilds SQLite from JSON).
+- `stale-artifacts` warns → if the work is complete, suggest the
+  orcaops-finish skill; otherwise resume or amend the artifact.
+- `unresolved-blocks` warns → resolve via `orcaops block acknowledge`
+  (only for evaluators whose `on_block` opts in via
+  `acknowledge_breaking_change`) or `orcaops block dismiss` (always
+  available). Otherwise amend the offending artifact.

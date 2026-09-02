@@ -1,0 +1,25 @@
+schema: orcaops.evaluator/v1
+id: plan-conformance-revision
+phase: post-plan-revision
+severity: warn
+description: >-
+  On a plan revision, re-compare the artifact's `plan_steps` and structured
+  `non_goals` against the pinned source plan so a narrowing revise is caught
+  immediately rather than deferred to pre-pr. Same rubric as its post-plan
+  sibling: a dropped source obligation a non-goal names is a *declared*
+  exclusion; one that silently vanishes is narrowing. No-op when no source
+  plan is pinned (the prompt short-circuits to INFO). One of three phase
+  siblings sharing one prompt.
+engine:
+  kind: llm
+  prompt_file: prompts/plan-conformance.prompt.md
+  output_format: markdown
+  # 120s: a small slice plan finishes in seconds, but a large source-plan pin
+  # (~56KB) exceeded the 30s default — 4x headroom fits a large plan while
+  # still bounding a hang. A user's per-evaluator timeout may override it.
+  timeout_ms: 120000
+  # Compares plan text against the pinned source plan; needs nothing else.
+  additional_context_sections:
+    - source-plan
+filters:
+  when_llm: required

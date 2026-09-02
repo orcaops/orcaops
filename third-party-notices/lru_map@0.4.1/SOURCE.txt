@@ -1,0 +1,19 @@
+package:  lru_map@0.4.1
+declared: "repository": "git+https://github.com/rsms/js-lru.git"
+          (from the installed package's own package.json)
+
+url:      https://api.github.com/repos/rsms/js-lru/contents/LICENSE.txt?ref=5373f60c42259bca06a99d2bb10d872ebe4ae72b
+ref:      default branch HEAD at fetch time — the repository carries no tags
+commit:   5373f60c42259bca06a99d2bb10d872ebe4ae72b
+path:     LICENSE.txt (repository root)
+fetched:  2026-08-27 UTC
+
+Verification
+------------
+package.json at this commit is lru_map version 0.4.1, matching the installed
+package exactly. That is what makes this pin sound despite there being no tag:
+the commit holds the same version that is installed.
+
+The repository has published no tags, so a release tag could not be used. The
+commit is pinned explicitly instead, and the repository has been dormant since
+2020.

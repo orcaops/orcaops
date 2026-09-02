@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "."
+  },
+  "include": ["scripts/**/*", "vitest.config.ts", "vitest.watch-setup.ts"],
+  "exclude": ["node_modules", "dist"]
+}

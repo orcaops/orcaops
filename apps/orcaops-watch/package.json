@@ -1,0 +1,74 @@
+{
+  "name": "@orcaops/watch",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Terminal UI for orcaops: live capture status, checkpoint activity, and review for AI coding sessions.",
+  "license": "FSL-1.1-ALv2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orcaops/orcaops.git",
+    "directory": "apps/orcaops-watch"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "orcaops-watch": "./bin/orcaops-watch.cjs"
+  },
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun scripts/build.ts && node ../../scripts/check-no-proprietary.mjs --externals-from=dist/.build-externals.json",
+    "check:no-proprietary": "node ../../scripts/check-no-proprietary.mjs --externals-from=dist/.build-externals.json",
+    "dev": "bun --watch src/main.tsx",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.scripts.json && tsc --noEmit -p tsconfig.probes.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:render": "bun test src/tui/**/*.render.test.tsx --timeout 30000",
+    "test:pty": "bash scripts/review-experience-pty.sh",
+    "perf:review-cap": "bun scripts/review-cap-production-bench.tsx",
+    "probe:virtual": "bun probes/probeVirtual.tsx",
+    "probe:mouse": "bun probes/probeMouse.tsx",
+    "perf:review": "bun scripts/review-performance.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "prettier": "@orcaops/prettier-config",
+  "dependencies": {
+    "@opentui/core": "0.1.89",
+    "@opentui/react": "0.1.89",
+    "@orcaops/diff-fingerprint": "0.0.8",
+    "@orcaops/protocol": "0.0.26",
+    "@orcaops/sdk": "0.1.23",
+    "better-sqlite3": "^12.11.1",
+    "react": "^19.0.0",
+    "react-devtools-core": "^7.0.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@orcaops/agent-activity": "workspace:*",
+    "@orcaops/core": "workspace:*",
+    "@orcaops/diff-render": "workspace:*",
+    "@orcaops/eslint-config": "workspace:*",
+    "@orcaops/evaluator-protocol": "workspace:*",
+    "@orcaops/prettier-config": "workspace:*",
+    "@orcaops/project-scope": "workspace:*",
+    "@orcaops/review-core": "workspace:*",
+    "@orcaops/review-engine": "workspace:*",
+    "@orcaops/storage": "workspace:*",
+    "@orcaops/test-harness": "workspace:*",
+    "@orcaops/typescript-config": "workspace:*",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/bun": "^1.3.0",
+    "@types/react": "^19.0.0",
+    "typescript": "5.9.2",
+    "vitest": "^4.0.18"
+  }
+}

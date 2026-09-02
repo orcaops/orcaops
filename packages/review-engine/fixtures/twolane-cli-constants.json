@@ -1,0 +1,31 @@
+{
+  "lane_contracts": {
+    "account": {
+      "schema_version": 5,
+      "lane": "account",
+      "payload_format": "the served input is line-oriented markdown with engine-issued global aliases: k# maps to one canonical checkpoint and c# maps to one canonical citation",
+      "payload_shape": "{\"schema_version\": 1, \"overview\": {\"text\", \"citations\": [\"c#\", ...]}, \"acts\": [{\"title\", \"interpretation\"?, \"parts\": [...]}], \"questions\": [...]} — strict; unknown keys are rejected; the engine assigns A1/P1 ids and derives membership from nesting",
+      "authoring_schema_version": 1,
+      "overview_shape": "{\"text\", \"citations\": [\"c#\", ...]} — required; text is non-empty, at most 150 words, and contains no bracketed known prompt-local aliases such as [c3]; citations contain at least one unique engine-issued c# alias",
+      "part_shape": "{\"title\", \"checkpoints\": [\"k#\", ...], \"interpretation\", \"citations\": [\"c#\", ...]} — strict; the model authors causal grouping and meaning only, never ids, cross-references, or code ownership",
+      "act_shape": "{\"title\", \"interpretation\"?, \"parts\": [...]} — strict",
+      "checkpoint_ref_rule": "use only engine-issued k# aliases; every served completed checkpoint must appear in exactly one nested Part",
+      "citations_rule": "each Part carries at least one engine-issued c# alias from the prompt mapping",
+      "question_shape": "string, or {\"text\", \"citations\"?} — strict",
+      "routine_caps": "overview text is at most 150 words; each Act/Part title is at most 8 words and 120 Unicode code points; each interpretation is at most 80 words; at most 3 judgment questions, each at most 60 words; all limits are hard ceilings, never targets"
+    },
+    "forensic": {
+      "schema_version": 5,
+      "lane": "forensic",
+      "payload_format": "the served input is line-oriented text: a header, the coverage inventory, then the literal unified diff",
+      "payload_shape": "{\"findings\": [...], \"questions\": [...]} — strict; unknown keys are rejected",
+      "finding_shape": "{\"claim\", \"file\", \"related_files\", \"severity\", \"confidence\"} — strict; related_files permits at most 4 unique paths distinct from file, and slot/citations fields are not part of this lane",
+      "severity_values": ["CRITICAL", "CAUTION", "REVIEW"],
+      "confidence_values": ["HIGH", "MEDIUM", "LOW"],
+      "file_rule": "file and every related_files entry must be an exact changed non-capture path present in the served payload",
+      "question_shape": "string, or {\"text\", \"file\"?} — strict",
+      "routine_caps": "at most 3 findings (each claim at most 60 words) and at most 1 question; severity INFO is not accepted"
+    }
+  },
+  "routine_order_message": "account context is served only after the forensic lane is terminal (accepted, or its submission attempts can no longer be repaired)"
+}

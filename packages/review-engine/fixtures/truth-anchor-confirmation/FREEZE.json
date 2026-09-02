@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "fixture_provenance": {
+    "kind": "DETERMINISTIC_SYNTHETIC",
+    "generator": "scripts/generate-synthetic-confirmation-fixtures.mjs",
+    "seed": "truth-anchor-confirmation-v1",
+    "digest_namespace": "orcaops:synthetic-confirmation-fixture:v1"
+  },
+  "frozen_at": "2000-01-01T00:00:00.000Z",
+  "protocol": "PROTOCOL.md",
+  "protocol_sha256": "83b4a69175ce49760ec1a1c9d6b902379fb7e2769c9ab66dd092943b215b6b1a",
+  "no_tuning_after_freeze": true,
+  "implementation": {
+    "repository": "/fixtures/synthetic-worktrees/anchor-harness",
+    "source_commit": "297868600e17462905f37282cd12dd79142fe559",
+    "build_command": "pnpm build",
+    "cli_invocation": "node /fixtures/synthetic-worktrees/anchor-harness/apps/example-cli/bin/example.js",
+    "build_commit_env": "297868600e17462905f37282cd12dd79142fe559",
+    "build_dirty_env": false,
+    "package_name": "@fixture/example-cli",
+    "package_version": "0.0.0-fixture",
+    "cli_shim_sha256": "bd1c27ee634f244eb81eba7fbcbfa7f25b2bbda15464ccbfb7c3e6423b205009",
+    "cli_entry_sha256": "6a78088359add77b5ac7c52b2979c97700e7123ec271a77aae264a1c331612cf",
+    "compiled_runtime_manifest_sha256": "1b01e70d179df048eb73def91ff9e2ef74f2686bab7fdd81bd1091bd12746457",
+    "runtime_fingerprint_sha256": "45415dadd5b20ee7c02ce38ca4706c98d3e721771f2642b5af22c3874b97b97b",
+    "lockfile_sha256": "50fc752afe56c45140c96051bbef053f8ef7e464619efe600287e7e6cbd8200f",
+    "node_version": "synthetic-node-runtime",
+    "pnpm_version": "synthetic-package-manager"
+  },
+  "reviewer": {
+    "task_review_skill": "/fixtures/synthetic-worktrees/anchor-harness/.agents/skills/orcaops-task-review/SKILL.md",
+    "task_review_skill_sha256": "b797ac0c72fda825065db1905697f75872bcd51babbb9f95a8960bf17a6abd77",
+    "execution_profile": {
+      "host": {
+        "value": "synthetic-agent-host",
+        "provenance": "EVALUATION_REGISTERED"
+      },
+      "host_version": null,
+      "model": {
+        "value": "synthetic-review-model",
+        "provenance": "EVALUATION_REGISTERED"
+      },
+      "effort": {
+        "value": "fixture",
+        "provenance": "EVALUATION_REGISTERED"
+      },
+      "launcher_mode": {
+        "value": "synthetic-sequential-runner",
+        "provenance": "EVALUATION_REGISTERED"
+      },
+      "instruction_hash": {
+        "value": "b797ac0c72fda825065db1905697f75872bcd51babbb9f95a8960bf17a6abd77",
+        "provenance": "EVALUATION_REGISTERED"
+      }
+    }
+  },
+  "semantic_anchor_profile": {
+    "name": "semantic-anchor-profile-v1",
+    "profile_source": "ENGINE_REGISTERED",
+    "context_window_tokens": 1000000,
+    "hard_transport_bytes": 2000000,
+    "estimated_token_divisor_bytes": 3,
+    "instruction_reserve_tokens": 16000,
+    "maximum_output_tokens": 32000,
+    "context_reserve_percent": 10,
+    "usable_input_tokens": 852000,
+    "maximum_submission_bytes": 128000
+  },
+  "subjects": [
+    {
+      "id": "SYNTHETIC_LIBRARY_PATCH",
+      "repository": "/fixtures/synthetic-repositories/library-patch",
+      "branch": "fixture/library-update-hook",
+      "head": "a541d0ce554da5692685f575a1921bf17246da5e",
+      "base": "b90a5f1c4e831337fbf5ae805c1bd8ba952b86dc",
+      "committed_diff_sha256": "b339b8c79a310cdf94164b4a46db2bddea1eecad95247e83dfb73119f7066cd3",
+      "committed_diff_bytes": 26046,
+      "tracked_worktree_diff_sha256": "1e4ae7fc7a38303cafc9eec54483d016049b50c12c6b5fed99e043abc2512090",
+      "tracked_worktree_diff_bytes": 548,
+      "status_sha256": "b18064737d0978459633b3dd2795898bb116e5fea7e3b35da4a55f5dea6ce0eb",
+      "untracked_inventory_sha256": "abec65cb151d0a842111a615b5474c5a54f1f3073f568f1d01ec49e187cc2318",
+      "config_sha256": "8fa2539cc5045cb185b7c045cc456244677dab5b49f93ee0a2debb1278236fee"
+    },
+    {
+      "id": "SYNTHETIC_STUB_HEAVY_REPOSITORY",
+      "repository": "/fixtures/synthetic-worktrees/stub-heavy",
+      "branch": "fixture/stub-heavy",
+      "head": "7e2d2ed098ad735e4f8fa709c86dc9ef28587c06",
+      "base": "a8c492120dbb8f7fe8470be1005854c6f69fa05a",
+      "committed_diff_sha256": "e87ae9b3ff4cd5b000253821d6780f557febdf3b4a9ce75dc2af60a1bf16fe8c",
+      "committed_diff_bytes": 23786305,
+      "tracked_worktree_diff_sha256": "57615405e8f86606a9054aa9ec2d5e5d3ec21587e5b4c0d2b70fc6fdd19a53d2",
+      "tracked_worktree_diff_bytes": 48134,
+      "status_sha256": "4363bd76ee5c8b07431b38cc915ef520ee9e91e7ca4905d3dd3b5c07fff9574d",
+      "untracked_inventory_sha256": "4c6ea3482b85fd8f6fa0e10e451cff8e2e1a8587ae121c77a9145c371a0f44ea",
+      "config_sha256": "0b78de41d8d81c83d8de5af2e72fadfc5662abd95fe50e9d824a8dced044831e"
+    },
+    {
+      "id": "SYNTHETIC_ACTIVE_CHANGESET",
+      "repository": "/fixtures/synthetic-worktrees/active-changeset",
+      "branch": "fixture/active-changeset",
+      "reviewed_implementation_commit": "ccb1b0fc63d0559879ce0c42f46dc5cceac20ad2",
+      "base": "d4740a7ff23928411c421ba3890158e7bcba56c6",
+      "committed_diff_sha256": "9930740945b98bdeeb6e6d6c0719c880c66151574be07015c75f67d41527f9f5",
+      "committed_diff_bytes": 24671117,
+      "tracked_worktree_diff_sha256": "1b8605cddb93baabf0890b2ac57c6d444074ac010401a2fdfe3b97bf37523178",
+      "tracked_worktree_diff_bytes": 735,
+      "status_sha256_after_fixture_commit": "f40d73a9d83ab39bdca6d2854ca356e3d4202b336ca24efbbb57879db25101e9",
+      "untracked_inventory_sha256_after_fixture_commit": "1de16091a90c3a80207a0b844e10693eb1d4403ed04d14fb15d4896c38b6b76d",
+      "config_sha256": "0b78de41d8d81c83d8de5af2e72fadfc5662abd95fe50e9d824a8dced044831e",
+      "harness_path_policy_stub": "packages/review-engine/fixtures/**",
+      "note": "The fixture directory is policy-stubbed harness evidence. Recheck the synthetic implementation diff and require the eligible target-space hash to remain stable."
+    }
+  ],
+  "required_versions": {
+    "story_model": 3,
+    "prepared_anchor_input": 4,
+    "semantic_submission": 3,
+    "semantic_attempt": 3,
+    "semantic_target": 3,
+    "semantic_model": 3,
+    "semantic_manifest": 3,
+    "semantic_pointer": 3
+  },
+  "stop_conditions": [
+    "subject_identity_drift",
+    "runtime_fingerprint_drift",
+    "unhealthy_floor",
+    "unexpected_size_refusal",
+    "terminal_lane_rejection",
+    "corrupt_current_generation",
+    "post_freeze_tuning"
+  ]
+}

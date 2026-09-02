@@ -1,0 +1,22 @@
+schema: orcaops.evaluator/v1
+id: always-block
+phase: checkpoint-open
+severity: block
+description: >-
+  Demo blocking evaluator. Always fires a VIOLATION so pack authors
+  can see the gate-rejection + policy-exception code paths. A registered
+  demo pack enables it unless the local `.orcaops/evaluators.yaml`
+  explicitly sets this evaluator to false.
+on_block_message: |
+  This is the demo blocking evaluator. To proceed past it, retry the
+  open with a fresh `idempotency_key` and a `policy_exceptions[]`
+  entry naming `demo/always-block` with a reason. Or set
+  `demo/always-block.enabled: false` in `.orcaops/evaluators.yaml`.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/always-block.js
+resolution:
+  policy_exception:
+    enabled: true

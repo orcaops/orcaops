@@ -1,0 +1,61 @@
+{
+  "name": "@orcaops/evaluator-protocol",
+  "version": "0.1.0",
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./subprocess": {
+      "types": "./dist/subprocess.d.ts",
+      "default": "./dist/subprocess.js"
+    },
+    "./secret-corpus": {
+      "types": "./dist/secret-corpus.d.ts",
+      "default": "./dist/secret-corpus.js"
+    },
+    "./secrets": {
+      "types": "./dist/secrets.d.ts",
+      "default": "./dist/secrets.js"
+    },
+    "./terminal": {
+      "types": "./dist/terminal.d.ts",
+      "default": "./dist/terminal.js"
+    },
+    "./search-types": {
+      "types": "./dist/search-types.d.ts",
+      "default": "./dist/search-types.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "picomatch": "^4.0.4",
+    "zod": "^4.0.17"
+  },
+  "devDependencies": {
+    "@orcaops/eslint-config": "workspace:*",
+    "@orcaops/prettier-config": "workspace:*",
+    "@orcaops/typescript-config": "workspace:*",
+    "@types/node": "24.3.1",
+    "@types/picomatch": "^4.0.0",
+    "vitest": "^4.0.18"
+  }
+}

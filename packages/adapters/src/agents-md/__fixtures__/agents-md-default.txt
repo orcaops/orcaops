@@ -1,0 +1,51 @@
+<!-- orcaops:start v=0.0.0-fixture -->
+## Orcaops
+
+This repo uses **orcaops** to capture and evaluate AI coding sessions.
+The `orcaops-*` skills own the CLI surface, flags, and evaluator
+semantics — invoke them on the cues below rather than driving the CLI
+by hand.
+
+**Capture lifecycle: plan → checkpoint(s) → finish.**
+Each phase has a paired skill; skipping a phase degrades the next. At
+the start of any non-trivial coding task:
+
+1. Run `orcaops status --json` to check whether an in-flight artifact
+   already exists for the current branch.
+2. If none exists — or the existing artifact is unrelated to the task
+   you were just asked about — invoke **`orcaops-capture`** to plan.
+3. For each chunk of work, invoke **`orcaops-checkpoint`**: **open the
+   checkpoint before you change the worktree**, then close it after with
+   what actually finished. Orcaops attributes your changes by diffing the
+   worktree between open and close; opening first is the only reliable way to
+   get clean per-line attribution, since work done before open is outside that
+   window. The skill owns command
+   syntax, evaluator handling, cadence, and subagent coordination.
+4. Before ending the session, invoke **`orcaops-finish`** to run the
+   final checks, capture the summary, synchronize, and materialize the reviewer-facing digest.
+   The granular **`orcaops-pre-pr`**, **`orcaops-summary`**, **`orcaops-digest`** skills remain
+   available for manual inspection and recovery.
+
+**Read intents → skills.** Match user phrasing: continuation
+("pick up where we left off") → `orcaops-resume`; PR summary ("show me
+the digest", "what changed?") → `orcaops-digest`; provenance ("why does
+X exist?", "what was the agent worried about when it wrote this?") → `orcaops-why`; cross-branch search ("have we worked on X
+before?") → `orcaops-search`; install health ("is orcaops set up
+correctly?") → `orcaops-doctor`; adversarial review ("red-team this PR", "poke holes in what the agent did") → `orcaops-adversarial-review`; recap over a window or ref range ("what did I do yesterday / this week?", "changelog since v1.2", "journal today") → `orcaops-recap`; plan critique / prior art before planning ("critique this plan", "have we solved this before?") → `orcaops-plan-critique`; task-review generation + comment loop ("generate a review", "compose the review", "address the open review comments") → `orcaops-task-review`; git-history backfill ("seed orcaops", "import my git history", "why is search empty?") → `orcaops-seed`; history gap during normal work (why miss, cold subsystem, empty old prior-art) → `orcaops-seed-discovery`; authoring an evaluator ("write an evaluator", "add a check that blocks X") → recommend the human run `/orcaops-author-evaluator` rather than invoking it yourself. For broader survey questions ("what's
+the state of this branch?"), run `orcaops status --json` directly, not
+`orcaops-resume`.
+
+**Attribution.** Pass `--invoked-by-agent <your-agent-id>` on every
+artifact-writing capture command with YOUR OWN agent id, so each event
+records which agent produced it (multi-agent repos share one artifact
+thread). Omitted, orcaops falls back to `ORCAOPS_INVOKED_BY_AGENT`, then
+environment detection, then `other`.
+
+**Skip orcaops for:** typo fixes, cosmetic single-line edits,
+formatting-only changes, trivial doc tweaks. Resume an existing artifact
+instead of starting a new one when continuing prior work.
+
+Full skill bodies live under `.claude/skills/orcaops-*` (Claude Code),
+`.agents/skills/orcaops-*` (Codex / Cursor / OpenCode / GitHub Copilot), or
+`.aider-desk/skills/orcaops-*` (AiderDesk).
+<!-- orcaops:end -->

@@ -1,0 +1,30 @@
+schema: orcaops.evaluator/v1
+id: revision-rationale-required
+phase: post-plan-revision
+severity: block
+description: >-
+  Every plan revision must state *why* the plan changed. The rationale
+  is the audit record reviewers read against the per-revision
+  `step_lineage` diff — without it, the revision history is a list of
+  "what" with no "why." Severity is `block`: an empty or near-empty
+  rationale fails the revise call. Default `min_length=16` filters
+  out placeholders ("update", "fix", "wip").
+on_block_message: |
+  Rewrite the revise call with a fuller `rationale` field describing
+  what scope shifted and why. Re-issue with a fresh `idempotency_key`
+  (same key + different payload is `IDEMPOTENCY_CONFLICT`).
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/revision-rationale-required.js
+params_schema:
+  type: object
+  properties:
+    min_length:
+      type: integer
+      minimum: 1
+  required: [min_length]
+  additionalProperties: false
+params:
+  min_length: 16

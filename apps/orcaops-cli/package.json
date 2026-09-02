@@ -1,0 +1,61 @@
+{
+  "name": "@orcaops/cli",
+  "version": "0.1.0",
+  "license": "FSL-1.1-ALv2",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "orcaops": "./bin/orcaops.js"
+  },
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json",
+    "dev:cloud": "pnpm build && node dist/cli/dev.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:cli": "vitest run --project cli",
+    "test:smoke": "vitest run --project smoke --passWithNoTests",
+    "test:coverage": "vitest run --coverage",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.6.0",
+    "@orcaops/adapters": "workspace:*",
+    "@orcaops/core": "workspace:*",
+    "@orcaops/evaluator-pack": "workspace:*",
+    "@orcaops/evaluator-protocol": "workspace:*",
+    "@orcaops/evaluator-runner": "workspace:*",
+    "@orcaops/llm": "workspace:*",
+    "@orcaops/project-scope": "workspace:*",
+    "@orcaops/review-engine": "workspace:*",
+    "@orcaops/sdk": "0.1.23",
+    "@orcaops/storage": "workspace:*",
+    "commander": "^14.0.0",
+    "diff": "^9.0.0",
+    "effection": "^4.0.2",
+    "open": "^11.0.0",
+    "smol-toml": "^1.7.1",
+    "yaml": "^2.8.2",
+    "zod": "^4.0.17"
+  },
+  "devDependencies": {
+    "@orcaops/eslint-config": "workspace:*",
+    "@orcaops/evaluator-sdk": "workspace:*",
+    "@orcaops/prettier-config": "workspace:*",
+    "@orcaops/test-harness": "workspace:*",
+    "@orcaops/typescript-config": "workspace:*",
+    "@types/better-sqlite3": "^7.6.12",
+    "better-sqlite3": "^12.11.1",
+    "jose": "^6.2.3",
+    "vitest": "^4.0.18"
+  }
+}

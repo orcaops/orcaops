@@ -1,0 +1,44 @@
+{
+  "name": "@orcaops/evaluator-pack",
+  "version": "0.1.0",
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./packs/*": "./dist/packs/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs && node scripts/lint-params-schema.mjs && tsc -p tsconfig.json && tsc -p tsconfig.dist.json && tsc -p tsconfig.packs.json && node scripts/build-assets.mjs",
+    "lint:params-schema": "node scripts/lint-params-schema.mjs",
+    "prepublishOnly": "pnpm build",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@orcaops/evaluator-protocol": "workspace:*",
+    "@orcaops/evaluator-sdk": "workspace:*",
+    "typescript": "5.9.2"
+  },
+  "devDependencies": {
+    "@orcaops/eslint-config": "workspace:*",
+    "@orcaops/prettier-config": "workspace:*",
+    "@orcaops/typescript-config": "workspace:*",
+    "@types/node": "24.3.1",
+    "vitest": "^4.0.18",
+    "yaml": "^2.8.2"
+  }
+}

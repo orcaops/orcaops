@@ -1,0 +1,43 @@
+schema: orcaops.evaluator/v1
+id: checkpoint-scope-density
+phase: checkpoint-open
+severity: block
+description: >-
+  Block when an opened checkpoint declares a large fraction of the
+  plan steps. Pushes the agent toward smaller cadence beats — open
+  one checkpoint per plan step (or small group), close it, open the
+  next. Subagents working in parallel each open their own small-scope
+  cp; this check applies per cp, so a swarm of small parallel cps
+  never trips it. To proceed despite the block, retry the open with
+  a `policy_exceptions[]` entry naming this evaluator and giving a
+  reason — the exception is recorded on the open checkpoint.
+on_block_message: |
+  Re-issue the open with a smaller `declared_step_ids` set (one or two
+  plan steps; the rest land on follow-up checkpoints). Or, if the
+  scope-density is genuinely intentional, retry with a fresh
+  `idempotency_key` and a `policy_exceptions[]` entry naming
+  `core/checkpoint-scope-density` with a reason. The exception is
+  recorded on the open and surfaces in the digest.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/checkpoint-scope-density.js
+resolution:
+  policy_exception:
+    enabled: true
+params_schema:
+  type: object
+  properties:
+    max_fraction_of_plan:
+      type: number
+      exclusiveMinimum: 0
+      maximum: 1
+    min_plan_size:
+      type: integer
+      minimum: 1
+  required: [max_fraction_of_plan, min_plan_size]
+  additionalProperties: false
+params:
+  max_fraction_of_plan: 0.6
+  min_plan_size: 4

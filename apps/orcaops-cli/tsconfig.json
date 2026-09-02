@@ -1,0 +1,21 @@
+{
+  "extends": "@orcaops/typescript-config/node.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "declaration": false,
+    "declarationMap": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*"],
+  // plan/review/test-helpers.ts stays beside its colocated consumers but
+  // must never ship in dist.
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/**/*.test.ts",
+    "src/commands/plan/review/test-helpers.ts"
+  ]
+}

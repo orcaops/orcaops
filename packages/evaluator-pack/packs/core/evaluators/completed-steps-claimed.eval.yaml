@@ -1,0 +1,17 @@
+schema: orcaops.evaluator/v1
+id: completed-steps-claimed
+phase: checkpoint-close
+severity: warn
+description: >-
+  Step completion is agent-declared via `completed_step_ids` on the
+  closing checkpoint. This evaluator nudges the agent when a
+  checkpoint's content clearly maps to one or more plan steps but the
+  field was left empty — likely an oversight that would cause those
+  steps to render as ☐ in `orcaops resume`. Severity is `warn` (never
+  blocking); false positives are intentional ("remind to declare",
+  not "decide what was completed").
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/completion-claims.js

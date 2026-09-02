@@ -1,0 +1,13 @@
+schema: orcaops.evaluator/v1
+id: pre-pr-warn-stub
+phase: pre-pr
+severity: warn
+default_enabled: false
+description: >-
+  Test fixture: an opt-in pre-PR warning used to exercise finish's
+  pause-before-summary behavior without an LLM provider.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/pre-pr-warn-stub.mjs

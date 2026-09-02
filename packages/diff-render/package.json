@@ -1,0 +1,52 @@
+{
+  "name": "@orcaops/diff-render",
+  "version": "0.0.0",
+  "license": "FSL-1.1-ALv2",
+  "private": true,
+  "type": "module",
+  "description": "Isolated, MIT-vendored per-hunk diff render + row layer for the Task Review TUI. Third-party provenance in LICENSE + THIRD-PARTY-NOTICES.md.",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "scripts": {
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@pierre/diffs": "^1.3.5",
+    "string-width": "^7.2.0"
+  },
+  "peerDependencies": {
+    "@opentui/core": "0.1.89",
+    "@opentui/react": "0.1.89",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@opentui/core": "0.1.89",
+    "@opentui/react": "0.1.89",
+    "@orcaops/eslint-config": "workspace:*",
+    "@orcaops/prettier-config": "workspace:*",
+    "@orcaops/typescript-config": "workspace:*",
+    "@types/node": "24.3.1",
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "vitest": "^4.0.18",
+    "typescript": "5.9.2"
+  }
+}

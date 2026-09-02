@@ -1,0 +1,20 @@
+schema: orcaops.evaluator/v1
+id: scope-density-stub
+phase: checkpoint-open
+severity: block
+description: >-
+  Test fixture: stub for checkpoint-scope-density. CLI tests use this
+  ref to exercise dismiss-rate and policy-exception paths without
+  depending on the real density heuristic.
+on_block_message: |
+  Test fixture — production users would not see this. Retry with a
+  `policy_exceptions[]` entry naming `test-pack/scope-density-stub`
+  to bypass.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/scope-density-stub.mjs
+resolution:
+  policy_exception:
+    enabled: true

@@ -1,0 +1,32 @@
+schema: orcaops.evaluator/v1
+id: revision-diff-bounded
+phase: post-plan-revision
+severity: warn
+description: >-
+  Warns when a revision's structural diff (`added + dropped` step_ids)
+  exceeds half the prior plan's size. Heuristic for "this revision is
+  large enough that a fresh artifact would track better than chaining
+  another revision." Pure rewrites (`rewritten` only) and reorders
+  (no add/drop) never trigger. Plans below `min_prior_plan_size=4`
+  are exempt — small plans where one revision naturally restructures
+  everything.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/revision-diff-bounded.js
+params_schema:
+  type: object
+  properties:
+    max_diff_fraction:
+      type: number
+      exclusiveMinimum: 0
+      maximum: 1
+    min_prior_plan_size:
+      type: integer
+      minimum: 1
+  required: [max_diff_fraction, min_prior_plan_size]
+  additionalProperties: false
+params:
+  max_diff_fraction: 0.5
+  min_prior_plan_size: 4

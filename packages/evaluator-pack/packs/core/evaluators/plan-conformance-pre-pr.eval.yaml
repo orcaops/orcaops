@@ -1,0 +1,26 @@
+schema: orcaops.evaluator/v1
+id: plan-conformance-pre-pr
+phase: pre-pr
+severity: warn
+description: >-
+  Final plan-level drift check before PR: compare the artifact's
+  `plan_steps` and structured `non_goals` against the pinned source plan and
+  flag any source obligation that was silently narrowed or dropped rather
+  than declared as a non-goal. By pre-pr it is too late for the agent to
+  cheaply re-plan, so findings are residual narrowing the reviewer must
+  weigh (and ride the digest's near-top conformance surface). No-op when no
+  source plan is pinned (the prompt short-circuits to INFO). One of three
+  phase siblings sharing one prompt.
+engine:
+  kind: llm
+  prompt_file: prompts/plan-conformance.prompt.md
+  output_format: markdown
+  # 120s: a small slice plan finishes in seconds, but a large source-plan pin
+  # (~56KB) exceeded the 30s default — 4x headroom fits a large plan while
+  # still bounding a hang. A user's per-evaluator timeout may override it.
+  timeout_ms: 120000
+  # Compares plan text against the pinned source plan; needs nothing else.
+  additional_context_sections:
+    - source-plan
+filters:
+  when_llm: required

@@ -1,0 +1,14 @@
+schema: orcaops.evaluator/v1
+id: pass-fixture
+phase: post-plan
+severity: info
+description: >-
+  Test fixture: a guaranteed-pass evaluator. CLI tests that need a
+  non-violating ref (the symmetric pair to strict-stub) use this
+  evaluator to exercise the "evaluator fires and passes" path
+  without depending on the bundled core pack.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/pass-fixture.mjs

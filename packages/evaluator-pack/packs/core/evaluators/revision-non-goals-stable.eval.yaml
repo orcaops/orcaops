@@ -1,0 +1,15 @@
+schema: orcaops.evaluator/v1
+id: revision-non-goals-stable
+phase: post-plan-revision
+severity: warn
+description: >-
+  Warns when a revision *removes* a non-goal — a scope-creep signal
+  (the agent quietly relaxed an explicit out-of-scope boundary).
+  Additions and reordering pass silently. Companion to
+  `revision-touched-scope-stable`: paired warns on the two
+  intent-debt fields plan revisions can quietly mutate.
+engine:
+  kind: command
+  command:
+    - node
+    - ./runtime/revision-non-goals-stable.js

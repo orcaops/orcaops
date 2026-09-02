@@ -1,0 +1,23 @@
+package:  effection@4.0.2
+declared: "repository": "git+https://github.com/thefrontside/effection.git"
+          (from the installed package's own package.json)
+
+url:      https://api.github.com/repos/thefrontside/effection/contents/LICENSE?ref=effection-v4.0.2
+ref:      tag effection-v4.0.2
+commit:   9f3aa632f34eff4a7ee21fb3bba88d4a75e27b2d
+path:     LICENSE (repository root)
+fetched:  2026-08-27 UTC
+
+Verification
+------------
+The repository root is the effection package itself (mod.ts, lib/, deno.json),
+not a monorepo directory, so the root LICENSE governs it. The tag
+effection-v4.0.2 is the release tag for the installed version.
+
+The fetched notice is "The MIT License (MIT)", copyright 2018-present Charles
+Lowell, which agrees with the "license": "MIT" the installed package declares.
+
+Noted discrepancy, not acted on: deno.json at this same commit carries
+"license": "ISC". The LICENSE file and the published npm package both say MIT,
+so the notice reproduced here is the MIT text. The stale ISC field is an
+upstream inconsistency; resolving it is upstream's to make.
