@@ -1,0 +1,83 @@
+name: Publish @orcaops/watch
+
+# Publishes the Task Review terminal UI companion. Manual dispatch, separate
+# from the tag-driven CLI publish: Watch versions independently and its
+# absence must never fail a CLI launch run. The first publish was
+# bootstrapped by token; this workflow carries every later version via OIDC
+# trusted publishing (register the trusted publisher naming this file).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and verify without publishing'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-watch
+  # Never cancel a publish midway; npm is not transactional.
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: github.repository == 'orcaops/orcaops'
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: corepack enable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+          registry-url: 'https://registry.npmjs.org'
+      # The watch UI builds under Bun.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.3.14'
+
+      - run: pnpm install --frozen-lockfile
+
+      # Newer than Node 22 bundles; pinned so a publish reproduces from the log.
+      - name: Use an npm that supports trusted publishing
+        run: npm install --global npm@11.6.2
+
+      - name: Build and gate the watch tarball
+        run: pnpm release:watch
+
+      - name: Publish
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./apps/orcaops-watch/package.json').version")"
+          published="$(npm view "@orcaops/watch@${version}" version 2>/dev/null || true)"
+          if [ "$published" = "$version" ]; then
+            echo "@orcaops/watch@${version} already on npm; skipping"
+            exit 0
+          fi
+          flags="--access public --provenance"
+          if [ "$DRY_RUN" = "true" ]; then
+            flags="$flags --dry-run"
+          fi
+          echo "publishing @orcaops/watch@${version} (dry_run=${DRY_RUN})"
+          npm publish "./dist-release/orcaops-watch-${version}.tgz" $flags
+
+      - name: Record what ran
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          {
+            echo "### @orcaops/watch"
+            echo
+            echo "- dry run: \`${DRY_RUN}\`"
+            echo "- commit: \`${{ github.sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

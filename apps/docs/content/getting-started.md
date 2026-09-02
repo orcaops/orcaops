@@ -43,6 +43,13 @@ npm i -g @orcaops/cli
 orcaops --version
 ```
 
+> [!NOTE]
+> Orcaops stores its task records in SQLite, whose native module is fetched by
+> `better-sqlite3`'s install script. If your npm blocks install scripts (an
+> `allow-scripts` policy or `--ignore-scripts`), the install "succeeds" but the
+> first real command fails with a missing-binding error — reinstall with
+> `npm install -g --allow-scripts=better-sqlite3 @orcaops/cli`.
+
 ## 2. Initialize your repository
 
 Run this once from the repository root:

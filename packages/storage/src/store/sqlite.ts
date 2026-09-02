@@ -29,6 +29,26 @@ function loadDatabase(): typeof Database {
   return DatabaseCtor;
 }
 
+/**
+ * npm's script-blocking installs (allow-scripts policies, --ignore-scripts)
+ * skip better-sqlite3's install script, so no native binding exists. The
+ * require still succeeds — v12 dlopens lazily inside `new Database()` — so
+ * the failure surfaces at construction as a bindings-file stack that says
+ * nothing about the cause. Name the cause and the reinstall fix.
+ */
+export function nativeModuleHint(cause: string): string {
+  return (
+    'better-sqlite3 has no native module for this install. Its install script was ' +
+    'likely blocked (an npm allow-scripts policy, or --ignore-scripts). Reinstall ' +
+    'allowing it: `npm install -g --allow-scripts=better-sqlite3 @orcaops/cli`. ' +
+    `Underlying error: ${cause}`
+  );
+}
+
+function isMissingBindingError(message: string): boolean {
+  return message.includes('bindings file') || message.includes('better_sqlite3.node');
+}
+
 // Artifact-level 'abandoned' was never produced (only checkpoints abandon);
 // the launch vocabulary is the derived artifact STATE — this coarse pair is
 // internal storage plumbing.
@@ -799,7 +819,13 @@ export class Store {
     this.dbPath = resolveDbPaths();
     mkdirSync(path.dirname(this.dbPath), { recursive: true });
     this.dbPath = resolveDbPaths();
-    this.db = new (loadDatabase())(this.dbPath);
+    try {
+      this.db = new (loadDatabase())(this.dbPath);
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      if (isMissingBindingError(cause)) throw new Error(nativeModuleHint(cause));
+      throw error;
+    }
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.migrate(opts.rebuildFreshProjection === true, opts.rebuildExistingProjection === true);
