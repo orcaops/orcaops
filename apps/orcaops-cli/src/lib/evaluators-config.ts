@@ -30,7 +30,7 @@ export const EVALUATOR_CONFIG_FILE = '.orcaops/evaluators.yaml';
 export const CONFIG_YAML_HEADER =
   '# .orcaops/evaluators.yaml — owned by `orcaops eval add-pack`.\n' +
   '# Edit by hand to tweak provider / model / timeout / severity / params / enable flags; full schema:\n' +
-  '#   https://orcaops.dev/evaluators\n';
+  '#   https://docs.orcaops.ai/evaluators\n';
 
 export function evaluatorsConfigPath(repoRoot: string): string {
   return path.join(repoRoot, EVALUATOR_CONFIG_FILE);

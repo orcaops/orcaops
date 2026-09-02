@@ -23,11 +23,11 @@ The root `pnpm build` includes this site through Turbo and caches `dist/`.
 
 ### GitHub Pages
 
-The site publishes to <https://orcaops.github.io/orcaops/> from
+The site publishes to <https://docs.orcaops.ai/> from
 `.github/workflows/docs-pages.yml` whenever `main` changes. The workflow can
 also be run manually from the Actions tab.
 
-The VitePress `base` is `/orcaops/`, matching the GitHub Project Pages path.
+The VitePress `base` is `/`, matching the custom domain root.
 In the repository settings, select **Pages → Build and deployment → Source →
 GitHub Actions** before the first deployment.
 

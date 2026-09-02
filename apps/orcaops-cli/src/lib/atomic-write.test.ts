@@ -106,7 +106,7 @@ describe('writeEvaluatorsConfig (atomic)', () => {
     // Raw file keeps the header comment.
     const raw = await readFile(evaluatorsConfigPath(repoRoot), 'utf8');
     expect(raw.startsWith(CONFIG_YAML_HEADER)).toBe(true);
-    expect(CONFIG_YAML_HEADER).toContain('https://orcaops.dev/evaluators');
+    expect(CONFIG_YAML_HEADER).toContain('https://docs.orcaops.ai/evaluators');
     expect(CONFIG_YAML_HEADER).not.toContain('/docs/evaluators-config');
 
     // Parsed round-trip preserves the meaningful content.

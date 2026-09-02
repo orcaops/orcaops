@@ -1,6 +1,6 @@
 # .orcaops/evaluators.yaml — owned by `orcaops eval add-pack`.
 # Edit by hand to tweak engine / severity / params / enable flags; full schema:
-#   https://orcaops.dev/evaluators
+#   https://docs.orcaops.ai/evaluators
 schema: orcaops.evaluator_config/v2
 runtime:
   max_concurrent: 4

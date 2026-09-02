@@ -6,7 +6,7 @@ As your coding agent works, Orcaops captures the plan, decisions, progress,
 checks, and open questions in a local, versioned task record — without
 replacing your agent, planning tools, or development workflow.
 
-Documentation: <https://orcaops.github.io/orcaops/> · Website:
+Documentation: <https://docs.orcaops.ai/> · Website:
 <https://orcaops.ai>
 
 ## What it does
@@ -125,7 +125,7 @@ review on top of the local workflow; connect with `orcaops login`. See
 
 ## Documentation
 
-The hosted site is at <https://orcaops.github.io/orcaops/>. The same pages
+The hosted site is at <https://docs.orcaops.ai/>. The same pages
 live in this repository under `apps/docs/content/`.
 
 **Start locally**

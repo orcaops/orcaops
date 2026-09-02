@@ -3,7 +3,7 @@ import llmstxt from 'vitepress-plugin-llms';
 import { pages, sections } from '../../docs.config.mjs';
 import { validateBuiltLinks } from '../../validate-built-links.mjs';
 
-const base = '/orcaops/';
+const base = '/';
 
 // The hosted, searchable documentation site. Page order comes from the shared
 // docs.config.mjs catalog.
@@ -14,6 +14,7 @@ export default defineConfig({
   lang: 'en-US',
   appearance: 'dark',
   cleanUrls: true,
+  sitemap: { hostname: 'https://docs.orcaops.ai' },
   head: [
     ['link', { rel: 'icon', type: 'image/png', href: `${base}favicon.png` }],
     ['meta', { name: 'theme-color', content: '#0a0b0d' }],
@@ -23,6 +24,7 @@ export default defineConfig({
   vite: {
     plugins: [
       llmstxt({
+        domain: 'https://docs.orcaops.ai',
         excludeUnnecessaryFiles: false,
         injectLLMHint: false,
       }),
