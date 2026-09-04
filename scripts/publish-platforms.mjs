@@ -24,6 +24,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { distTagFor } from './release-channel.mjs';
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
 
@@ -179,7 +181,10 @@ for (const p of plan) {
 
 try {
   for (const p of plan) {
-    const argv = ['publish', p.tarball, '--access', 'public'];
+    // npm refuses a prerelease with no tag rather than defaulting it to latest,
+    // and the same helper decides the CLI's tag, so the packages it pins land
+    // beside it instead of under a second answer.
+    const argv = ['publish', p.tarball, '--access', 'public', '--tag', distTagFor(version)];
     // Only a known name can carry provenance. A first publish runs from a
     // laptop against the bootstrap token, and npm generates provenance only
     // inside a supported CI with an OIDC token — asking anyway fails the very
