@@ -86,9 +86,19 @@ jobs:
           echo "DIST_TAG=${tag}" >> "$GITHUB_ENV"
 
       # From inside staging: it is the only form carrying the bundled deps.
+      # Skip-if-present so a run that died after the upload can be re-run and
+      # reach the jobs behind it; npm answers a re-publish with a 409.
       - name: Publish to npm with provenance
-        run: npm publish --provenance --access public --tag "$DIST_TAG"
         working-directory: build/cli-dist/staging
+        run: |
+          set -euo pipefail
+          if [ "$(npm view "@orcaops/cli@${VERSION}" version 2>/dev/null || true)" = "$VERSION" ]; then
+            echo "::notice::@orcaops/cli@${VERSION} is already on npm; nothing was uploaded"
+            echo "UPLOADED=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          npm publish --provenance --access public --tag "$DIST_TAG"
+          echo "UPLOADED=true" >> "$GITHUB_ENV"
 
       - name: Record what was published
         run: |
@@ -98,6 +108,7 @@ jobs:
             echo "- tag: \`${{ github.ref_name }}\`"
             echo "- commit: \`${{ github.sha }}\`"
             echo "- dist-tag: \`${DIST_TAG}\`"
+            echo "- uploaded this run: \`${UPLOADED}\`"
             echo "- provenance: attested via OIDC trusted publishing"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -118,6 +129,10 @@ jobs:
         run: |
           set -euo pipefail
           version="${TAG_REF#v}"
+          # A candidate ships the notes of the version it heads toward, which
+          # is what verify-publishable accepts too — so 0.2.0-rc.1 reads the
+          # 0.2.0 section rather than demanding one of its own.
+          version="${version%%-*}"
           awk -v want="$version" '
             /^## \[?[0-9]+\.[0-9]+\.[0-9]+/ {
               if (seen) exit
@@ -140,6 +155,10 @@ jobs:
           TAG_REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          if gh release view "$TAG_REF" >/dev/null 2>&1; then
+            echo "::notice::release ${TAG_REF} already exists; leaving it untouched"
+            exit 0
+          fi
           flags=(--title "$TAG_REF" --notes-file release-notes.md --verify-tag)
           # A candidate must not sit on the repository front page as Latest.
           case "$TAG_REF" in
