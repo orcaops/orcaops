@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { countOpenReviewComments } from './review-badge';
+import { countOpenReviewComments } from './review-badge.js';
 
 const anchor = { kind: 'DIFF_LINE', file: 'a.ts', side: 'add', line: 1, lineHash: 'h' };
 

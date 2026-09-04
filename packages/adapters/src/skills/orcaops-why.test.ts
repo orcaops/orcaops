@@ -71,6 +71,48 @@ describe('orcaops-why routing cues', () => {
     expect(body).not.toContain('Do NOT pass the bare path');
   });
 
+  it('leads with the why framing and drops the bisect disclaimer', () => {
+    const { name, description } = orcaopsWhySkill;
+    expect(name).toBe('Orcaops: why code is the way it is');
+    expect(description.startsWith('Trace why code is the way it is')).toBe(true);
+    expect(description).toContain('Invoke before reading the code');
+    expect(description).toContain('why is this built this way?');
+    // The old clause claimed regression questions and then disclaimed the
+    // same neighbourhood; the positive description already separates the two.
+    expect(description).not.toContain('Skip for');
+  });
+
+  it('gives a subsystem question its own shape', () => {
+    expect(body).toContain('**Shape 4 — a subsystem or concept.**');
+    expect(body).toContain('Pick two or three entry-point files');
+    expect(body).toContain('Read the oldest entry and the entry whose summary names the concept');
+  });
+
+  it('treats the match as a pointer and requires a second witness', () => {
+    expect(body).toContain('Read what\nit points at before you answer');
+    expect(body).toContain('do not answer from the artifact alone either');
+    expect(body).toContain('# Before you answer');
+    expect(body).toContain('**Corroborate against a source `why` did not name**');
+    expect(body).toContain('**Say what you could not find written anywhere.**');
+    expect(body).toContain('**Look at what the matched checkpoints touched.**');
+  });
+
+  it('sends lineage-drift checks to show, which is where the line prints', () => {
+    expect(body).toContain('`why` does not report it; `orcaops show\n<artifact_id>` does');
+    expect(body).toContain('git log <artifact_head>..HEAD -- <paths>');
+  });
+
+  it('describes imported decisions as commit-anchored reconstructions', () => {
+    // Enrichment can mint plan decisions, so "decisions are empty" is false;
+    // the citation is the checkable part, so the skill asks for it to be cited.
+    expect(body).toContain('`uncertainty[]` and\ncheckpoint decisions are empty on them');
+    expect(body).toContain('reconstructions anchored to a quoted commit — cite the commit');
+    expect(body).not.toContain('the decision and uncertainty fields are empty');
+    expect(body).toContain(
+      'decisions are reconstructions anchored to a quoted commit, so the lens'
+    );
+  });
+
   it('documents complete compact history and expanded whole-file detail', () => {
     expect(body).toContain('orcaops why <file>                            # complete history');
     expect(body).toContain('orcaops why <file> --all');

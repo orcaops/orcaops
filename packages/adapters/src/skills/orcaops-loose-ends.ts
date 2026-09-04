@@ -9,10 +9,7 @@ export const orcaopsLooseEndsSkill: SkillTemplate = {
   id: 'loose-ends',
   name: 'Orcaops: loose ends',
   description:
-    'Surface everything captured work still owes — "what did I say I\'d come back to?", ' +
-    '"what\'s still open?", "any loose ends?". Reads open items, deferred decisions, recorded ' +
-    'uncertainty, uncovered plan steps, and stale open checkpoints. Skip for: resuming one ' +
-    'task (resume skill) or a PR summary (digest skill).',
+    'Find unfinished captured work: open items, deferred decisions, uncertainty, uncovered steps, and stale checkpoints. Use for "what\'s still open?", "what did we defer?", or "any loose ends?".',
   tags: ['orcaops', 'insight'],
   group: 'insight',
   defaultEnabled: false,

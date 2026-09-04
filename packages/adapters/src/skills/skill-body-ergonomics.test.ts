@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import { orcaopsCaptureSkill } from './orcaops-capture.js';
 import { orcaopsCheckpointSkill } from './orcaops-checkpoint.js';
+import { orcaopsDoctorSkill } from './orcaops-doctor.js';
 import { orcaopsFinishSkill } from './orcaops-finish.js';
 import { orcaopsPrePrSkill } from './orcaops-pre-pr.js';
+import { orcaopsResumeSkill } from './orcaops-resume.js';
 import { orcaopsSummarySkill } from './orcaops-summary.js';
 import { DEFAULT_PREFIX } from '../refs.js';
 import type { SkillTemplate } from '../types.js';
@@ -53,11 +55,61 @@ describe('skill-body ergonomics', () => {
     expect(body).toContain('STALE_SUMMARY');
   });
 
+  it('keeps incomplete work resumable and sends completed work through finish', () => {
+    const summary = bodyText(orcaopsSummarySkill);
+    expect(summary).toContain('Do not capture a summary merely because a session is ending');
+    expect(summary).toContain('leave the artifact active so it remains resumable');
+    expect(summary).toContain('For normal finalization, use `orcaops finish`');
+    expect(summary).not.toContain("don't end a session");
+
+    const resume = bodyText(orcaopsResumeSkill);
+    expect(resume).toContain('Start a follow-up artifact');
+    expect(resume).toContain("only corrects the existing summary's wording");
+    expect(resume).not.toContain('Re-summarize / amend');
+    expect(resume).toContain('`candidates`');
+    expect(resume).toContain('`default_candidate_id`');
+    expect(resume).toContain('`--accept-default`');
+    expect(resume).toContain('`--no-pin`');
+    expect(resume).not.toContain('branch is N commits ahead');
+
+    const prePr = bodyText(orcaopsPrePrSkill);
+    expect(prePr).toContain('`orcaops-finish`');
+    expect(prePr).toContain('orcaops block acknowledge');
+    expect(prePr).toContain('orcaops block dismiss');
+    expect(prePr).not.toContain("checkpoint`'s block workflow");
+  });
+
+  it('uses current evaluator result fields', () => {
+    for (const skill of [orcaopsCaptureSkill, orcaopsPrePrSkill]) {
+      const body = bodyText(skill);
+      expect(body, skill.id).toContain('"evaluator_ref"');
+      expect(body, skill.id).toContain('"run_status"');
+      expect(body, skill.id).toContain('"verdict"');
+      expect(body, skill.id).not.toMatch(/"evaluator"\s*:/);
+      expect(body, skill.id).not.toMatch(/"status"\s*:\s*"violation"/);
+    }
+  });
+
   it('finish limits amendments to wording-only replacements', () => {
     const body = bodyText(orcaopsFinishSkill);
     expect(body).toContain('prior_summary_event_id');
     expect(body).toContain('repeat every previously accepted warning exactly');
     expect(body).toMatch(/Adding, removing, or changing an\s+acceptance is refused/);
+  });
+
+  it('routes ordinary completion requests to finish', () => {
+    expect(orcaopsFinishSkill.description).toContain('finish this work');
+    expect(orcaopsFinishSkill.description).toContain('wrap this up');
+    expect(orcaopsFinishSkill.description).toContain('get this ready for a PR');
+    expect(orcaopsSummarySkill.description).toContain('finish workflow');
+    expect(orcaopsPrePrSkill.description).toContain('finish');
+  });
+
+  it('describes unresolved evaluator blocks with current fields', () => {
+    const body = bodyText(orcaopsDoctorSkill);
+    expect(body).toContain('`run_status: completed`');
+    expect(body).toContain('`verdict: violation`');
+    expect(body).not.toContain('status:violation');
   });
 
   it('closing skills distinguish pauses from finalized digest results', () => {

@@ -5,13 +5,16 @@ import { isDeepStrictEqual } from 'node:util';
 import { parse as parseToml, type TomlTable, type TomlValue } from 'smol-toml';
 
 import { getAgentOverlay } from '@orcaops/adapters';
+import { runBoundedSubprocess } from '@orcaops/evaluator-protocol/subprocess';
+import { providerBinPath } from '@orcaops/llm';
 import { SUPPORTED_AGENT_IDS, type SupportedAgentId } from '@orcaops/storage';
 
 import { atomicWriteFile } from './atomic-write.js';
 import { resolveGlobalRoot } from './global-install.js';
-import { getInvocationEnv } from './invocation-context.js';
+import { getInvocationCwd, getInvocationEnv } from './invocation-context.js';
 import {
   canonicalSessionHookCommand,
+  isOrcaopsHook,
   isSemanticallyEmpty,
   type JsonObject,
   reconcileDocument,
@@ -19,7 +22,7 @@ import {
   SESSION_HOOK_COMMAND,
   type SessionHookAction,
   type SettingsSpec,
-  settingsSpecs,
+  userJsonSpecs,
 } from './session-hooks.js';
 
 /**
@@ -142,10 +145,16 @@ export function resolveUserHookHome(agent: SupportedAgentId): string | null {
   }
 }
 
-/** Absolute user settings path for an agent, or null when it has no user surface. */
+/**
+ * Absolute user JSON hook path for an agent, or null when it has no user
+ * surface. Same rule as `userJsonSpecs()`: a `machine-config` row that
+ * declares a `userFile` (codex's `hooks.json`) has a user-level JSON surface
+ * even though it has no project one.
+ */
 export function resolveUserHookPath(agent: SupportedAgentId): string | null {
   const sh = getAgentOverlay(agent)?.sessionHooks;
-  if (!sh || sh.kind !== 'settings-json' || !sh.userFile) return null;
+  if (!sh || !sh.userFile) return null;
+  if (sh.kind !== 'settings-json' && sh.kind !== 'machine-config') return null;
   const home = resolveUserHookHome(agent);
   return home ? path.join(home, sh.userFile) : null;
 }
@@ -155,37 +164,60 @@ export function userHookCapableAgents(): SupportedAgentId[] {
   return SUPPORTED_AGENT_IDS.filter((id) => resolveUserHookPath(id) !== null);
 }
 
+/**
+ * Does a recorded codex path name the JSON surface? Codex is the one agent
+ * with two representations, and a path recorded under an older CODEX_HOME
+ * cannot be compared against today's, so the file NAME the overlay declares
+ * is what tells the two apart.
+ */
+export function isCodexHooksJsonPath(candidate: string): boolean {
+  const userFile = getAgentOverlay('codex')?.sessionHooks?.userFile;
+  return userFile !== undefined && path.basename(candidate) === userFile;
+}
+
 export interface UserSessionHookConsentSurface {
   agent: SupportedAgentId;
   path: string;
-  mode: 'reconcile' | 'managed-choice';
+  mode: 'reconcile' | 'managed-choice' | 'remove';
 }
 
 export interface UserSessionHookConsentPlan {
   agents: SupportedAgentId[];
   jsonAgents: SupportedAgentId[];
   codexWanted: boolean;
+  /** Null when codex was not requested — nothing resolved, nothing probed. */
+  representation: CodexRepresentation | null;
   surfaces: UserSessionHookConsentSurface[];
 }
 
-export function planUserSessionHookConsent(
-  requestedAgents: SupportedAgentId[]
-): UserSessionHookConsentPlan {
+/**
+ * THE seat of the codex representation decision: resolved once here and
+ * carried on the plan, so one command probes `codex --version` at most once
+ * and consent, the planners and the record can never disagree about which
+ * file the registration belongs in.
+ */
+export async function planUserSessionHookConsent(
+  requestedAgents: SupportedAgentId[],
+  representationOverride?: CodexRepresentationSurface
+): Promise<UserSessionHookConsentPlan> {
   const agents = [...new Set(requestedAgents)];
-  const jsonAgents = agents.filter((agent) => agent !== 'codex');
-  const codexWanted = agents.includes('codex' as SupportedAgentId);
+  const codexWanted = agents.includes('codex');
+  const representation = codexWanted
+    ? await resolveCodexRepresentation(representationOverride)
+    : null;
+  const codexOnJson = representation?.surface === 'hooks-json';
+  const jsonAgents = agents.filter((agent) => agent !== 'codex' || codexOnJson);
   const surfaces = jsonAgents.flatMap((agent): UserSessionHookConsentSurface[] => {
     const settingsPath = resolveUserHookPath(agent);
     return settingsPath === null ? [] : [{ agent, path: settingsPath, mode: 'reconcile' }];
   });
-  if (codexWanted) {
-    surfaces.push({
-      agent: 'codex' as SupportedAgentId,
-      path: codexConfigTomlPath(),
-      mode: 'managed-choice',
-    });
+  if (representation !== null && !codexOnJson) {
+    surfaces.push({ agent: 'codex', path: representation.tomlPath, mode: 'managed-choice' });
   }
-  return { agents, jsonAgents, codexWanted, surfaces };
+  if (representation !== null && codexOnJson && (await codexTomlRegistersOurs(representation))) {
+    surfaces.push({ agent: 'codex', path: representation.tomlPath, mode: 'remove' });
+  }
+  return { agents, jsonAgents, codexWanted, representation, surfaces };
 }
 
 /**
@@ -201,7 +233,7 @@ export function userSettingsSpec(
 ): SettingsSpec | null {
   const abs = pathOverride ?? resolveUserHookPath(agent);
   if (abs === null) return null;
-  const base = settingsSpecs().find((s) => s.agent === agent);
+  const base = userJsonSpecs().find((s) => s.agent === agent);
   if (!base) return null;
   const desired = structuredClone(base.desired) as JsonObject;
   if (base.schema === 'flat') {
@@ -211,6 +243,12 @@ export function userSettingsSpec(
     hooks[0].command = canonicalSessionHookCommand(agent, { user: true });
   }
   return { ...base, path: abs, desired };
+}
+
+/** `hooks.<eventKey>` of a settings document, or an empty array when it has none. */
+function hookEventGroups(document: unknown, eventKey: string): unknown[] {
+  const entries = tomlTable(tomlTable(document)?.hooks)?.[eventKey];
+  return Array.isArray(entries) ? entries : [];
 }
 
 export interface UserSessionHookFilePlan {
@@ -227,9 +265,22 @@ export interface UserSessionHookFilePlan {
   unresolved?: boolean;
 }
 
+export interface CodexHooksJsonGroups {
+  /** `hooks.SessionStart` as hooks.json held it before the reconcile. */
+  before: unknown[];
+  /** The same array as the reconcile left it — what the file now holds. */
+  after: unknown[];
+}
+
 export interface PlanUserSessionHooksResult {
   plans: UserSessionHookFilePlan[];
   warnings: string[];
+  /**
+   * The codex hooks.json groups either side of the reconcile, present only when
+   * an install reconciled that file. Codex keys hook trust by group POSITION,
+   * so the config.toml trust edit needs the real before-to-after mapping.
+   */
+  codexGroups?: CodexHooksJsonGroups;
 }
 
 type UserConfigPathState =
@@ -376,28 +427,41 @@ async function readUserFile(
 
 export type UserSessionHookPlanOperation = 'install' | 'uninstall';
 
-/** Reconcile selected installs or strip every capable surface on uninstall. */
+/**
+ * Reconcile selected installs or strip every capable surface on uninstall.
+ * `representation` is the resolved codex answer from the consent plan: codex
+ * reaches the JSON reconcile only when it says `hooks-json`, so an install
+ * can never write hooks.json on a resolver's behalf that never ran.
+ */
 export async function planUserSessionHooks(
   agents: SupportedAgentId[],
   mode: 'apply' | 'preview',
   operation: UserSessionHookPlanOperation = 'install',
   recordedEntries: readonly UserHooksRecordEntry[] = [],
-  beforeWrite?: (absPath: string) => Promise<void>
+  beforeWrite?: (absPath: string) => Promise<void>,
+  representation: CodexRepresentation | null = null
 ): Promise<PlanUserSessionHooksResult> {
   const plans: UserSessionHookFilePlan[] = [];
   const warnings: string[] = [];
+  let codexGroups: CodexHooksJsonGroups | undefined;
   const currentTargets = (
-    operation === 'uninstall' ? userHookCapableAgents() : [...new Set(agents)]
+    operation === 'uninstall'
+      ? userHookCapableAgents()
+      : [...new Set(agents)].filter(
+          (agent) => agent !== 'codex' || representation?.surface === 'hooks-json'
+        )
   )
     .map((agent) => ({ agent, path: resolveUserHookPath(agent) }))
     .filter((entry): entry is { agent: SupportedAgentId; path: string } => entry.path !== null);
   const targets = [
     ...currentTargets,
     ...(operation === 'uninstall'
-      ? recordedEntries.filter(
+      ? // A recorded codex path is only ours to reconcile as JSON when it
+        // names the sidecar; config.toml has its own marker-proof remover.
+        recordedEntries.filter(
           (entry) =>
-            entry.agent !== ('codex' as SupportedAgentId) &&
-            resolveUserHookPath(entry.agent) !== null
+            resolveUserHookPath(entry.agent) !== null &&
+            (entry.agent !== 'codex' || isCodexHooksJsonPath(entry.path))
         )
       : []),
   ].filter(
@@ -414,6 +478,15 @@ export async function planUserSessionHooks(
     const spec = userSettingsSpec(agent, target.path);
     if (!spec) continue;
     const recorded = recordedPaths.has(`${agent}\0${spec.path}`);
+    // `parsed` is never reconciled in place, so its array is the true before.
+    const recordCodexGroups = (before: unknown, after: unknown): void => {
+      if (agent === 'codex' && desired && isCodexHooksJsonPath(spec.path)) {
+        codexGroups = {
+          before: hookEventGroups(before, spec.eventKey),
+          after: hookEventGroups(after, spec.eventKey),
+        };
+      }
+    };
     const file = await readUserFile(spec.path);
 
     if (file.status === 'absent') {
@@ -423,6 +496,7 @@ export async function planUserSessionHooks(
       }
       const root: JsonObject = structuredClone(spec.seed);
       reconcileDocument(root, spec, spec.desired);
+      recordCodexGroups(spec.seed, root);
       if (mode === 'apply') {
         await beforeWrite?.(spec.path);
         // expectedContent: null = the file must still be absent at rename.
@@ -473,6 +547,7 @@ export async function planUserSessionHooks(
       warnings.push(`${spec.path} has an unexpected "hooks" shape — left untouched`);
       continue;
     }
+    recordCodexGroups(parsed, root);
 
     if (JSON.stringify(parsed) === JSON.stringify(root)) {
       if (desired) plans.push({ agent, path: spec.path, action: 'unchanged' });
@@ -537,7 +612,7 @@ export async function planUserSessionHooks(
     plans.push({ agent, path: spec.path, action: desired ? 'updated' : 'removed' });
   }
 
-  return { plans, warnings };
+  return { plans, warnings, codexGroups };
 }
 
 // Codex config.toml surface.
@@ -588,18 +663,33 @@ export const CODEX_HOOKS_JSON_NOTE =
   'Codex will report loading hooks from both hooks.json and config.toml at startup; that is informational — both sets run.';
 
 /**
- * The dual-representation note when `<codex home>/hooks.json` is a file
- * (another tool's, e.g. Superset). Existence only — never parsed, never
- * written; a directory or dangling symlink counts as absent.
+ * Does `<codex home>/hooks.json` hold hooks Codex loads? Read-only: an absent
+ * file, a directory, one that does not parse, and one with no hook entries all
+ * answer no — existence alone is not a second representation.
  */
-export async function codexHooksJsonNote(): Promise<string | null> {
-  const home = resolveUserHookHome('codex' as SupportedAgentId);
-  if (!home) return null;
+export async function codexHooksJsonCarriesHooks(): Promise<boolean> {
   try {
-    return (await stat(path.join(home, 'hooks.json'))).isFile() ? CODEX_HOOKS_JSON_NOTE : null;
+    const hooksJsonPath = codexHooksJsonPath();
+    if (!(await stat(hooksJsonPath)).isFile()) return false;
+    const parsed: unknown = JSON.parse(await readFile(hooksJsonPath, 'utf8'));
+    return countCodexHookEntries(tomlTable(parsed)) > 0;
   } catch {
-    return null;
+    return false;
   }
+}
+
+/**
+ * The note for a layer that really carries two representations: hooks in
+ * hooks.json AND hooks in config.toml. Codex prints its "loading hooks from
+ * both" line whoever owns the entries, so another tool's hooks.json beside our
+ * config.toml block still earns it — while a machine whose registration has
+ * moved into hooks.json alone runs one representation and gets none.
+ */
+export async function codexDualRepresentationNote(): Promise<string | null> {
+  if (!(await codexHooksJsonCarriesHooks())) return null;
+  const toml = await readCodexTomlState();
+  if (toml.raw === null) return null;
+  return countCodexHookEntries(parseCodexToml(toml.raw)) > 0 ? CODEX_HOOKS_JSON_NOTE : null;
 }
 
 function codexHookCommand(): string {
@@ -1054,9 +1144,892 @@ export async function readCodexTomlState(
   };
 }
 
+// Codex representation resolver.
+//
+// Codex loads hooks from BOTH `$CODEX_HOME/hooks.json` and config.toml and
+// says so at startup ("prefer a single representation for this layer"), so
+// orcaops registers in exactly one of them. hooks.json is the better home —
+// it is plain JSON the shared reconcile already understands, and it is not
+// the file Codex appends its own trust tables to — but only builds new enough
+// to load the sidecar may be sent there.
+
+export type CodexRepresentationSurface = 'hooks-json' | 'config-toml';
+
+export type CodexRepresentationReason =
+  | 'version-unsupported'
+  | 'version-unknown'
+  | 'existing-hooks-json'
+  | 'existing-toml-hooks'
+  | 'toml-unreadable'
+  | 'default'
+  | 'override';
+
+export type CodexVersionGate = 'supported' | 'unsupported' | 'unknown';
+
+export interface CodexRepresentation {
+  surface: CodexRepresentationSurface;
+  reason: CodexRepresentationReason;
+  hooksJsonPath: string;
+  tomlPath: string;
+  /** The gate's verdict, reported even when an override bypassed it. */
+  versionGate: CodexVersionGate;
+}
+
+/**
+ * The lowest codex-cli build MEASURED to load a hooks.json hook (0.146.0,
+ * 0.146.1 and 0.147.0 were the builds available to measure). Codex's own docs
+ * date the hooks.json sidecar to 0.114, and two upstream issues report the
+ * sidecar not firing, so the documented floor is not evidence. Gating on the
+ * measured one costs a user on an older build only the informational
+ * dual-representation warning they already get; a lower bound that turns out
+ * to be wrong costs them the hook itself, silently.
+ */
+export const CODEX_HOOKS_JSON_MIN_VERSION = '0.146.0';
+
+const CODEX_VERSION_PROBE_TIMEOUT_MS = 5_000;
+const CODEX_VERSION_PROBE_MAX_OUTPUT_BYTES = 8 * 1024;
+
+/** `codex --version` stdout, or null when the probe could not answer. */
+export type CodexVersionProbe = () => Promise<string | null>;
+
+export function codexHooksJsonPath(): string {
+  return (
+    resolveUserHookPath('codex' as SupportedAgentId) ??
+    path.join(os.homedir(), '.codex', 'hooks.json')
+  );
+}
+
+async function probeCodexVersionOutput(): Promise<string | null> {
+  const invocationEnv = getInvocationEnv();
+  const result = await runBoundedSubprocess({
+    argv: [providerBinPath('codex', invocationEnv), '--version'],
+    cwd: getInvocationCwd(),
+    env: Object.fromEntries(
+      Object.entries(invocationEnv).filter(([, value]) => value !== undefined)
+    ) as Record<string, string>,
+    timeoutMs: CODEX_VERSION_PROBE_TIMEOUT_MS,
+    maxOutputBytes: CODEX_VERSION_PROBE_MAX_OUTPUT_BYTES,
+  });
+  const answered =
+    result.spawn_error === null && result.killed_reason === null && result.exit_code === 0;
+  return answered ? result.stdout : null;
+}
+
+function parseCodexVersion(output: string | null): [number, number, number] | null {
+  const match = output?.match(/codex-cli\s+(\d+)\.(\d+)\.(\d+)/) ?? null;
+  return match === null ? null : [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function meetsCodexHooksJsonFloor(version: [number, number, number]): boolean {
+  const floor = CODEX_HOOKS_JSON_MIN_VERSION.split('.').map(Number);
+  for (const [index, part] of version.entries()) {
+    if (part !== floor[index]) return part > floor[index];
+  }
+  return true;
+}
+
+/** A regular hooks.json holding a JSON object — the file we can join. */
+async function codexHooksJsonHoldsObject(hooksJsonPath: string): Promise<boolean> {
+  try {
+    if (!(await stat(hooksJsonPath)).isFile()) return false;
+    const parsed: unknown = JSON.parse(await readFile(hooksJsonPath, 'utf8'));
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Hook entries under `hooks.<Event>`, ours included. Every array element counts
+ * (a group contributes its inner hooks, any other shape counts as one), so a
+ * user's own hooks are recognised whichever schema they wrote them in;
+ * `hooks.state`, Codex's own trust bookkeeping, is a table rather than an array
+ * and never counts. The grouped shape is the same in config.toml and in
+ * hooks.json, so a parsed document of either kind can be counted here.
+ */
+function countCodexHookEntries(table: TomlTable | null): number {
+  const hooks = tomlTable(table?.hooks);
+  if (hooks === null) return 0;
+  let total = 0;
+  for (const entries of Object.values(hooks)) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      const inner = tomlTable(entry)?.hooks;
+      total += Array.isArray(inner) ? inner.length : 1;
+    }
+  }
+  return total;
+}
+
+/** Hook entries under `hooks.<Event>` that are not our canonical registration. */
+function countForeignCodexHookEntries(table: TomlTable | null): number {
+  return countCodexHookEntries(table) - countCodexRegistrations(table);
+}
+
+type CodexTomlHooksOwnership = 'foreign' | 'ours-or-none' | 'unreadable';
+
+async function inspectCodexTomlHooks(tomlPath: string): Promise<CodexTomlHooksOwnership> {
+  let raw: string;
+  try {
+    raw = await readFile(tomlPath, 'utf8');
+  } catch (error) {
+    // No config.toml at all is not a reason to stay in it; anything else is,
+    // because a file we cannot read may register hooks we cannot see.
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'ours-or-none' : 'unreadable';
+  }
+  const parsed = parseCodexToml(raw);
+  if (parsed === null) return 'unreadable';
+  return countForeignCodexHookEntries(parsed) > 0 ? 'foreign' : 'ours-or-none';
+}
+
+/**
+ * Which file codex's registration belongs in. Join whatever already exists,
+ * else create hooks.json:
+ *
+ *  1. an override answers directly, but still reports what the gate found;
+ *  2. a build below the measured floor (or a probe that could not answer)
+ *     stays on config.toml, the surface validated on every build measured;
+ *  3. a hooks.json holding a JSON object is joined;
+ *  4. a config.toml carrying hooks that are not ours keeps the registration
+ *     beside them (as does one we cannot read or parse);
+ *  5. otherwise hooks.json is created.
+ *
+ * Never throws: a probe that rejects reads as "could not answer", and every
+ * file inspection degrades to leaving us where we already are.
+ */
+export async function resolveCodexRepresentation(
+  override?: CodexRepresentationSurface,
+  probeVersion: CodexVersionProbe = probeCodexVersionOutput
+): Promise<CodexRepresentation> {
+  const paths = { hooksJsonPath: codexHooksJsonPath(), tomlPath: codexConfigTomlPath() };
+  const output = await probeVersion().catch(() => null);
+  const version = parseCodexVersion(output);
+  const versionGate: CodexVersionGate =
+    version === null ? 'unknown' : meetsCodexHooksJsonFloor(version) ? 'supported' : 'unsupported';
+  const base = { ...paths, versionGate };
+
+  if (override !== undefined) return { ...base, surface: override, reason: 'override' };
+  if (versionGate !== 'supported') {
+    return {
+      ...base,
+      surface: 'config-toml',
+      reason: versionGate === 'unsupported' ? 'version-unsupported' : 'version-unknown',
+    };
+  }
+  if (await codexHooksJsonHoldsObject(paths.hooksJsonPath)) {
+    return { ...base, surface: 'hooks-json', reason: 'existing-hooks-json' };
+  }
+  const toml = await inspectCodexTomlHooks(paths.tomlPath);
+  if (toml !== 'ours-or-none') {
+    return {
+      ...base,
+      surface: 'config-toml',
+      reason: toml === 'foreign' ? 'existing-toml-hooks' : 'toml-unreadable',
+    };
+  }
+  return { ...base, surface: 'hooks-json', reason: 'default' };
+}
+
+// Codex hook trust.
+//
+// Codex records approval as
+// `[hooks.state."<source path>:<event>:<group idx>:<hook idx>"] trusted_hash`
+// in config.toml, whatever file the hook itself came from, and the hash covers
+// the hook DEFINITION — command AND matcher — rather than the key: the same
+// definition approved under one key runs unprompted under another (measured),
+// while our canonical command under a stale matcher is a different hook that
+// hashes differently. Moving the registration between representations may
+// therefore CARRY the existing approval instead of asking the user to
+// re-approve a command they already approved. A stale hash costs a prompt,
+// never a wrong grant, but a hash is still only ever copied — never invented.
+
+const CODEX_TRUST_EVENT = 'session_start';
+
+/**
+ * `<path>:session_start:<group>:<hook>` for the canonical command inside a
+ * PARSED document (a config.toml table or a hooks.json object — the grouped
+ * shape is the same in both), or null when it registers nothing of ours.
+ * Indexes are read from the document rather than assumed: a Superset rewrite
+ * of hooks.json can put our group anywhere.
+ */
+export function codexTrustKey(document: unknown, filePath: string): string | null {
+  const command = codexHookCommand();
+  const groups = tomlTable(tomlTable(document)?.hooks)?.SessionStart;
+  if (!Array.isArray(groups)) return null;
+  for (const [groupIndex, group] of groups.entries()) {
+    const hooks = tomlTable(group)?.hooks;
+    if (!Array.isArray(hooks)) continue;
+    const hookIndex = hooks.findIndex((hook) => tomlTable(hook)?.command === command);
+    if (hookIndex !== -1) {
+      return `${filePath}:${CODEX_TRUST_EVENT}:${groupIndex}:${hookIndex}`;
+    }
+  }
+  return null;
+}
+
+/** The group and hook indexes a trust key names for `filePath`, or null for any other key. */
+function codexTrustKeyIndexes(key: string, filePath: string): CodexHookPosition | null {
+  const prefix = `${filePath}:${CODEX_TRUST_EVENT}:`;
+  if (!key.startsWith(prefix)) return null;
+  const match = /^(\d+):(\d+)$/.exec(key.slice(prefix.length));
+  return match === null ? null : { group: Number(match[1]), hook: Number(match[2]) };
+}
+
+/** A hook's place in an event array — the tail of the trust key that names it. */
+export interface CodexHookPosition {
+  group: number;
+  hook: number;
+}
+
+function codexHookPositionKey(position: CodexHookPosition): string {
+  return `${position.group}:${position.hook}`;
+}
+
+function codexTrustKeyAt(filePath: string, position: CodexHookPosition): string {
+  return `${filePath}:${CODEX_TRUST_EVENT}:${position.group}:${position.hook}`;
+}
+
+interface CodexGroupOutcome {
+  /** What this group is worth comparing against the after array. */
+  value: unknown;
+  /** Before hook index → its index inside the surviving group; our own hooks are absent. */
+  hooks: Map<number, number>;
+  /** The reconcile rewrote this group around a foreign hook, stripping ours out of it. */
+  rewritten: boolean;
+  /** Every hook in it is ours, so a group that does not survive took only rows of ours with it. */
+  ours: boolean;
+}
+
+/**
+ * What the reconcile does to one group: drops it when every hook is ours,
+ * REWRITES it around the foreign hooks when only some are, and otherwise
+ * preserves it verbatim. Stripping our entry from ahead of a foreign hook
+ * re-indexes that hook inside its own group, so the surviving hooks carry
+ * their new positions with them.
+ */
+function codexGroupOutcome(group: unknown, isOurs: (hook: unknown) => boolean): CodexGroupOutcome {
+  const hooks = tomlTable(group)?.hooks;
+  if (!Array.isArray(hooks))
+    return { value: group, hooks: new Map(), rewritten: false, ours: false };
+  const surviving = new Map<number, number>();
+  const foreign: unknown[] = [];
+  for (const [index, hook] of hooks.entries()) {
+    if (isOurs(hook)) continue;
+    surviving.set(index, foreign.length);
+    foreign.push(hook);
+  }
+  if (foreign.length === hooks.length) {
+    return { value: group, hooks: surviving, rewritten: false, ours: false };
+  }
+  if (foreign.length === 0) {
+    // All ours: dropped, unless it is exactly the group we want and the
+    // reconcile keeps it in place — in which case it survives verbatim.
+    const identity = new Map(hooks.map((_, index): [number, number] => [index, index]));
+    return { value: group, hooks: identity, rewritten: false, ours: true };
+  }
+  return {
+    value: { ...(tomlTable(group) ?? {}), hooks: foreign },
+    hooks: surviving,
+    rewritten: true,
+    ours: false,
+  };
+}
+
+/**
+ * Where the reconcile left each HOOK of an event array: `<group>:<hook>` →
+ * the position it now occupies. Surviving groups are matched by value in
+ * order, so two identical groups map first-to-first; groups the reconcile
+ * preserves verbatim claim their slot before rewritten ones are matched by
+ * the value they take once our entries are stripped, so a rewritten group
+ * never steals the slot of the group it happens to resemble. A before group
+ * that reaches no after position and held nothing but our hooks is DROPPED;
+ * an after position no before group reaches is the group we inserted.
+ */
+export function codexHookPositionMap(
+  before: readonly unknown[],
+  after: readonly unknown[],
+  isOurs: (hook: unknown) => boolean
+): { positions: Map<string, CodexHookPosition>; droppedGroups: Set<number> } {
+  const outcomes = before.map((group) => codexGroupOutcome(group, isOurs));
+  const claimed = new Set<number>();
+  const landed = new Map<number, number>();
+  const claim = (from: number, outcome: CodexGroupOutcome): void => {
+    const to = after.findIndex(
+      (candidate, index) => !claimed.has(index) && isDeepStrictEqual(candidate, outcome.value)
+    );
+    if (to === -1) return;
+    claimed.add(to);
+    landed.set(from, to);
+  };
+  for (const [from, outcome] of outcomes.entries()) if (!outcome.rewritten) claim(from, outcome);
+  for (const [from, outcome] of outcomes.entries()) if (outcome.rewritten) claim(from, outcome);
+
+  const positions = new Map<string, CodexHookPosition>();
+  const droppedGroups = new Set<number>();
+  for (const [from, outcome] of outcomes.entries()) {
+    const to = landed.get(from);
+    if (to === undefined) {
+      // A group that survives but matched nothing is one we cannot account
+      // for; only a group that provably lost every hook — all of them ours —
+      // may have its rows retired.
+      if (outcome.ours) droppedGroups.add(from);
+      continue;
+    }
+    for (const [hook, landedHook] of outcome.hooks) {
+      positions.set(codexHookPositionKey({ group: from, hook }), { group: to, hook: landedHook });
+    }
+  }
+  return { positions, droppedGroups };
+}
+
+/**
+ * The re-index the reconcile forces on hooks.json, or null when it left every
+ * hook where it was and dropped none. Derived from the group arrays either
+ * side of the reconcile rather than from our own position: the reconcile
+ * inserts our canonical group, DROPS any stale group of ours, and REWRITES a
+ * group that holds a foreign hook beside ours — so the hooks behind it do not
+ * all move by the same amount, and one that did not move must not be re-keyed.
+ */
+export function codexTrustShiftFor(
+  hooksJsonPath: string,
+  groups: { before: readonly unknown[]; after: readonly unknown[] }
+): CodexTrustShiftKeys | null {
+  const spec = userSettingsSpec('codex', hooksJsonPath);
+  const { positions, droppedGroups } = codexHookPositionMap(groups.before, groups.after, (hook) =>
+    spec === null ? false : isOrcaopsHook(hook, spec)
+  );
+  const moves = new Map<string, CodexHookPosition>();
+  for (const [from, to] of positions) if (from !== codexHookPositionKey(to)) moves.set(from, to);
+  return moves.size === 0 && droppedGroups.size === 0
+    ? null
+    : { hooksJsonPath, moves, droppedGroups };
+}
+
+export interface CodexTrustCarryKeys {
+  fromKey: string;
+  toKey: string;
+}
+
+export interface CodexTrustShiftKeys {
+  /** The file whose trust keys the reconcile re-indexed. */
+  hooksJsonPath: string;
+  /**
+   * Every hook whose group OR hook index changed, keyed `<group>:<hook>` as it
+   * was before. Hooks that stayed put — and positions the after document does
+   * not have — are absent, so nothing is ever re-keyed onto a hook that is not
+   * there.
+   */
+  moves: ReadonlyMap<string, CodexHookPosition>;
+  /**
+   * Before-indexes of the groups that lost every hook. Only an all-ours group
+   * can lose all of them, so an approval keyed to one of these is provably ours
+   * and describes a hook that no longer exists.
+   */
+  droppedGroups: ReadonlySet<number>;
+}
+
+export interface CodexTrustEditKeys {
+  /** Our own approval, copied from its config.toml key onto its hooks.json one. */
+  carry: CodexTrustCarryKeys | null;
+  shift: CodexTrustShiftKeys | null;
+}
+
+export type CodexTrustCarryVerdict = 'present' | 'absent' | 'unchanged' | 'refused';
+
+export interface CodexTrustEditPlan {
+  /** How our own approval fared. */
+  carry: CodexTrustCarryVerdict;
+  /** Approvals belonging to OTHER hooks that followed their group to its new index. */
+  moved: number;
+  /** Approvals left at their stale key, so Codex asks about those hooks once. */
+  skipped: string[];
+  /** The composed document, or null when there is nothing to write. */
+  next: string | null;
+}
+
+function codexTomlTrustState(parsed: TomlTable): TomlTable | null {
+  return tomlTable(tomlTable(parsed.hooks)?.state);
+}
+
+function codexTrustedHash(state: TomlTable | null, key: string): string | null {
+  const hash = tomlTable(state?.[key])?.trusted_hash;
+  return typeof hash === 'string' && hash.trim() !== '' ? hash : null;
+}
+
+/**
+ * The dotted key path of a plain TOML table header (`[a.b."c"]`), or null for
+ * an array-of-tables header and for anything this cannot read exactly. A
+ * header we cannot read is a key we decline to relocate rather than guess at.
+ */
+function tomlTableHeaderPath(line: string): string[] | null {
+  const text = line.trim();
+  if (!text.startsWith('[') || text.startsWith('[[')) return null;
+  let quote: string | null = null;
+  let close = -1;
+  for (let i = 1; i < text.length && close === -1; i += 1) {
+    const ch = text[i];
+    if (quote === '"' && ch === '\\') i += 1;
+    else if (quote !== null) quote = ch === quote ? null : quote;
+    else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === ']') close = i;
+  }
+  if (close === -1) return null;
+  const trailing = text.slice(close + 1).trim();
+  if (trailing !== '' && !trailing.startsWith('#')) return null;
+  return tomlKeyPath(text.slice(1, close));
+}
+
+function tomlKeyPath(text: string): string[] | null {
+  const parts: string[] = [];
+  let i = 0;
+  for (;;) {
+    while (i < text.length && /\s/.test(text[i])) i += 1;
+    const quote = text[i];
+    if (quote === '"' || quote === "'") {
+      let end = i + 1;
+      while (end < text.length && text[end] !== quote) {
+        end += quote === '"' && text[end] === '\\' ? 2 : 1;
+      }
+      if (end >= text.length) return null;
+      const literal = text.slice(i, end + 1);
+      try {
+        parts.push(quote === '"' ? (JSON.parse(literal) as string) : literal.slice(1, -1));
+      } catch {
+        return null;
+      }
+      i = end + 1;
+    } else {
+      const bare = /^[A-Za-z0-9_-]+/.exec(text.slice(i));
+      if (bare === null) return null;
+      parts.push(bare[0]);
+      i += bare[0].length;
+    }
+    while (i < text.length && /\s/.test(text[i])) i += 1;
+    if (i >= text.length) return parts;
+    if (text[i] !== '.') return null;
+    i += 1;
+  }
+}
+
+interface CodexTrustTableText {
+  /** Bytes the entry occupies, cut when it moves. */
+  start: number;
+  end: number;
+  /** Its value lines, without the header or any trailing blank or comment line. */
+  body: string[];
+}
+
+/**
+ * Where `[hooks.state."<key>"]` is written, or null when the key is not a
+ * table of its own (an inline or dotted form) or is written more than once.
+ * A trailing comment run is left behind rather than cut, because it reads as
+ * a heading for whatever table follows.
+ */
+function codexTrustTableText(raw: string, key: string): CodexTrustTableText | null {
+  const lines: Array<{ text: string; start: number; header: boolean }> = [];
+  let offset = 0;
+  for (const text of raw.split('\n')) {
+    lines.push({ text, start: offset, header: /^\s*\[/.test(text) });
+    offset += text.length + 1;
+  }
+  const wanted = ['hooks', 'state', key];
+  const found = lines.filter(
+    (line) => line.header && isDeepStrictEqual(tomlTableHeaderPath(line.text), wanted)
+  );
+  if (found.length !== 1) return null;
+
+  const first = lines.indexOf(found[0]);
+  let last = first;
+  let after = lines.length;
+  for (let i = first + 1; i < lines.length; i += 1) {
+    if (lines[i].header) {
+      after = i;
+      break;
+    }
+    const text = lines[i].text.trim();
+    if (text !== '' && !text.startsWith('#')) last = i;
+  }
+  const comment = lines.slice(last + 1, after).find((line) => line.text.trim().startsWith('#'));
+  const end = comment?.start ?? (after === lines.length ? raw.length : lines[after].start);
+  return {
+    start: lines[first].start,
+    end,
+    body: lines.slice(first + 1, last + 1).map((line) => line.text.replace(/\r$/, '')),
+  };
+}
+
+interface CodexTrustRelocation {
+  fromKey: string;
+  toKey: string;
+  hash: string;
+  /** What lands at `toKey`, for the diff the whole edit is proved by. */
+  value: TomlValue;
+  /** The lines re-emitted under the new header. */
+  body: string[];
+  /** The bytes the source occupies, or null when the entry is copied rather than moved. */
+  cut: { start: number; end: number } | null;
+}
+
+/** A dead entry of ours, cut from `[hooks.state]` and re-emitted nowhere. */
+interface CodexTrustRetirement {
+  key: string;
+  cut: { start: number; end: number };
+}
+
+interface CodexTrustShiftPlan {
+  relocations: CodexTrustRelocation[];
+  retirements: CodexTrustRetirement[];
+  unmovable: string[];
+}
+
+function planCodexTrustShift(
+  raw: string,
+  state: TomlTable | null,
+  shift: CodexTrustShiftKeys | null
+): CodexTrustShiftPlan {
+  const relocations: CodexTrustRelocation[] = [];
+  const retirements: CodexTrustRetirement[] = [];
+  const unmovable: string[] = [];
+  if (shift === null || state === null) return { relocations, retirements, unmovable };
+  const keyed = Object.keys(state)
+    .flatMap((key) => {
+      const at = codexTrustKeyIndexes(key, shift.hooksJsonPath);
+      return at === null ? [] : [{ key, at }];
+    })
+    .sort((a, b) => a.at.group - b.at.group || a.at.hook - b.at.hook);
+  for (const { key, at } of keyed) {
+    // A group loses every hook only when every hook in it was our exact
+    // command, so this entry is ours and its hook is gone. Retiring it frees
+    // the index for whichever surviving hook moved onto it.
+    if (shift.droppedGroups.has(at.group)) {
+      const dead = codexTrustTableText(raw, key);
+      if (dead !== null) retirements.push({ key, cut: { start: dead.start, end: dead.end } });
+      continue;
+    }
+    const to = shift.moves.get(codexHookPositionKey(at));
+    // A hook that never moved keeps its key; inventing a destination for it
+    // lands trust on a hook that is not there, and Codex then runs neither.
+    if (to === undefined) continue;
+    // An entry recording no hash records no approval, so it has nothing to
+    // preserve — but it still occupies its key, and may block a move onto it.
+    const hash = codexTrustedHash(state, key);
+    if (hash === null) continue;
+    const text = codexTrustTableText(raw, key);
+    if (text === null) {
+      unmovable.push(key);
+      continue;
+    }
+    relocations.push({
+      fromKey: key,
+      toKey: codexTrustKeyAt(shift.hooksJsonPath, to),
+      hash,
+      value: state[key],
+      body: text.body,
+      cut: { start: text.start, end: text.end },
+    });
+  }
+  return { relocations, retirements, unmovable };
+}
+
+/**
+ * The largest set of relocations that overwrites nothing: a target key held by
+ * an entry that is not itself moving away — or being retired — and whose hash
+ * differs, blocks its move; and blocking one move can block the move that was
+ * waiting for it to vacate, so the set shrinks until it is stable.
+ */
+function acceptCodexTrustRelocations(
+  state: TomlTable | null,
+  relocations: CodexTrustRelocation[],
+  retirements: readonly CodexTrustRetirement[]
+): { accepted: Set<CodexTrustRelocation>; written: Set<CodexTrustRelocation> } {
+  const occupied = (key: string): boolean => state !== null && hasOwnTomlKey(state, key);
+  const accepted = new Set(relocations);
+  const vacatedKeys = (): Set<string> =>
+    new Set([
+      ...retirements.map((r) => r.key),
+      ...[...accepted].filter((r) => r.cut !== null).map((r) => r.fromKey),
+    ]);
+  for (;;) {
+    const vacated = vacatedKeys();
+    const blocked = [...accepted].find(
+      (r) =>
+        occupied(r.toKey) && !vacated.has(r.toKey) && codexTrustedHash(state, r.toKey) !== r.hash
+    );
+    if (blocked === undefined) break;
+    accepted.delete(blocked);
+  }
+  const vacated = vacatedKeys();
+  // A target left holding the identical hash already records this approval;
+  // the entry moves onto it without the write.
+  const written = new Set([...accepted].filter((r) => !occupied(r.toKey) || vacated.has(r.toKey)));
+  return { accepted, written };
+}
+
+function composeCodexTrustEdit(
+  raw: string,
+  applied: CodexTrustRelocation[],
+  written: Set<CodexTrustRelocation>,
+  retirements: readonly CodexTrustRetirement[]
+): string {
+  const eol = codexTomlEol(raw);
+  const cuts = [
+    ...retirements.map((r) => r.cut),
+    ...applied.flatMap((r) => (r.cut === null ? [] : [r.cut])),
+  ];
+  let text = raw;
+  for (const cut of [...cuts].sort((a, b) => b.start - a.start)) {
+    text = text.slice(0, cut.start) + text.slice(cut.end);
+  }
+  if (cuts.length > 0) text = text.replace(/[ \t\r\n]+$/, eol);
+  const tables = applied
+    .filter((r) => written.has(r))
+    .map((r) => [`[hooks.state.${JSON.stringify(r.toKey)}]`, ...r.body, ''].join(eol));
+  if (tables.length === 0) return text;
+  const base = text === '' || /\r?\n$/.test(text) ? text : `${text}${eol}`;
+  return `${base}${eol}${tables.join(eol)}`;
+}
+
+/**
+ * Rewrite `[hooks.state]` so every approval survives the reconcile that put our
+ * group into hooks.json: ours copied onto its new key, each approval whose hook
+ * moved re-keyed to the group and hook index it now sits at, and our own dead
+ * entries — those keyed to a group the reconcile emptied — retired, which frees
+ * their index for whichever survivor moved onto it. New tables are APPENDED, so
+ * they land after any trailing orcaops marker rather than inside the fence Codex
+ * itself writes into.
+ *
+ * The whole edit is proved by diff — the composed document must parse to the
+ * original with exactly the intended key moves and byte-identical hashes — so
+ * anything else refuses and writes nothing.
+ */
+export function planCodexTrustEdit(rawToml: string, keys: CodexTrustEditKeys): CodexTrustEditPlan {
+  const parsed = parseCodexToml(rawToml);
+  if (parsed === null) return { carry: 'absent', moved: 0, skipped: [], next: null };
+  const state = codexTomlTrustState(parsed);
+
+  const carryHash = keys.carry === null ? null : codexTrustedHash(state, keys.carry.fromKey);
+  const ours: CodexTrustRelocation | null =
+    keys.carry === null || carryHash === null
+      ? null
+      : {
+          fromKey: keys.carry.fromKey,
+          toKey: keys.carry.toKey,
+          hash: carryHash,
+          value: { trusted_hash: carryHash },
+          body: [`trusted_hash = ${JSON.stringify(carryHash)}`],
+          cut: null,
+        };
+  const shift = planCodexTrustShift(rawToml, state, keys.shift);
+  const { retirements } = shift;
+  const planned = [...shift.relocations, ...(ours === null ? [] : [ours])];
+  const nothingWritten = (
+    carry: CodexTrustCarryVerdict,
+    skipped: string[]
+  ): CodexTrustEditPlan => ({
+    carry: ours === null ? 'absent' : carry,
+    moved: 0,
+    skipped,
+    next: null,
+  });
+  if (planned.length === 0 && retirements.length === 0) {
+    return nothingWritten('absent', shift.unmovable);
+  }
+
+  const { accepted, written } = acceptCodexTrustRelocations(state, planned, retirements);
+  const skipped = [
+    ...shift.relocations.filter((r) => !accepted.has(r)).map((r) => r.fromKey),
+    ...shift.unmovable,
+  ];
+  const applied = planned.filter((r) => accepted.has(r));
+  if (applied.length === 0 && retirements.length === 0) return nothingWritten('refused', skipped);
+  if (written.size === 0 && retirements.length === 0 && applied.every((r) => r.cut === null)) {
+    return nothingWritten('unchanged', skipped);
+  }
+
+  const next = composeCodexTrustEdit(rawToml, applied, written, retirements);
+  const nextState: TomlTable = { ...(state ?? {}) };
+  for (const r of retirements) delete nextState[r.key];
+  for (const r of applied) if (r.cut !== null) delete nextState[r.fromKey];
+  for (const r of applied) if (written.has(r)) nextState[r.toKey] = r.value;
+  const expected: TomlTable = {
+    ...parsed,
+    hooks: { ...(tomlTable(parsed.hooks) ?? {}), state: nextState },
+  };
+  if (!isDeepStrictEqual(parseCodexToml(next), expected)) {
+    return nothingWritten('refused', [
+      ...shift.relocations.map((r) => r.fromKey),
+      ...shift.unmovable,
+    ]);
+  }
+  return {
+    carry:
+      ours === null
+        ? 'absent'
+        : !accepted.has(ours)
+          ? 'refused'
+          : written.has(ours)
+            ? 'present'
+            : 'unchanged',
+    moved: applied.filter((r) => r !== ours).length,
+    skipped,
+    next,
+  };
+}
+
+export type CodexTrustCarryOutcome = CodexTrustCarryVerdict | 'unreadable';
+
+export interface CodexTrustEditReport {
+  carry: CodexTrustCarryOutcome;
+  moved: number;
+  skipped: string[];
+}
+
+export interface CarryCodexTrustOptions {
+  configPath?: string;
+  beforeWrite?: () => Promise<void>;
+}
+
+/** Apply `planCodexTrustEdit` under the same pre-image guard as the other config.toml writers. */
+export async function carryCodexTrust(
+  keys: CodexTrustEditKeys,
+  options: CarryCodexTrustOptions = {}
+): Promise<CodexTrustEditReport> {
+  const state = await readCodexTomlState(options.configPath);
+  if (state.readStatus === 'unreadable') return { carry: 'unreadable', moved: 0, skipped: [] };
+  if (state.raw === null) return { carry: 'absent', moved: 0, skipped: [] };
+  const plan = planCodexTrustEdit(state.raw, keys);
+  if (plan.next === null) return { carry: plan.carry, moved: 0, skipped: plan.skipped };
+  await options.beforeWrite?.();
+  await writeUserConfigFile(state.path, plan.next, codexTomlWriteGuard(state));
+  return { carry: plan.carry, moved: plan.moved, skipped: plan.skipped };
+}
+
+/** Does config.toml still register (or fence) the orcaops hook? */
+async function codexTomlRegistersOurs(representation: CodexRepresentation): Promise<boolean> {
+  const state = await readCodexTomlState(representation.tomlPath);
+  return state.installed || state.markerBlock;
+}
+
+export type CodexTrustCarryReport = CodexTrustCarryOutcome | 'failed';
+
+export type CodexMigrationOutcome = 'moved' | 'kept-duplicate' | 'none';
+
+export interface CodexTrustShiftReport {
+  /** Approvals for OTHER hooks that followed their group to its new index. */
+  moved: number;
+  /** Approvals left at their stale key, so Codex asks about those hooks once. */
+  skipped: string[];
+}
+
+export interface CodexRegistrationMigration {
+  outcome: CodexMigrationOutcome;
+  /** The removal's verdict, or null when config.toml held nothing of ours. */
+  removal: CodexTomlRemoveOutcome | null;
+  /** The approval's verdict, or null when config.toml recorded none for us. */
+  trust: CodexTrustCarryReport | null;
+  trustShift: CodexTrustShiftReport;
+}
+
+export interface MigrateCodexRegistrationOptions {
+  /**
+   * The hooks.json groups either side of the reconcile. Only the hooks that
+   * actually changed position are re-keyed, so re-running against a file we
+   * are already in shifts nothing.
+   */
+  groups?: CodexHooksJsonGroups;
+}
+
+/**
+ * May the block go? Only once the approval it carries either moved to the
+ * hooks.json key or was never there: a write that threw and a plan that
+ * refused both leave the grant on the config.toml key, and removing the block
+ * that key names would strand it.
+ */
+function codexTrustReleasesTomlBlock(trust: CodexTrustCarryReport | null): boolean {
+  return trust === null || trust === 'present' || trust === 'unchanged' || trust === 'absent';
+}
+
+/**
+ * Make config.toml agree with the hooks.json that now carries the
+ * registration: re-key every approval whose group the reconcile moved, copy the
+ * one the user already granted us, then remove any block we own. Both trust
+ * indexes are READ from their documents — Codex keys trust by position, and a
+ * Superset rewrite can put our hooks.json group anywhere.
+ *
+ * The order is load-bearing. Trust is settled while the block still stands,
+ * and an approval that did not move stops the move, so every failure leaves
+ * the hook registered twice (today's state) rather than not at all.
+ */
+export async function migrateCodexRegistrationToHooksJson(
+  representation: CodexRepresentation,
+  options: MigrateCodexRegistrationOptions = {}
+): Promise<CodexRegistrationMigration> {
+  const noShift: CodexTrustShiftReport = { moved: 0, skipped: [] };
+  const state = await readCodexTomlState(representation.tomlPath);
+  if (state.readStatus === 'unreadable') {
+    return { outcome: 'none', removal: 'unreadable', trust: null, trustShift: noShift };
+  }
+  if (state.raw === null) {
+    return { outcome: 'none', removal: null, trust: null, trustShift: noShift };
+  }
+
+  const registered = state.installed || state.markerBlock;
+  const parsed = parseCodexToml(state.raw);
+  const fromKey =
+    parsed === null || !registered ? null : codexTrustKey(parsed, representation.tomlPath);
+  const toKey = await codexHooksJsonTrustKey(representation);
+  const carry = fromKey !== null && toKey !== null ? { fromKey, toKey } : null;
+  const shift =
+    options.groups === undefined
+      ? null
+      : codexTrustShiftFor(representation.hooksJsonPath, options.groups);
+
+  let trust: CodexTrustCarryReport | null = null;
+  let trustShift = noShift;
+  if (carry !== null || shift !== null) {
+    try {
+      const report = await carryCodexTrust(
+        { carry, shift },
+        { configPath: representation.tomlPath }
+      );
+      trust = carry === null ? null : report.carry;
+      trustShift = { moved: report.moved, skipped: report.skipped };
+    } catch {
+      trust = 'failed';
+    }
+  }
+  if (!registered) return { outcome: 'none', removal: null, trust, trustShift };
+  if (!codexTrustReleasesTomlBlock(trust)) {
+    return { outcome: 'kept-duplicate', removal: null, trust, trustShift };
+  }
+
+  const removal = await removeCodexTomlBlock(representation.tomlPath);
+  return {
+    outcome: removal === 'removed' ? 'moved' : 'kept-duplicate',
+    removal,
+    trust,
+    trustShift,
+  };
+}
+
+/** The trust key of our entry in the RECONCILED hooks.json, read back from disk. */
+async function codexHooksJsonTrustKey(representation: CodexRepresentation): Promise<string | null> {
+  const file = await readUserFile(representation.hooksJsonPath);
+  if (file.status !== 'ok') return null;
+  let document: unknown;
+  try {
+    document = JSON.parse(file.raw);
+  } catch {
+    return null;
+  }
+  return codexTrustKey(document, representation.hooksJsonPath);
+}
+
 export type UserSessionHookSurfaceState =
   | 'installed'
   | 'absent'
+  /** Registered, working, but in the file the resolved representation has replaced. */
+  | 'superseded'
   | 'invalid-json'
   | 'registered-but-broken'
   | 'registered-but-missing'
@@ -1072,23 +2045,57 @@ export interface UserSessionHookSurfaceHealth {
   owned: boolean;
 }
 
-function userSessionHookInstallRemedy(agent: SupportedAgentId): string {
-  const managedMode = agent === ('codex' as SupportedAgentId) ? ' and choose managed mode' : '';
+/** The chooser is offered for config.toml only, so only that surface names it. */
+function userSessionHookInstallRemedy(agent: SupportedAgentId, targetPath?: string): string {
+  const managedMode =
+    agent === ('codex' as SupportedAgentId) &&
+    (targetPath === undefined || !isCodexHooksJsonPath(targetPath))
+      ? ' and choose managed mode'
+      : '';
   return `Run \`orcaops session-hooks install --agents ${agent}\`${managedMode} to repair the registration.`;
 }
 
+function codexSupersededRemedy(hooksJsonPath: string): string {
+  return `The Codex hook now runs from ${hooksJsonPath}; run \`orcaops session-hooks install --agents codex\` to clean up this leftover block.`;
+}
+
+function userSessionHookInvalidJsonRemedy(agent: SupportedAgentId, targetPath: string): string {
+  return `${targetPath} is not valid JSON — fix it, then re-run \`orcaops session-hooks install --agents ${agent}\`.`;
+}
+
 export async function evaluateUserSessionHookSurfaces(
-  record: UserHooksRecord | null
+  record: UserHooksRecord | null,
+  representation?: CodexRepresentation
 ): Promise<UserSessionHookSurfaceHealth[]> {
   const rows: UserSessionHookSurfaceHealth[] = [];
   const recordedEntries = record?.entries ?? [];
   const isRecorded = (agent: SupportedAgentId, targetPath: string): boolean =>
     recordedEntries.some((entry) => entry.agent === agent && entry.path === targetPath);
 
+  // Both codex files are reported, but the representation is resolved (and
+  // codex probed for its version) only where the answer can change a row:
+  // when the registration is live in BOTH files at once.
+  let resolved = representation ?? null;
+  const codexRepresentation = async (): Promise<CodexRepresentation> =>
+    (resolved ??= await resolveCodexRepresentation());
+  let hooksJsonRegisters: boolean | null = null;
+  const codexHooksJsonRegisters = async (): Promise<boolean> => {
+    if (hooksJsonRegisters === null) {
+      const file = await readUserFile(codexHooksJsonPath());
+      hooksJsonRegisters = file.status === 'ok' && file.raw.includes(SESSION_HOOK_COMMAND);
+    }
+    return hooksJsonRegisters;
+  };
+
   const codexAgent = 'codex' as SupportedAgentId;
+  // A recorded codex path may name either representation; only the TOML ones
+  // belong to the reader below (the sidecar is evaluated as JSON with the
+  // other user files).
   const codexPaths = [
     codexConfigTomlPath(),
-    ...recordedEntries.filter((entry) => entry.agent === codexAgent).map((entry) => entry.path),
+    ...recordedEntries
+      .filter((entry) => entry.agent === codexAgent && !isCodexHooksJsonPath(entry.path))
+      .map((entry) => entry.path),
   ].filter((candidate, index, all) => all.indexOf(candidate) === index);
   for (const configPath of codexPaths) {
     const codex = await readCodexTomlState(configPath);
@@ -1127,6 +2134,21 @@ export async function evaluateUserSessionHookSurfaces(
     } else {
       state = 'absent';
     }
+    // A registration the resolved representation has moved past still WORKS
+    // (Codex runs both files), so this is a nudge to re-run install, not a
+    // failure — and only once the registration is actually live in hooks.json,
+    // since until then re-running install would change nothing.
+    if (
+      state === 'installed' &&
+      configPath === codexConfigTomlPath() &&
+      (await codexHooksJsonRegisters())
+    ) {
+      const codexSurface = await codexRepresentation();
+      if (codexSurface.surface === 'hooks-json') {
+        state = 'superseded';
+        remedy = codexSupersededRemedy(codexSurface.hooksJsonPath);
+      }
+    }
     rows.push({ agent: codexAgent, path: codex.path, state, remedy, recorded, owned });
   }
 
@@ -1135,7 +2157,9 @@ export async function evaluateUserSessionHookSurfaces(
       .map((agent) => ({ agent, path: resolveUserHookPath(agent) }))
       .filter((entry): entry is { agent: SupportedAgentId; path: string } => entry.path !== null),
     ...recordedEntries.filter(
-      (entry) => entry.agent !== codexAgent && resolveUserHookPath(entry.agent) !== null
+      (entry) =>
+        resolveUserHookPath(entry.agent) !== null &&
+        (entry.agent !== codexAgent || isCodexHooksJsonPath(entry.path))
     ),
   ].filter(
     (entry, index, all) =>
@@ -1154,17 +2178,23 @@ export async function evaluateUserSessionHookSurfaces(
       remedy = `${file.message} — retry after restoring access`;
     } else if (file.status === 'absent') {
       state = recorded ? 'registered-but-missing' : 'absent';
-      if (recorded) remedy = userSessionHookInstallRemedy(target.agent);
+      if (recorded) remedy = userSessionHookInstallRemedy(target.agent, target.path);
     } else {
       owned = file.raw.includes(SESSION_HOOK_COMMAND);
       try {
         JSON.parse(file.raw);
         state = owned ? 'installed' : recorded ? 'registered-but-missing' : 'absent';
         if (state === 'registered-but-missing') {
-          remedy = userSessionHookInstallRemedy(target.agent);
+          remedy = userSessionHookInstallRemedy(target.agent, target.path);
         }
       } catch {
-        state = 'invalid-json';
+        // A file that no longer parses registers nothing, however it reads:
+        // when it is ours (recorded, or still carrying the command text) that
+        // is a broken registration with a repair, not someone else's mess.
+        state = recorded || owned ? 'registered-but-broken' : 'invalid-json';
+        if (state === 'registered-but-broken') {
+          remedy = userSessionHookInvalidJsonRemedy(target.agent, target.path);
+        }
       }
     }
     rows.push({ ...target, state, remedy, recorded, owned });

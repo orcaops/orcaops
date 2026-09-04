@@ -1,9 +1,9 @@
 ---
 name: "Orcaops: timetravel"
-description: "Walk checkpoint boundaries as real trees — \"bisect which checkpoint broke this test\", \"recover the abandoned attempt\", \"replay how this feature came together\". Three verbs: bisect (find the culprit checkpoint at sub-commit granularity), salvage (materialize abandoned work + its recorded reason), timelapse (checkpoint-by-checkpoint replay for self-review or devlogs). Skip for: single-line provenance (`orcaops why`), a shareable PR view (digest skill), or diffing commits git already has (plain `git diff`)."
+description: "Bisect, recover, or replay checkpoint boundaries. Use for \"which checkpoint broke this test?\", \"recover the abandoned attempt\", or \"replay how this came together\"."
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "5984df6732ea"
+  contentHash: "e737573b27b6"
 ---
 
 # When to use
@@ -31,7 +31,7 @@ back per verb below, never guess.
 
 # bisect
 
-1. `orcaops show --artifact <id> --json` → the checkpoint list.
+1. `orcaops show <id> --json` → the checkpoint list.
 2. Binary-search the boundaries. For each probe n:
    ```bash
    orcaops snapshots checkout --artifact <id> --checkpoint <n> --phase close --json
@@ -48,7 +48,7 @@ back per verb below, never guess.
 
 # salvage
 
-1. Find the abandoned cp + reason: `orcaops show --artifact <id> --json`
+1. Find the abandoned cp + reason: `orcaops show <id> --json`
    (`status: "abandoned"`, `abandon_reason`).
 2. The abandoned window's diff:
    ```bash

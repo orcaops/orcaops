@@ -229,20 +229,19 @@ Start-time refusals mint no payload and spend no repair:
 
 Ordering and submission diagnostics are repairable only as stated:
 
-| Code                             | Meaning and response                                                                          |
-| -------------------------------- | --------------------------------------------------------------------------------------------- |
-| `TWOLANE_ROUTINE_ORDER`          | Finish the forensic lane before requesting or submitting account context.                     |
-| `SLICE_PAYLOAD_SHAPE`            | Fix the exact strict-schema paths named by the diagnostic.                                    |
-| `SLICE_ROUTINE_LIMITS`           | Reduce counts or word lengths and remove banned severities.                                   |
-| `SLICE_UNKNOWN_FILE`             | Anchor forensic content only to changed files served in the payload.                          |
-| `SLICE_UNKNOWN_CITATION`         | Use only engine-issued `c#` aliases.                                                          |
-| `SLICE_OVERVIEW_ALIAS_LEAK`      | Remove bracketed prompt-local aliases from overview prose; keep them in `overview.citations`. |
-| `STORY_CHECKPOINT_UNCLAIMED`     | Place every completed checkpoint in exactly one Part.                                         |
-| `STORY_CHECKPOINT_DUPLICATED`    | Remove duplicate Part membership.                                                             |
-| `STORY_UNKNOWN_CHECKPOINT_REF`   | Use only served completed-checkpoint `k#` aliases.                                            |
-| `STORY_OPEN_OR_ABANDONED_MEMBER` | Remove open or abandoned checkpoints from Part membership.                                    |
-| `SLICE_SUBMIT_AFTER_ACCEPT`      | Do not resubmit a lane that is already accepted.                                              |
-| `TWOLANE_ATTEMPT_BUDGET`         | The lane's one repair is spent; do not mint a replacement run.                                |
+| Code                           | Meaning and response                                                                          |
+| ------------------------------ | --------------------------------------------------------------------------------------------- |
+| `TWOLANE_ROUTINE_ORDER`        | Finish the forensic lane before requesting or submitting account context.                     |
+| `SLICE_PAYLOAD_SHAPE`          | Fix the exact strict-schema paths named by the diagnostic.                                    |
+| `SLICE_ROUTINE_LIMITS`         | Reduce counts or word lengths and remove banned severities.                                   |
+| `SLICE_UNKNOWN_FILE`           | Anchor forensic content only to changed files served in the payload.                          |
+| `SLICE_UNKNOWN_CITATION`       | Use only engine-issued `c#` aliases.                                                          |
+| `SLICE_OVERVIEW_ALIAS_LEAK`    | Remove bracketed prompt-local aliases from overview prose; keep them in `overview.citations`. |
+| `STORY_CHECKPOINT_UNCLAIMED`   | Place every completed checkpoint in exactly one Part.                                         |
+| `STORY_CHECKPOINT_DUPLICATED`  | Remove duplicate Part membership.                                                             |
+| `STORY_UNKNOWN_CHECKPOINT_REF` | Use only served completed-checkpoint `k#` aliases.                                            |
+| `SLICE_SUBMIT_AFTER_ACCEPT`    | Do not resubmit a lane that is already accepted.                                              |
+| `TWOLANE_ATTEMPT_BUDGET`       | The lane's one repair is spent; do not mint a replacement run.                                |
 
 Finalization failures are classified. Every finalize code arrives after a valid
 account submission: the lane remains accepted, and neither resubmitting the

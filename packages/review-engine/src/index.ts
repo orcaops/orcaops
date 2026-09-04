@@ -41,6 +41,7 @@ export * from './runtimeIdentity.js';
 export * from './semanticAnchors.js';
 export * from './semanticAnchorGenerations.js';
 export * from './storyReviewModel.js';
+export { SLICE_DIAGNOSTIC_CODES } from './twolaneSlice.js';
 export {
   parseReviewArgs,
   resolveReviewRoot,

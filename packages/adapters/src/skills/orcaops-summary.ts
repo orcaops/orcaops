@@ -5,14 +5,21 @@ export const orcaopsSummarySkill: SkillTemplate = {
   id: 'summary',
   name: 'Orcaops: capture summary',
   description:
-    'Close the artifact thread with the final outcome. Required before the PR digest works.',
+    'Manually save or repair the final outcome of completed work. Use the finish workflow for normal finalization.',
   tags: ['orcaops', 'capture'],
   body: `${ATTRIBUTION_INSTRUCTION}
 
 # When to use
 
-**Before ending the session.** This is the closing step of the artifact
-thread. Without it:
+Use this when the task is complete and the artifact is ready to finalize.
+For normal finalization, use \`orcaops finish\`: it runs the pre-PR checks,
+saves the summary, syncs, and renders the digest in one flow. Use this
+standalone command when the user explicitly asks to save or repair a summary.
+
+Do not capture a summary merely because a session is ending. If work will
+continue later, leave the artifact active so it remains resumable.
+
+Without a final summary:
 
 - The artifact stays \`active\`. \`orcaops doctor\` flags it as stale
   after 24h.
@@ -21,25 +28,21 @@ thread. Without it:
   that reviewers read first.
 - \`orcaops status\` reports the thread as half-captured.
 
-Treat capturing the summary as a step in itself: don't end a session
-without it.
-
 What \`capture summary\` actually requires:
 
 1. No open checkpoints — close or abandon each first (else
    \`INVALID_INPUT\`).
 2. No unresolved block-severity violation (else \`BLOCKED\`).
 
-Strongly recommended first: \`orcaops capture pre-pr-check\` — the final
-evaluator pass and your best signal you're clear to ship. It is NOT a
-hard gate (summary does not require it to have run), but skipping it
-means no pre-PR evaluation happened. Also complete the planned steps
-(claim each via a checkpoint's \`completed_step_ids\`) so the digest
-reads as fully covered.
+When using this manual path, strongly consider running
+\`orcaops capture pre-pr-check\` first. It is not a hard prerequisite, but
+skipping it means no final evaluator pass happened. Also complete the planned
+steps so the digest reads as fully covered.
 
 If a block is unresolved (from pre-pr-check or a checkpoint-close),
 summary stays \`BLOCKED\` until you resolve it via
-\`orcaops block acknowledge\` (for evaluators whose \`on_block\` permits)
+\`orcaops block acknowledge\` (for evaluators whose spec sets
+\`resolution.acknowledge.enabled: true\`)
 or \`orcaops block dismiss\` (always available).
 
 # How to capture
@@ -107,7 +110,9 @@ silently clobber it. To replace it deliberately, re-run \`capture summary\` with
 \`SUMMARY_ALREADY_CAPTURED\` error). If another amend landed since you read it you
 get \`STALE_SUMMARY\` — re-read and retry with the fresh token. (Plan *revision*
 stays hard-frozen post-summary via \`ARTIFACT_FINALIZED\`; only the summary itself
-is amendable, explicitly.)
+is amendable, explicitly.) An amendment corrects the existing summary wording;
+it does not make the artifact cover later or forgotten work. Capture that work
+in a new artifact.
 
 # Errors
 

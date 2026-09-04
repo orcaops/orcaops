@@ -20,7 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { appendEvent } from '@orcaops/storage';
 
-import { DiffStatReader } from './diff-stats';
+import { DiffStatReader } from './diff-stats.js';
 
 describe('DiffStatReader cache identity', () => {
   let tmpRoot: string;

@@ -1,9 +1,9 @@
 ---
 name: "Orcaops: resume an artifact"
-description: "Show progress on an in-flight artifact + a paste-ready prompt for picking work back up. Use ONLY when the user signals continuation intent — \"pick up where we left off\", \"continue the work in progress\", \"resume from where I stopped\", \"where was I?\" — including cold-starting captured work in a FRESH worktree or clone: \"pick up the work from the deleted worktree\", \"continue artifact <id> here\", \"hand this thread to another checkout\" (restores from the home-dir archive when enabled). For broader survey questions (\"what's the state of this branch?\", \"show me what's going on\") prefer `orcaops status` instead. Skip for: archive mirror health (`orcaops archive status`)."
+description: "Resume one in-flight artifact with a paste-ready continuation prompt, or cold-start it in a fresh worktree or clone. Use for \"where was I?\", \"pick up where we left off\", or \"continue artifact <id> here\"; a broad branch-status survey is `orcaops status`."
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "49223503abbf"
+  contentHash: "2f3884ec2483"
 tags: ["orcaops", "read"]
 ---
 
@@ -38,9 +38,18 @@ continuation prompt.
 orcaops resume                          # latest active artifact on current branch
 orcaops resume --branch feat/x          # specific branch
 orcaops resume --artifact <id>          # specific artifact
+orcaops resume --accept-default         # choose and pin the newest active candidate
+orcaops resume --accept-default --no-pin # choose it once without saving the choice
 orcaops resume --json                   # machine-readable
 orcaops resume --copy                   # also copy the suggested prompt to clipboard
 ```
+
+When more than one artifact is active and no pin selects one, resume returns an
+ambiguous picker instead of guessing. In JSON, inspect `candidates` and
+`default_candidate_id`. Use `orcaops checkout <id>` to save an explicit
+choice, `orcaops resume --artifact <id>` to use one only this time, or
+`--accept-default` to choose the most recently active candidate and save that
+choice. Add `--no-pin` when accepting the default should be one-time only.
 
 # Interpreting the output
 
@@ -79,10 +88,12 @@ Output sections:
 - **Suggested prompt** — paste-ready text the user can hand back to you
   ("continue from step N: do X, Y") to re-anchor.
 
-If the branch HEAD is ahead of the last captured checkpoint, you'll see
-a "branch is N commits ahead — resume context may be stale" warning.
-Surface that to the user; consider asking whether to re-capture before
-continuing.
+Surface any `repo_state` note before continuing. The current renderer may say
+that the working tree is dirty, that commits since `artifact_head_sha` touch
+the artifact's files and work may already be partly done, that HEAD moved with
+no overlap, or that open items may already be addressed. Use the accompanying
+`repo_state` fields to decide what needs rechecking; do not substitute an
+older quoted warning.
 
 # Cold-start in a fresh worktree (the handoff mechanic)
 
@@ -138,8 +149,9 @@ Instead, present 2-3 options to the user and ask which they want:
 1. **Open the PR** for the most recently summarized artifact
    (run `orcaops digest --artifact <id>` first if missing).
 2. **Start a new task** — capture a new plan via `orcaops-capture`.
-3. **Re-summarize / amend** the most recent closed artifact if the work
-   is actually still in flight and the close was premature.
+3. **Start a follow-up artifact** if later or forgotten work remains. A
+   summary amendment only corrects the existing summary's wording; it does
+   not reopen the plan or make the closed artifact cover new work.
 
 Pick one based on the user's response. The runtime can't infer their
 intent here — only the user knows whether the closed artifact is "done"

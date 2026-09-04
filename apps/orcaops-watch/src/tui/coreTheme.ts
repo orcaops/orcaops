@@ -1,4 +1,4 @@
-import type { AgentState } from '../core/types.js';
+import type { AgentState } from '@orcaops/watch-data/ui';
 
 /**
  * The orcaops watch semantic palette, kept at low chrome saturation.

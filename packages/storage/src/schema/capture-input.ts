@@ -190,7 +190,7 @@ export const CapturePlanReviseInputSchema = z.object({
   prior_plan_event_id: identifierText().nullable(),
   /**
    * Explicit acknowledgement (one entry per closed-cp-claimed step
-   * being dropped). Mirrors the `acknowledge_policy_exception` pattern
+   * being dropped). Mirrors the explicit policy-exception opt-in pattern
    * — silent drop of a closed-cp-claimed step is rejected; explicit
    * acknowledgement is recorded in the event payload.
    */
@@ -224,7 +224,7 @@ export const CaptureCheckpointOpenInputSchema = z.object({
   agent_session_id: identifierText().optional(),
   /**
    * Inline pre-write block-resolution. Each entry names an evaluator
-   * (which must opt in via `acknowledge_policy_exception`) plus a
+   * (which must set `resolution.policy_exception.enabled: true`) plus a
    * reason. The exception is recorded on the open cp and surfaces in
    * the digest; doctor flags persistent dismissals.
    */

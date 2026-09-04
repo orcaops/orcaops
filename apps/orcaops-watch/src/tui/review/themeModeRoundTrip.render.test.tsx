@@ -7,8 +7,9 @@ import { createTestRenderer } from '@opentui/core/testing';
 import { createRoot } from '@opentui/react';
 import { expect, test } from 'bun:test';
 
+import type { WatchSnapshot, WatchThread } from '@orcaops/watch-data/ui';
+
 import type { SnapshotSource } from '../../data/snapshot';
-import type { WatchSnapshot, WatchThread } from '../../data/types';
 import { App } from '../App';
 import { ThemeProvider } from '../ThemeProvider';
 

@@ -304,7 +304,7 @@ export const ErrorCodes = {
    * step_id that a closed cp claimed in `completed_step_ids` AND
    * the input did not include that step_id in
    * `acknowledge_drops_completed_steps`. Mirrors the
-   * `acknowledge_policy_exception` pattern.
+   * explicit policy-exception opt-in pattern.
    */
   PLAN_REVISION_UNACKNOWLEDGED_DROPS: 'PLAN_REVISION_UNACKNOWLEDGED_DROPS',
   /**

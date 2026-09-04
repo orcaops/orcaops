@@ -1,9 +1,9 @@
 ---
 name: "Orcaops: plan critique"
-description: "Critique a plan against captured history BEFORE work starts — \"critique this plan\", \"review my plan draft\", \"poke holes in this plan before I start\", \"have we solved something like this before?\", \"what did we decide last time we touched auth?\" — and as a pre-step before `capture plan` on non-trivial work. Two paths: a prior-art sweep feeding the capture (decisions, rejected alternatives, non-goals, unresolved uncertainty from captured artifacts — every archived project when the archive is enabled), and a draft critique against past decisions, fragile files, abandoned attempts, and weak acceptance criteria. Skip for: continuing an in-flight task (resume skill)."
+description: "Before drafting or capturing a non-trivial coding plan, check prior Orcaops work for relevant decisions and risks. Also critique a plan draft against that history. Use for \"critique this plan\", \"review this plan against earlier decisions\", or \"poke holes in this plan before I start\". For history questions not tied to a plan, use captured-history lookup instead."
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "e53ab500af33"
+  contentHash: "34ed631bf730"
 tags: ["orcaops", "insight"]
 ---
 
@@ -15,13 +15,13 @@ Triggers:
   (the capture skill references this sweep).
 - "critique this plan", "review my plan draft", "poke holes in this
   plan before I start".
-- "have we solved something like this before?" / "what did we decide
-  last time we touched X?"
 
 Skip when:
 
 - The user is continuing an in-flight task → `orcaops-resume`.
 - Reviewing SHIPPED work rather than a plan → `orcaops-adversarial-review`.
+- The user only asks whether earlier work or decisions exist, without a plan to
+  critique → `orcaops-search`.
 
 Both paths drive ONLY existing read commands — `search`, `decisions`,
 `loose-ends`, `list --touching`, `show`. Nothing here writes.
@@ -39,7 +39,7 @@ error strings) and sweep captured history:
 
 ```bash
 orcaops search "<term>" --json
-orcaops decisions --json                    # decision records with rationale
+orcaops decisions --all-branches --json     # decision records with rationale
 ```
 
 **Cross-project mode:** when the archive is enabled
@@ -72,7 +72,7 @@ to `orcaops-capture`.
 Read the draft, then interrogate it against captured history — one pass
 per lens, citations required:
 
-1. **Contradicted decisions.** `orcaops decisions --json` (add
+1. **Contradicted decisions.** `orcaops decisions --all-branches --json` (replace with
    `--all-projects` when the archive is enabled): does any step reverse
    a recorded decision without saying why it no longer holds? Flag it —
    the fix is a new decision acknowledging the reversal, not silence.
@@ -81,18 +81,20 @@ per lens, citations required:
    touched it; `orcaops show <id> --json` for their uncertainty and
    evaluator violations. A file with recurring uncertainty or violations
    deserves an explicit risk line in the plan.
-3. **Abandoned attempts.** Prior artifacts on the same scope with
-   abandoned checkpoints or no summary — `orcaops search "<term>" --json`
-   then `show` — are attempts that DIED. Ask what killed them; the plan
-   should say why this time is different.
+3. **Prior attempts.** Use `orcaops search "<term>" --json` and `show` to
+   distinguish active, interrupted, abandoned, and unsummarized work. Only an
+   explicitly abandoned checkpoint is a dead attempt; unsummarized work may
+   still be in flight. Ask what stopped an abandoned attempt and whether the
+   new plan addresses it.
 4. **Non-goal drift.** Compare the draft against recurring `non_goals`
    in prior artifacts; a plan quietly re-including a recurring exclusion
    needs the exclusion's rationale addressed.
-5. **Weak acceptance criteria.** `orcaops loose-ends --json` shows what
+5. **Weak acceptance criteria.** `orcaops loose-ends --all-branches --json` shows what
    past plans left dangling. Steps whose criteria are vague ("works",
    "is clean") or missing produce exactly those dangles — propose
    concrete, checkable criteria.
 
-Deliver the critique as findings with citations (artifact id +
-checkpoint/decision), each with a proposed plan edit. No citation → no
-finding; history-free style opinions belong in code review, not here.
+Deliver each historical finding with an artifact and checkpoint or decision
+citation. A defect visible directly in the draft may cite the draft section
+instead. Give every finding a proposed plan edit; do not present unsupported
+historical claims.

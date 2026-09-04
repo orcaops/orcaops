@@ -1,9 +1,9 @@
 ---
 name: "Orcaops: capture plan"
-description: "Capture or revise the plan for a coding task. Initial capture mints stable step_ids and fires post-plan evaluators; revisions are append-only events with full-supersede payloads and fire post-plan-revision evaluators."
+description: "Capture or revise a coding-task plan, minting stable step IDs and running plan checks."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "49d2bb2996c5"
+  generatedBy: "orcaops@0.1.1"
+  contentHash: "068100ced9d1"
 ---
 
 # When to use
@@ -73,6 +73,9 @@ or when the skill is not installed.
          implement Redis sliding-window middleware in Express
        label: |-
          Redis sliding-window middleware
+       acceptance_criteria:
+         - text: |-
+             the middleware returns HTTP 429 when the configured limit is exceeded
      - text: |-
          mount the new middleware on /api/charge
        label: |-
@@ -107,7 +110,7 @@ or when the skill is not installed.
 
 The `--source-plan <path>` flag: **if a plan document exists anywhere, pass
 it.** It reads and hashes the file at capture time and pins it immutably on
-the artifact, so the `plan-conformance` evaluator can grade the captured plan
+the artifact, so the plan-conformance evaluators can grade the captured plan
 against what the slice actually asked for.
 
 - **Out-of-repo paths are fully supported.** A plan in your agent's planning
@@ -139,7 +142,7 @@ as the `plan_revision_id` optimistic-concurrency token on cp-open.
 
 | Field | Notes |
 |---|---|
-| `idempotency_key` | **Optional — auto-minted (UUIDv7) when omitted**, so you normally don't pass it. Supply one explicitly only for replay-safe retries: reusing the same key makes a retried call dedup as a replay instead of minting a new artifact. |
+| `idempotency_key` | **Optional — auto-minted (UUIDv7) when omitted**, so you normally don't pass it. Supply one explicitly only for replay-safe retries: reusing the same key makes a retried call dedup as a replay instead of minting a new artifact. **On initial capture the match is key-only**: a reused key replays the FIRST artifact and silently ignores the plan you just sent, even if it is completely different. It never raises `IDEMPOTENCY_CONFLICT`. If you are retrying with an EDITED plan, mint a fresh key, or capture once and use `plan revise`. |
 | `task` | One-sentence description of the work |
 | `label` | **Plan-level short headline** — 1-line human-readable name for the whole capture thread (1–70 chars, no newlines/tabs, trimmed). Distinct from the longer `task`. Surfaces in lists, digests, and downstream PR titles. The `plan-label-quality` evaluator (severity: warn) flags labels that are too short, generic ("fix", "wip", "cleanup", etc.), or just the leading slice of `task`. |
 | `plan_steps` | Ordered list of step objects (~3-7 entries), each `{ text, label, acceptance_criteria? }`. The runtime mints stable UUIDv7 step_ids per entry. `label` is a short-form description (1-line TL;DR per step); see the `label` notes below. **`acceptance_criteria`** (optional) is a list of `{ text }` rubric items whose evidence the store requires when the step is claimed complete; the runtime mints a stable `criterion_id` per entry and returns them in the response (key `done_criteria` to them at checkpoint-close). A step with no criteria has no criterion-evidence requirement. |
@@ -293,8 +296,10 @@ envelope shape:
     ...
   ],
   "evaluator_results": [
-    { "evaluator": "plan-mentions-tests", "severity": "warn", "status": "pass", ... },
-    { "evaluator": "revision-rationale-required", "severity": "block", "status": "pass", ... }
+    { "evaluator_ref": "core/plan-mentions-tests", "severity": "warn",
+      "run_status": "completed", "verdict": "pass", ... },
+    { "evaluator_ref": "core/revision-rationale-required", "severity": "block",
+      "run_status": "completed", "verdict": "pass", ... }
   ],
   "blocking": false
 }
@@ -304,7 +309,7 @@ envelope shape:
 revisions). The top-level `plan_event_id` is the latest plan event_id, suitable
 for passing forward as `plan_revision_id` on the next cp-open.
 
-For each `evaluator_result` with `status: "violation"`:
+For each completed `evaluator_result` with `verdict: "violation"`:
 - **severity: warn** — address the concern, then either retry or
   acknowledge in a follow-up. The capture itself succeeded.
 - **severity: block** — the call already failed (the evaluator's
@@ -327,7 +332,7 @@ When `blocking: true` is set, do **not** start the work until resolved.
 | `UNINITIALIZED` | Repo isn't set up; the user needs to run `orcaops init`. |
 | `NOT_A_REPO` | Cwd isn't a git repo. |
 | `UNKNOWN_ARTIFACT` | (revise only) wrong `artifact_id`. Check `orcaops status --json`. |
-| `IDEMPOTENCY_CONFLICT` | Same `idempotency_key` was used by a prior call with a different payload. Mint a fresh key. |
+| `IDEMPOTENCY_CONFLICT` | Same `idempotency_key` was used by a prior call with a different payload. Mint a fresh key. Raised by `plan revise` and by the artifact-scoped writes (checkpoint, summary, evaluator-run, block) — **not** by initial `capture plan`, which matches on the key alone and replays instead (see `idempotency_key` above). |
 | `ARTIFACT_FINALIZED` | (revise only) `summary_captured` already fired — the PLAN is frozen post-summary. Running pre-pr-check does NOT finalize; revise freely before summary. Start a fresh artifact. (The summary itself is not frozen — amend it via `capture summary` with a `prior_summary_event_id` token; see the summary skill.) |
 | `STALE_PLAN_REVISION` | (revise only) `prior_plan_event_id` is no longer the latest plan event. Re-read resume/status, retry with the fresh token. |
 | `PLAN_REVISION_OPEN_CP_CONFLICT` | (revise only) you're dropping a step_id an open cp declares. Abandon the cp first, or revise without dropping that step_id (text-only rewrites are fine). |

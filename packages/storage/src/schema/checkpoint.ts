@@ -89,9 +89,9 @@ export type CheckpointDecision = z.infer<typeof CheckpointDecisionSchema>;
 
 /**
  * Inline policy-exception entry on `checkpoint open` payloads. Names an
- * evaluator and gives a free-form reason. The evaluator must opt in via
- * the `acknowledge_policy_exception` literal in its `## on_block`
- * section, otherwise the open is rejected with `INVALID_INPUT` (the
+ * evaluator and gives a free-form reason. The evaluator must set
+ * `resolution.policy_exception.enabled: true`, otherwise the open is
+ * rejected with `INVALID_INPUT` (the
  * "loud rejection" semantic — silent ignore would let agents think
  * they bypassed a block when they didn't).
  */

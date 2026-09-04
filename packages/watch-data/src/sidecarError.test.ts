@@ -7,7 +7,7 @@ import {
   ReviewCacheBehindError,
   ReviewSidecarSchemaError,
   serializeSidecarSchemaError,
-} from './sidecarError';
+} from './sidecarError.js';
 
 describe('Watch sidecar schema errors', () => {
   it('round-trips an older cache as a typed recoverable error', () => {

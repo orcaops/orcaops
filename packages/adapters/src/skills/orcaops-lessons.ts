@@ -11,12 +11,7 @@ export const orcaopsLessonsSkill: SkillTemplate = {
   id: 'lessons',
   name: 'Orcaops: lessons',
   description:
-    'Mine captured history into lessons — "what should I do differently?", "turn this ' +
-    'sprint into lessons learned", "what keeps going wrong?". Correlates recorded ' +
-    'uncertainty[] with later evaluator violations and open items, and emits growth-log ' +
-    'entries ("Next time X, I will Y") plus candidate evaluator ideas, reading evaluator ' +
-    'pass-rate trends from `orcaops stats`. Skip for: the current to-do sweep (loose-ends ' +
-    "skill) or one task's cost (`orcaops usage --artifact`).",
+    'Turn captured uncertainty, failures, and open items into lessons and possible new checks. Use for "what should I do differently?", "what keeps going wrong?", or "lessons learned from this work".',
   tags: ['orcaops', 'insight'],
   group: 'insight',
   defaultEnabled: false,
@@ -49,14 +44,14 @@ orcaops search "<recurring theme>" --json   # find the same worry across artifac
    what happened to it — did a later checkpoint, evaluator violation, or
    summary open_item land on the SAME surface? A worry that came true is a
    lesson; a worry that never materialized calibrates future uncertainty.
-2. **Violation clusters and pass-rate trends:** read
+2. **Violation clusters and aggregate pass rates:** read
    \`stats.evaluators.by_evaluator[]\` — the whole array is \`null\` when
    any artifact is unreadable (\`degraded_artifacts\` names them; run
    \`orcaops doctor\`), and a row's \`pass_rate\` is
    pass/(pass+violation) with null meaning nothing was graded (don't
-   render null as 0%). Falling rates on the SAME evaluator across artifacts =
-   drift: a recurring process failure, not a one-off. Read 2-3 of its
-   violation bodies via \`show --json\` for the concrete pattern.
+   render null as 0%). This is one aggregate sample, so it does not prove a
+   rising or falling trend. Use it to find evaluators with repeated violations,
+   then read 2-3 violation bodies via \`show --json\` for the concrete pattern.
 3. Emit each lesson in the growth-log format — one line, actionable:
 
    \`Next time [concrete situation], I will [concrete action].\`

@@ -4,12 +4,12 @@
 // Bun UI spawns this and parses the stream; this file never touches OpenTUI.
 import { reviewRuntimeDescriptorFromModule, runReview } from '@orcaops/review-engine';
 
-import { serializeSidecarSchemaError } from './sidecarError';
-import type { WatchSnapshot } from './types';
-import { SnapshotEngine } from '../core/engine';
-import { FsWatch } from '../core/fs-watch';
-import { DEFAULT_THRESHOLDS } from '../core/liveness';
-import { collectSnapshot } from '../core/snapshot';
+import { SnapshotEngine } from './engine.js';
+import { FsWatch } from './fs-watch.js';
+import { DEFAULT_THRESHOLDS } from './liveness.js';
+import { serializeSidecarSchemaError } from './sidecarError.js';
+import { collectSnapshot } from './snapshot.js';
+import type { WatchSnapshot } from './types.js';
 
 const HEARTBEAT_MS = 10_000;
 const FAST_MS = 2_000;

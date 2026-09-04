@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { buildReviewFloorFixture, slugifyBranch } from '@orcaops/review-core';
+import { FsWatch } from '@orcaops/watch-data';
 
 import { mountReviewApp } from '../../../tests/review/mountReviewApp';
-import { FsWatch } from '../../core/fs-watch';
 import { loadInstalledReview, loadReview, readReviewGenerations } from '../../data/reviewSource';
 import { readWorktreeProbe } from '../../data/staleness';
 

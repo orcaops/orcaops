@@ -1,4 +1,5 @@
-import type { TickerEvent } from '../../data/types';
+import type { TickerEvent } from '@orcaops/watch-data/ui';
+
 import { useCockpitTheme } from '../ThemeProvider';
 import {
   EVENT_FAMILY_THEME,

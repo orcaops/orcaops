@@ -14,7 +14,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
-import { CODEX_TOML_MARKER_START, codexTomlSnippet } from '../../src/lib/session-hooks-user.js';
+import {
+  CODEX_TOML_MARKER_END,
+  CODEX_TOML_MARKER_START,
+  codexTomlSnippet,
+} from '../../src/lib/session-hooks-user.js';
 import { makeAgent } from '../support/test-agent.js';
 
 const promptState = vi.hoisted(() => ({
@@ -23,6 +27,38 @@ const promptState = vi.hoisted(() => ({
   codexChoice: null as string | null,
 }));
 const CANCELLED = Symbol('clack-cancel');
+
+// The codex representation resolver probes `codex --version`; answering it
+// here keeps the surface these tests exercise independent of what is
+// installed on the machine, and spawns nothing. No answer (the default) is
+// what a machine without codex gives, which keeps codex on config.toml.
+const codexVersion = vi.hoisted(() => ({ output: null as string | null }));
+
+vi.mock('@orcaops/evaluator-protocol/subprocess', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@orcaops/evaluator-protocol/subprocess')>();
+  return {
+    ...actual,
+    runBoundedSubprocess: async (
+      request: Parameters<typeof actual.runBoundedSubprocess>[0]
+    ): ReturnType<typeof actual.runBoundedSubprocess> => {
+      const [bin, ...args] = request.argv;
+      const probesCodex =
+        (bin === 'codex' || bin.endsWith('/codex')) && args.length === 1 && args[0] === '--version';
+      if (!probesCodex) return actual.runBoundedSubprocess(request);
+      return {
+        exit_code: codexVersion.output === null ? 1 : 0,
+        signal: null,
+        stdout: codexVersion.output ?? '',
+        stderr: '',
+        duration_ms: 0,
+        killed_reason: null,
+        spawn_error: null,
+        hard_killed: false,
+        termination_confirmed: true,
+      };
+    },
+  };
+});
 
 vi.mock('@clack/prompts', () => ({
   cancel: vi.fn(),
@@ -65,6 +101,7 @@ describe('interactive personal init machine session hooks', () => {
     (process.stdout as unknown as { isTTY: boolean }).isTTY = true;
     (process.stdin as unknown as { isTTY: boolean }).isTTY = true;
     delete process.env.CI;
+    codexVersion.output = null;
     promptState.machineConsent = false;
     promptState.agents = ['claude-code'];
     promptState.codexChoice = null;
@@ -503,6 +540,60 @@ describe('interactive personal init machine session hooks', () => {
     expect(inlineBytes).not.toBe(seed);
     expect(inlineBytes).toBe(standaloneBytes);
     await standaloneRepo.cleanup();
+  });
+
+  it('a Codex build that reads hooks.json registers the sidecar with no chooser', async () => {
+    codexVersion.output = 'codex-cli 0.147.0\n';
+    promptState.machineConsent = true;
+    promptState.agents = ['codex'];
+
+    const result = await agent.runRaw(['init', '--json', '--no-llm']);
+    expect(result.exitCode).toBe(0);
+    const output = JSON.parse(result.stdout) as {
+      machine_session_hooks: { codex_outcome: string | null; live_agents: string[] };
+    };
+    expect(output.machine_session_hooks.codex_outcome).toBeNull();
+    expect(output.machine_session_hooks.live_agents).toEqual(['codex']);
+
+    const prompts = await import('@clack/prompts');
+    expect(
+      vi
+        .mocked(prompts.select)
+        .mock.calls.some(([args]) =>
+          (args as { message: string }).message.startsWith('Codex registers')
+        )
+    ).toBe(false);
+    expect(await readFile(path.join(homeRoot, 'codex', 'hooks.json'), 'utf8')).toContain(
+      'orcaops hook session-start'
+    );
+    expect(await exists(path.join(homeRoot, 'codex', 'config.toml'))).toBe(false);
+  });
+
+  it('a leftover Codex block names the file to clean up and offers the retry', async () => {
+    codexVersion.output = 'codex-cli 0.147.0\n';
+    promptState.machineConsent = true;
+    promptState.agents = ['codex'];
+    const configToml = path.join(homeRoot, 'codex', 'config.toml');
+    await mkdir(path.dirname(configToml), { recursive: true });
+    // Duplicated start markers leave ownership unprovable, so the block stays.
+    await writeFile(
+      configToml,
+      `${CODEX_TOML_MARKER_START}\n${CODEX_TOML_MARKER_START}\n${codexTomlSnippet()}\n${CODEX_TOML_MARKER_END}\n`,
+      'utf8'
+    );
+
+    const result = await agent.runRaw(['init', '--no-llm']);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('Action needed:');
+    expect(result.stdout).toContain(
+      `Codex is registered in ${path.join(homeRoot, 'codex', 'hooks.json')}; delete the leftover ` +
+        `orcaops hook in ${configToml} (see the warning above), or re-run ` +
+        '`orcaops session-hooks install` to retry the move.'
+    );
+    expect(await readFile(path.join(homeRoot, 'codex', 'hooks.json'), 'utf8')).toContain(
+      'orcaops hook session-start'
+    );
+    expect(await readFile(configToml, 'utf8')).toContain(codexTomlSnippet());
   });
 
   it('reports a staged apply failure as partial and leaves the hook unclaimed', async () => {

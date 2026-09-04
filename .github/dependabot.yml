@@ -37,13 +37,14 @@ updates:
     # a future OpenTUI package that never got its own decision or owner.
     ignore:
       - dependency-name: 'typescript'
+      - dependency-name: 'better-sqlite3'
       - dependency-name: '@opentui/core'
       - dependency-name: '@opentui/react'
       - dependency-name: 'conventional-commits-parser'
     # Every group is `applies-to: version-updates`, so security PRs stay
-    # ungrouped and individually reviewable. `esbuild`, `better-sqlite3`,
-    # `turbo`, `@types/*`, and unmatched runtime deps deliberately match no
-    # group and arrive as isolated PRs.
+    # ungrouped and individually reviewable. `esbuild`, `turbo`, `@types/*`,
+    # and unmatched runtime deps deliberately match no group and arrive as
+    # isolated PRs.
     groups:
       lint-tooling:
         applies-to: 'version-updates'

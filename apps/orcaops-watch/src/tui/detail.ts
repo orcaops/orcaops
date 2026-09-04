@@ -1,7 +1,8 @@
+import type { WatchTask, WatchThread } from '@orcaops/watch-data/ui';
+
 import { type EventFamily, eventFamily, eventLabel } from './eventPresentation';
 import { displayLen, truncate } from './layout';
 import { fmtLocalTime } from './time';
-import type { WatchTask, WatchThread } from '../data/types';
 
 export type DetailTone =
   | 'section'

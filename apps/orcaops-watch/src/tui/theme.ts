@@ -5,6 +5,8 @@
 // COCKPIT_LIGHT objects, which swap by the active theme's appearance — so a
 // theme change repaints the whole cockpit. GLYPH / STATE_LABEL are
 // appearance-invariant and stay plain module constants.
+import type { AgentState } from '@orcaops/watch-data/ui';
+
 import {
   AMBER,
   BLUE,
@@ -26,7 +28,6 @@ import {
   STATE_LABEL,
   UI_GLYPH,
 } from './coreTheme';
-import type { AgentState } from '../core/types.js';
 
 export {
   AMBER,

@@ -242,9 +242,6 @@ transport test controls are not user configuration.
 | `ORCAOPS_INVOKED_BY_AGENT` | Provides the capture-attribution fallback when `--invoked-by-agent` is not passed.                                                              |
 | `ORCAOPS_DISABLE_DRAIN`    | Disables the automatic cloud push drain when set to `1`.                                                                                        |
 | `ORCAOPS_HOOK_SUPPRESS`    | Suppresses session-start hook output for any non-empty value except `0`/`false`. Orcaops sets it to prevent recursion around agent invocations. |
-| `ORCAOPS_WATCH_BIN`        | Overrides the path to Orcaops Watch when it is not the sibling of the CLI.                                                                      |
-| `ORCAOPS_WATCH_BUN`        | Overrides the path to the Bun runtime used by the watch launcher.                                                                               |
-| `ORCAOPS_WATCH_NODE`       | Overrides the path to the Node runtime used by the watch data sidecars.                                                                         |
 | `ORCAOPS_CLAUDE_PATH`      | Overrides the path to the `claude` CLI used by LLM evaluators and review lanes.                                                                 |
 | `ORCAOPS_CODEX_PATH`       | Overrides the path to the `codex` CLI used by LLM evaluators and review lanes.                                                                  |
 
@@ -264,3 +261,18 @@ configuration.
 | `ORCAOPS_PACKAGE_ROOT`  | Absolute root of the evaluator's pack.                           |
 | `ORCAOPS_EVALUATOR_REF` | The resolved `<pack>/<evaluator>` ref.                           |
 | `ORCAOPS_CHECKPOINT_N`  | Checkpoint number, present only for checkpoint-phase evaluators. |
+
+### Watch UI hand-off
+
+Set **by Orcaops** when `orcaops watch` launches the Task Review UI; not user
+configuration.
+
+| Variable                  | Effect                                                                              |
+| ------------------------- | ----------------------------------------------------------------------------------- |
+| `ORCAOPS_WATCH_SIDECAR`   | Path of the Node data sidecar the UI spawns; wins over the UI's own build output.   |
+| `ORCAOPS_WATCH_DEPS_ROOT` | Root of the `@orcaops/cli` install whose `node_modules` the compiled UI loads from. |
+| `ORCAOPS_WATCH_NODE`      | The Node binary the UI spawns the sidecar with (the one running the CLI).           |
+
+A workspace checkout runs the interpreted UI under Bun instead; `ORCAOPS_WATCH_BUN`
+picks that Bun and `ORCAOPS_WATCH_BIN` substitutes a binary. Released builds refuse
+both.

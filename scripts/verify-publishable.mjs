@@ -12,7 +12,17 @@ import { PROPRIETARY_PACKAGES, checkNoProprietary } from './check-no-proprietary
 import { baseVersionOf, isPrerelease } from './release-channel.mjs';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const staging = path.resolve(process.argv[2] ?? path.join(ROOT, 'build', 'cli-dist', 'staging'));
+// `<staging> [--bundle=<relative path>]`: the bundle defaults to the CLI's,
+// and a platform package names its executable instead.
+const args = process.argv.slice(2);
+const bundleArg = args.find((a) => a.startsWith('--bundle='))?.slice('--bundle='.length);
+// Docs are required by default so a new publishable package cannot skip the
+// gate by omission. A companion whose npm page carries no prose — a compiled
+// platform binary — opts out explicitly at its call site.
+const docsRequired = !args.includes('--no-docs');
+const positional = args.filter((a) => !a.startsWith('--'));
+const staging = path.resolve(positional[0] ?? path.join(ROOT, 'build', 'cli-dist', 'staging'));
+const bundleRelative = bundleArg ?? path.join('dist', 'cli', 'index.js');
 const FSL_ID = 'FSL-1.1-ALv2';
 
 function escapeRegExp(text) {
@@ -60,40 +70,42 @@ check('no do-not-publish marker', () => {
   if (marker) throw new Error(`staging carries ${marker} — this is a local test artifact`);
 });
 
-check('the npm page will render a README and a changelog', () => {
-  const missing = ['README.md', 'CHANGELOG.md'].filter(
-    (doc) => !existsSync(path.join(staging, doc))
-  );
-  if (missing.length > 0) throw new Error(`staging is missing ${missing.join(', ')}`);
-  return missing.length === 0 ? 'README.md, CHANGELOG.md' : '';
-});
+if (docsRequired)
+  check('the npm page will render a README and a changelog', () => {
+    const missing = ['README.md', 'CHANGELOG.md'].filter(
+      (doc) => !existsSync(path.join(staging, doc))
+    );
+    if (missing.length > 0) throw new Error(`staging is missing ${missing.join(', ')}`);
+    return missing.length === 0 ? 'README.md, CHANGELOG.md' : '';
+  });
 
-check('the changelog documents the version being published', () => {
-  const meta = JSON.parse(readFileSync(path.join(staging, 'package.json'), 'utf8'));
-  const changelog = readFileSync(path.join(staging, 'CHANGELOG.md'), 'utf8');
-  // A published page is frozen, so an un-noted release is a permanent defect:
-  // the top-most version heading must be the version going out. A candidate
-  // is documented by the section it is heading toward — either the base
-  // version or a still-open Unreleased — because its notes are being written,
-  // and forcing a heading per candidate would rewrite history at promotion.
-  const leading = /^## \[?([^\]\s]+)\]?/m.exec(changelog);
-  if (leading === null) throw new Error('no section heading found');
-  const found = leading[1];
-  if (isPrerelease(meta.version)) {
-    const accepted = new Set([meta.version, baseVersionOf(meta.version), 'Unreleased']);
-    if (!accepted.has(found)) {
-      throw new Error(
-        `changelog leads with ${found}; a candidate for ${meta.version} needs ` +
-          `${baseVersionOf(meta.version)} or Unreleased`
-      );
+if (docsRequired)
+  check('the changelog documents the version being published', () => {
+    const meta = JSON.parse(readFileSync(path.join(staging, 'package.json'), 'utf8'));
+    const changelog = readFileSync(path.join(staging, 'CHANGELOG.md'), 'utf8');
+    // A published page is frozen, so an un-noted release is a permanent defect:
+    // the top-most version heading must be the version going out. A candidate
+    // is documented by the section it is heading toward — either the base
+    // version or a still-open Unreleased — because its notes are being written,
+    // and forcing a heading per candidate would rewrite history at promotion.
+    const leading = /^## \[?([^\]\s]+)\]?/m.exec(changelog);
+    if (leading === null) throw new Error('no section heading found');
+    const found = leading[1];
+    if (isPrerelease(meta.version)) {
+      const accepted = new Set([meta.version, baseVersionOf(meta.version), 'Unreleased']);
+      if (!accepted.has(found)) {
+        throw new Error(
+          `changelog leads with ${found}; a candidate for ${meta.version} needs ` +
+            `${baseVersionOf(meta.version)} or Unreleased`
+        );
+      }
+      return `candidate documented by ${found}`;
     }
-    return `candidate documented by ${found}`;
-  }
-  if (found !== meta.version) {
-    throw new Error(`changelog leads with ${found}, publishing ${meta.version}`);
-  }
-  return `leads with ${found}`;
-});
+    if (found !== meta.version) {
+      throw new Error(`changelog leads with ${found}, publishing ${meta.version}`);
+    }
+    return `leads with ${found}`;
+  });
 
 check('third-party notices are present', () => {
   const notices = path.join(staging, 'THIRD-PARTY-NOTICES');
@@ -104,8 +116,8 @@ check('third-party notices are present', () => {
 });
 
 check('no proprietary code in the bundle it will publish', () => {
-  const bundle = path.join(staging, 'dist', 'cli', 'index.js');
-  if (!existsSync(bundle)) throw new Error('no dist/cli/index.js to check');
+  const bundle = path.join(staging, bundleRelative);
+  if (!existsSync(bundle)) throw new Error(`no ${bundleRelative} to check`);
   // Bytes-only: the staging directory carries no module graph and no build
   // declaration, so markers are all there is to scan.
   const { ok, errors } = checkNoProprietary({
@@ -140,7 +152,9 @@ check('no stray licence claims in the bundled packages', () => {
       count += 1;
       const meta = JSON.parse(readFileSync(pj, 'utf8'));
       if (meta.license === FSL_ID) continue;
-      if (new RegExp(`^### ${escapeRegExp(`${meta.name}@${meta.version}`)} — `, 'm').test(notices)) {
+      if (
+        new RegExp(`^### ${escapeRegExp(`${meta.name}@${meta.version}`)} — `, 'm').test(notices)
+      ) {
         noticed += 1;
         continue;
       }

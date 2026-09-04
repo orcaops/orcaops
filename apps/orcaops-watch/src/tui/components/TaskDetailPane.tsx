@@ -1,5 +1,6 @@
+import type { WatchTask, WatchThread } from '@orcaops/watch-data/ui';
+
 import { ago, fmtTokens } from '../../core/format';
-import type { WatchTask, WatchThread } from '../../data/types';
 import { useCockpitTheme } from '../ThemeProvider';
 import type { TaskDetailModel, TaskMemberPresentation } from '../detail';
 import { EmptyState, Rule, useHit } from '../kit';

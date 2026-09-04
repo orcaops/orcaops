@@ -1,5 +1,13 @@
 import { run } from 'effection';
-import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import {
+  access,
+  constants as fsConstants,
+  readdir,
+  readFile,
+  realpath,
+  stat,
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
@@ -103,7 +111,6 @@ import {
 import { archiveResolutionCommands } from './archive.js';
 import { inspectSeedClone, repairSeed } from './seed/index.js';
 import { readSeedState } from './seed/journal.js';
-import { resolveWatchBin } from './watch.js';
 import { CliExit } from '../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../io/output.js';
 import { CLI_VERSION } from '../lib/cli-version.js';
@@ -157,6 +164,7 @@ import { resolveRepoKey } from '../lib/repo-key.js';
 import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { discoverGitRoot, resolveExplicitOverride } from '../lib/resolve-root.js';
 import {
+  codexDualRepresentationNote,
   evaluateUserSessionHookSurfaces,
   readUserHooksRecord,
   userSettingsSpec,
@@ -175,6 +183,12 @@ import {
   resolveSkillSet,
   type SkillGates,
 } from '../lib/skill-set.js';
+import {
+  companionDoctorSummary,
+  findOnPath,
+  liveCompanionInputs,
+  resolveWatchCompanion,
+} from '../lib/watch-companion.js';
 
 // Shared with the session-start hook guidance so "stale open checkpoint"
 // means the same thing in doctor and in the hook's nudge.
@@ -346,7 +360,7 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
     }
     checks.push(await guardRepositoryCheck('evaluators', () => checkEvaluators(repoRoot, config)));
     checks.push(checkLlmTool(config, providerSnapshot));
-    checks.push(await guardRepositoryCheck('watch-runtime', () => checkWatchRuntime()));
+    checks.push(await guardRepositoryCheck('watch-companion', () => checkWatchCompanion()));
     const resolvedDiscovery = discoverEvaluatorsForCli(repoRoot);
     checks.push(
       await guardRepositoryCheck('evaluator-provider-availability', async () => {
@@ -2095,14 +2109,21 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
             `  - ${surface.path}: registered user-level entry could not be verified — ${surface.remedy}`
           );
         }
-      } else if (surface.state === 'invalid-json') {
-        if (surface.recorded) {
-          addMachineFinding(`  - ${surface.path}: user config unreadable (invalid JSON)`);
-        }
+      } else if (surface.state === 'superseded') {
+        // The hook IS registered and running — from the file the resolved
+        // representation moved it to. What is left here is a duplicate
+        // registration to clean up, so this warns rather than reads as broken.
+        addMachineFinding(
+          `  - ${surface.path}: leftover duplicate registration — ${surface.remedy}`
+        );
       } else if (surface.state === 'registered-unsupported') {
         addMachineFinding(`  - ${surface.path}: ${surface.remedy}`);
       }
+      // `invalid-json` is another tool's unparseable file (an unparseable one
+      // of OURS reads as registered-but-broken above) — not doctor's to report.
     }
+    const dualRepresentation = await codexDualRepresentationNote();
+    if (dualRepresentation !== null) info.push(`  - ${dualRepresentation}`);
     for (const entry of record?.entries ?? []) {
       const userSpec = userSettingsSpec(entry.agent, entry.path);
       if (!userSpec) continue;
@@ -2336,102 +2357,116 @@ async function checkSkillDrift(
 }
 
 /**
- * A missing Bun is NOT a fault — `orcaops watch` is the only command that needs
- * it, and warning on every run would teach people to skim past doctor. Only a
- * resolvable watch binary with no Bun to run it warns.
+ * The Task Review companion: what `orcaops watch` would launch, and whether it
+ * can. Resolution is shared with the launcher; this adds the probes only a
+ * health check should pay for (the executable's own version, its signature
+ * on macOS, the temp dir it extracts into).
  */
-async function checkWatchRuntime(): Promise<DoctorCheck> {
-  const name = 'watch-runtime';
+async function checkWatchCompanion(): Promise<DoctorCheck> {
+  const name = 'watch-companion';
   const env = getInvocationEnv();
+  const inputs = liveCompanionInputs(env);
+  const launch = resolveWatchCompanion(inputs);
+  const base = companionDoctorSummary(launch);
 
-  const probe = await runBoundedSubprocess({
-    argv: ['bun', '--version'],
+  // An override that points at nothing has forfeited every fallback, so it is
+  // a fault even on a workspace build. A bare name resolves the way spawn does.
+  if (launch.kind === 'launch' && launch.tier === 'override') {
+    const present = launch.command.includes(path.sep)
+      ? await pathExists(launch.command)
+      : findOnPath(launch.command, env) !== null;
+    if (!present) {
+      return {
+        name,
+        status: 'warn',
+        summary: `ORCAOPS_WATCH_BIN points at ${launch.command}, which does not exist`,
+        details: ['  - unset it, or point it at a runnable Task Review build'],
+      };
+    }
+  }
+
+  if (launch.kind !== 'launch' || launch.tier !== 'platform') {
+    return {
+      name,
+      status: base.status,
+      summary: base.summary,
+      ...(base.details.length > 0 ? { details: base.details } : {}),
+    };
+  }
+
+  const details = [...base.details];
+  let status: DoctorStatus = base.status;
+  const childEnv = Object.fromEntries(
+    Object.entries(launch.env).filter(([, value]) => value !== undefined)
+  ) as Record<string, string>;
+
+  const version = await runBoundedSubprocess({
+    argv: [launch.command, '--version'],
     cwd: getInvocationCwd(),
-    env: Object.fromEntries(
-      Object.entries(env).filter(([, value]) => value !== undefined)
-    ) as Record<string, string>,
+    env: childEnv,
     timeoutMs: 5_000,
     maxOutputBytes: 4 * 1024,
   });
-  // Kill reasons must be claimed before the exit code: a killed process reports
-  // exit_code null, which would otherwise read as "bun said no".
-  const bun: 'present' | 'absent' | 'unverified' =
-    probe.spawn_error?.code === 'ENOENT'
-      ? 'absent'
-      : probe.killed_reason !== null
-        ? 'unverified'
-        : probe.exit_code === 0
-          ? 'present'
-          : 'absent';
-
-  const resolved = resolveWatchBin(env);
-  const explicitOverride = (env.ORCAOPS_WATCH_BIN ?? '') !== '';
-  const watchPath = resolved.includes(path.sep)
-    ? (await pathExists(resolved))
-      ? resolved
-      : null
-    : await findOnPath(resolved, env);
-
-  const details: string[] = [];
-  if (bun === 'unverified') {
+  const reported = version.exit_code === 0 ? version.stdout.trim() : null;
+  if (reported === null) {
+    status = 'warn';
     details.push(
-      `  - could not verify bun (probe ${probe.killed_reason}); re-run doctor if \`orcaops watch\` misbehaves`
+      `  - exe_version=unknown (${version.spawn_error?.code ?? version.killed_reason ?? `exit ${version.exit_code}`}); the companion may not run here — reinstall the CLI`
     );
+  } else if (reported !== launch.companion?.version) {
+    status = 'warn';
+    details.push(
+      `  - exe_version=${reported} does not match the package (${launch.companion?.version ?? '?'}); reinstall the CLI`
+    );
+  } else {
+    details.push(`  - exe_version=${reported}`);
   }
 
-  // An override that points at nothing has forfeited the PATH fallback, so
-  // unlike a plain absence it is always a fault.
-  if (explicitOverride && watchPath === null) {
-    return {
-      name,
-      status: 'warn',
-      summary: `ORCAOPS_WATCH_BIN points at ${resolved}, which does not exist`,
-      details: [
-        '  - unset it to fall back to PATH resolution, or point it at the installed binary',
-        ...details,
-      ],
-    };
+  if (process.platform === 'darwin') {
+    const sign = await runBoundedSubprocess({
+      argv: ['codesign', '--verify', '--strict', launch.command],
+      cwd: getInvocationCwd(),
+      env: childEnv,
+      timeoutMs: 10_000,
+      maxOutputBytes: 4 * 1024,
+    });
+    if (sign.spawn_error !== null) details.push('  - codesign=n/a (codesign not found)');
+    else if (sign.exit_code === 0) details.push('  - codesign=valid');
+    else {
+      status = 'warn';
+      details.push(
+        '  - codesign=invalid; macOS may refuse to run the companion — reinstall the CLI'
+      );
+    }
+  } else {
+    details.push('  - codesign=n/a');
   }
 
-  if (watchPath !== null && bun === 'absent') {
-    return {
-      name,
-      status: 'warn',
-      summary: `orcaops-watch found at ${watchPath} but bun is not on PATH`,
-      details: [
-        '  - Task Review runs under Bun; `orcaops watch` will fail to start until it is installed (https://bun.sh)',
-        ...details,
-      ],
-    };
-  }
+  // Bun extracts the embedded native library into a temp dir it chooses
+  // itself: the launcher's TMPDIR when honoured, otherwise the platform
+  // default. Both must be writable for the companion to start.
+  const writable = async (dir: string): Promise<boolean> =>
+    access(dir, fsConstants.W_OK).then(
+      () => true,
+      () => false
+    );
+  const tmp = launch.env.TMPDIR ?? '';
+  const tmpWritable = await writable(tmp);
+  const systemTmp = process.platform === 'win32' ? tmpdir() : '/tmp';
+  const systemTmpWritable = await writable(systemTmp);
+  if (!tmpWritable || !systemTmpWritable) status = 'warn';
+  details.push(
+    `  - tmpdir=${tmp} writable=${tmpWritable ? 'yes' : 'no'} system_tmp=${systemTmp} writable=${systemTmpWritable ? 'yes' : 'no'}`
+  );
 
-  if (watchPath !== null) {
-    return {
-      name,
-      status: 'pass',
-      summary: `Task Review ready (bun ${bun}, orcaops-watch at ${watchPath})`,
-      ...(details.length > 0 ? { details } : {}),
-    };
-  }
-
-  return {
-    name,
-    status: 'pass',
-    summary:
-      bun === 'present'
-        ? 'bun present; orcaops-watch not installed (optional — only `orcaops watch` needs it)'
-        : `Task Review not installed (bun ${bun}, no orcaops-watch) — optional; every other command is Node-only`,
-    ...(details.length > 0 ? { details } : {}),
-  };
-}
-
-async function findOnPath(bin: string, env: NodeJS.ProcessEnv): Promise<string | null> {
-  for (const dir of (env.PATH ?? '').split(path.delimiter)) {
-    if (dir === '') continue;
-    const candidate = path.join(dir, bin);
-    if (await pathExists(candidate)) return candidate;
-  }
-  return null;
+  // A degraded check must not keep the healthy headline. The details carried the
+  // problem while the summary still read "Task Review ready", so a scanning
+  // reader saw a warning row that said everything was fine.
+  const summary =
+    status === base.status
+      ? base.summary
+      : `Task Review companion needs attention (${base.summary})`;
+  return { name, status, summary, details };
 }
 
 /** Does a path exist at all? (An absent dir is the common case here.) */
@@ -4228,7 +4263,7 @@ const DOCTOR_SECTIONS = [
       'config',
       'cache',
       'llm-tool',
-      'watch-runtime',
+      'watch-companion',
     ]),
   },
   {

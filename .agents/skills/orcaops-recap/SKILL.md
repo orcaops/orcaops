@@ -1,9 +1,9 @@
 ---
 name: "Orcaops: recap (standup / changelog / journal)"
-description: "Summarize captured work over a time window or git ref range, in three named formats. Standup: \"standup\", \"what did I do yesterday / this week\", \"progress report\", or client updates. Changelog: \"changelog since v1.2\", \"what shipped between these tags?\", \"draft the release notes\" — task labels and outcomes in user-intent wording, not commit messages. Journal: \"journal today\", \"update my dev log\", \"append to NOTES.md what happened this week\" — the CLI stays read-only; YOU write the file. Skip for: picking a single task back up (resume skill), a current-branch survey (`orcaops status --json`), or one PR's reviewer-facing summary (digest skill)."
+description: "Summarize captured work over a time window or git range as a standup, changelog, or journal. Use for \"what did I do yesterday?\", \"changelog since v1.2\", \"draft the release notes\", or \"journal today\"."
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "57a7a73575cf"
+  contentHash: "445646cb3d61"
 ---
 
 # When to use
@@ -30,9 +30,11 @@ Skip when:
 
 # Shared window discipline (standup + journal)
 
-1. Compute the window as **UTC dates** (date-only values snap to UTC day
-   edges): yesterday → `--active-since <YYYY-MM-DD> --active-until <same date>`;
-   this week → Monday through today.
+1. Compute the user's requested local calendar window first, then convert its
+   start and end to explicit UTC instants for the CLI. Date-only values snap to
+   UTC day edges, so use them only when the intended calendar window is UTC.
+   For "yesterday" in another timezone, pass the corresponding ISO UTC start
+   and end timestamps; for "this week", convert local Monday through now.
 2. Resolve the artifact set with the bounded ACTIVITY window — **not**
    `--since` (started_at):
 
@@ -125,7 +127,7 @@ orcaops decisions --all-branches --active-since <ISO> --active-until <ISO> --jso
 orcaops loose-ends --all-branches --json
 ```
 
-Same UTC window discipline as standup (interval-overlap activity). decisions
+Same local-window-to-UTC discipline as standup (interval-overlap activity). decisions
 FILTERS RECORDS by the window; loose-ends is current-state — its findings
 are today's open tab, not the period's history.
 

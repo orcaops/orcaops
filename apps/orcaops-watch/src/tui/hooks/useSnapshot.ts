@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 
+import type { WatchSnapshot } from '@orcaops/watch-data/ui';
+
 import type { SnapshotSource } from '../../data/snapshot';
-import type { WatchSnapshot } from '../../data/types';
 
 export interface SnapshotState {
   snapshot: WatchSnapshot | null;

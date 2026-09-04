@@ -1,5 +1,6 @@
+import type { WatchTask, WatchThread } from '@orcaops/watch-data/ui';
+
 import { ago } from '../../core/format';
-import type { WatchTask, WatchThread } from '../../data/types';
 import { useCockpitTheme } from '../ThemeProvider';
 import { SYMBOL } from '../coreTheme';
 import { Badge, MeterBar, Row, type RowTone } from '../kit';

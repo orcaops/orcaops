@@ -30,7 +30,7 @@
   "dependencies": {
     "@orcaops/agent-activity": "workspace:*",
     "@orcaops/evaluator-protocol": "workspace:*",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "13.0.3",
     "effection": "^4.0.2",
     "execa": "^9.5.3"
   },

@@ -27,6 +27,13 @@ describe('orcaops-plan-approval pull guidance', () => {
     expect(body).toContain('orcaops plan review pull');
   });
 
+  it('uses the public id field and CLI error contract', () => {
+    expect(body).toContain('`external_id`');
+    expect(body).not.toContain('`externalId`');
+    expect(body).toContain('reports `NO_INPUT`');
+    expect(body).not.toMatch(/`plan pull` `NOT_FOUND`/);
+  });
+
   it('never opens a code-span with a bare `pull`', () => {
     // Every reference is `plan pull` or `plan review pull`, so no
     // backtick-opened code-span should start with "pull". This single invariant
@@ -35,12 +42,9 @@ describe('orcaops-plan-approval pull guidance', () => {
     expect(body).not.toMatch(/`pull/);
   });
 
-  it('advertises read/download an in-review plan body in its selection description', () => {
-    // The frontmatter description is the skill-SELECTION surface — the model
-    // matches intent against it before it ever opens the body. Cue the exact
-    // phrasing ("download my in-review plan").
+  it('advertises reading and downloading cloud plans', () => {
     const { description } = orcaopsPlanApprovalSkill;
-    expect(description).toMatch(/read or download a plan body/i);
-    expect(description).toContain('in-review candidate');
+    expect(description).toMatch(/read, download/);
+    expect(description).toContain('cloud approval flow');
   });
 });

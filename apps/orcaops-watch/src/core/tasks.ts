@@ -1,4 +1,4 @@
-import type { AgentState, WatchProject, WatchTask, WatchThread } from './types.js';
+import type { AgentState, WatchProject, WatchTask, WatchThread } from '@orcaops/watch-data/ui';
 
 /** Default branches accumulate many unrelated threads, so they are never rolled into a task. */
 const DEFAULT_BRANCHES = new Set(['main', 'master']);

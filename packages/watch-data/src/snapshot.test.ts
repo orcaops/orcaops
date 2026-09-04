@@ -9,7 +9,7 @@ import { openAllProjects } from '@orcaops/project-scope';
 
 import { AgentActivityReader, type AgentActivityReaderLike } from './agent-activity.js';
 import { collectFromScope, collectSnapshot } from './snapshot.js';
-import { makeArchiveFixture } from '../../tests/support/fixture-archive.js';
+import { makeArchiveFixture } from '../tests/support/fixture-archive.js';
 
 // readProjectId enforces canonical UUIDv7 for git-config-stored project ids.
 const PROJ_HOT = '019fc100-0000-7000-8000-00000000bbbb';

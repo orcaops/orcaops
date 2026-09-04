@@ -60,6 +60,19 @@ async function parseExpectingFailure(argv: string[]): Promise<{ code?: string }>
 }
 
 describe('orcaops CLI program', () => {
+  it('keeps help choices aligned with accepted agent ids and digest output', () => {
+    const program = buildOfficialProgram();
+    const capture = program.commands.find((command) => command.name() === 'capture')!;
+    const plan = capture.commands.find((command) => command.name() === 'plan')!;
+    const seed = program.commands.find((command) => command.name() === 'seed')!;
+    const digest = program.commands.find((command) => command.name() === 'digest')!;
+
+    expect(plan.helpInformation()).toContain('antigravity-cli');
+    expect(seed.helpInformation()).toContain('antigravity-cli');
+    expect(digest.helpInformation()).toMatch(/print a\s+confirmation/);
+    expect(digest.helpInformation()).not.toContain('in addition to stdout');
+  });
+
   it('documents both why modes and whole-file detail expansion', () => {
     const why = buildOfficialProgram().commands.find((command) => command.name() === 'why');
     expect(why).toBeDefined();

@@ -1,6 +1,7 @@
+import { DEFAULT_SPARKLINE } from '@orcaops/watch-data/ui';
+import type { WatchThread } from '@orcaops/watch-data/ui';
+
 import { ago, fmtTokens } from '../../core/format';
-import { DEFAULT_SPARKLINE } from '../../core/sparkline';
-import type { WatchThread } from '../../data/types';
 import { useCockpitTheme } from '../ThemeProvider';
 import { Rule } from '../kit';
 import { truncate } from '../layout';

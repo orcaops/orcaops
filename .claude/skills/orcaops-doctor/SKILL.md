@@ -1,9 +1,9 @@
 ---
 name: "Orcaops: diagnose install"
-description: "Diagnose adapter health, env, evaluator validity, cache integrity, and watchdog signals. Use when the user asks \"is orcaops set up correctly?\", \"what's broken?\", \"diagnose orcaops\", or when an orcaops command fails unexpectedly."
+description: "Diagnose or repair Orcaops setup. Use for \"is Orcaops set up correctly?\", \"diagnose Orcaops\", or when an orcaops command fails unexpectedly."
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "0180beed2815"
+  contentHash: "cf325a18454b"
 tags: ["orcaops", "read", "diagnostic"]
 ---
 
@@ -31,6 +31,9 @@ orcaops doctor --json   # machine-readable; same checks
 orcaops doctor --fix    # repair install drift and resume a missing/partial seed
 ```
 
+Run `--fix` only when the user explicitly asks for repair. A diagnosis alone
+does not authorize changing installed files or resuming an import.
+
 # Interpreting the output
 
 Checks are reported as `pass` / `warn` / `fail`:
@@ -46,7 +49,7 @@ Checks are reported as `pass` / `warn` / `fail`:
 | `agent-skills` | Configured adapter's skills + commands present and stamped at the current orcaops version. |
 | `seed` | Existing git history has live or imported artifact coverage; partial imports are resumable. |
 | `stale-artifacts` | No active artifact has been idle >24h (suggests a forgotten summary). |
-| `unresolved-blocks` | No evaluator's latest run is `severity:block + status:violation`. |
+| `unresolved-blocks` | No evaluator's latest run is `severity: block`, `run_status: completed`, and `verdict: violation`. |
 
 Exit code is `0` on pass or warn (warnings don't fail CI); `1` only
 when something is genuinely broken (missing init, corrupt cache,
@@ -62,6 +65,6 @@ not-a-repo).
 - `stale-artifacts` warns → if the work is complete, suggest the
   orcaops-finish skill; otherwise resume or amend the artifact.
 - `unresolved-blocks` warns → resolve via `orcaops block acknowledge`
-  (only for evaluators whose `on_block` opts in via
-  `acknowledge_breaking_change`) or `orcaops block dismiss` (always
+  (only for evaluators whose spec sets
+  `resolution.acknowledge.enabled: true`) or `orcaops block dismiss` (always
   available). Otherwise amend the offending artifact.

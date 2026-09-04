@@ -37,7 +37,7 @@
     "@orcaops/test-harness": "workspace:*",
     "@orcaops/typescript-config": "workspace:*",
     "@types/better-sqlite3": "^7.6.12",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "13.0.3",
     "vitest": "^4.0.18"
   }
 }

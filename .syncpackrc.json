@@ -15,6 +15,12 @@
       "pinVersion": "5.9.2"
     },
     {
+      "label": "Pin better-sqlite3 to the exact version the release ships and tests",
+      "dependencies": ["better-sqlite3"],
+      "dependencyTypes": ["dev", "prod"],
+      "pinVersion": "13.0.3"
+    },
+    {
       "label": "use workspace protocol for local packages",
       "dependencies": ["$LOCAL"],
       "dependencyTypes": ["!local", "prod", "dev"],

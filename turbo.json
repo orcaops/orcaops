@@ -7,6 +7,17 @@
       "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
       "env": ["NODE_ENV"]
     },
+    "compile": {
+      "dependsOn": ["build"],
+      "inputs": [
+        "src/**",
+        "scripts/compile.ts",
+        "platforms.json",
+        "$TURBO_ROOT$/.bun-version",
+        "$TURBO_ROOT$/apps/orcaops-cli/package.json"
+      ],
+      "outputs": ["build/compiled/**"]
+    },
     "dev": {
       "dependsOn": ["^build"],
       "cache": false,

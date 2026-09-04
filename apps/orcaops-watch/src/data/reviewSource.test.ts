@@ -4,9 +4,9 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { buildReviewFloorFixture } from '@orcaops/review-core';
+import { ReviewCacheBehindError } from '@orcaops/watch-data/ui';
 
 import { loadReview, loadReviewProjections } from './reviewSource';
-import { ReviewCacheBehindError } from './sidecarError';
 
 const diff = [
   'diff --git a/src/fixture.ts b/src/fixture.ts',

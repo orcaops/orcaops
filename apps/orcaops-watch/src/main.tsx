@@ -1,7 +1,7 @@
-import { createCliRenderer } from '@opentui/core';
+import { createCliRenderer, resolveRenderLib } from '@opentui/core';
 import { createRoot } from '@opentui/react';
 
-import { parseArgs } from './cli';
+import type { CliOptions } from './cli';
 import { pollSnapshot } from './data/snapshot';
 import { App } from './tui/App';
 import { ThemeProvider } from './tui/ThemeProvider';
@@ -11,11 +11,13 @@ import {
   type TerminalThemeMode,
 } from './tui/review/themeDetection';
 
-async function main() {
-  const opts = parseArgs(process.argv.slice(2));
-
-  // Headless import/boot check (no TTY needed).
+/** The application proper; `entry.ts` parses argv and gates the terminal. */
+export async function main(opts: CliOptions): Promise<void> {
+  // Headless boot check (no TTY needed). Resolving the render library binds
+  // the embedded native code's symbols, so a broken embed fails here rather
+  // than at the first render.
   if (opts.selfcheck) {
+    resolveRenderLib();
     process.stdout.write('watch selfcheck ok\n');
     process.exit(0);
   }
@@ -62,5 +64,3 @@ async function main() {
     process.on(sig, () => shutdown(renderer));
   }
 }
-
-void main();

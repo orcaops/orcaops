@@ -1,12 +1,12 @@
 import { ATTRIBUTION_INSTRUCTION } from '../attribution.js';
 import { skillRef } from '../refs.js';
 import type { SkillTemplate } from '../types.js';
+import { SECRET_IN_PAYLOAD_ERROR_ROW } from './shared-errors.js';
 
 export const orcaopsCheckpointSkill: SkillTemplate = {
   id: 'checkpoint',
   name: 'Orcaops: capture checkpoint',
-  description:
-    'Two-phase checkpoint lifecycle: open declares scope, close finalizes it (firing checkpoint-close evaluators), abandon cancels it.',
+  description: 'Open, close, or abandon a work checkpoint with scope, evidence, and verification.',
   tags: ['orcaops', 'capture'],
   body: (prefix: string) => `# Cadence rule
 
@@ -19,12 +19,12 @@ review evidence ONLY from the diff between the worktree at open and at
 close. Opening first is the only reliable way to get clean per-line
 attribution — anything changed before open is outside that window.
 
-**COMMIT BEFORE YOU CLOSE.** The full ordering is: open → make changes →
-run formatters and tests → commit → close. The commit belongs INSIDE the
-window for the same reason the formatter run does: a pre-commit hook that
-rewrites files is a worktree change, and if it lands after the close it is
-attributed to nothing. Closing first and committing after leaves the
-formatting delta — and any hook rewrite — outside every checkpoint. If you
+**IF A COMMIT IS AUTHORIZED AND INTENDED, COMMIT BEFORE YOU CLOSE.** The full
+ordering is: open → make changes → run formatters and tests → stage only this
+checkpoint's files → commit → close. A commit belongs inside the window because
+a pre-commit hook can rewrite files; a rewrite after close is attributed to
+nothing. Do not create a commit merely because you opened a checkpoint, and do
+not stage unrelated dirty-worktree or sibling-agent changes. If you
 slip and change the worktree before opening, still open and close a
 narrowly scoped checkpoint to claim the completed work; never leave real
 work uncovered. The two-phase shape also keeps resume granularity and
@@ -89,7 +89,7 @@ returns \`AMBIGUOUS_CHECKPOINT\` listing the open \`n\`s so you pick one.
 | Field | Notes |
 |---|---|
 | \`agent_session_id\` | Subagent attribution. Surfaces in \`status --json\`, \`resume\`, and the digest. |
-| \`policy_exceptions[]\` | Inline pre-write block resolution. Each entry names an evaluator that opts in via \`acknowledge_policy_exception\` and gives a reason. The exception is recorded on the open cp; doctor surfaces persistent dismissals. |
+| \`policy_exceptions[]\` | Inline pre-write block resolution. Each entry names a checkpoint-open evaluator whose spec sets \`resolution.policy_exception.enabled: true\` and gives a reason. The exception is recorded on the open cp; doctor surfaces persistent dismissals. |
 | \`plan_revision_id\` | Optimistic-concurrency token: the latest \`plan_event_id\` you observed (in \`resume\` / \`status\`). Pass null to skip the freshness check (lower-friction race-tolerance opt-out). With a non-null token, \`STALE_PLAN_REVISION\` rejects if a newer plan event has been committed since you read. |
 
 ## When the open is blocked
@@ -139,13 +139,21 @@ decisions:
           allows a 2x burst across the window boundary
 uncertainty:
   - "TTL strategy if multi-region Redis is added later"
+done_criteria:
+  - criterion_id: 01HX0K8N6ZQF8M5R2V8DZ7T4AA
+    evidence: |-
+      The limit-exceeded integration test passes and asserts HTTP 429.
+verification:
+  - command: "pnpm test rateLimiter"
+    exit_code: 0
+    output_digest: "9 tests passed"
 EOF
+\`\`\`
 
 (\`summary\` / \`reason\` / \`decision\` are free text → \`|-\` block scalars;
 \`files_changed\` / \`uncertainty\` items are quoted because a path or note may
 contain a colon-space or look numeric; \`completed_step_ids\` are UUIDs → plain.
 YAML would otherwise coerce \`0123\` to a number or read a colon-space as a map.)
-\`\`\`
 
 **Read \`warnings[]\` on EVERY response — open, close, and abandon.** All three
 can return a non-blocking \`warnings[]\` array (separate from
@@ -182,6 +190,8 @@ can return a non-blocking \`warnings[]\` array (separate from
 | \`n\` | **Optional — omit to close the single open checkpoint.** Pass the \`n\` from \`open\` to be explicit; required only when more than one cp is open (else \`AMBIGUOUS_CHECKPOINT\`). |
 | \`summary\` | 1-3 sentences describing what changed and why. |
 | \`completed_step_ids\` | Must be a **subset** of the open's \`declared_step_ids\` (subset, not equality — agents discover scope mid-step). Steps that were declared but not completed silently fall through and can be claimed by a follow-up cp. |
+| \`done_criteria[]\` | Required when a completed step has acceptance criteria. Include one \`{ criterion_id, evidence }\` entry for every criterion on each completed step. A completed step with no criteria needs no entries. |
+| \`verification[]\` | Required whenever a non-imported close claims a completed step. Cite at least one command run fresh at close with its exit code. Git-import artifacts are exempt because inventing fresh verification for historical work would be false. |
 
 ## Uncertainty section
 
@@ -226,8 +236,6 @@ checkpoint field for choices made while doing the work. Shape:
 | Field | Notes |
 |---|---|
 | \`files_changed\` | Files modified at THIS cp (not cumulative). **When checkpoint windows overlap** (parallel agents or a human editing alongside), this list is the ATTRIBUTION CLAIM: boundary snapshots attribute exclusive-interval changes conclusively, but genuinely concurrent changes are arbitrated by each checkpoint's \`files_changed\` — report it accurately and completely (an omission can cost the claim; an over-claim is rejected and flagged when evidence contradicts it). |
-| \`done_criteria[]\` | Evidence map keyed to the plan's acceptance criteria: a list of \`{ criterion_id, evidence }\`. Each \`criterion_id\` must resolve to a criterion on a step in \`completed_step_ids\` (read the ids from the \`capture plan\` response or \`orcaops show\`); \`evidence\` is free-text, non-blank proof of what was delivered for that criterion. \`INVALID_INPUT\` if a criterion_id doesn't resolve to a completed step. |
-| \`verification[]\` | Verified close (see below): commands you ran fresh at close with their exit codes — \`{ command, exit_code, output_digest?, note? }\`. |
 
 ## Verified close
 
@@ -247,6 +255,11 @@ command is honest evidence — record the non-zero exit and say where the
 failure stands in \`summary\`/\`uncertainty\` rather than omitting the run.
 The store rejects completion claims with no cited evidence and deliberately
 accepts non-zero exits so failure is never punished into silence.
+
+For a partial close that claims no completed steps, omit both
+\`done_criteria\` and \`verification\`. For a completed step with no acceptance
+criteria, omit \`done_criteria\` but still include \`verification\`. Only a
+\`git-import\` artifact may claim a completed step without fresh verification.
 
 # 3. \`abandon\` — cancel without claiming work
 
@@ -279,12 +292,12 @@ re-shuffle in-flight cps' declared scopes.
    \`plan_steps\` array (each with \`step_id\` + \`idx\` + \`text\` + \`label\`).
 2. Parent dispatches subagent-a on step_ids [\`STEP1_ID\`, \`STEP2_ID\`]
    and subagent-b on step_id [\`STEP3_ID\`].
-3. subagent-a: \`checkpoint open --declared_step_ids [STEP1_ID, STEP2_ID]
-   --agent_session_id subagent-a\` → work → close with
-   \`completed_step_ids\` ⊆ that set.
-4. subagent-b in parallel: \`checkpoint open
-   --declared_step_ids [STEP3_ID] --agent_session_id subagent-b\` →
-   work → close.
+3. subagent-a: pipe \`declared_step_ids: [STEP1_ID, STEP2_ID]\` and
+   \`agent_session_id: subagent-a\` through the supported \`--input -\` heredoc →
+   work → close with \`completed_step_ids\` contained in that set.
+4. subagent-b in parallel: pipe \`declared_step_ids: [STEP3_ID]\` and
+   \`agent_session_id: subagent-b\` through its own \`--input -\` heredoc → work
+   → close.
 
 If a subagent's \`open\` returns \`OPEN_CP_OVERLAP\`, retry with
 non-overlapping scope or signal back to the parent. If two subagents
@@ -321,12 +334,12 @@ is a coordination bug, not a soft policy.
 | Code | Meaning |
 |---|---|
 | \`UNKNOWN_ARTIFACT\` | Wrong \`artifact_id\`. Check \`orcaops status --json\`. |
-| \`SECRET_IN_PAYLOAD\` | A field carries a recognizable credential. The payload shape is fine — rewrite the narrative to DESCRIBE the credential instead of quoting it (\`the deploy token from the env\`), then retry. \`secret_findings\` names every offending field and its key prefix; nothing was written, pushed, or snapshotted. |
+${SECRET_IN_PAYLOAD_ERROR_ROW}
 | \`OPEN_CP_OVERLAP\` | A declared step_id is already covered by another open or a closed cp. Re-issue with smaller scope or revise the plan to split the step. |
 | \`STALE_PLAN_REVISION\` | The \`plan_revision_id\` you passed is no longer the latest plan event for the artifact. Re-read \`resume\` / \`status\`, retry with the fresh token. (Skip by passing \`null\` if you accept the race.) |
 | \`INVALID_INPUT\` (path: \`declared_step_ids\`) | Step_id not present in the latest plan revision, duplicate within the array, or empty array. |
 | \`INVALID_INPUT\` (path: \`completed_step_ids\`) | Step_id duplicate within the array, or not a subset of the open's \`declared_step_ids\`. |
-| \`INVALID_INPUT\` (path: \`policy_exceptions\`) | Named evaluator does not opt into pre-write exceptions (no \`acknowledge_policy_exception\` literal in its \`## on_block\`). Re-scope the open or use \`block dismiss\` after-the-fact. |
+| \`INVALID_INPUT\` (path: \`policy_exceptions\`) | Named evaluator is not a checkpoint-open evaluator or its spec has \`resolution.policy_exception.enabled: false\`. Re-scope the open or use \`block dismiss\` after-the-fact. |
 | \`IDEMPOTENCY_CONFLICT\` | Same key, different payload. Mint a fresh key. |
 `,
 };

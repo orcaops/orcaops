@@ -145,6 +145,66 @@ describe('review executable identity', () => {
     expect(dependencyChanged.runtimeFingerprintSha256).not.toBe(clean.runtimeFingerprintSha256);
   });
 
+  it('ignores the Watch UI platform package npm picked for this host', async () => {
+    const descriptor = { packageRoot: root, entrypointPath: path.join(root, 'entry.js') };
+    const env = { ...process.env, ORCAOPS_BUILD_DIRTY: 'false' };
+    const before = await observeReviewExecutableIdentity(descriptor, env);
+
+    // The four platform packages are os/cpu-filtered optionals; exactly one
+    // installs per host, so hashing it would make the same release fingerprint
+    // differently on a mac and on linux.
+    const platform = path.join(root, 'node_modules', '@orcaops', 'watch-darwin-arm64');
+    await mkdir(path.join(platform, 'bin'), { recursive: true });
+    await mkdir(path.join(platform, 'dist'), { recursive: true });
+    await writeFile(
+      path.join(platform, 'package.json'),
+      JSON.stringify({
+        name: '@orcaops/watch-darwin-arm64',
+        version: '1.2.3',
+        os: ['darwin'],
+        cpu: ['arm64'],
+        orcaopsWatch: { exe: 'bin/orcaops-watch-ui', bun: '1.4.0', target: 'bun-darwin-arm64' },
+      })
+    );
+    await writeFile(path.join(platform, 'bin', 'orcaops-watch-ui'), 'not really an executable\n');
+    await writeFile(path.join(platform, 'dist', 'stray.js'), 'export const stray = 1;\n');
+    await writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify({
+        name: '@orcaops/cli',
+        version: '1.2.3',
+        dependencies: { '@orcaops/review-engine': 'workspace:*' },
+        optionalDependencies: { '@orcaops/watch-darwin-arm64': '1.2.3' },
+      })
+    );
+    const withPlatform = await observeReviewExecutableIdentity(descriptor, env);
+    expect(withPlatform.compiledRuntimeManifestSha256).toBe(before.compiledRuntimeManifestSha256);
+
+    // Control: an ordinary @orcaops optional dependency with compiled files
+    // still enters the manifest.
+    const plain = path.join(root, 'node_modules', '@orcaops', 'keyring-shim');
+    await mkdir(path.join(plain, 'dist'), { recursive: true });
+    await writeFile(
+      path.join(plain, 'package.json'),
+      JSON.stringify({ name: '@orcaops/keyring-shim', version: '1.2.3' })
+    );
+    await writeFile(path.join(plain, 'dist', 'index.js'), 'export const shim = 1;\n');
+    await writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify({
+        name: '@orcaops/cli',
+        version: '1.2.3',
+        dependencies: { '@orcaops/review-engine': 'workspace:*' },
+        optionalDependencies: {
+          '@orcaops/watch-darwin-arm64': '1.2.3',
+          '@orcaops/keyring-shim': '1.2.3',
+        },
+      })
+    );
+    const withPlain = await observeReviewExecutableIdentity(descriptor, env);
+    expect(withPlain.compiledRuntimeManifestSha256).not.toBe(before.compiledRuntimeManifestSha256);
+  });
+
   it('uses content and build provenance rather than the diagnostic entrypoint path', async () => {
     const alternate = path.join(root, 'alternate-entry.js');
     await writeFile(alternate, 'export {};\n');

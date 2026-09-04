@@ -16,12 +16,7 @@ export const orcaopsParallelDispatchSkill: SkillTemplate = {
   id: 'parallel-dispatch',
   name: 'Orcaops: parallel dispatch',
   description:
-    "Dispatch a captured plan's steps to parallel subagents with orcaops as the shared task " +
-    'ledger — "parallelize this plan", "dispatch these steps to subagents", "split this plan ' +
-    'across subagents", "run these tasks in parallel", "spec-driven dispatch". Subagents run ' +
-    'fully concurrently: step-id disjointness at open plus accurate close-time files_changed ' +
-    'self-reports keep per-agent attribution clean. Skip for: single-agent work (capture + ' +
-    'checkpoint skills are enough).',
+    'Parallelize or split a captured plan across subagents while keeping their work separately recorded.',
   tags: ['orcaops', 'orchestration'],
   group: 'orchestration',
   defaultEnabled: false,
@@ -83,10 +78,11 @@ attribute to it conclusively) plus each agent's close-time self-report.
    file can cost you the claim, and an over-report is rejected and
    flagged when the evidence contradicts it. On success close with
    \`completed_step_ids: [its step_id]\` and \`done_criteria\` entries keyed
-   to the brief's \`criterion_id\`s. If no meaningful work happened
+   to every one of the brief's \`criterion_id\`s, plus at least one
+   \`verification\` record for a command run fresh at close. If no meaningful work happened
    (dispatch failed, task rescoped), ABANDON — which releases the step
    for a fresh dispatch — rather than closing empty.
-5. **Parent finishes the thread.** After every task resolves:
-   \`${skillRef('pre-pr', prefix)}\` → \`${skillRef('summary', prefix)}\` — one artifact, one
-   reviewer-facing thread, per-step attribution intact.`,
+5. **Parent finishes the thread.** After every task resolves, use
+   \`${skillRef('finish', prefix)}\` for the normal finalization path — one
+   artifact, one reviewer-facing thread, per-step attribution intact.`,
 };

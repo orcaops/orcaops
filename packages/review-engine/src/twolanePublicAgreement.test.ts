@@ -8,7 +8,7 @@ import { FLOOR_PRODUCER_VERSION } from './floor.js';
 import { REVIEW_STATE_VERSION } from './reviewState.js';
 import { STORY_REVIEW_MODEL_SCHEMA_VERSION } from './storyReviewModel.js';
 import { TWOLANE_FINALIZE_ERROR_CODES, TWOLANE_RUN_SCHEMA_VERSION } from './twolaneRunCli.js';
-import { SLICE_SCHEMA_VERSION } from './twolaneSlice.js';
+import { SLICE_DIAGNOSTIC_CODES, SLICE_SCHEMA_VERSION } from './twolaneSlice.js';
 
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
@@ -74,11 +74,13 @@ describe('public two-lane routine agreement', () => {
       'SLICE_SUBMIT_AFTER_ACCEPT',
       'TWOLANE_ATTEMPT_BUDGET',
       ...TWOLANE_FINALIZE_ERROR_CODES,
+      ...SLICE_DIAGNOSTIC_CODES,
     ]) {
       expect(docs, code).toContain(code);
       for (const instructions of [sourceSkill, agentsSkill, claudeSkill]) {
         expect(instructions, code).toContain(code);
       }
     }
+    expect(docs).not.toContain('STORY_OPEN_OR_ABANDONED_MEMBER');
   });
 });

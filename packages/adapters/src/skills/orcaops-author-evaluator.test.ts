@@ -88,6 +88,21 @@ describe('the managed block recommends rather than invokes', () => {
   });
 });
 
+describe('evaluator test guidance', () => {
+  it('distinguishes the shipped environment from the minimum launch requirement', () => {
+    const body = bodyOf();
+    expect(body).toContain('`env.inherit: [PATH, HOME, NODE_PATH]`');
+    expect(body).toContain('`PATH` is the minimum needed to\n  launch Node');
+  });
+
+  it('does not present a revision-zero fixture as a revision comparison', () => {
+    const body = bodyOf();
+    expect(body).toContain('A fixture plan is revision 0');
+    expect(body).toContain('exercises your null branch, not your comparison');
+    expect(body).toContain('pass a non-null `prior_plan`');
+  });
+});
+
 describe('the rendered skill file', () => {
   const rendered = makeSkillRenderer('.claude/skills', { includeTags: true }).format(
     orcaopsAuthorEvaluatorSkill,

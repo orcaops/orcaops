@@ -4,6 +4,7 @@ import { createRoot } from '@opentui/react';
 import { expect, test } from 'bun:test';
 
 import { THEMES } from '@orcaops/diff-render';
+import type { WatchSnapshot } from '@orcaops/watch-data/ui';
 
 import {
   journeyReviewTarget,
@@ -12,7 +13,6 @@ import {
 } from '../../../tests/review/appJourneyFixture';
 import { buildReviewAppHarness } from '../../../tests/review/reviewAppHarness';
 import type { SnapshotSource } from '../../data/snapshot';
-import type { WatchSnapshot } from '../../data/types';
 import { App, composeWatchFooterNotice, MIXED_ARCHIVE_NOTICE_PREFIX } from '../App';
 import { ThemeProvider } from '../ThemeProvider';
 import { executableHelpInvocation } from '../commandRegistry';

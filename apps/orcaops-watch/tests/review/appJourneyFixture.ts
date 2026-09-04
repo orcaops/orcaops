@@ -1,5 +1,6 @@
+import type { WatchSnapshot, WatchThread } from '@orcaops/watch-data/ui';
+
 import type { ResolveReviewTarget } from '../../src/data/reviewTarget';
-import type { WatchSnapshot, WatchThread } from '../../src/data/types';
 
 export const REVIEWABLE_JOURNEY_INDEX = 18;
 /** The one fixture branch a live worktree owns; every other row is refused. */

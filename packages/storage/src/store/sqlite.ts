@@ -30,23 +30,35 @@ function loadDatabase(): typeof Database {
 }
 
 /**
- * npm's script-blocking installs (allow-scripts policies, --ignore-scripts)
- * skip better-sqlite3's install script, so no native binding exists. The
- * require still succeeds — v12 dlopens lazily inside `new Database()` — so
- * the failure surfaces at construction as a bindings-file stack that says
- * nothing about the cause. Name the cause and the reinstall fix.
+ * better-sqlite3 13.x ships its prebuilt binaries in its own tarball and has no
+ * install script, so a blocked install can no longer strand us. What is left is
+ * a host with no prebuilt binary — there is no source fallback any more — or an
+ * install that lost files. Either way the require succeeds and the failure only
+ * surfaces at `new Database()`, as a bindings-file stack that says nothing about
+ * the cause. Name the cause and what to do.
+ *
+ * Remedy FIRST, diagnostic last: this is thrown as a plain Error, so the CLI
+ * classifies it INTERNAL and bounds the message at 200 characters. Anything
+ * after that is cut, and the reinstall command is the half the user needs.
  */
 export function nativeModuleHint(cause: string): string {
   return (
-    'better-sqlite3 has no native module for this install. Its install script was ' +
-    'likely blocked (an npm allow-scripts policy, or --ignore-scripts). Reinstall ' +
-    'allowing it: `npm install -g --allow-scripts=better-sqlite3 @orcaops/cli`. ' +
-    `Underlying error: ${cause}`
+    'better-sqlite3 could not load its native module. Reinstall: ' +
+    '`npm install -g @orcaops/cli`. ' +
+    `Cause: ${cause}`
   );
 }
 
+/**
+ * v12 always loaded `build/Release/better_sqlite3.node`, so any load failure
+ * named that file. v13 loads `prebuilds/<platform>-<arch>.node`, so a present
+ * but unloadable prebuild — a wrong-architecture copy, a torn download, a
+ * partially synced node_modules — throws a dlopen message naming neither of the
+ * old tokens. Match the prebuilds path too, or those users get a raw dlopen
+ * stack truncated to its path prefix and no remedy at all.
+ */
 function isMissingBindingError(message: string): boolean {
-  return message.includes('bindings file') || message.includes('better_sqlite3.node');
+  return /bindings file|better_sqlite3\.node|better-sqlite3[\\/]prebuilds[\\/]/.test(message);
 }
 
 // Artifact-level 'abandoned' was never produced (only checkpoints abandon);
@@ -2279,6 +2291,18 @@ export class Store {
   // Search index (FTS5)
   // ────────────────────────────────────────
 
+  /**
+   * IMMEDIATE, not the default deferred. The DELETE below writes an FTS5 table,
+   * and FTS5 reads its shadow tables before writing them — so a deferred
+   * transaction opens for reading and then has to upgrade. SQLite refuses a
+   * read-to-write upgrade with SQLITE_BUSY straight away and never calls the
+   * busy handler, so the connection's 5s `busy_timeout` does not apply and a
+   * concurrent capture fails outright. Taking the write lock up front is what
+   * `global-index.ts` already does for the same reason.
+   *
+   * Measured at 144 concurrent captures on one repo: deferred lost 6 of 122
+   * checkpoint closes to `database is locked`; immediate lost 0 of 144.
+   */
   replaceSearchEntry(entry: SearchEntry): void {
     const redactedContent = redactSecretsInString(entry.content);
     const tx = this.db.transaction((e: SearchEntry) => {
@@ -2292,7 +2316,7 @@ export class Store {
         )
         .run(e.artifact_id, e.source, e.branch, e.ts, redactedContent);
     });
-    tx(entry);
+    tx.immediate(entry);
   }
 
   /**

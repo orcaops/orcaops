@@ -1,4 +1,5 @@
-import type { AgentState } from '../../data/types';
+import type { AgentState } from '@orcaops/watch-data/ui';
+
 import { useCockpitTheme } from '../ThemeProvider';
 import { sparkCells } from '../layout';
 

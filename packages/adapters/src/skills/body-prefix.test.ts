@@ -35,9 +35,9 @@ describe('body prefix threading', () => {
 
   it('pre-pr body threads the prefix into its sibling skill refs', () => {
     const oo = render(orcaopsPrePrSkill, 'oo');
-    expect(oo).toContain('oo-checkpoint');
+    expect(oo).toContain('oo-finish');
     expect(oo).toContain('oo-summary');
-    expect(oo).not.toMatch(/orcaops-(checkpoint|summary)\b/);
+    expect(oo).not.toMatch(/orcaops-(finish|summary)\b/);
   });
 });
 
@@ -51,5 +51,16 @@ describe('verified-close guidance in the checkpoint skill', () => {
     // cited, never omitted.
     expect(body).toMatch(/FAILING\s+command is honest evidence/);
     expect(body).toContain('store rejects completion claims with no cited evidence');
+    expect(body).toContain('resolution.policy_exception.enabled: true');
+    expect(body).not.toContain('acknowledge_policy_exception');
+    expect(body).not.toContain('checkpoint open --declared_step_ids');
+  });
+
+  it('keeps close-time explanation outside the shell block', () => {
+    const body = render(orcaopsCheckpointSkill, 'orcaops');
+    expect(body).toMatch(/output_digest: "9 tests passed"\nEOF\n```\n\n\(`/);
+    expect(body).not.toMatch(/\nEOF\n\n\(`/);
+    expect(body).toContain('done_criteria:');
+    expect(body).toContain('verification:');
   });
 });

@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
+import { ReviewCacheBehindError } from '@orcaops/watch-data/ui';
+
 import { mountReviewApp } from '../../../tests/review/mountReviewApp';
 import { buildReviewAppHarness } from '../../../tests/review/reviewAppHarness';
-import { ReviewCacheBehindError } from '../../data/sidecarError';
 
 describe('persistent App shell → Review bridge', () => {
   test('the Help menu opens the same review overlay as the keyboard command', async () => {

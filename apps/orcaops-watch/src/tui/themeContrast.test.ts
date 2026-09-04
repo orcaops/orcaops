@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import { THEMES } from '@orcaops/diff-render';
+import type { AgentState } from '@orcaops/watch-data/ui';
 
 import { cockpitThemeFor } from './ThemeProvider';
 import { COCKPIT_DARK, COCKPIT_LIGHT, type CockpitTheme } from './theme';
-import type { AgentState } from '../core/types';
 
 const STATES: readonly AgentState[] = [
   'working',

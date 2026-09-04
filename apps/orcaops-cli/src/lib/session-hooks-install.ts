@@ -3,14 +3,23 @@ import type { Writable } from 'node:stream';
 import type { SupportedAgentId } from '@orcaops/storage';
 
 import {
+  CODEX_HOOKS_JSON_MIN_VERSION,
+  CODEX_HOOKS_JSON_NOTE,
   codexConfigTomlPath,
   codexFenceGuidance,
   codexHooksDisabledGuidance,
-  codexHooksJsonNote,
+  codexHooksJsonCarriesHooks,
   codexHooksShapeGuidance,
   codexInvalidTomlGuidance,
   codexMarkerLineGuidance,
+  type CodexRegistrationMigration,
+  type CodexRepresentation,
+  type CodexRepresentationSurface,
   codexTomlSnippet,
+  type CodexTrustCarryReport,
+  type CodexTrustShiftReport,
+  isCodexHooksJsonPath,
+  migrateCodexRegistrationToHooksJson,
   planUserSessionHookConsent,
   planUserSessionHooks,
   type PlanUserSessionHooksResult,
@@ -19,6 +28,7 @@ import {
   type UserHooksRecordEntry,
   userHooksRecordPath,
   type UserSessionHookConsentPlan,
+  type UserSessionHookConsentSurface,
   writeCodexTomlBlock,
   writeUserHooksRecord,
 } from './session-hooks-user.js';
@@ -47,10 +57,61 @@ export interface PromptUserSessionHookInstallOptions {
   output: Writable;
   say: (text: string) => void;
   onCancel?: () => never;
+  /** `--representation`: force the codex file rather than resolving one. */
+  representationOverride?: CodexRepresentationSurface;
+}
+
+function consentSurfaceLine(surface: UserSessionHookConsentSurface): string {
+  if (surface.mode === 'managed-choice') {
+    return `  ? ${surface.path}  (${surface.agent}; may modify in managed mode only)\n`;
+  }
+  if (surface.mode === 'remove') {
+    return `  - ${surface.path}  (${surface.agent}; the orcaops block is removed from this file)\n`;
+  }
+  return `  ~ ${surface.path}  (${surface.agent}; will reconcile this entry)\n`;
+}
+
+/**
+ * Why codex is being registered where it is, when the answer is not the one
+ * the file layout alone would give: a version gate that could not be cleared,
+ * or an override that ignored one.
+ */
+function codexRepresentationNote(representation: CodexRepresentation | null): string {
+  if (representation === null) return '';
+  if (representation.reason === 'version-unsupported') {
+    return (
+      `Codex registers in ${representation.tomlPath}: this codex-cli is older than ` +
+      `${CODEX_HOOKS_JSON_MIN_VERSION}, the oldest build measured to read hooks.json.\n\n`
+    );
+  }
+  if (representation.reason === 'version-unknown') {
+    return (
+      `Codex registers in ${representation.tomlPath}: \`codex --version\` could not be read, ` +
+      `so orcaops cannot tell whether this build reads hooks.json (needs ${CODEX_HOOKS_JSON_MIN_VERSION}).\n\n`
+    );
+  }
+  if (representation.reason === 'override' && representation.versionGate !== 'supported') {
+    return (
+      `! --representation ${representation.surface} overrides the version gate ` +
+      `(codex-cli ${representation.versionGate === 'unsupported' ? `is older than ${CODEX_HOOKS_JSON_MIN_VERSION}` : 'could not be read'}).\n` +
+      '  A build that does not read the file you chose runs no hook at all.\n\n'
+    );
+  }
+  return '';
 }
 
 export interface AppliedUserSessionHookInstall extends PlanUserSessionHooksResult {
   codexOutcome: CodexSessionHookOutcome;
+  /**
+   * Whether the registration left config.toml for hooks.json — `moved`, or
+   * `kept-duplicate` when the old block could not go and both now register.
+   * Null when nothing was in config.toml to move.
+   */
+  codexMigration: 'moved' | 'kept-duplicate' | null;
+  /** Whether the approval the user already gave Codex moved with the registration. */
+  codexTrustCarry: CodexTrustCarryReport | null;
+  /** How the approvals for OTHER hooks in hooks.json fared when our group displaced them. */
+  codexTrustShift: CodexTrustShiftReport;
   /** How a managed write landed: a fresh config.toml or a block merged into an existing one. */
   codexConfigWrite: 'created' | 'merged' | null;
   installedEntries: UserHooksRecordEntry[];
@@ -65,22 +126,17 @@ export async function promptUserSessionHookInstall(
   options: PromptUserSessionHookInstallOptions
 ): Promise<StagedUserSessionHookInstall | null> {
   const prompts = await import('@clack/prompts');
-  const consent = planUserSessionHookConsent(agents);
+  const consent = await planUserSessionHookConsent(agents, options.representationOverride);
 
   options.say(
     'Machine-level session hooks inject short orcaops capture guidance at every agent\n' +
       'session start, in every repo that has BOTH run `orcaops init` and enabled\n' +
       'session hooks. Repos without orcaops stay completely silent.\n\n' +
       'This consent covers the following user config surfaces:\n' +
-      consent.surfaces
-        .map((surface) =>
-          surface.mode === 'managed-choice'
-            ? `  ? ${surface.path}  (${surface.agent}; may modify in managed mode only)\n`
-            : `  ~ ${surface.path}  (${surface.agent}; will reconcile this entry)\n`
-        )
-        .join('') +
+      consent.surfaces.map(consentSurfaceLine).join('') +
       '\nOnly exact orcaops-managed entries are reconciled; other entries are preserved.\n' +
-      'Undo managed entries any time with `orcaops session-hooks uninstall`.\n\n'
+      'Undo managed entries any time with `orcaops session-hooks uninstall`.\n\n' +
+      codexRepresentationNote(consent.representation)
   );
   const proceed = await prompts.confirm({
     message: `Continue with ${consent.surfaces.length} selected user config surface(s)?`,
@@ -90,8 +146,12 @@ export async function promptUserSessionHookInstall(
   if (prompts.isCancel(proceed)) options.onCancel?.();
   if (proceed !== true) return null;
 
+  // The chooser exists because config.toml is the user's primary Codex file
+  // and a marker-owned block in it is a bigger ask than a JSON merge. The
+  // hooks.json surface is the same reconcile Claude Code gets with no
+  // chooser, and consent already named the file.
   let codexChoice: CodexSessionHookChoice | null = null;
-  if (consent.codexWanted) {
+  if (consent.representation?.surface === 'config-toml') {
     const choice = await prompts.select({
       message: 'Codex registers via ~/.codex/config.toml — how should orcaops handle it?',
       options: [
@@ -132,11 +192,41 @@ export async function applyUserSessionHookInstall(
   staged: StagedUserSessionHookInstall,
   cliVersion: string
 ): Promise<AppliedUserSessionHookInstall> {
-  const result = await planUserSessionHooks(staged.consent.jsonAgents, 'apply');
+  const representation = staged.consent.representation;
+  const codexOnJson = representation?.surface === 'hooks-json';
+  const result = await planUserSessionHooks(
+    staged.consent.jsonAgents,
+    'apply',
+    'install',
+    [],
+    undefined,
+    representation
+  );
   let codexOutcome: CodexSessionHookOutcome = null;
   let codexConfigWrite: AppliedUserSessionHookInstall['codexConfigWrite'] = null;
+  let codexMigration: AppliedUserSessionHookInstall['codexMigration'] = null;
+  let codexTrustCarry: CodexTrustCarryReport | null = null;
+  let codexTrustShift: CodexTrustShiftReport = { moved: 0, skipped: [] };
 
-  if (staged.consent.codexWanted) {
+  if (representation?.surface === 'hooks-json') {
+    const codexPlans = result.plans.filter((plan) => plan.agent === 'codex');
+    const sidecarCarriesHook = codexPlans.some(
+      (plan) =>
+        plan.action === 'created' || plan.action === 'updated' || plan.action === 'unchanged'
+    );
+    // Only a hooks.json that actually carries the hook may retire config.toml.
+    if (sidecarCarriesHook) {
+      const migration = await migrateCodexRegistrationToHooksJson(representation, {
+        groups: result.codexGroups,
+      });
+      codexMigration = migration.outcome === 'none' ? null : migration.outcome;
+      codexTrustCarry = migration.trust;
+      codexTrustShift = migration.trustShift;
+      result.warnings.push(...(await codexMigrationWarnings(representation, migration)));
+      const toml = await readCodexTomlState(representation.tomlPath);
+      if (toml.hooksDisabled) result.warnings.push(codexHooksDisabledGuidance(toml.path));
+    }
+  } else if (staged.consent.codexWanted) {
     if (staged.codexChoice === 'manual') {
       codexOutcome = 'manual-snippet';
     } else if (staged.codexChoice === 'managed') {
@@ -206,7 +296,13 @@ export async function applyUserSessionHookInstall(
           cli_version: cliVersion,
           entries: [
             ...(previous.status === 'ok' ? previous.record.entries : []).filter(
-              (entry) => !installedPaths.has(`${entry.agent}\0${entry.path}`)
+              (entry) =>
+                !installedPaths.has(`${entry.agent}\0${entry.path}`) &&
+                // The record names where the registration LIVES: once codex is
+                // on hooks.json, the config.toml entry it moved off is stale
+                // even when the block itself could not be removed. Uninstall
+                // scans config.toml regardless of the record.
+                !(codexOnJson && entry.agent === 'codex' && !isCodexHooksJsonPath(entry.path))
             ),
             ...installedEntries,
           ],
@@ -234,6 +330,7 @@ export async function applyUserSessionHookInstall(
     codexOutcome === 'refused-markers' ||
     codexOutcome === 'refused-unreadable' ||
     codexOutcome === 'failed' ||
+    codexMigration === 'kept-duplicate' ||
     (installedEntries.length > 0 && record === null);
 
   // The settings-json planner never sees Codex; a repeat managed install
@@ -254,14 +351,65 @@ export async function applyUserSessionHookInstall(
     ...result,
     plans,
     codexOutcome,
+    codexMigration,
+    codexTrustCarry,
+    codexTrustShift,
     codexConfigWrite,
     installedEntries,
     liveAgents,
     record,
     restartRequired:
-      sessionHooksRestartRequired(result.plans) || codexOutcome === 'managed-written',
+      sessionHooksRestartRequired(result.plans) ||
+      codexOutcome === 'managed-written' ||
+      // A move can leave every plan `unchanged` and still change what Codex
+      // loads at its next start.
+      codexMigration === 'moved',
     partialFailure,
   };
+}
+
+async function codexMigrationWarnings(
+  representation: CodexRepresentation,
+  migration: CodexRegistrationMigration
+): Promise<string[]> {
+  const tomlPath = representation.tomlPath;
+  const warnings: string[] = [];
+  if (migration.trust === 'failed') {
+    warnings.push(`${tomlPath} could not be updated with the Codex approvals the move carries`);
+  } else if (migration.trust === 'refused') {
+    warnings.push(
+      `the Codex approval for this hook could not be moved to its ${representation.hooksJsonPath} key, so the ${tomlPath} entry it still names was left in place`
+    );
+  }
+  if (migration.removal === 'manual-content') {
+    warnings.push(
+      `${tomlPath} carries a manually-pasted or foreign orcaops hook — remove it yourself; orcaops never edits content it did not mark`
+    );
+  } else if (migration.removal === 'refused-markers') {
+    const state = await readCodexTomlState(tomlPath);
+    warnings.push(codexMarkerLineGuidance(tomlPath, state.markerProblemLines));
+  } else if (migration.removal === 'refused-fence') {
+    warnings.push(codexFenceGuidance(tomlPath));
+  } else if (migration.removal === 'refused-invalid') {
+    warnings.push(codexInvalidTomlGuidance(tomlPath));
+  } else if (migration.removal === 'unreadable') {
+    const state = await readCodexTomlState(tomlPath);
+    warnings.push(
+      `${state.readError ?? `${tomlPath} could not be checked for an older registration`} — left untouched`
+    );
+  }
+  if (migration.outcome === 'kept-duplicate') {
+    // The removal is skipped outright only when the approval could not move,
+    // and that is the one kept-duplicate a plain re-run can clear.
+    const retry =
+      migration.removal === null
+        ? '; re-run `orcaops session-hooks install` to retry the move'
+        : '';
+    warnings.push(
+      `the Codex hook is now registered in ${representation.hooksJsonPath}, but the older registration in ${tomlPath} is still there — both are live until it is cleaned up${retry}`
+    );
+  }
+  return warnings;
 }
 
 export async function codexSessionHookGuidance(
@@ -278,7 +426,9 @@ export async function codexSessionHookGuidance(
         ? `Paste this into ${configPath}:\n\n${codexTomlSnippet()}\n\n` +
           'Codex reviews new hooks once (hash-pinned trust). Approve the orcaops entry when asked; `orcaops session-hooks status` will confirm it after the paste.\n'
         : '';
-    const note = await codexHooksJsonNote();
+    // This path registers in config.toml (or tells the user to), so hooks in
+    // the sidecar are the second representation.
+    const note = (await codexHooksJsonCarriesHooks()) ? CODEX_HOOKS_JSON_NOTE : null;
     const text = snippet + (note === null ? '' : `${note}\n`);
     return text.length > 0 ? text : null;
   }

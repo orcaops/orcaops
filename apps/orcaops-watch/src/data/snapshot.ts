@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
+import type { WatchSnapshot } from '@orcaops/watch-data/ui';
+
 import { resolveSidecar, sidecarMissingError } from './sidecarPath';
-import type { WatchSnapshot } from './types';
 
 const execFileAsync = promisify(execFile);
 

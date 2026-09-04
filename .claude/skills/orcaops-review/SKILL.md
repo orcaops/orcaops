@@ -1,9 +1,9 @@
 ---
 name: "Orcaops: review feedback loop (PR review collaboration)"
-description: "Work reviewer feedback on a PR under review: pull the anchored transcript, reply to every thread you act on, do the work as checkpoints, push, then watch for the next human pass with the bounded poll. Use when the user says \"address the review feedback\", \"check for review comments\", \"wait for the reviewer\", or after pushing changes on a PR that has an orcaops review."
+description: "Handle human feedback on a cloud PR review: check comments, reply to reviewer threads, push fixes, or wait for the reviewer. Use for \"address the review feedback on my PR\"."
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "1b6de7a92c1d"
+  contentHash: "0cb369da373b"
 tags: ["orcaops", "capture"]
 ---
 

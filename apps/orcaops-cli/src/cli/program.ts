@@ -200,7 +200,7 @@ function addCaptureInputOptions(cmd: Command): Command {
     .option(
       '--invoked-by-agent <id>',
       'Attribute this capture to the invoking coding agent ' +
-        '(claude-code|cursor|codex|opencode|aider|github-copilot|other); ' +
+        '(claude-code|cursor|codex|opencode|aider|github-copilot|antigravity-cli|other); ' +
         'also via ORCAOPS_INVOKED_BY_AGENT, else auto-detected from the environment'
     );
 }
@@ -570,11 +570,21 @@ export function buildProgram(options: BuildProgramOptions): Command {
         '(TTY-only; lists the exact files before writing; --yes is refused by design)'
     )
     .option('--agents <list>', 'Comma-separated subset of user-hook-capable agents')
+    .option(
+      '--representation <surface>',
+      'Codex only: force hooks-json or config-toml instead of the resolved file'
+    )
     .option('--json', 'Machine-readable output')
     .option('--yes', 'Refused — the consent prompt cannot be skipped')
     .option('--dry-run', 'Preview the per-file plan without writing')
-    .action((opts: { agents?: string; json?: boolean; yes?: boolean; dryRun?: boolean }) =>
-      sessionHooksInstallAction(opts)
+    .action(
+      (opts: {
+        agents?: string;
+        representation?: string;
+        json?: boolean;
+        yes?: boolean;
+        dryRun?: boolean;
+      }) => sessionHooksInstallAction(opts)
     );
   sessionHooks
     .command('uninstall')
@@ -904,7 +914,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .option(
       '--invoked-by-agent <id>',
       'Attribute this seed run to the invoking coding agent ' +
-        '(claude-code|cursor|codex|opencode|aider|github-copilot|other); ' +
+        '(claude-code|cursor|codex|opencode|aider|github-copilot|antigravity-cli|other); ' +
         'recorded on the job ledger — seeded artifacts keep agent "other"'
     )
     .option('--json', 'Emit JSON')
@@ -1214,7 +1224,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .option('--branch-wide', 'Combine every captured artifact in the branch PR range')
     .option('--base <ref>', 'Base ref for --branch-wide (defaults to the repository default)')
     .option('--primary-artifact <id>', 'Title source override for --branch-wide')
-    .option('--out <file>', 'Write the rendered digest to this file in addition to stdout')
+    .option('--out <file>', 'Write the rendered digest to this file and print a confirmation')
     .option('--format <fmt>', 'Output format: md (default) or json', 'md')
     .option('--json', 'Shorthand for --format json')
     .action(

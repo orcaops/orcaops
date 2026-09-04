@@ -35,7 +35,7 @@
   "dependencies": {
     "@orcaops/diff-fingerprint": "0.0.8",
     "@orcaops/evaluator-protocol": "workspace:*",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "13.0.3",
     "yaml": "^2.8.2",
     "zod": "^4.0.17"
   },

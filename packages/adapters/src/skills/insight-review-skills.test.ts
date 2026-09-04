@@ -15,34 +15,20 @@ const bodyOf = (skill: { body: string | ((p: string) => string) }, prefix = 'orc
   typeof skill.body === 'function' ? skill.body(prefix) : skill.body;
 
 describe('orcaops-recap (standup / changelog / journal formats)', () => {
-  it('is a default-on insight skill with complete description triggers', () => {
+  it('is a default-on insight skill with distinct format cues', () => {
     expect(orcaopsRecapSkill.group).toBe('insight');
     expect(orcaopsRecapSkill.defaultEnabled).toBe(true);
-    expect(orcaopsRecapSkill.description).toMatch(/what did I do yesterday \/ this week/);
-    expect(orcaopsRecapSkill.description).toContain('changelog since v1.2');
-    expect(orcaopsRecapSkill.description).toContain('journal today');
+    expect(orcaopsRecapSkill.description).toContain('time window or git range');
   });
 
-  it('absorbs ALL merged trigger phrases verbatim in the selection description', () => {
+  it('names each recap format in the selection description', () => {
     const d = orcaopsRecapSkill.description;
-    // standup's
     expect(d).toMatch(/standup/);
-    expect(d).toMatch(/what did I do yesterday \/ this week/);
-    expect(d).toMatch(/progress report/);
-    // changelog's
-    expect(d).toContain('changelog since v1.2');
-    expect(d).toContain('what shipped between these tags?');
-    expect(d).toContain('draft the release notes');
-    // journal's
-    expect(d).toContain('journal today');
-    expect(d).toContain('update my dev log');
-    expect(d).toContain('append to NOTES.md what happened this week');
+    expect(d).toMatch(/changelog/);
+    expect(d).toMatch(/journal/);
   });
 
-  it('keeps the skip-fors both ways (resume / status / digest)', () => {
-    expect(orcaopsRecapSkill.description).toMatch(/resume skill/);
-    expect(orcaopsRecapSkill.description).toContain('orcaops status --json');
-    expect(orcaopsRecapSkill.description).toMatch(/digest skill/);
+  it('keeps detailed routing in the body', () => {
     const body = bodyOf(orcaopsRecapSkill);
     expect(body).toContain('`orcaops-resume`');
     expect(body).toContain('orcaops status --json');
@@ -61,6 +47,9 @@ describe('orcaops-recap (standup / changelog / journal formats)', () => {
     expect(body).toContain('**Shipped**');
     expect(body).toContain('**In flight**');
     expect(body).toContain('**Loose ends**');
+    expect(body).toContain("Compute the user's requested local calendar window first");
+    expect(body).toContain('convert its\n   start and end to explicit UTC instants');
+    expect(body).not.toContain('Compute the window as **UTC dates**');
   });
 
   it('changelog format: wraps list --between and MANDATES the unmatched_candidates disclosure', () => {
@@ -90,15 +79,13 @@ describe('orcaops-recap (standup / changelog / journal formats)', () => {
 });
 
 describe('orcaops-adversarial-review', () => {
-  it('is a default-on review skill with complete description triggers', () => {
+  it('is a default-on review skill with a red-team cue', () => {
     expect(orcaopsAdversarialReviewSkill.group).toBe('review');
     expect(orcaopsAdversarialReviewSkill.defaultEnabled).toBe(true);
-    expect(orcaopsAdversarialReviewSkill.description).toMatch(/red-team this/);
+    expect(orcaopsAdversarialReviewSkill.description).toMatch(/red-team/i);
   });
 
-  it('description + body pin the trigger phrases and skip conditions', () => {
-    expect(orcaopsAdversarialReviewSkill.description).toMatch(/red-team/);
-    expect(orcaopsAdversarialReviewSkill.description).toMatch(/poke holes/);
+  it('body pins the trigger phrases and skip conditions', () => {
     const body = bodyOf(orcaopsAdversarialReviewSkill);
     expect(body).toContain('"adversarial review"');
     expect(body).toContain('"verify the done criteria"');
@@ -115,7 +102,7 @@ describe('orcaops-adversarial-review', () => {
     expect(body).toContain('**REFUTED**');
     expect(body).toMatch(/Attack each `uncertainty\[\]` entry/);
     expect(body).toMatch(/Audit `criterion_lineage` for goalpost moves/);
-    expect(body).toMatch(/Check non-goal violations/);
+    expect(body).toMatch(/Investigate possible non-goal violations/);
     expect(body).toContain('orcaops show <artifact_id> --json');
   });
 
@@ -144,6 +131,14 @@ describe('orcaops-adversarial-review', () => {
     expect(body).toMatch(/DO flag silent divergence/);
     expect(body).toMatch(/Criteria-checked/);
     expect(body).toMatch(/Depth scales with the ask/);
+  });
+
+  it('requires evidence before calling a non-goal violation and offers valid remediation', () => {
+    const body = bodyOf(orcaopsAdversarialReviewSkill);
+    expect(body).toContain('Touching a\n   related file is a reason to inspect the actual change');
+    expect(body).toContain('Never claim a\ncompleted step again');
+    expect(body).toContain('summarized artifact, capture remediation in a follow-up artifact');
+    expect(body).not.toContain('REFUTED criterion → reopen the work');
   });
 
   it('cross-refs resolve under a custom prefix', () => {

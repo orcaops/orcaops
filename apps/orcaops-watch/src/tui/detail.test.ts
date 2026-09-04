@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import type { WatchCheckpoint, WatchTask, WatchThread } from '@orcaops/watch-data/ui';
+
 import {
   buildDetail,
   buildTaskDetail,
@@ -9,7 +11,6 @@ import {
   wrapDetailText,
 } from './detail';
 import { displayLen } from './layout';
-import type { WatchCheckpoint, WatchTask, WatchThread } from '../data/types';
 
 function checkpoint(overrides: Partial<WatchCheckpoint> = {}): WatchCheckpoint {
   return {

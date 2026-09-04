@@ -55,10 +55,10 @@ review material for a human, not a merge verdict.
 
 ## Getting started
 
-You need Node.js 22 or newer on macOS or Linux (Windows via WSL2), and a git
-repository with at least one commit. The CLI itself is Node-only; one command
-needs more: `orcaops watch`, the Task Review terminal UI, runs under
-[Bun](https://bun.sh) — install Bun only if you want it.
+You need Node.js 22.14 or newer on macOS or Linux (Windows via WSL2), and a git
+repository with at least one commit. `orcaops watch`, the Task Review terminal
+UI, installs with the CLI as a compiled companion for your platform; nothing
+else is required.
 
 ```bash
 npm i -g @orcaops/cli
@@ -67,13 +67,6 @@ orcaops --version
 # from the repository root
 orcaops init
 ```
-
-> [!NOTE]
-> Orcaops stores its task records in SQLite, whose native module is fetched by
-> `better-sqlite3`'s install script. If your npm blocks install scripts (an
-> `allow-scripts` policy or `--ignore-scripts`), the install "succeeds" but the
-> first real command fails with a missing-binding error — reinstall with
-> `npm install -g --allow-scripts=better-sqlite3 @orcaops/cli`.
 
 [orcaops.ai](https://orcaops.ai) is the project site and where accounts live.
 npm is the only place the CLI is published; the site points at the command

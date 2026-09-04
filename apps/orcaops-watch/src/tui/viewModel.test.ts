@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import type { AgentState, WatchSnapshot, WatchThread } from '@orcaops/watch-data/ui';
+
 import {
   navOrder,
   navRows,
@@ -8,7 +10,6 @@ import {
   resolveRailSelection,
   statusCounts,
 } from './viewModel';
-import type { AgentState, WatchSnapshot, WatchThread } from '../data/types';
 
 function thread(id: string, state: AgentState, lastWriteMs = 1000): WatchThread {
   return {

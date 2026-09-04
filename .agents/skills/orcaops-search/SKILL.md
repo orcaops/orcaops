@@ -1,9 +1,9 @@
 ---
 name: "Orcaops: search captured artifacts"
-description: "FTS5 search over plan / checkpoint / summary content across all captured artifacts. Use when the user asks \"did we already work on X?\", \"search prior artifacts for Y\", \"have I touched Z before?\", \"have we worked on X before in ANY project?\", or you need historical context before suggesting an approach."
+description: "Search captured plans, checkpoints, and summaries. Use for \"have we worked on X before?\", \"find earlier work about X\", or \"what did we decide last time?\""
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "659cf320561b"
+  contentHash: "e15d250d585c"
 ---
 
 # When to use
@@ -27,7 +27,7 @@ The user typically gives you the query. If not, pick one from context:
 ```bash
 orcaops search "rate limit"             # ranked across all branches
 orcaops search redis --branch feat/x    # restrict to one branch
-orcaops search redis --type checkpoint  # plan | checkpoint | summary | evaluator
+orcaops search redis --type checkpoint  # restrict to one indexed kind; see --help
 orcaops search redis --limit 5          # cap result count (default 25)
 orcaops search redis --json             # machine-readable
 ```

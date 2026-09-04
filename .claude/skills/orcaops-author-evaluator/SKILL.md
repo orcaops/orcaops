@@ -1,10 +1,10 @@
 ---
 name: "Orcaops: author an evaluator"
-description: "Author a new orcaops evaluator — command-engine (deterministic) or LLM-engine — for this repo or a distributable pack: \"write an evaluator that blocks X\", \"add a check for Y at checkpoint close\", \"create an evaluator pack\". Walks the spec, the engine choice, phase and severity semantics, the context an LLM evaluator declares, the verdict sentinel, and the SDK + CLI test loop. Stops at dev registration — it never grants durable trust and never enables an evaluator. Not for running or debugging evaluators that already exist."
+description: "Create and test an Orcaops evaluator. Use for \"write an evaluator that blocks X\" or \"add a check for Y at checkpoint close\"."
 disable-model-invocation: true
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "1dbce7fa6626"
+  contentHash: "ed4f11ed4b60"
 tags: ["orcaops", "authoring"]
 ---
 
@@ -251,9 +251,10 @@ under test. Never hand-roll one.
 
   **It does not reproduce the production environment.** `runFixture()`
   inherits your ambient env; production builds the subprocess env from an
-  ALLOWLIST that starts EMPTY. So an engine missing
-  `env.inherit: [PATH]` passes every SDK test and then dies with
-  `spawn node ENOENT` for real. Only the CLI loop below catches it.
+  ALLOWLIST that starts EMPTY. The shipped command evaluators use
+  `env.inherit: [PATH, HOME, NODE_PATH]`; `PATH` is the minimum needed to
+  launch Node. An engine that omits it can pass every SDK test and then die
+  with `spawn node ENOENT` for real. Only the CLI loop below catches it.
 - LLM engine: `runLlmFixture()` assembles the prompt exactly as the
   runner would and parses a response you supply, calling no provider.
   Assert on the context block for what the model would have seen —

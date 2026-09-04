@@ -3,7 +3,7 @@ name: "orcaops:digest"
 description: "Render a reviewer-facing digest for one artifact or a whole branch."
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "a5119c43954a"
+  contentHash: "e2527ca8dad3"
 tags: ["orcaops", "read-only"]
 ---
 
@@ -16,7 +16,7 @@ orcaops digest --branch feat/x          # latest on another branch
 orcaops digest --artifact <id>          # one specific artifact
 orcaops digest --branch-wide            # all captured work in the current PR range
 orcaops digest --branch-wide --base origin/main
-orcaops digest --out PR-DESCRIPTION.md  # write to file in addition to stdout
+orcaops digest --out PR-DESCRIPTION.md  # write to file; stdout confirms the path
 orcaops digest --json                   # machine-readable
 ```
 

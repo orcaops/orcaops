@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 
-import type { AgentState } from '../../data/types';
+import type { AgentState } from '@orcaops/watch-data/ui';
+
 import { useCockpitTheme } from '../ThemeProvider';
 import { progressBar } from '../layout';
 import { SPACE, UI_GLYPH } from '../theme';

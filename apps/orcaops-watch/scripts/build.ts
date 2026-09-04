@@ -3,6 +3,7 @@
 // configured build outputs cache both runtime entry points.
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(import.meta.dir, '..');
 const dist = path.join(root, 'dist');
@@ -16,7 +17,7 @@ const UI_EXTERNAL = ['@opentui/core', '@opentui/react', 'react', ...PROPRIETARY]
 const SIDECAR_EXTERNAL = ['better-sqlite3', '@napi-rs/keyring', ...PROPRIETARY];
 
 const ui = await Bun.build({
-  entrypoints: [path.join(root, 'src', 'main.tsx')],
+  entrypoints: [path.join(root, 'src', 'entry.ts')],
   outdir: dist,
   target: 'bun',
   format: 'esm',
@@ -35,11 +36,12 @@ if (!ui.success) {
 chmodSync(path.join(dist, 'main.js'), 0o755);
 console.log('built dist/main.js');
 
-// target=node so the native better-sqlite3 addon works. The unpublished
-// @orcaops/* workspace packages are INLINED: with no registry identity, a
-// published watch tarball could never resolve them at runtime.
+// The sidecar is @orcaops/watch-data's built entry, bundled here for the dev
+// and test paths (the CLI ships its own copy). target=node so the native
+// better-sqlite3 addon works; the @orcaops/* workspace packages are INLINED
+// because nothing installs them beside dist/.
 const sidecar = await Bun.build({
-  entrypoints: [path.join(root, 'src', 'data', 'sidecar.ts')],
+  entrypoints: [fileURLToPath(import.meta.resolve('@orcaops/watch-data/sidecar'))],
   outdir: dist,
   target: 'node',
   format: 'esm',

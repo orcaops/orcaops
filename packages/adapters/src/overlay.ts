@@ -125,22 +125,21 @@ export const AGENT_OVERLAYS: Partial<Record<ToolId, AgentOverlay>> = {
     subagentOrchestration: 'none',
     // Codex hooks — live-validated against codex-cli 0.146-0.147: Codex
     // loads `$CODEX_HOME/hooks.json` AND the `hooks` tables in config.toml,
-    // and hooks are on by default since 0.124 (no feature gate). config.toml
-    // is the surface here because it is the one validated end to end and
-    // already carries every existing registration. Plain-text stdout is
-    // REJECTED: injection requires the hookSpecificOutput JSON envelope
-    // (payload 'codex-json'; the hook command emits it). There is no project
-    // settings surface: `machine-config` keeps codex session-hook capable
-    // while the settings-file planner skips it — the only registration is
-    // the config.toml snippet/managed flow in `orcaops session-hooks
-    // install`.
+    // and hooks are on by default since 0.124 (no feature gate). Plain-text
+    // stdout is REJECTED: injection requires the hookSpecificOutput JSON
+    // envelope (payload 'codex-json'; the hook command emits it).
+    //
+    // `machine-config` keeps codex session-hook capable with NO project hook
+    // file: there is no `.codex/hooks.json` surface, so the project settings
+    // planner skips the row entirely. Registration is user-level only —
+    // `hooks.json` when it is the resolved representation, otherwise the
+    // bespoke config.toml snippet/managed flow in session-hooks-user.ts.
     sessionHooks: {
       kind: 'machine-config',
       path: 'config.toml',
       payload: 'codex-json',
-      // NO userFile: machine registration is the bespoke config.toml
-      // snippet/managed flow in session-hooks-user.ts, not the
-      // settings-json userFile machinery.
+      matcher: 'startup|resume',
+      userFile: 'hooks.json',
     },
   },
   cursor: {

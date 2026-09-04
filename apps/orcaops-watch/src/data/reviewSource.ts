@@ -31,9 +31,9 @@ import {
   STORY_REVIEW_MODEL_FILE,
   type StoryReviewModel,
 } from '@orcaops/review-engine';
+import { parseSidecarSchemaError } from '@orcaops/watch-data/ui';
 
 import { reviewFloorLockKey, reviewLocksDir, withReviewLock } from './reviewLock';
-import { parseSidecarSchemaError } from './sidecarError';
 import { resolveSidecar, sidecarMissingError } from './sidecarPath';
 import { readWorktreeProbe } from './staleness';
 

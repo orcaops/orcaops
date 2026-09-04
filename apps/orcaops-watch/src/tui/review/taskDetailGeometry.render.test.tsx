@@ -14,7 +14,8 @@ import { createRoot } from '@opentui/react';
 import { describe, expect, test } from 'bun:test';
 import { createRef } from 'react';
 
-import type { WatchTask, WatchThread } from '../../data/types';
+import type { WatchTask, WatchThread } from '@orcaops/watch-data/ui';
+
 import { ThemeProvider } from '../ThemeProvider';
 import { TaskDetailPane } from '../components/TaskDetailPane';
 import { buildTaskDetail, taskMemberRefLine } from '../detail';

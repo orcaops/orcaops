@@ -6,9 +6,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   canonicalSessionHookCommand,
+  isSemanticallyEmpty,
+  type JsonObject,
   reconcileDocument,
   type SettingsSpec,
   settingsSpecs,
+  userJsonSpecs,
 } from './session-hooks.js';
 
 interface CommandResult {
@@ -108,5 +111,89 @@ describe('reconcileDocument — keys orcaops does not own', () => {
     >;
     expect(reconcileDocument(root, spec, null)).toBe('ok');
     expect((root.hooks as Record<string, unknown>).PostToolUse).toEqual([mine]);
+  });
+});
+
+describe('codex hooks.json spec', () => {
+  const codexSpec = (): SettingsSpec => {
+    const spec = userJsonSpecs().find((s) => s.agent === 'codex');
+    if (!spec) throw new Error('codex user json spec missing');
+    return spec;
+  };
+
+  const notify = (name: string): JsonObject => ({
+    hooks: [{ type: 'command', command: `/Applications/Superset.app/${name}/notify.sh` }],
+  });
+
+  /** The shape Superset's writer leaves behind in ~/.codex/hooks.json. */
+  const supersetDocument = (): JsonObject => ({
+    hooks: {
+      SessionStart: [notify('session-start')],
+      UserPromptSubmit: [notify('prompt')],
+      Stop: [notify('stop')],
+    },
+  });
+
+  it('is a grouped SessionStart group with a matcher and no timeout', () => {
+    const spec = codexSpec();
+    expect(spec.schema).toBe('grouped');
+    expect(spec.eventKey).toBe('SessionStart');
+    expect(spec.seed).toEqual({});
+    expect(spec.placement).toBe('prepend');
+    expect(spec.desired).toEqual({
+      matcher: 'startup|resume',
+      hooks: [{ type: 'command', command: canonicalSessionHookCommand('codex') }],
+    });
+  });
+
+  it('is offered to the user planner but never to the project planner', () => {
+    expect(userJsonSpecs().map((s) => s.agent)).toContain('codex');
+    expect(settingsSpecs().map((s) => s.agent)).not.toContain('codex');
+  });
+
+  it('puts our group first in SessionStart and leaves the other events alone', () => {
+    const spec = codexSpec();
+    const root = supersetDocument();
+    expect(reconcileDocument(root, spec, spec.desired)).toBe('ok');
+    const hooks = root.hooks as JsonObject;
+    expect(hooks.SessionStart).toEqual([spec.desired, notify('session-start')]);
+    expect(hooks.UserPromptSubmit).toEqual([notify('prompt')]);
+    expect(hooks.Stop).toEqual([notify('stop')]);
+  });
+
+  it('changes nothing on a second reconcile', () => {
+    const spec = codexSpec();
+    const root = supersetDocument();
+    reconcileDocument(root, spec, spec.desired);
+    const once = structuredClone(root);
+    expect(reconcileDocument(root, spec, spec.desired)).toBe('ok');
+    expect(root).toEqual(once);
+    expect((root.hooks as JsonObject).SessionStart).toEqual([
+      spec.desired,
+      notify('session-start'),
+    ]);
+  });
+
+  it('leaves our group where a Superset rewrite moved it instead of duplicating it', () => {
+    const spec = codexSpec();
+    const root = supersetDocument();
+    (root.hooks as JsonObject).SessionStart = [
+      notify('session-start'),
+      structuredClone(spec.desired),
+    ];
+    expect(reconcileDocument(root, spec, spec.desired)).toBe('ok');
+    expect((root.hooks as JsonObject).SessionStart).toEqual([
+      notify('session-start'),
+      spec.desired,
+    ]);
+  });
+
+  it('strips only our command and leaves their file intact', () => {
+    const spec = codexSpec();
+    const root = supersetDocument();
+    reconcileDocument(root, spec, spec.desired);
+    expect(reconcileDocument(root, spec, null)).toBe('ok');
+    expect(root).toEqual(supersetDocument());
+    expect(isSemanticallyEmpty(root, spec)).toBe(false);
   });
 });

@@ -265,24 +265,21 @@ describe('ArtifactLock', () => {
       // macOS derives st_birthtime as min(birthtime, mtime): a renewal's
       // whole-millisecond utimes could drag a sub-millisecond birthtime DOWN
       // and mutate the identity the lease compares. Acquire normalizes first;
-      // this pins the postcondition (whole-ms birth) and that an immediate
-      // flurry of renewals — the same-millisecond window that used to lose
-      // the lease — keeps ownership.
+      // this pins the postcondition that leaves birthtime unmovable, and that
+      // an immediate flurry of renewals — the same-millisecond window that
+      // used to lose the lease — keeps ownership.
       const lock = new ArtifactLock({ locksDir, containmentRoot: tmpRoot });
       await lock.withLock('stability', async (lease) => {
         const lockPath = path.join(locksDir, 'stability.lock');
         const before = await stat(lockPath);
         if (process.platform === 'darwin') {
-          // The APFS-specific postcondition is a disjunction, not a floor:
-          // when the normalizing utimes lands in the creation millisecond it
-          // floors the birthtime, but under load it can land a millisecond
-          // later — APFS only lowers birthtime to an EARLIER mtime, so the
-          // fraction survives. Either way the hazard is gone: a fractional
-          // birthtime here implies mtime is already past it, and every
-          // renewal is later still. (Linux birthtime is immutable, so the
-          // hazard never existed there.)
-          const wholeMs = before.birthtimeMs === Math.floor(before.birthtimeMs);
-          expect(wholeMs || before.mtimeMs > before.birthtimeMs).toBe(true);
+          // The postcondition is a floor: birthtime at or below mtime, which
+          // is what stops a later renewal lowering it. It is NOT necessarily
+          // a whole millisecond — utimes round-trips a millisecond Date
+          // through a nanosecond timespec, so a normalized stamp can read
+          // back as x.999 and land exactly equal to mtime. (Linux birthtime
+          // is immutable, so the hazard never existed there.)
+          expect(before.birthtimeMs).toBeLessThanOrEqual(before.mtimeMs);
         }
         for (let i = 0; i < 25; i++) {
           await lease.assert();

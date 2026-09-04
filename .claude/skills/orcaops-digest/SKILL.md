@@ -1,9 +1,9 @@
 ---
 name: "Orcaops: render digest"
-description: "Render a reviewer-facing digest for one artifact or a whole branch. Use branch-wide mode for PR summaries and PR bodies; use the default mode for an explicitly named artifact or thread."
+description: "Render a reviewer-facing summary or PR body. Use for \"show me the digest\", \"draft the PR description\", or \"write the PR body\"."
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "4e210d9b7218"
+  contentHash: "f2d42c9191d2"
 tags: ["orcaops", "read"]
 ---
 
@@ -32,7 +32,7 @@ orcaops digest --artifact <id>          # a specific artifact
 orcaops digest --branch-wide            # all captured work in the current PR range
 orcaops digest --branch-wide --base origin/main
 orcaops digest --branch-wide --branch feat/x --primary-artifact <id>
-orcaops digest --out PR-DESCRIPTION.md  # write to file in addition to stdout
+orcaops digest --out PR-DESCRIPTION.md  # write to file; stdout confirms the path
 orcaops digest --json                   # machine-readable
 ```
 
@@ -64,24 +64,26 @@ reshape the branch-wide digest yourself:
 1. `orcaops digest --branch-wide --json` → read `data` (structured) and
    `markdown` (rendered).
 2. Compose the PR body from it:
-   - **Title**: use `data.title`. Its source artifact and selection rule are
-     recorded. Use `--primary-artifact` when the default is not the branch's
-     main outcome.
-   - **Summary**: the outcome headline + the "why" section, tightened
-     to 2-4 sentences.
-   - **What changed**: one bullet per checkpoint (its summary line);
-     fold trivial checkpoints together.
-   - **Decisions**: only the load-bearing ones reviewers must know
-     (with the rejected alternative when it clarifies).
-   - **Open items / follow-ups**: carry them verbatim — hiding known
-     gaps from a PR description is the failure mode.
+   - **Title**: use `data.title.text` when `data.title` is non-null.
+     Otherwise write a title from the branch outcome. Use
+     `--primary-artifact` when the default is not the branch's main outcome.
+   - **Summary**: tighten `data.outcome`, or the relevant entries in
+     `data.outcomes`, to 2-4 sentences.
+   - **What changed**: one bullet per entry in `data.changes`; fold trivial
+     entries together.
+   - **Decisions**: select only the load-bearing entries from
+     `data.decisions`.
+   - **Open items / follow-ups**: carry `data.open_items` forward — hiding
+     known gaps from a PR description is the failure mode.
+   - **Tests**: use `data.tests` when verification belongs in the PR body.
    - **Imported provenance**: when present, keep the synthesized-history
      disclosure and commit-author attribution near the top.
    - Keep evaluator "release checks" only when something FAILED or was
      policy-excepted; green checks are noise in a PR body.
 3. Write the reshaped body where the user wants it (stdout, a file via
-   your own write, or `gh pr create --body-file -`). `--out` writes
-   the FULL digest, not the reshaped body — reshape first, then write.
+   your own write, or `gh pr create --body-file -`). `--out` writes the
+   full raw digest to the file and prints only a confirmation on stdout; it
+   does not create the reshaped PR body.
 
 # Errors
 

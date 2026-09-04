@@ -27,6 +27,7 @@ import {
   UNCERTAINTY_STATE,
   uncertaintyState,
 } from '@orcaops/review-core';
+import { ReviewCacheBehindError } from '@orcaops/watch-data/ui';
 
 import { CacheUpgradeDialog } from './CacheUpgradeDialog';
 import { executableHelpEntries, type ExecutableHelpEntry, HelpDialog } from './HelpDialog';
@@ -165,7 +166,6 @@ import {
   type ReviewData,
   type ReviewGenerations,
 } from '../../data/reviewSource';
-import { ReviewCacheBehindError } from '../../data/sidecarError';
 import {
   computeFloorStaleness,
   readWorktreeProbe,

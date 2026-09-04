@@ -11,9 +11,25 @@ packages:
 # advisory exceptions live in config/dependency-policy.json and are applied by
 # scripts/run-production-audit.mjs, which needs the unfiltered report.
 minimumReleaseAge: 10080
+# Our own scope is exempt: the delay guards against a compromised third-party
+# release, and a package we publish ourselves gains nothing from a week-long
+# hold that only blocks workspace development.
+minimumReleaseAgeExclude:
+  - '@orcaops/*'
+
+# Every OpenTUI platform library, not just the host's: the Watch UI is
+# cross-compiled into one executable per platform, and Bun embeds the target's
+# libopentui at compile time from the package installed here. Bun binds the
+# lookup to process.platform/arch at compile time, so a missing package fails
+# the compile, never the runtime. glibc only: OpenTUI 0.1.89 ships no musl build.
+supportedArchitectures:
+  os: [darwin, linux]
+  cpu: [x64, arm64]
+  libc: [glibc]
 
 onlyBuiltDependencies:
-  - better-sqlite3
+  # better-sqlite3 is gone from here deliberately: 13.x is N-API and ships its
+  # prebuilds in its own tarball, so it has no install script to allow.
   - esbuild
 
 overrides:

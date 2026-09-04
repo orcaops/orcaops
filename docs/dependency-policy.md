@@ -26,12 +26,21 @@ decision.
 
 - `typescript` is pinned across the monorepo by `.syncpackrc.json`. Move that
   coordinated pin rather than updating one workspace independently.
+- `better-sqlite3` is pinned to an exact version across the monorepo by
+  `.syncpackrc.json`, and the CLI's release manifest carries the same literal so
+  the native addon the tests exercise is the one an install fetches. Move the
+  coordinated pin, then re-run the install smoke before shipping.
 - `@opentui/core` and `@opentui/react` move together. Their updates require the
   Watch render, PTY, and performance checks because they affect the interactive
   review surface.
 - `conventional-commits-parser` is pinned for seed-history stability. Review
   upgrades against the canonical clustering fixtures and deterministic-id
   checks before moving it.
+- Bun is pinned by `.bun-version` (not an npm dependency, so it has no policy
+  entry or Dependabot ignore). Every `setup-bun` step reads that file, and the
+  Watch UI executables embed that exact runtime, so a Bun bump is a release
+  change: run the compile, the Bun-less install smoke, and `codesign --verify`
+  on the darwin executables before moving it.
 
 For an OpenTUI update, run:
 
@@ -40,6 +49,13 @@ pnpm --filter @orcaops/watch test:render
 pnpm --filter @orcaops/watch test:pty
 pnpm --filter @orcaops/watch perf:review-cap
 pnpm --filter @orcaops/watch perf:review
+```
+
+For a Bun update, run:
+
+```bash
+pnpm compile
+codesign --verify --strict --verbose=2 apps/orcaops-watch/build/compiled/@orcaops/watch-darwin-arm64/bin/orcaops-watch-ui
 ```
 
 When a package no longer needs manual management, remove both its policy entry
@@ -55,6 +71,12 @@ Dependabot Alerts and the named policy owner are therefore required controls.
 younger than seven days from entering a newly resolved lockfile. It applies to
 transitive dependencies, but it is a delay rather than malware detection and it
 does not re-resolve versions already present in the lockfile.
+
+The `@orcaops/*` scope is excluded (`minimumReleaseAgeExclude`): the delay
+guards against a compromised third-party release, and a package we publish
+ourselves gains nothing from a week-long hold that only blocks workspace
+development. The exclusion is scope-wide and declared, not a bypass; the
+emergency bypass below still covers every other package.
 
 For pnpm 10.18.2, an emergency security-fix bypass is:
 

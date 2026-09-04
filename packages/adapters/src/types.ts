@@ -179,11 +179,14 @@ export interface SessionHooksSurface {
   /** Session-start source matcher, for agents whose hook schema supports one. */
   matcher?: string;
   /**
-   * Settings file under the agent's USER config home (e.g. `settings.json`
-   * under `~/.claude`) for MACHINE-level hook registration — the consent-gated
-   * `orcaops session-hooks install` surface. Absent → the agent's hook
-   * surface is project-only. The home dir itself is resolved by the CLI
-   * (env-overridable), never here.
+   * The agent's user-level JSON hook file (e.g. `settings.json` under
+   * `~/.claude`, `hooks.json` under `~/.codex`) for MACHINE-level
+   * registration — the consent-gated `orcaops session-hooks install`
+   * surface. Absent → the agent's hook surface is project-only. The home dir
+   * itself is resolved by the CLI (env-overridable), never here.
+   *
+   * On a `machine-config` row only the USER-level planner honours this; the
+   * project settings planner still writes nothing for that agent.
    */
   userFile?: string;
 }

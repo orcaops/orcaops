@@ -354,7 +354,7 @@ export interface OpenEvaluatorContext {
   /**
    * Validate that every entry in `policy_exceptions[]` names a real
    * `fires_at: checkpoint-open` evaluator that opts into the inline
-   * exception flow via `acknowledge_policy_exception`. Throws a
+   * exception flow via `resolution.policy_exception.enabled`. Throws a
    * `CheckpointValidationError` (mapped to INVALID_INPUT at the CLI
    * boundary) on bad input. Storage calls this AFTER the
    * idempotency lookup so a bad opt-in is recorded as

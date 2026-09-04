@@ -1,6 +1,7 @@
-import { attentionRows, sortedProjects } from '../core/presenters';
+import { attentionRows, sortedProjects } from '@orcaops/watch-data/ui';
+import type { WatchProject, WatchSnapshot, WatchTask, WatchThread } from '@orcaops/watch-data/ui';
+
 import { deriveTasks } from '../core/tasks';
-import type { WatchProject, WatchSnapshot, WatchTask, WatchThread } from '../data/types';
 
 export type StatusFilter = 'all' | 'attention' | 'working' | 'ready' | 'idle';
 

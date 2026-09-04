@@ -26,10 +26,10 @@ jobs:
           cache: 'pnpm'
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: '1.3.14'
+          bun-version-file: '.bun-version'
       - run: pnpm install --frozen-lockfile
       - name: Cache Turbo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .turbo
           key: turbo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
@@ -60,10 +60,10 @@ jobs:
           cache: 'pnpm'
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: '1.3.14'
+          bun-version-file: '.bun-version'
       - run: pnpm install --frozen-lockfile
       - name: Cache Turbo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .turbo
           key: turbo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
@@ -86,10 +86,10 @@ jobs:
           cache: 'pnpm'
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: '1.3.14'
+          bun-version-file: '.bun-version'
       - run: pnpm install --frozen-lockfile
       - name: Cache Turbo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .turbo
           key: turbo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
@@ -107,12 +107,57 @@ jobs:
         if: always()
         run: pnpm --filter @orcaops/watch perf:review-cap
 
+  # Every release artifact from one host: only a mac can re-sign and verify the
+  # darwin executables, and Bun cross-compiles the linux targets from there.
+  watch-compile:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: corepack enable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: '.bun-version'
+      # Cross-compiling downloads one Bun runtime per target; keep them between runs.
+      - name: Cache Bun downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-targets-${{ hashFiles('.bun-version') }}
+      - run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm build
+      - name: Compile the Watch UI for every platform
+        run: pnpm compile
+      - name: Stage the platform packages
+        run: SKIP_COMPILE=1 pnpm release:watch-platforms
+      - name: Build the CLI tarball
+        run: SKIP_BUILD=1 SKIP_GATE=1 pnpm release:cli
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-artifacts
+          if-no-files-found: error
+          path: |
+            dist-release/
+            build/cli-dist/staging/
+
+  # The release as a user gets it: installed through a registry of the packed
+  # artifacts, on hosts that never heard of Bun, on both Node lines.
   install-smoke:
+    needs: watch-compile
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest ]
+        os: [ ubuntu-latest, macos-15 ]
         node: [ 22, 24 ]
+        include:
+          - os: ubuntu-24.04-arm
+            node: 22
+          - os: macos-15-intel
+            node: 22
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -120,13 +165,11 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: ${{ matrix.node }}
-          cache: 'pnpm'
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          bun-version: '1.3.14'
-      - run: pnpm install --frozen-lockfile
-      - name: Build tarball + verify a clean install
-        run: pnpm install:loop
+          name: release-artifacts
+      - name: Install the release through a local registry and launch Watch
+        run: SKIP_BUILD=1 pnpm install:loop --with-watch --no-bun
 
   audit:
     runs-on: ubuntu-latest
@@ -178,7 +221,7 @@ jobs:
 
   check:
     runs-on: ubuntu-latest
-    needs: [ lint, typecheck, test, install-smoke, audit ]
+    needs: [ lint, typecheck, test, watch-compile, install-smoke, audit ]
     if: always()
     steps:
       - name: Verify all CI legs succeeded
@@ -186,12 +229,13 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           TYPECHECK_RESULT: ${{ needs.typecheck.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          WATCH_COMPILE_RESULT: ${{ needs.watch-compile.result }}
           INSTALL_SMOKE_RESULT: ${{ needs.install-smoke.result }}
           AUDIT_RESULT: ${{ needs.audit.result }}
         run: |
           set -euo pipefail
-          echo "lint=$LINT_RESULT typecheck=$TYPECHECK_RESULT test=$TEST_RESULT install-smoke=$INSTALL_SMOKE_RESULT audit=$AUDIT_RESULT"
-          if [ "$LINT_RESULT" != "success" ] || [ "$TYPECHECK_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ] || [ "$INSTALL_SMOKE_RESULT" != "success" ] || [ "$AUDIT_RESULT" != "success" ]; then
+          echo "lint=$LINT_RESULT typecheck=$TYPECHECK_RESULT test=$TEST_RESULT watch-compile=$WATCH_COMPILE_RESULT install-smoke=$INSTALL_SMOKE_RESULT audit=$AUDIT_RESULT"
+          if [ "$LINT_RESULT" != "success" ] || [ "$TYPECHECK_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ] || [ "$WATCH_COMPILE_RESULT" != "success" ] || [ "$INSTALL_SMOKE_RESULT" != "success" ] || [ "$AUDIT_RESULT" != "success" ]; then
             echo "::error::one or more CI legs failed"
             exit 1
           fi

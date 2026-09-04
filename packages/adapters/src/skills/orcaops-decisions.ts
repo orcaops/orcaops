@@ -10,10 +10,7 @@ export const orcaopsDecisionsSkill: SkillTemplate = {
   id: 'decisions',
   name: 'Orcaops: decision log',
   description:
-    'Recall recorded decisions — "what did we decide about X?", "why did we choose Y?", ' +
-    '"what alternatives lost and why?", or promoting decisions into ADRs. Merges plan-time ' +
-    'decisions, checkpoint decisions, and summary-deferred decisions, each timestamped. Skip ' +
-    'for: file/line provenance (why skill) or full-text recall of arbitrary prose (search skill).',
+    'Recall recorded decisions, rejected alternatives, and their reasons, or turn them into ADRs. Use for "what did we decide about X?", "why did we choose Y over Z?", or "turn these decisions into ADRs".',
   tags: ['orcaops', 'insight'],
   group: 'insight',
   defaultEnabled: false,

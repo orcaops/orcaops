@@ -23,7 +23,7 @@ import { SnapshotEngine } from './engine.js';
 import { FsWatch } from './fs-watch.js';
 import { collectFromScope } from './snapshot.js';
 import type { WatchSnapshot, WatchThread } from './types.js';
-import { makeArchiveFixture, seedArtifact } from '../../tests/support/fixture-archive.js';
+import { makeArchiveFixture, seedArtifact } from '../tests/support/fixture-archive.js';
 
 const ARTX = '01999999-9999-7000-8000-0000000000e0';
 const ARTY = '01999999-9999-7000-8000-0000000000f0';

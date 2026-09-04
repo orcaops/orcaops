@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import { getAgentOverlay } from '@orcaops/adapters';
+import { getAgentOverlay, type SessionHooksSurface } from '@orcaops/adapters';
 import { SUPPORTED_AGENT_IDS, type SupportedAgentId } from '@orcaops/storage';
 
 import {
@@ -43,6 +43,15 @@ export interface CanonicalSessionHookCommandOptions {
   user?: boolean;
 }
 
+/**
+ * Resolving `orcaops` from PATH is load-bearing in a shared hook file, not just
+ * tidy. A host tool that co-owns `~/.codex/hooks.json` reaps the entries it
+ * considers its own by matching their command against its own install path and
+ * notify script, and rewrites that file on every launch. Routing this through a
+ * wrapper script under such a path would have the entry silently deleted;
+ * naming the binary keeps it plainly foreign to them (measured against one
+ * such tool's shipped writer).
+ */
 export function canonicalSessionHookCommand(
   agent: SupportedAgentId,
   opts: CanonicalSessionHookCommandOptions = {}
@@ -109,7 +118,8 @@ function desiredCommand(spec: SettingsSpec): string {
   return hooks[0].command as string;
 }
 
-function isOrcaopsHook(v: unknown, spec: SettingsSpec): boolean {
+/** Is this hook object the exact canonical entry `spec` owns? */
+export function isOrcaopsHook(v: unknown, spec: SettingsSpec): boolean {
   if (!isObject(v) || typeof v.command !== 'string') return false;
   return v.command === desiredCommand(spec);
 }
@@ -172,45 +182,81 @@ export interface SettingsSpec {
   desired: JsonObject;
   /** Fresh-file skeleton (root keys beyond `hooks`). */
   seed: JsonObject;
+  /**
+   * Where a NEW canonical entry lands in its event array; an entry already
+   * present is always kept in place. Default `append`.
+   */
+  placement?: 'append' | 'prepend';
 }
 
+function agentSpec(id: SupportedAgentId, sh: SessionHooksSurface): SettingsSpec {
+  const command = canonicalSessionHookCommand(id);
+  if (id === 'cursor') {
+    return {
+      agent: id,
+      path: sh.path,
+      schema: 'flat',
+      // Cursor's event keys are lowerCamelCase and entries carry no matcher.
+      eventKey: 'sessionStart',
+      desired: { type: 'command', command, timeout: 10 },
+      seed: { version: 1 },
+    };
+  }
+  return {
+    agent: id,
+    path: sh.path,
+    schema: 'grouped',
+    eventKey: 'SessionStart',
+    desired: {
+      ...(sh.matcher ? { matcher: sh.matcher } : {}),
+      hooks: [
+        {
+          type: 'command',
+          command,
+          // Claude Code shows a spinner while a hook runs; keep the budget
+          // tight. Codex's JSON hook shape has no documented timeout key.
+          ...(id === 'claude-code' ? { timeout: 10 } : {}),
+        },
+      ],
+    },
+    // Codex's hooks.json carries no `version` key, unlike Cursor's.
+    seed: {},
+    // Superset rewrites ~/.codex/hooks.json on every app start and agent
+    // launch, re-pushing its own groups to the END of each event. Codex's
+    // hook-trust keys include the group index, so an appended group is
+    // reordered by that rewrite and its trust keys shift; a prepended group
+    // is already where the rewrite leaves it.
+    ...(id === 'codex' ? { placement: 'prepend' as const } : {}),
+  };
+}
+
+/**
+ * Project settings-file specs. Only `settings-json` rows qualify, so codex
+ * (`machine-config`) never reaches the project planner or `projectEntryStatus`.
+ */
 export function settingsSpecs(): SettingsSpec[] {
   const specs: SettingsSpec[] = [];
   for (const id of SUPPORTED_AGENT_IDS) {
     const sh = getAgentOverlay(id)?.sessionHooks;
     if (!sh || sh.kind !== 'settings-json') continue;
-    const command = canonicalSessionHookCommand(id);
-    if (id === 'cursor') {
-      specs.push({
-        agent: id,
-        path: sh.path,
-        schema: 'flat',
-        // Cursor's event keys are lowerCamelCase and entries carry no matcher.
-        eventKey: 'sessionStart',
-        desired: { type: 'command', command, timeout: 10 },
-        seed: { version: 1 },
-      });
-      continue;
-    }
-    specs.push({
-      agent: id,
-      path: sh.path,
-      schema: 'grouped',
-      eventKey: 'SessionStart',
-      desired: {
-        ...(sh.matcher ? { matcher: sh.matcher } : {}),
-        hooks: [
-          {
-            type: 'command',
-            command,
-            // Claude Code shows a spinner while a hook runs; keep the budget
-            // tight. Codex's JSON hook shape has no documented timeout key.
-            ...(id === 'claude-code' ? { timeout: 10 } : {}),
-          },
-        ],
-      },
-      seed: {},
-    });
+    specs.push(agentSpec(id, sh));
+  }
+  return specs;
+}
+
+/**
+ * Specs for every agent with a user-level JSON hook file — the settings-json
+ * agents plus `machine-config` agents that declare a `userFile` (codex's
+ * `~/.codex/hooks.json`). Paths here are still the row's project-relative
+ * `path`; the user planner re-points them at the absolute user file.
+ */
+export function userJsonSpecs(): SettingsSpec[] {
+  const specs: SettingsSpec[] = [];
+  for (const id of SUPPORTED_AGENT_IDS) {
+    const sh = getAgentOverlay(id)?.sessionHooks;
+    if (!sh) continue;
+    if (sh.kind !== 'settings-json' && !(sh.kind === 'machine-config' && sh.userFile)) continue;
+    specs.push(agentSpec(id, sh));
   }
   return specs;
 }
@@ -223,8 +269,9 @@ export function settingsSpecs(): SettingsSpec[] {
  * the orcaops inner entries removed — user hooks are never deleted.
  * An entry already identical to `desired` is kept IN PLACE (position is user
  * data too: a user group appended after ours must not push ours to the end on
- * every reconcile); the canonical entry is appended only when no in-place
- * match survived. Extra ours entries beyond the first match are dropped.
+ * every reconcile); the canonical entry is inserted at `spec.placement`
+ * (default `append`) only when no in-place match survived. Extra ours entries
+ * beyond the first match are dropped.
  * Returns 'invalid' when the existing `hooks` region has an unexpected shape
  * (caller preserves the file untouched).
  */
@@ -265,7 +312,10 @@ export function reconcileDocument(
     else keepInPlace(entry);
     // unmatched all-ours → dropped; the canonical group is appended below
   }
-  if (desired && !matched) kept.push(desired);
+  if (desired && !matched) {
+    if (spec.placement === 'prepend') kept.unshift(desired);
+    else kept.push(desired);
+  }
 
   if (kept.length > 0) hooks[spec.eventKey] = kept;
   else delete hooks[spec.eventKey];

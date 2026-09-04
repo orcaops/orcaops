@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
+import type { AgentState, WatchProject, WatchThread } from '@orcaops/watch-data/ui';
+
 import { deriveTasks, isDefaultBranch, rollupState } from './tasks.js';
-import type { AgentState, WatchProject, WatchThread } from './types.js';
 
 function thread(id: string, branch: string, state: AgentState): WatchThread {
   return {

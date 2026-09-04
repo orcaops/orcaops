@@ -73,8 +73,7 @@ describe('opt-in insight skills', () => {
 
   it('estimate: wraps usage + stats + show and frames ranges, never promises', () => {
     const body = bodyOf(orcaopsEstimateSkill);
-    expect(orcaopsEstimateSkill.description).toContain('`orcaops usage --json` directly');
-    expect(orcaopsEstimateSkill.description).not.toContain('retro skill');
+    expect(orcaopsEstimateSkill.description).toContain('similar captured work');
     expect(body).toContain('orcaops usage --artifact <id> --json');
     expect(body).toContain('orcaops show <id> --json');
     expect(body).toContain('orcaops stats --json');
@@ -95,6 +94,8 @@ describe('opt-in insight skills', () => {
     expect(body).toMatch(/Next time \[concrete situation\], I will \[concrete action\]\./);
     expect(body).toMatch(/Uncited lessons are vibes/);
     expect(body).toMatch(/Candidate evaluators/);
+    expect(body).toContain('one aggregate sample, so it does not prove a');
+    expect(body).not.toContain('Falling rates');
   });
 
   it('bodies resolve under a custom prefix (no residue, no rawrefs)', () => {

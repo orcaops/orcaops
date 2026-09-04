@@ -49,6 +49,38 @@ vi.mock('@clack/prompts', () => ({
   isCancel: (v: unknown) => v === CANCELLED,
 }));
 
+// `codex --version` is the one resolver input a test cannot state as a file.
+// Answering the probe here keeps every case deterministic and spawns nothing;
+// the default (no answer) is what a machine without codex on PATH gives, which
+// keeps the registration on config.toml.
+const codexVersion = vi.hoisted(() => ({ output: null as string | null }));
+
+vi.mock('@orcaops/evaluator-protocol/subprocess', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@orcaops/evaluator-protocol/subprocess')>();
+  return {
+    ...actual,
+    runBoundedSubprocess: async (
+      request: Parameters<typeof actual.runBoundedSubprocess>[0]
+    ): ReturnType<typeof actual.runBoundedSubprocess> => {
+      const [bin, ...args] = request.argv;
+      const probesCodex =
+        (bin === 'codex' || bin.endsWith('/codex')) && args.length === 1 && args[0] === '--version';
+      if (!probesCodex) return actual.runBoundedSubprocess(request);
+      return {
+        exit_code: codexVersion.output === null ? 1 : 0,
+        signal: null,
+        stdout: codexVersion.output ?? '',
+        stderr: '',
+        duration_ms: 0,
+        killed_reason: null,
+        spawn_error: null,
+        hard_killed: false,
+        termination_confirmed: true,
+      };
+    },
+  };
+});
+
 type Mock = ReturnType<typeof vi.fn>;
 
 async function confirmMock(): Promise<Mock> {
@@ -91,6 +123,7 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     (process.stdout as unknown as { isTTY: boolean }).isTTY = true;
     (process.stdin as unknown as { isTTY: boolean }).isTTY = true;
     delete process.env.CI;
+    codexVersion.output = null;
     (await confirmMock()).mockReset();
     (await confirmMock()).mockImplementation(async () => false);
     (await selectMock()).mockReset();
@@ -155,8 +188,8 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     const r = await agent.runRaw(['session-hooks', 'install']);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain(claudeSettings());
-    // Codex is listed via its REAL surface (config.toml — hooks.json is not
-    // read by shipped codex); the chooser (fallback: skip) decides the write.
+    // With no readable codex version, codex is listed on config.toml; the
+    // chooser (fallback: skip) decides the write.
     expect(r.stdout).toContain(path.join(codexHome, 'config.toml'));
 
     const claude = JSON.parse(await readFile(claudeSettings(), 'utf8')) as {
@@ -172,7 +205,7 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     expect(ours).toBeDefined();
     expect(ours!.hooks[0].command).toBe(canonicalSessionHookCommand('claude-code', { user: true }));
 
-    // hooks.json is NEVER written — it is not read by shipped codex-cli.
+    // The config.toml surface never touches the sidecar.
     expect(await exists(codexHooks())).toBe(false);
 
     const record = JSON.parse(await readFile(recordPath(), 'utf8')) as {
@@ -1721,8 +1754,10 @@ describe('orcaops session-hooks (machine-level registration)', () => {
 
   const noteCount = (text: string): number => text.split(CODEX_HOOKS_JSON_NOTE).length - 1;
 
-  it('notes a hooks.json sidecar even when it is not valid JSON', async () => {
-    await writeFile(codexHooks(), '{ not json', 'utf8');
+  it('notes two representations only while both files carry hooks', async () => {
+    // Another tool's sidecar beside our config.toml block is exactly what
+    // makes Codex report loading hooks from both files.
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
     (await confirmMock()).mockResolvedValueOnce(true);
     (await selectMock()).mockResolvedValueOnce('managed');
     const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
@@ -1734,17 +1769,12 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     expect(noteCount(human.stdout)).toBe(1);
     const st = await agent.runRaw(['session-hooks', 'status', '--json']);
     const out = JSON.parse(st.stdout) as {
-      surfaces: Array<{ agent: string; state: string; note?: string }>;
+      surfaces: Array<{ agent: string; path: string; state: string; note?: string }>;
     };
-    expect(out.surfaces.find((row) => row.agent === 'codex')).toMatchObject({
+    expect(out.surfaces.find((row) => row.path === codexConfig())).toMatchObject({
       state: 'installed',
       note: CODEX_HOOKS_JSON_NOTE,
     });
-
-    (await confirmMock()).mockResolvedValueOnce(true);
-    (await selectMock()).mockResolvedValueOnce('managed');
-    const again = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
-    expect(noteCount(again.stdout)).toBe(1);
 
     (await confirmMock()).mockResolvedValueOnce(true);
     (await selectMock()).mockResolvedValueOnce('manual');
@@ -1752,8 +1782,11 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     expect(manual.stdout).toContain('Paste this into');
     expect(noteCount(manual.stdout)).toBe(1);
 
-    const doctor = await agent.runRaw(['doctor', '--json']);
-    expect(doctor.stdout).not.toContain('loading hooks from both');
+    // A sidecar Codex loads no hook from is not a second representation.
+    for (const sidecar of ['{ not json', '{}\n']) {
+      await writeFile(codexHooks(), sidecar, 'utf8');
+      expect(noteCount((await agent.runRaw(['session-hooks', 'status'])).stdout)).toBe(0);
+    }
   });
 
   it('hooks.json bytes and mtime are untouched by install and uninstall', async () => {
@@ -1788,7 +1821,7 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     expect(noteCount((await agent.runRaw(['session-hooks', 'status'])).stdout)).toBe(0);
 
     const otherHome = await mkdtemp(path.join(tmpdir(), 'orcaops-uh-codex-other-'));
-    await writeFile(path.join(otherHome, 'hooks.json'), '{}\n', 'utf8');
+    await writeFile(path.join(otherHome, 'hooks.json'), supersetHooksJson(), 'utf8');
     const other = makeAgent({
       cwd: repo.path,
       env: {
@@ -1825,6 +1858,614 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     expect(status.exitCode).toBe(0);
     expect(noteCount(status.stdout)).toBe(0);
     expect((await stat(codexHooks())).isDirectory()).toBe(true);
+  });
+
+  const SUPPORTED_CODEX_VERSION = 'codex-cli 0.147.0\n';
+  const codexConfig = (): string => path.join(codexHome, 'config.toml');
+  const supersetHooksJson = (): string =>
+    `${JSON.stringify(
+      {
+        hooks: {
+          SessionStart: [
+            { matcher: 'startup', hooks: [{ type: 'command', command: 'superset notify' }] },
+          ],
+          SessionEnd: [{ hooks: [{ type: 'command', command: 'superset end' }] }],
+        },
+      },
+      null,
+      2
+    )}\n`;
+  const fencedCodexBlock = (): string =>
+    `${CODEX_TOML_MARKER_START}\n${codexTomlSnippet()}\n${CODEX_TOML_MARKER_END}\n`;
+  const codexUserCommand = (): string => canonicalSessionHookCommand('codex', { user: true });
+  type CodexHooksJson = {
+    hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
+  };
+  const readCodexHooksJson = async (): Promise<CodexHooksJson> =>
+    JSON.parse(await readFile(codexHooks(), 'utf8')) as CodexHooksJson;
+
+  it('moves the Codex registration into an existing hooks.json and carries the approval', async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+    const oldTrustKey = `${codexConfig()}:session_start:0:0`;
+    const supersetTrustKey = `${codexHooks()}:session_start:0:0`;
+    const supersetEndTrustKey = `${codexHooks()}:session_end:0:0`;
+    await writeFile(
+      codexConfig(),
+      `model = "gpt-5"\n\n${fencedCodexBlock()}\n` +
+        `[hooks.state."${oldTrustKey}"]\ntrusted_hash = "sha256:already-approved"\n\n` +
+        `[hooks.state."${supersetTrustKey}"]\ntrusted_hash = "sha256:superset"\nenabled = true\n\n` +
+        `[hooks.state."${supersetEndTrustKey}"]\ntrusted_hash = "sha256:superset-end"\n`,
+      'utf8'
+    );
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+    expect(install.stdout).toContain(`~ ${codexHooks()}  (codex; will reconcile this entry)`);
+    expect(install.stdout).toContain(
+      `- ${codexConfig()}  (codex; the orcaops block is removed from this file)`
+    );
+
+    const hooks = await readCodexHooksJson();
+    expect(hooks.hooks.SessionStart[0].hooks[0].command).toBe(codexUserCommand());
+    expect(hooks.hooks.SessionStart[1].hooks[0].command).toBe('superset notify');
+    expect(hooks.hooks.SessionEnd[0].hooks[0].command).toBe('superset end');
+
+    const toml = await readFile(codexConfig(), 'utf8');
+    expect(toml).not.toContain(CODEX_TOML_MARKER_START);
+    expect(toml).not.toContain('orcaops hook session-start');
+    expect(toml).toContain('model = "gpt-5"');
+    const state = (
+      parseToml(toml) as { hooks: { state: Record<string, { trusted_hash: string }> } }
+    ).hooks.state;
+    expect(state[supersetTrustKey].trusted_hash).toBe('sha256:already-approved');
+    expect(state[oldTrustKey].trusted_hash).toBe('sha256:already-approved');
+    // Superset's group moved from index 0 to 1, and its approval with it.
+    expect(state[`${codexHooks()}:session_start:1:0`]).toEqual({
+      trusted_hash: 'sha256:superset',
+      enabled: true,
+    });
+    expect(state[supersetEndTrustKey].trusted_hash).toBe('sha256:superset-end');
+
+    expect(install.stdout).toContain(`updated: ${codexHooks()} (joined existing hooks.json)`);
+    expect(install.stdout).toContain(`removed: ${codexConfig()} (marker block moved)`);
+    expect(install.stdout).toContain('approval you already gave this hook moved with it');
+    expect(install.stdout).toContain('1 approval already given to another hook moved with it');
+
+    const record = JSON.parse(await readFile(recordPath(), 'utf8')) as {
+      entries: Array<{ agent: string; path: string }>;
+    };
+    expect(record.entries.map(({ agent, path: p }) => ({ agent, path: p }))).toEqual([
+      { agent: 'codex', path: codexHooks() },
+    ]);
+  });
+
+  it('completes the move when the hook was never approved, and says it is reviewed once', async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+    await writeFile(codexConfig(), `model = "gpt-5"\n\n${fencedCodexBlock()}`, 'utf8');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+    expect(install.stdout).toContain(`removed: ${codexConfig()} (marker block moved)`);
+    expect(install.stdout).toContain('Codex reviews the entry once in its new file');
+    expect(install.stdout).not.toContain('approval you already gave this hook moved with it');
+
+    const toml = await readFile(codexConfig(), 'utf8');
+    expect(toml).toContain('model = "gpt-5"');
+    expect(toml).not.toContain(CODEX_TOML_MARKER_START);
+    expect(toml).not.toContain('orcaops hook session-start');
+    expect((await readCodexHooksJson()).hooks.SessionStart[0].hooks[0].command).toBe(
+      codexUserCommand()
+    );
+  });
+
+  it("re-keys another tool's approval even when config.toml never registered orcaops", async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+    const supersetTrustKey = `${codexHooks()}:session_start:0:0`;
+    await writeFile(
+      codexConfig(),
+      `model = "gpt-5"\n\n[hooks.state."${supersetTrustKey}"]\ntrusted_hash = "sha256:superset"\n`,
+      'utf8'
+    );
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+
+    const hooks = await readCodexHooksJson();
+    expect(hooks.hooks.SessionStart[0].hooks[0].command).toBe(codexUserCommand());
+    const state = (
+      parseToml(await readFile(codexConfig(), 'utf8')) as {
+        hooks: { state: Record<string, { trusted_hash: string }> };
+      }
+    ).hooks.state;
+    expect(state[`${codexHooks()}:session_start:1:0`].trusted_hash).toBe('sha256:superset');
+    expect(state[supersetTrustKey]).toBeUndefined();
+    expect(install.stdout).toContain('1 approval already given to another hook moved with it');
+  });
+
+  it('drops a stale entry of ours, retires its dead approval, and leaves the group behind it keyed as it was', async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    // A previous release registered the same command under a narrower matcher,
+    // so Codex trusts it as a hook of its own and the reconcile drops it.
+    await writeFile(
+      codexHooks(),
+      `${JSON.stringify(
+        {
+          hooks: {
+            SessionStart: [
+              {
+                matcher: 'startup',
+                hooks: [{ type: 'command', command: codexUserCommand() }],
+              },
+              { matcher: 'startup', hooks: [{ type: 'command', command: 'superset notify' }] },
+            ],
+          },
+        },
+        null,
+        2
+      )}\n`,
+      'utf8'
+    );
+    const staleTrustKey = `${codexHooks()}:session_start:0:0`;
+    const supersetTrustKey = `${codexHooks()}:session_start:1:0`;
+    await writeFile(
+      codexConfig(),
+      `model = "gpt-5"\n\n[hooks.state."${staleTrustKey}"]\ntrusted_hash = "sha256:stale-ours"\n\n` +
+        `[hooks.state."${supersetTrustKey}"]\ntrusted_hash = "sha256:superset"\n`,
+      'utf8'
+    );
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+
+    const hooks = await readCodexHooksJson();
+    expect(hooks.hooks.SessionStart).toHaveLength(2);
+    expect(hooks.hooks.SessionStart[0]).toMatchObject({ matcher: 'startup|resume' });
+    expect(hooks.hooks.SessionStart[0].hooks[0].command).toBe(codexUserCommand());
+    expect(hooks.hooks.SessionStart[1].hooks[0].command).toBe('superset notify');
+
+    const state = (
+      parseToml(await readFile(codexConfig(), 'utf8')) as {
+        hooks: { state: Record<string, { trusted_hash: string }> };
+      }
+    ).hooks.state;
+    expect(state[supersetTrustKey].trusted_hash).toBe('sha256:superset');
+    expect(state[staleTrustKey]).toBeUndefined();
+    expect(state[`${codexHooks()}:session_start:2:0`]).toBeUndefined();
+    expect(await readFile(codexConfig(), 'utf8')).toContain('model = "gpt-5"');
+    expect(install.stdout).not.toContain('already given to another hook moved with it');
+  });
+
+  it("keeps another tool's approval when its hook shares a group with ours", async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    // A user appended our command into Superset's own group, so the reconcile
+    // rewrites that group around the hook it keeps instead of dropping it.
+    await writeFile(
+      codexHooks(),
+      `${JSON.stringify(
+        {
+          hooks: {
+            SessionStart: [
+              {
+                matcher: 'startup',
+                hooks: [
+                  { type: 'command', command: 'superset notify' },
+                  { type: 'command', command: codexUserCommand() },
+                ],
+              },
+            ],
+          },
+        },
+        null,
+        2
+      )}\n`,
+      'utf8'
+    );
+    const supersetTrustKey = `${codexHooks()}:session_start:0:0`;
+    const supersetEndTrustKey = `${codexHooks()}:session_end:0:0`;
+    await writeFile(
+      codexConfig(),
+      `model = "gpt-5"\n\n[hooks.state."${supersetTrustKey}"]\ntrusted_hash = "sha256:superset"\nenabled = true\n\n` +
+        `[hooks.state."${supersetEndTrustKey}"]\ntrusted_hash = "sha256:superset-end"\n`,
+      'utf8'
+    );
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+
+    const hooks = await readCodexHooksJson();
+    expect(hooks.hooks.SessionStart).toHaveLength(2);
+    expect(hooks.hooks.SessionStart[0].hooks[0].command).toBe(codexUserCommand());
+    expect(hooks.hooks.SessionStart[1].hooks).toHaveLength(1);
+    expect(hooks.hooks.SessionStart[1].hooks[0].command).toBe('superset notify');
+
+    const state = (
+      parseToml(await readFile(codexConfig(), 'utf8')) as {
+        hooks: { state: Record<string, { trusted_hash: string; enabled?: boolean }> };
+      }
+    ).hooks.state;
+    expect(state).toEqual({
+      [`${codexHooks()}:session_start:1:0`]: {
+        trusted_hash: 'sha256:superset',
+        enabled: true,
+      },
+      [supersetEndTrustKey]: { trusted_hash: 'sha256:superset-end' },
+    });
+    expect(install.stdout).toContain('1 approval already given to another hook moved with it');
+  });
+
+  it('a config.toml block that cannot be removed keeps both and records only hooks.json', async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+    // A duplicated start marker leaves ownership unprovable, so the removal
+    // refuses and the registration must stay live in both files.
+    const unremovable = `${CODEX_TOML_MARKER_START}\n${fencedCodexBlock()}`;
+    await writeFile(codexConfig(), unremovable, 'utf8');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex', '--json']);
+    expect(install.exitCode).toBe(0);
+    const output = JSON.parse(install.stdout) as {
+      codex_migration: string | null;
+      warnings: string[];
+    };
+    expect(output.codex_migration).toBe('kept-duplicate');
+    expect(output.warnings.join('\n')).toContain('malformed or duplicate orcaops marker lines');
+    expect(output.warnings.join('\n')).toContain('both are live until it is cleaned up');
+
+    expect(await readFile(codexConfig(), 'utf8')).toBe(unremovable);
+    expect((await readCodexHooksJson()).hooks.SessionStart[0].hooks[0].command).toBe(
+      codexUserCommand()
+    );
+    const record = JSON.parse(await readFile(recordPath(), 'utf8')) as {
+      entries: Array<{ agent: string; path: string }>;
+    };
+    expect(record.entries.map((entry) => entry.path)).toEqual([codexHooks()]);
+  });
+
+  it('an approval that cannot move to its new key keeps both and names the file to clean up', async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+    // Superset's approval is written inline, so it has no table to relocate:
+    // it stays on the key our entry moves onto, holding a hash of its own, and
+    // the edit refuses rather than overwrite it.
+    const seed =
+      `model = "gpt-5"\n\n[hooks.state]\n"${codexHooks()}:session_start:0:0" = { trusted_hash = "sha256:superset" }\n\n` +
+      `${fencedCodexBlock()}\n[hooks.state."${codexConfig()}:session_start:0:0"]\ntrusted_hash = "sha256:already-approved"\n`;
+    await writeFile(codexConfig(), seed, 'utf8');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex', '--json']);
+    expect(install.exitCode).toBe(0);
+    const output = JSON.parse(install.stdout) as {
+      codex_migration: string | null;
+      codex_trust_carry: string | null;
+      warnings: string[];
+    };
+    expect(output.codex_migration).toBe('kept-duplicate');
+    expect(output.codex_trust_carry).toBe('refused');
+    const warnings = output.warnings.join('\n');
+    expect(warnings).toContain(`could not be moved to its ${codexHooks()} key`);
+    expect(warnings).toContain(`the older registration in ${codexConfig()} is still there`);
+    expect(warnings).toContain('re-run `orcaops session-hooks install` to retry the move');
+
+    expect(await readFile(codexConfig(), 'utf8')).toBe(seed);
+    expect((await readCodexHooksJson()).hooks.SessionStart[0].hooks[0].command).toBe(
+      codexUserCommand()
+    );
+  });
+
+  // Root ignores directory write bits, so the trust write would not fail.
+  it.skipIf(process.getuid?.() === 0)(
+    'a trust write that fails keeps both registrations',
+    async () => {
+      codexVersion.output = SUPPORTED_CODEX_VERSION;
+      await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+      const lockedDir = await mkdtemp(path.join(tmpdir(), 'orcaops-uh-locked-'));
+      const lockedToml = path.join(lockedDir, 'config.toml');
+      const seed =
+        `model = "gpt-5"\n\n${fencedCodexBlock()}\n` +
+        `[hooks.state."${codexConfig()}:session_start:0:0"]\ntrusted_hash = "sha256:already-approved"\n`;
+      await writeFile(lockedToml, seed, 'utf8');
+      await symlink(lockedToml, codexConfig());
+      await chmod(lockedDir, 0o555);
+
+      try {
+        (await confirmMock()).mockResolvedValueOnce(true);
+        const install = await agent.runRaw([
+          'session-hooks',
+          'install',
+          '--agents',
+          'codex',
+          '--json',
+        ]);
+        expect(install.exitCode).toBe(0);
+        const output = JSON.parse(install.stdout) as {
+          codex_migration: string | null;
+          codex_trust_carry: string | null;
+          warnings: string[];
+        };
+        expect(output.codex_migration).toBe('kept-duplicate');
+        expect(output.codex_trust_carry).toBe('failed');
+        expect(output.warnings.join('\n')).toContain(
+          `${codexConfig()} could not be updated with the Codex approvals the move carries`
+        );
+        expect(await readFile(lockedToml, 'utf8')).toBe(seed);
+        expect((await readCodexHooksJson()).hooks.SessionStart[0].hooks[0].command).toBe(
+          codexUserCommand()
+        );
+      } finally {
+        await chmod(lockedDir, 0o755);
+        await rm(lockedDir, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it('a Codex build that cannot be shown to read hooks.json stays in config.toml and says why', async () => {
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const unknown = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(unknown.exitCode).toBe(0);
+    expect(unknown.stdout).toContain('`codex --version` could not be read');
+    expect(unknown.stdout).toContain(codexConfig());
+    expect(await readFile(codexConfig(), 'utf8')).toContain(codexTomlSnippet());
+    expect(await readFile(codexHooks(), 'utf8')).toBe(supersetHooksJson());
+
+    await rm(codexConfig(), { force: true });
+    codexVersion.output = 'codex-cli 0.140.0\n';
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const old = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(old.exitCode).toBe(0);
+    expect(old.stdout).toContain('older than 0.146.0');
+    expect(await readFile(codexConfig(), 'utf8')).toContain(codexTomlSnippet());
+  });
+
+  it('--representation config-toml writes the fence even where hooks.json exists', async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const install = await agent.runRaw([
+      'session-hooks',
+      'install',
+      '--agents',
+      'codex',
+      '--representation',
+      'config-toml',
+    ]);
+    expect(install.exitCode).toBe(0);
+    expect(await readFile(codexConfig(), 'utf8')).toContain(codexTomlSnippet());
+    expect(await readFile(codexHooks(), 'utf8')).toBe(supersetHooksJson());
+  });
+
+  it('rejects a --representation value that is neither surface', async () => {
+    const asJson = await agent.runRaw([
+      'session-hooks',
+      'install',
+      '--representation',
+      'toml',
+      '--json',
+    ]);
+    expect(asJson.exitCode).toBe(1);
+    const envelope = JSON.parse(asJson.stdout) as { ok: boolean; error: { message: string } };
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.message).toContain('unknown --representation: toml');
+
+    const human = await agent.runRaw(['session-hooks', 'install', '--representation', 'toml']);
+    expect(human.exitCode).toBe(1);
+    expect(human.stderr).toContain('unknown --representation: toml');
+    expect(await exists(codexConfig())).toBe(false);
+    expect(await exists(codexHooks())).toBe(false);
+  });
+
+  it('--representation hooks-json overrides a failed version gate and warns', async () => {
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const install = await agent.runRaw([
+      'session-hooks',
+      'install',
+      '--agents',
+      'codex',
+      '--representation',
+      'hooks-json',
+    ]);
+    expect(install.exitCode).toBe(0);
+    expect(install.stdout).toContain('--representation hooks-json overrides the version gate');
+    expect(install.stdout).not.toContain(codexConfig());
+    expect((await readCodexHooksJson()).hooks.SessionStart[0].hooks[0].command).toBe(
+      codexUserCommand()
+    );
+    expect(await exists(codexConfig())).toBe(false);
+  });
+
+  it('uninstall after the move strips our group and leaves the Superset file intact', async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+    await writeFile(codexConfig(), fencedCodexBlock(), 'utf8');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+    // The fence was the whole file, so the move leaves nothing behind.
+    expect(await exists(codexConfig())).toBe(false);
+
+    const uninstall = await agent.runRaw(['session-hooks', 'uninstall', '--yes']);
+    expect(uninstall.exitCode).toBe(0);
+    expect(uninstall.stdout).toContain(`removed: ${codexHooks()}`);
+    expect(await readFile(codexHooks(), 'utf8')).toBe(supersetHooksJson());
+    expect(await exists(recordPath())).toBe(false);
+  });
+
+  it('dry-run on the hooks.json surface names the sidecar and the block the move would take', async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+    await writeFile(codexConfig(), fencedCodexBlock(), 'utf8');
+
+    const r = await agent.runRaw([
+      'session-hooks',
+      'install',
+      '--agents',
+      'codex',
+      '--dry-run',
+      '--json',
+    ]);
+    expect(r.exitCode).toBe(0);
+    const out = JSON.parse(r.stdout) as {
+      plans: Array<{ path: string; action: string; managed?: string }>;
+    };
+    expect(out.plans).toEqual([
+      expect.objectContaining({ path: codexHooks(), action: 'updated' }),
+      expect.objectContaining({
+        path: codexConfig(),
+        action: 'removed',
+        managed: 'move the registration out of config.toml',
+      }),
+    ]);
+    expect(await readFile(codexHooks(), 'utf8')).toBe(supersetHooksJson());
+    expect(await readFile(codexConfig(), 'utf8')).toBe(fencedCodexBlock());
+  });
+
+  it('shows the managed/manual chooser for config.toml and never for hooks.json', async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const sidecar = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(sidecar.exitCode).toBe(0);
+    expect(await exists(codexHooks())).toBe(true);
+    expect(await selectMock()).not.toHaveBeenCalled();
+
+    codexVersion.output = null;
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const toml = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(toml.exitCode).toBe(0);
+    expect(
+      (await selectMock()).mock.calls.some(([args]) =>
+        (args as { message: string }).message.startsWith('Codex registers')
+      )
+    ).toBe(true);
+    expect(await readFile(codexConfig(), 'utf8')).toContain(codexTomlSnippet());
+  });
+
+  // Doctor is a repo-context command, so every case below initializes the repo
+  // AFTER registering the machine surfaces it is meant to report on.
+  const sessionHookDoctorCheck = async (): Promise<{ status?: string; details: string }> => {
+    await agent.runRaw(['init', '--scope', 'project', '--yes', '--json', '--no-llm']);
+    const doctor = await agent.runRaw(['doctor', '--json']);
+    const report = JSON.parse(doctor.stdout) as {
+      checks: Array<{ name: string; status: string; details?: string[] }>;
+    };
+    const check = report.checks.find((c) => c.name === 'session-hooks');
+    return { status: check?.status, details: (check?.details ?? []).join('\n') };
+  };
+
+  it('doctor warns about the config.toml block a refused removal left behind', async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+    // A hand-pasted registration carries no markers, so orcaops may not remove
+    // it: the move leaves both files registering the hook.
+    const pasted = `${codexTomlSnippet()}\n`;
+    await writeFile(codexConfig(), pasted, 'utf8');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+    expect(await readFile(codexConfig(), 'utf8')).toBe(pasted);
+
+    const status = await agent.runRaw(['session-hooks', 'status', '--json']);
+    const surfaces = (
+      JSON.parse(status.stdout) as {
+        surfaces: Array<{ path: string; state: string; remedy?: string }>;
+      }
+    ).surfaces;
+    expect(surfaces.find((row) => row.path === codexConfig())?.state).toBe('superseded');
+
+    const check = await sessionHookDoctorCheck();
+    expect(check.status).toBe('warn');
+    expect(check.details).toContain(`${codexConfig()}: leftover duplicate registration`);
+    expect(check.details).toContain(`The Codex hook now runs from ${codexHooks()}`);
+    expect(check.details).toContain('session-hooks install --agents codex');
+    // Registered and running is not broken, missing, or unverified.
+    expect(check.details).not.toContain('registered user-level entry');
+  });
+
+  it('doctor names the hooks.json file when the registration there cannot be parsed or read', async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+    const registered = await readFile(codexHooks(), 'utf8');
+
+    await writeFile(codexHooks(), `not json ${registered}`, 'utf8');
+    const invalid = await sessionHookDoctorCheck();
+    expect(invalid.status).toBe('warn');
+    expect(invalid.details).toContain(
+      `${codexHooks()}: registered user-level entry is broken — ${codexHooks()} is not valid JSON`
+    );
+    expect(invalid.details).toContain('session-hooks install --agents codex');
+    // The managed/manual chooser belongs to config.toml, not the sidecar.
+    expect(invalid.details).not.toContain('choose managed mode');
+
+    if (process.getuid?.() === 0) return;
+    await writeFile(codexHooks(), registered, 'utf8');
+    await chmod(codexHooks(), 0o000);
+    try {
+      const unreadable = await sessionHookDoctorCheck();
+      expect(unreadable.status).toBe('warn');
+      expect(unreadable.details).toContain(
+        `${codexHooks()}: registered user-level entry could not be verified`
+      );
+      expect(unreadable.details).toContain('retry after restoring access');
+      const status = await agent.runRaw(['session-hooks', 'status', '--json']);
+      const row = (
+        JSON.parse(status.stdout) as {
+          surfaces: Array<{ path: string; state: string; remedy?: string }>;
+        }
+      ).surfaces.find((surface) => surface.path === codexHooks());
+      expect(row?.state).toBe('registered-unverified');
+      expect(row?.remedy).toContain(codexHooks());
+    } finally {
+      await chmod(codexHooks(), 0o600);
+    }
+  });
+
+  it('doctor stays silent about the representation once only hooks.json registers', async () => {
+    codexVersion.output = SUPPORTED_CODEX_VERSION;
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+    await writeFile(codexConfig(), fencedCodexBlock(), 'utf8');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+    expect(await exists(codexConfig())).toBe(false);
+    expect(noteCount(install.stdout)).toBe(0);
+    expect(noteCount((await agent.runRaw(['session-hooks', 'status'])).stdout)).toBe(0);
+
+    const check = await sessionHookDoctorCheck();
+    expect(check.status).toBeDefined();
+    expect(check.details).not.toContain(CODEX_HOOKS_JSON_NOTE);
+    expect(check.details).not.toContain(codexConfig());
+  });
+
+  it('doctor carries the two-representation note while both files register', async () => {
+    await writeFile(codexHooks(), supersetHooksJson(), 'utf8');
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+    expect(await readFile(codexConfig(), 'utf8')).toContain(codexTomlSnippet());
+
+    const check = await sessionHookDoctorCheck();
+    expect(check.details).toContain(CODEX_HOOKS_JSON_NOTE);
   });
 
   it('a record naming an agent with no user surface → registered-unsupported + doctor warning', async () => {

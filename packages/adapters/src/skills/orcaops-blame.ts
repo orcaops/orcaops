@@ -10,11 +10,7 @@ export const orcaopsBlameSkill: SkillTemplate = {
   id: 'blame',
   name: 'Orcaops: blame (agent-trace export)',
   description:
-    'Export per-line AI provenance for a commit in the Cursor agent-trace v0.1.0 format — ' +
-    '"which lines did the agent write?", "export agent provenance", "attach provenance notes ' +
-    'to this commit". Interop-grade records: line ranges valid at the commit, contributor ' +
-    'model ids, orcaops artifact/checkpoint metadata. Skip for: WHY a line exists ' +
-    '(why skill) or reviewing unattributed work (adversarial-review skill).',
+    'Export which lines an AI agent wrote in a commit as agent-trace records and git notes.',
   tags: ['orcaops', 'insight', 'provenance'],
   group: 'insight',
   defaultEnabled: false,

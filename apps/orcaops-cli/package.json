@@ -1,6 +1,6 @@
 {
   "name": "@orcaops/cli",
-  "version": "0.1.1",
+  "version": "0.2.0-rc.1",
   "license": "FSL-1.1-ALv2",
   "private": true,
   "type": "module",
@@ -37,8 +37,11 @@
     "@orcaops/llm": "workspace:*",
     "@orcaops/project-scope": "workspace:*",
     "@orcaops/review-engine": "workspace:*",
+    "@orcaops/diff-fingerprint": "0.0.8",
+    "@orcaops/protocol": "0.0.26",
     "@orcaops/sdk": "0.1.23",
     "@orcaops/storage": "workspace:*",
+    "@orcaops/watch-data": "workspace:*",
     "commander": "^14.0.0",
     "diff": "^9.0.0",
     "effection": "^4.0.2",
@@ -53,8 +56,9 @@
     "@orcaops/prettier-config": "workspace:*",
     "@orcaops/test-harness": "workspace:*",
     "@orcaops/typescript-config": "workspace:*",
+    "@orcaops/watch": "workspace:*",
     "@types/better-sqlite3": "^7.6.12",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "13.0.3",
     "jose": "^6.2.3",
     "vitest": "^4.0.18"
   }

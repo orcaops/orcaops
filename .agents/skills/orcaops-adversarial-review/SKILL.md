@@ -1,9 +1,9 @@
 ---
 name: "Orcaops: adversarial review"
-description: "Cross-examine what the agent claims it did — \"red-team this\", \"poke holes\", \"adversarial review\", \"verify the done criteria\", \"review the agent's code\". Two dimensions: a CLAIMS AUDIT (refutes done_criteria evidence, attacks recorded uncertainty, audits criterion lineage for goalpost moves, checks non-goal violations, and sweeps BOTH the uncommitted diff and in-window commits for work no checkpoint accounts for) and an UNCERTAINTY-LED CODE REVIEW (starts from the recorded uncertainty, never re-flags documented decisions, flags silent divergence from them). Skip for: evaluator gating before a PR (pre-pr skill) or a shareable summary (digest skill)."
+description: "Red-team completed work and its evidence. Use for \"poke holes in this\", \"verify the done criteria\", or \"review the agent's code\"."
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "e9b87fde35fc"
+  contentHash: "5db055e269d7"
 ---
 
 # When to use
@@ -43,17 +43,19 @@ to refute, not to summarize.
    or REMOVED after work started (compare revision timestamps to the first
    checkpoint open), without a rationale in the revision, is a goalpost
    move — flag it even when the shipped work satisfies the weakened rubric.
-4. **Check non-goal violations.** Latest plan `non_goals` vs every closed
-   checkpoint's `files_changed`: work that touched an excluded area is a
-   violation even if useful — route it to a plan revision or a revert.
+4. **Investigate possible non-goal violations.** Compare the latest plan's
+   `non_goals` with every closed checkpoint's `files_changed`. Touching a
+   related file is a reason to inspect the actual change, not proof that the
+   excluded behavior was delivered. Flag a violation only when the diff shows
+   that the non-goal itself was crossed.
 5. **Sweep for unaccounted work — BOTH surfaces.** Uncommitted work:
    `orcaops diff --attribution --unattributed --json` (add
    `--artifact <id>` to scope). In-window COMMITS — invisible to the
    base→worktree sweep because their changes sit in both trees:
    `orcaops diff --reconcile --json` reports every commit inside the
    artifact window whose files no checkpoint claim or manifest covers
-   (`uncovered_commits`), plus commits covered only by
-   weak/ambiguous evidence (`ambiguous_coverage_commits`), and — for a
+   (`window.uncovered_commits`), plus commits covered only by
+   weak/ambiguous evidence (`window.ambiguous_coverage_commits`), and — for a
    SUMMARIZED artifact — commits after the last checkpoint close but before
    the summary as their own LOUD finding (`pre_summary.uncovered_commits`),
    distinct from genuinely-post-summary commits (the soft
@@ -92,10 +94,12 @@ only the flagged spots; a deep review works every checkpoint's diff.
 
 A findings table — one row per finding:
 `| # | target (criterion / uncertainty / lineage / non-goal / unattributed) | verdict | evidence |`
-— followed by remediation routing: REFUTED criterion → reopen the work
-(new checkpoint against the step); goalpost move → plan revision with
-rationale (or restore the criterion); non-goal violation → plan revision
-acknowledging the scope change or a revert; open uncertainty → record the
-resolution in the closing summary; unattributed hunk → a checkpoint that
-claims it (with the why), or a revert. Cite the attribution
+— followed by remediation routing. For an active artifact, add a new obligation
+through a valid plan revision and cover it with a new checkpoint. Never claim a
+completed step again or rewrite criteria attached to completed work. For a
+summarized artifact, capture remediation in a follow-up artifact. A goalpost
+move needs a valid plan revision or restoration before completion; a confirmed
+non-goal violation needs an acknowledged scope change or a revert. Record an
+open uncertainty's resolution before finalization. Put unattributed work in a
+new valid checkpoint when the active plan allows it, or revert it. Cite the attribution
 `disclosure` block verbatim wherever it capped a verdict.

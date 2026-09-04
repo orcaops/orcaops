@@ -53,6 +53,27 @@ describe('agent overlay', () => {
     }
   });
 
+  it('gives codex a user-level hooks.json surface and no project settings file', () => {
+    const sh = getAgentOverlay('codex')!.sessionHooks!;
+    expect(sh).toEqual({
+      kind: 'machine-config',
+      path: 'config.toml',
+      payload: 'codex-json',
+      matcher: 'startup|resume',
+      userFile: 'hooks.json',
+    });
+    // The project settings planner selects on `settings-json`, so a
+    // `machine-config` row carrying a userFile yields a user-level spec only.
+    expect(sh.kind).not.toBe('settings-json');
+  });
+
+  it('declares a user-level hook file for exactly the machine-registerable agents', () => {
+    const withUserFile = overlayBackedToolIds().filter(
+      (id) => getAgentOverlay(id)!.sessionHooks?.userFile !== undefined
+    );
+    expect(withUserFile).toEqual(['claude-code', 'codex']);
+  });
+
   it('uses parallel seed orchestration only on the independently rendered Claude tree', () => {
     expect(getAgentOverlay('claude-code')!.subagentOrchestration).toBe('parallel');
     for (const id of overlayBackedToolIds().filter((id) => id !== 'claude-code')) {

@@ -415,6 +415,24 @@ describe('ArtifactStore — event-first writes', () => {
       expect((await stat(paths.checkpointJson(1))).mtimeMs).toBe(before.mtimeMs);
     });
 
+    it('rejects a new checkpoint that redeclares a completed step', async () => {
+      await writePlan('plan-completed-step');
+      await writeCheckpoint('cp-completed-step', { n: 1, summary: 'closed once' });
+
+      const error = await store
+        .writeCheckpointOpened(
+          { artifact_id: artifactId, declared_step_ids: [STEP_ID] },
+          { idempotencyKey: 'cp-redeclare-completed', headSha: 'cafef00d' }
+        )
+        .then(
+          () => null,
+          (cause: unknown) => cause
+        );
+
+      expect(error).toMatchObject({ code: 'OPEN_CP_OVERLAP' });
+      expect(String(error)).toContain('already claimed by closed cp #1');
+    });
+
     // ── default replay extractor (asymmetric default-payload regression) ──
     it('storage-direct close replay with no replayPayload + no extractor returns replay (not conflict)', async () => {
       await writePlan('plan-init-1');

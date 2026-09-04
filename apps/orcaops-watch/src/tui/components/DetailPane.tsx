@@ -1,5 +1,6 @@
+import type { WatchCheckpoint, WatchThread } from '@orcaops/watch-data/ui';
+
 import { ago, fmtTokens } from '../../core/format';
-import type { WatchCheckpoint, WatchThread } from '../../data/types';
 import { useCockpitTheme } from '../ThemeProvider';
 import { type DetailAction, type DetailLine, type DetailTone, wrapDetailText } from '../detail';
 import { EVENT_FAMILY_THEME } from '../eventPresentation';

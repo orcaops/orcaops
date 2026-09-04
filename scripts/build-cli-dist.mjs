@@ -12,6 +12,7 @@
 // prebuild. Cross-platform for macOS-arm64 + Linux with no per-platform build.
 
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 import {
@@ -62,8 +63,11 @@ const EVAL_PACKS = [
 // The proprietary pins below are EXACT — no caret, no tilde. A range would let
 // an install pull unreviewed bytes into an FSL-labelled tree, so moving one of
 // them is a licence decision.
+// Exact, and guarded below against the version the workspace actually
+// installed and tested: the addon the CLI ships must be the one its suite ran.
+const BETTER_SQLITE3_VERSION = '13.0.3';
 const DIST_DEPENDENCIES = {
-  'better-sqlite3': '^12.11.1',
+  'better-sqlite3': BETTER_SQLITE3_VERSION,
   '@orcaops/evaluator-pack': '0.1.0',
   '@orcaops/evaluator-protocol': '0.1.0',
   '@orcaops/evaluator-sdk': '0.1.0',
@@ -71,7 +75,14 @@ const DIST_DEPENDENCIES = {
   '@orcaops/sdk': '0.1.23',
   '@orcaops/diff-fingerprint': '0.0.8',
 };
-const DIST_OPTIONAL_DEPENDENCIES = { '@napi-rs/keyring': '^1.3.0' };
+// The compiled Watch UI ships as one os/cpu-filtered optional package per
+// platform, versioned with the CLI that launches it; npm installs the one that
+// matches the host and silently skips the rest. Their manifest is
+// apps/orcaops-watch/platforms.json; the pin is filled in once VERSION is known.
+const WATCH_PLATFORMS = JSON.parse(
+  readFileSync(path.join(ROOT, 'apps', 'orcaops-watch', 'platforms.json'), 'utf8')
+);
+const WATCH_PLATFORM_PACKAGES = WATCH_PLATFORMS.map((platform) => platform.package);
 
 // The proprietary packages are listed literally rather than spread from
 // PROPRIETARY_PACKAGES: the licence gate asks whether this build declared each
@@ -122,6 +133,24 @@ const cliPkg = JSON.parse(readFileSync(path.join(CLI_DIR, 'package.json'), 'utf8
 const VERSION = cliPkg.version;
 log(`@orcaops/cli version ${VERSION}`);
 
+const DIST_OPTIONAL_DEPENDENCIES = {
+  '@napi-rs/keyring': '^1.3.0',
+  ...Object.fromEntries(WATCH_PLATFORM_PACKAGES.map((name) => [name, VERSION])),
+};
+
+const installedSqliteVersion = JSON.parse(
+  readFileSync(
+    createRequire(path.join(CLI_DIR, 'package.json')).resolve('better-sqlite3/package.json'),
+    'utf8'
+  )
+).version;
+if (installedSqliteVersion !== BETTER_SQLITE3_VERSION) {
+  fail(
+    `better-sqlite3 pin drift: the release manifest says ${BETTER_SQLITE3_VERSION} but the ` +
+      `workspace installed ${installedSqliteVersion} — move both pins together`
+  );
+}
+
 rmSync(BUILD_DIR, { recursive: true, force: true });
 mkdirSync(path.join(STAGING, 'dist', 'cli'), { recursive: true });
 mkdirSync(path.join(STAGING, 'bin'), { recursive: true });
@@ -156,10 +185,8 @@ const externalizePackageJson = {
   },
 };
 
-log('Bundling CLI with esbuild (minify, no sourcemap)…');
-const cliBuild = await build({
-  entryPoints: [cliEntry],
-  outfile: path.join(STAGING, 'dist', 'cli', 'index.js'),
+// Shared by both bundles: the CLI and the Watch data sidecar it spawns.
+const bundleOptions = {
   bundle: true,
   // The licence gate reads the module graph; output text cannot prove inlining.
   metafile: true,
@@ -185,27 +212,48 @@ const cliBuild = await build({
   external: BUNDLE_EXTERNALS,
   plugins: [externalizePackageJson],
   logLevel: 'info',
+};
+
+log('Bundling CLI with esbuild (minify, no sourcemap)…');
+const cliOutfile = path.join(STAGING, 'dist', 'cli', 'index.js');
+const cliBuild = await build({ ...bundleOptions, entryPoints: [cliEntry], outfile: cliOutfile });
+
+// The Watch data sidecar: the Node process the compiled Task Review UI spawns
+// for everything that touches better-sqlite3. Bundled from @orcaops/watch-data's
+// built entry so the CLI carries it and the UI never needs a second install.
+const sidecarEntry = path.join(ROOT, 'packages', 'watch-data', 'dist', 'sidecar.js');
+if (!existsSync(sidecarEntry))
+  fail(`watch sidecar entry not found: ${sidecarEntry} (build failed?)`);
+log('Bundling the Watch data sidecar with esbuild…');
+const sidecarOutfile = path.join(STAGING, 'dist', 'watch-sidecar.js');
+const sidecarBuild = await build({
+  ...bundleOptions,
+  entryPoints: [sidecarEntry],
+  outfile: sidecarOutfile,
 });
 
-const productionBundle = readFileSync(path.join(STAGING, 'dist', 'cli', 'index.js'), 'utf8');
-const leakedDevelopmentMarkers = ['orcaops-dev', '--cloud-url', '--data-root'].filter((marker) =>
-  productionBundle.includes(marker)
-);
-if (leakedDevelopmentMarkers.length > 0) {
-  fail(
-    `production bundle includes development-launcher surface: ${leakedDevelopmentMarkers.join(', ')}`
+const productionBundles = [cliOutfile, sidecarOutfile];
+for (const bundlePath of productionBundles) {
+  const text = readFileSync(bundlePath, 'utf8');
+  const leakedDevelopmentMarkers = ['orcaops-dev', '--cloud-url', '--data-root'].filter((marker) =>
+    text.includes(marker)
   );
+  if (leakedDevelopmentMarkers.length > 0) {
+    fail(
+      `${path.relative(STAGING, bundlePath)} includes development-launcher surface: ${leakedDevelopmentMarkers.join(', ')}`
+    );
+  }
 }
-log('Production bundle excludes the development launcher and its selectors ✓');
+log('Production bundles exclude the development launcher and its selectors ✓');
 
 // 3b. Licence gate — must stay ahead of the LICENSE and `license` staging
 // below, which are what turn inlined bytes into an irrevocable grant.
 log('Checking the bundle for inlined proprietary code…');
 const licenceGate = checkNoProprietary({
-  bundles: [path.join(STAGING, 'dist', 'cli', 'index.js')],
+  bundles: productionBundles,
   repoRoot: ROOT,
   declaredExternals: BUNDLE_EXTERNALS,
-  metafileInputs: cliBuild.metafile.inputs,
+  metafileInputs: { ...cliBuild.metafile.inputs, ...sidecarBuild.metafile.inputs },
 });
 for (const note of licenceGate.notes) log(note);
 if (!licenceGate.ok) {
@@ -221,7 +269,7 @@ if (!licenceGate.ok) {
   );
   process.exit(1);
 }
-log('Bundle keeps every proprietary package external ✓');
+log('Both bundles keep every proprietary package external ✓');
 
 // ---------------------------------------------------------------------------
 // 4. Materialize the unpublished eval packs (+ closure) into staging/node_modules
@@ -394,7 +442,14 @@ const distPkg = {
   ],
   bin: { orcaops: './bin/orcaops.js' },
   files: ['bin', 'dist', 'LICENSE', 'THIRD-PARTY-NOTICES', 'README.md', 'CHANGELOG.md'],
-  engines: { node: '>=22' },
+  engines: { node: '>=22.14.0' },
+  // These are the platforms Orcaops supports (README and the getting-started
+  // guide say the same). The addon also ships win32 prebuilds, so this is our
+  // support boundary, not its capability. It matters more since 13.x: there is
+  // no build-from-source fallback, so without this npm would install a CLI that
+  // dies on its first store access instead of refusing up front.
+  os: ['darwin', 'linux'],
+  cpu: ['x64', 'arm64'],
   dependencies: DIST_DEPENDENCIES,
   optionalDependencies: DIST_OPTIONAL_DEPENDENCIES,
   bundledDependencies: [...EVAL_PACKS],
@@ -461,13 +516,16 @@ if (process.env.SKIP_GATE === '1') {
     [
       `const required = ${JSON.stringify(Object.keys(DIST_DEPENDENCIES))};`,
       `const optional = ${JSON.stringify(Object.keys(DIST_OPTIONAL_DEPENDENCIES))};`,
+      // A platform package has no JS entry; its manifest is the resolvable surface.
+      `const byManifest = new Set(${JSON.stringify(WATCH_PLATFORM_PACKAGES)});`,
       'const missing = [];',
       'for (const spec of required) {',
       '  try { import.meta.resolve(spec); } catch (err) { missing.push(`${spec}: ${err.code ?? err.message}`); }',
       '}',
       'const absentOptional = [];',
       'for (const spec of optional) {',
-      '  try { import.meta.resolve(spec); } catch { absentOptional.push(spec); }',
+      '  const target = byManifest.has(spec) ? `${spec}/package.json` : spec;',
+      '  try { import.meta.resolve(target); } catch { absentOptional.push(spec); }',
       '}',
       'if (missing.length > 0) {',
       '  console.error("unresolvable from the installed package:\\n  " + missing.join("\\n  "));',
@@ -484,30 +542,28 @@ if (process.env.SKIP_GATE === '1') {
     fail('install smoke: a runtime dependency does not resolve from the installed package');
   }
   log(`Install smoke: ${probeRes.stdout.trim()} ✓`);
-}
 
-// ---------------------------------------------------------------------------
-// 10. Include the standalone docs HTML next to the tarball
-// ---------------------------------------------------------------------------
-// `pnpm build` (turbo) builds @orcaops/docs into a single self-contained, offline
-// HTML file. Ship it alongside the tarball so the docs travel with the CLI.
-const docsHtmlSrc = path.join(ROOT, 'apps', 'docs', 'dist', 'orcaops-docs.html');
-const docsHtmlDest = path.join(RELEASE, 'orcaops-docs.html');
-let docsShipped = false;
-if (existsSync(docsHtmlSrc)) {
-  cpSync(docsHtmlSrc, docsHtmlDest);
-  docsShipped = true;
-  log(`Included offline docs: ${path.relative(ROOT, docsHtmlDest)}`);
-} else {
-  log(
-    `WARN: ${path.relative(ROOT, docsHtmlSrc)} not found — run without SKIP_BUILD so @orcaops/docs builds`
+  // The sidecar must run from the installed tree under plain Node: it is what
+  // `orcaops watch` hands the compiled UI, and it resolves the proprietary
+  // packages from this very node_modules.
+  const sidecarRes = spawnSync(
+    'node',
+    [path.join(installedCliDir, 'dist', 'watch-sidecar.js'), 'review', '--help'],
+    { cwd: installedCliDir, encoding: 'utf8' }
   );
+  if (sidecarRes.status !== 0 || !sidecarRes.stdout.includes('usage: review')) {
+    process.stderr.write(`${sidecarRes.stdout ?? ''}${sidecarRes.stderr ?? ''}`);
+    fail(
+      'install smoke: dist/watch-sidecar.js does not answer `review --help` from the installed package'
+    );
+  }
+  log('Install smoke: the Watch data sidecar answers from the installed package ✓');
 }
 
 // ---------------------------------------------------------------------------
-// 11. Report + write a verifiable SHA256SUMS manifest
+// 10. Report + write a verifiable SHA256SUMS manifest
 // ---------------------------------------------------------------------------
-const artifacts = [tarball, ...(docsShipped ? [docsHtmlDest] : [])];
+const artifacts = [tarball];
 const sums = artifacts.map((f) => ({
   file: path.basename(f),
   sha: createHash('sha256').update(readFileSync(f)).digest('hex'),
@@ -524,8 +580,8 @@ for (const s of sums) log(`sha256  ${s.sha}  ${s.file}`);
 log(
   `Wrote   ${path.relative(ROOT, sumsPath)}  (verify: cd ${path.relative(ROOT, RELEASE)} && shasum -a 256 -c SHA256SUMS)`
 );
-log('Distribute the tarball, the docs HTML, and SHA256SUMS together. To install:');
-log(`  npm i -g ./orcaops-cli-${VERSION}.tgz   and open orcaops-docs.html in a browser.`);
+log('Distribute the tarball and SHA256SUMS together. To install:');
+log(`  npm i -g ./orcaops-cli-${VERSION}.tgz   (docs: https://docs.orcaops.ai)`);
 
 // ---------------------------------------------------------------------------
 // THIRD-PARTY-NOTICES generator
@@ -547,10 +603,10 @@ function generateNotices() {
   ];
 
   parts.push(
-    '## Bundled into the CLI (dist/cli/index.js)',
+    '## Bundled into the CLI (dist/cli/index.js and dist/watch-sidecar.js)',
     '',
     'These packages have no separate presence in the distribution — the bundler',
-    'copied their code into dist/cli/index.js.',
+    'copied their code into dist/cli/index.js or dist/watch-sidecar.js.',
     ''
   );
   const covered = new Set();
@@ -575,14 +631,13 @@ function generateNotices() {
 
   // Kept as a supplement, not as the source of truth: an inline banner can
   // carry a copyright line that appears in no LICENSE file.
-  const legal = path.join(STAGING, 'dist', 'cli', 'index.js.LEGAL.txt');
-  if (existsSync(legal)) {
-    parts.push(
-      '## Inline license banners preserved from the bundled sources',
-      '',
-      readFileSync(legal, 'utf8'),
-      ''
-    );
+  const legalFiles = [
+    path.join(STAGING, 'dist', 'cli', 'index.js.LEGAL.txt'),
+    path.join(STAGING, 'dist', 'watch-sidecar.js.LEGAL.txt'),
+  ].filter((file) => existsSync(file));
+  if (legalFiles.length > 0) {
+    parts.push('## Inline license banners preserved from the bundled sources', '');
+    for (const legal of legalFiles) parts.push(readFileSync(legal, 'utf8'), '');
   }
 
   writeFileSync(path.join(STAGING, 'THIRD-PARTY-NOTICES'), parts.join('\n'));

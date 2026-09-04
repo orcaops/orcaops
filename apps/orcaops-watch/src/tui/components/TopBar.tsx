@@ -1,6 +1,7 @@
+import { attentionRows } from '@orcaops/watch-data/ui';
+import type { WatchSnapshot } from '@orcaops/watch-data/ui';
+
 import { fmtTokens } from '../../core/format';
-import { attentionRows } from '../../core/presenters';
-import type { WatchSnapshot } from '../../data/types';
 import { useCockpitTheme } from '../ThemeProvider';
 import { displayLen, truncate } from '../layout';
 import { pickLogo } from '../logo';

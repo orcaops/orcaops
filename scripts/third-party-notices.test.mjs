@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  collectPackages,
   readSupplementalNotice,
   renderNotice,
   supplementalDirName,
@@ -41,6 +42,31 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
+});
+
+describe('collectPackages', () => {
+  it('resolves a seed from its own base directory when one is given', () => {
+    // A package's optional native companion installs beside that package's
+    // real directory, not under the consumer; the seed must say where to look.
+    const consumer = path.join(dir, 'consumer');
+    mkdirSync(path.join(consumer, 'node_modules', 'lib'), { recursive: true });
+    writeFileSync(
+      path.join(consumer, 'node_modules', 'lib', 'package.json'),
+      JSON.stringify({ name: 'lib', version: '1.0.0', license: 'MIT' })
+    );
+    const libDir = path.join(consumer, 'node_modules', 'lib');
+    mkdirSync(path.join(libDir, 'node_modules', 'lib-native'), { recursive: true });
+    writeFileSync(
+      path.join(libDir, 'node_modules', 'lib-native', 'package.json'),
+      JSON.stringify({ name: 'lib-native', version: '1.0.0', license: 'MIT' })
+    );
+    expect(() => collectPackages({ seeds: ['lib-native'], from: consumer })).toThrow(/lib-native/);
+    const found = collectPackages({
+      seeds: ['lib', { name: 'lib-native', from: libDir }],
+      from: consumer,
+    });
+    expect([...found.keys()].sort()).toEqual(['lib-native@1.0.0', 'lib@1.0.0']);
+  });
 });
 
 describe('supplementalDirName', () => {

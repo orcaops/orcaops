@@ -8,32 +8,33 @@ import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 import { makeAgent } from '../support/test-agent.js';
 
 /**
- * The `orcaops watch` delegation stub. The child bin is pinned via
- * `ORCAOPS_WATCH_BIN` (injected through the in-process agent's ALS env, which the
- * stub reads via getInvocationEnv()), so these run hermetically without the real
- * watch app installed.
+ * The `orcaops watch` launcher. The workspace CLI carries no platform pins, so
+ * the child bin can be pinned via `ORCAOPS_WATCH_BIN` (injected through the
+ * in-process agent's ALS env, which the launcher reads via getInvocationEnv())
+ * and these run hermetically without a compiled companion installed.
  */
-describe('orcaops watch — delegation stub', () => {
+describe('orcaops watch launcher', () => {
   let repo: TempRepo;
   let tmp: string;
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
-    tmp = mkdtempSync(path.join(tmpdir(), 'orcaops-watch-stub-'));
+    tmp = mkdtempSync(path.join(tmpdir(), 'orcaops-watch-launcher-'));
   });
 
   afterEach(async () => {
     await repo.cleanup();
   });
 
-  it('prints an install hint and exits non-zero when the watch bin is missing (ENOENT)', async () => {
+  it('names the reinstall command and exits 127 when the override cannot be started', async () => {
     const agent = makeAgent({
       cwd: repo.path,
       env: { ORCAOPS_WATCH_BIN: path.join(tmp, 'does-not-exist') },
     });
     const result = await agent.runRaw(['watch', '--once']);
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("could not find the 'orcaops-watch' binary");
+    expect(result.exitCode).toBe(127);
+    expect(result.stderr).toContain('could not start');
+    expect(result.stderr).toContain('npm i -g @orcaops/cli');
   });
 
   it('re-forwards --root to the child as ORCAOPS_ROOT', async () => {
@@ -61,16 +62,14 @@ describe('orcaops watch — delegation stub', () => {
     expect(result.exitCode).toBe(3);
   });
 
-  it('with no ORCAOPS_WATCH_BIN, falls through the sibling miss to a bare PATH lookup', async () => {
-    // No override → resolveWatchBin derives the sibling of this process's argv[1]
-    // (the vitest worker), which has no orcaops-watch neighbour, so it falls through
-    // to the bare `orcaops-watch` PATH tier. PATH is pinned to an empty dir because
-    // a pnpm/npx-run suite puts the workspace `node_modules/.bin` — which DOES
-    // contain orcaops-watch — on PATH; without this the bare lookup resolves and
-    // spawns the real Bun TUI, and the test hangs instead of asserting the hint.
+  it('with no ORCAOPS_WATCH_BIN, reaches the workspace app and refuses to render without a terminal', async () => {
+    // The workspace CLI has no platform pins, so resolution falls to the dev
+    // tier: the @orcaops/watch app's built dist/main.js under Bun. The harness
+    // has no TTY on either end, so the launcher must refuse before spawning
+    // anything — otherwise the real TUI would start and the test would hang.
     const agent = makeAgent({ cwd: repo.path, env: { PATH: tmp } });
     const result = await agent.runRaw(['watch', '--once']);
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("could not find the 'orcaops-watch' binary");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('needs an interactive terminal');
   });
 });

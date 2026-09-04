@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
 
 import { SKILL_TEMPLATES } from '@orcaops/adapters';
-import { parseReviewArgs } from '@orcaops/review-engine';
+import { parseReviewArgs, SLICE_DIAGNOSTIC_CODES } from '@orcaops/review-engine';
 
 const taskReview = SKILL_TEMPLATES.find((skill) => skill.id === 'task-review')!;
 const body = typeof taskReview.body === 'function' ? taskReview.body('orcaops') : taskReview.body;
 
 describe('task-review skill and public CLI agreement', () => {
+  it('documents every runtime slice diagnostic', () => {
+    for (const code of SLICE_DIAGNOSTIC_CODES) expect(body, code).toContain(code);
+    expect(body).not.toContain('STORY_OPEN_OR_ABANDONED_MEMBER');
+  });
+
   it('documents the accepted comment reply surface and rejects unsupported flag aliases', () => {
     const input = JSON.stringify({
       body: 'answer',

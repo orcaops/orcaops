@@ -1,16 +1,28 @@
 name: Publish @orcaops/cli
 
-# Publishes via npm OIDC trusted publishing, so there is no token to store.
-# Three things a human must do before the first run: create the @orcaops org
-# and @orcaops/cli on npm; configure trusted publishing for that package naming
-# orcaops/orcaops and this file, without which npm rejects the exchange; and add
-# protection rules to the npm-publish environment, which GitHub creates with
-# none.
+# One tag, one release: the CLI and the four Watch platform packages it pins,
+# built once, smoked Bun-less on every supported host, then published in
+# dependency order (platform packages, all or nothing, then the CLI).
+#
+# Publishes via npm OIDC trusted publishing only; no token exists in CI.
+# Trusted publishing cannot create a brand-new package name, so before the
+# first tag that ships a new platform package a human bootstraps the name
+# with the local ceremony in the private release runbook and registers its
+# trusted publisher (orcaops/orcaops, this file, the npm-publish
+# environment). scripts/publish-platforms.mjs refuses a name npm
+# does not know, so a missed bootstrap fails loudly before anything uploads.
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build, smoke and rehearse the publish without uploading'
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -21,16 +33,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    # A fork guard only. The private repository is also orcaops/orcaops, so this
-    # is true there too; what refuses a publish from it is the withheld-entries
-    # check inside `pnpm qualify:public-release`.
+  # A fork guard. The private repository is orcaops/orcaops-private, so this
+  # alone stops it; the withheld-entries check inside
+  # `pnpm qualify:public-release`, which runs before any artifact exists, is
+  # the second line.
+  compile:
+    runs-on: macos-15
     if: github.repository == 'orcaops/orcaops'
-    environment: npm-publish
-    permissions:
-      contents: read
-      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: corepack enable
@@ -38,40 +49,150 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
-          registry-url: 'https://registry.npmjs.org'
-      # Nothing here ships the watch binary, but `pnpm build` is unfiltered and
-      # builds it under Bun.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: '1.3.14'
-
+          bun-version-file: '.bun-version'
+      - name: Cache Bun downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-targets-${{ hashFiles('.bun-version') }}
       - run: pnpm install --frozen-lockfile
 
-      # Newer than Node 22 bundles; pinned so a publish reproduces from the log.
-      - name: Use an npm that supports trusted publishing
-        run: npm install --global npm@11.6.2
-
       - name: Check the tag matches the CLI version
+        id: version
         env:
+          REF_TYPE: ${{ github.ref_type }}
           TAG_REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           version="$(node -p "require('./apps/orcaops-cli/package.json').version")"
-          if [ "$TAG_REF" != "v${version}" ]; then
+          # Keyed on ref_type, not event_name: a workflow_dispatch can be aimed
+          # at a tag, and that path publishes for real, so it must be asserted
+          # too. A dispatch from a branch is a rehearsal and has no tag to match.
+          if [ "$REF_TYPE" = "tag" ] && [ "$TAG_REF" != "v${version}" ]; then
             echo "::error::tag ${TAG_REF} does not match apps/orcaops-cli version ${version}"
             exit 1
           fi
-          echo "publishing ${version}"
-          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          echo "releasing ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      # The version bump is a human step in the release runbook, and forgetting
+      # it used to be unrecoverable: the four platform packages publish before
+      # the CLI, so a CLI version that is already on npm meant four permanent
+      # uploads followed by E403 EPUBLISHCONFLICT, leaving companions no
+      # released CLI can pin. Fail here, before any artifact exists.
+      - name: Refuse a version that npm already holds
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -uo pipefail
+          if npm view "@orcaops/cli@${VERSION}" version >/dev/null 2>&1; then
+            echo "::error::@orcaops/cli@${VERSION} is already published."
+            echo "::error::If you meant to release, bump the version before tagging."
+            echo "::error::If you are recovering a partial publish, use Re-run FAILED jobs"
+            echo "::error::(which reuses the compile artifact and skips this job) — never Re-run all."
+            exit 1
+          fi
+          echo "@orcaops/cli@${VERSION} is unpublished — safe to release"
 
       - name: Qualify the public tree
         run: pnpm qualify:public-release
 
-      - name: Build the release tarball
-        run: pnpm release:cli
+      - name: Build the workspace
+        run: pnpm build
+      - name: Compile the Watch UI for every platform
+        run: pnpm compile
+      - name: Stage the platform packages
+        run: SKIP_COMPILE=1 pnpm release:watch-platforms
+      - name: Build the CLI tarball
+        run: SKIP_BUILD=1 pnpm release:cli
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-artifacts
+          if-no-files-found: error
+          path: |
+            dist-release/
+            build/cli-dist/staging/
 
-      - name: Verify the artifact is publishable
+  # The release as a user gets it, on hosts that never heard of Bun.
+  verify:
+    needs: compile
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+        node: [22, 24]
+        include:
+          - os: ubuntu-24.04-arm
+            node: 22
+          - os: macos-15-intel
+            node: 22
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: corepack enable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-artifacts
+      - name: Install the release through a local registry and launch Watch
+        run: SKIP_BUILD=1 pnpm install:loop --with-watch --no-bun
+
+  publish:
+    needs: [compile, verify]
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.compile.outputs.version }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+      REF_TYPE: ${{ github.ref_type }}
+    steps:
+      # A real publish comes only from a v* tag push; a dispatch may rehearse
+      # but never upload, whatever ref it ran from.
+      - name: Refuse a real publish from anything but a tag
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" != "true" ] && [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::a real publish runs only from a v* tag push (this is a ${REF_TYPE} ref); dispatch with dry_run for rehearsals"
+            exit 1
+          fi
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: corepack enable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+          registry-url: 'https://registry.npmjs.org'
+      # Newer than Node 22 bundles; pinned so a publish reproduces from the log.
+      - name: Use an npm that supports trusted publishing
+        run: npm install --global npm@11.6.2
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-artifacts
+
+      # BEFORE the first publish, not after. This is the only run of the CLI's
+      # licence / LICENSE / notices gate in the whole pipeline, and every publish
+      # below it is irreversible: a failure here used to leave four platform
+      # packages permanently on npm with no CLI that pins them.
+      - name: Verify the CLI artifact is publishable
         run: node scripts/verify-publishable.mjs build/cli-dist/staging
+
+      - name: Verify the CLI tarball matches its recorded checksum
+        run: |
+          set -euo pipefail
+          cd dist-release && shasum -a 256 -c SHA256SUMS
+
+      - name: Publish the platform packages (all or nothing)
+        run: |
+          set -euo pipefail
+          flags=(--expect-version "$VERSION")
+          if [ "$DRY_RUN" = "true" ]; then flags+=(--dry-run); fi
+          node scripts/publish-platforms.mjs "${flags[@]}"
 
       # Derived, never chosen: a candidate published to `latest` is handed to
       # every plain `npm i -g`, and npm has no undo for who already installed.
@@ -85,38 +206,66 @@ jobs:
           echo "publishing ${VERSION} under dist-tag ${tag}"
           echo "DIST_TAG=${tag}" >> "$GITHUB_ENV"
 
-      # From inside staging: it is the only form carrying the bundled deps.
+      # The very tarball the smoke matrix installed (release:cli packed it from
+      # staging with the bundled deps inside), so the published bytes are the
+      # tested bytes. `./` keeps npm from reading the path as a GitHub shorthand.
+      #
       # Skip-if-present so a run that died after the upload can be re-run and
       # reach the jobs behind it; npm answers a re-publish with a 409.
-      - name: Publish to npm with provenance
-        working-directory: build/cli-dist/staging
+      - name: Publish the CLI to npm with provenance
         run: |
           set -euo pipefail
-          if [ "$(npm view "@orcaops/cli@${VERSION}" version 2>/dev/null || true)" = "$VERSION" ]; then
+          if [ "$DRY_RUN" != "true" ] && \
+             [ "$(npm view "@orcaops/cli@${VERSION}" version 2>/dev/null || true)" = "$VERSION" ]; then
             echo "::notice::@orcaops/cli@${VERSION} is already on npm; nothing was uploaded"
             echo "UPLOADED=false" >> "$GITHUB_ENV"
             exit 0
           fi
-          npm publish --provenance --access public --tag "$DIST_TAG"
-          echo "UPLOADED=true" >> "$GITHUB_ENV"
+          flags=(--provenance --access public --tag "$DIST_TAG")
+          if [ "$DRY_RUN" = "true" ]; then flags+=(--dry-run); fi
+          npm publish "./dist-release/orcaops-cli-${VERSION}.tgz" "${flags[@]}"
+          echo "UPLOADED=$([ "$DRY_RUN" = "true" ] && echo false || echo true)" >> "$GITHUB_ENV"
 
+      - name: Verify the registry holds the tested CLI bytes
+        if: env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          local_sri="sha512-$(openssl dgst -sha512 -binary "./dist-release/orcaops-cli-${VERSION}.tgz" | base64 | tr -d '\n')"
+          for attempt in $(seq 1 24); do
+            recorded="$(npm view "@orcaops/cli@${VERSION}" dist.integrity 2>/dev/null || true)"
+            if [ "$recorded" = "$local_sri" ]; then echo "registry integrity matches the tested tarball"; exit 0; fi
+            if [ -n "$recorded" ]; then echo "::error::@orcaops/cli@${VERSION} on the registry has integrity ${recorded}, not the tested ${local_sri}"; exit 1; fi
+            echo "not visible yet (attempt ${attempt}); waiting"; sleep 10
+          done
+          echo "::error::@orcaops/cli@${VERSION} did not become visible on the registry"; exit 1
+
+      # always(): on a partial publish this summary is the only durable record
+      # of which packages are already on npm. Without it that lives in a job log.
       - name: Record what was published
+        if: always()
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
         run: |
           {
-            echo "### Published \`@orcaops/cli@${VERSION}\`"
+            echo "### Released \`@orcaops/cli@${VERSION}\` with its Watch platform packages"
             echo
-            echo "- tag: \`${{ github.ref_name }}\`"
-            echo "- commit: \`${{ github.sha }}\`"
+            echo "- dry run: \`${DRY_RUN}\`"
             echo "- dist-tag: \`${DIST_TAG}\`"
+            echo "- ref: \`${REF_NAME}\`"
+            echo "- commit: \`${SHA}\`"
             echo "- uploaded this run: \`${UPLOADED}\`"
             echo "- provenance: attested via OIDC trusted publishing"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The notes are a frozen artifact by now: drafted, leak-linted, and reviewed
-  # in the changelog PR before the freeze, then shipped inside the tarball
-  # this tag published. Publishing them is mechanical.
+  # in the changelog PR before the freeze, then shipped inside the tarball this
+  # tag published. Publishing them is mechanical. This runs before
+  # release-assets so the release is always created from the changelog rather
+  # than from the mirror's single squashed commit.
   release:
     needs: publish
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -139,7 +288,7 @@ jobs:
               line = $0
               sub(/^## \[?/, "", line)
               sub(/\]?[[:space:]].*$/, "", line)
-              if (line == want) { seen = 1; next }
+              if (line == want) { seen = 1 }
               next
             }
             seen { print }
@@ -165,3 +314,26 @@ jobs:
             *-*) flags+=(--prerelease) ;;
           esac
           gh release create "$TAG_REF" "${flags[@]}"
+
+  # Repo write lives in its own job, away from the one that can publish.
+  release-assets:
+    needs: [compile, publish, release]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-artifacts
+      - name: Attach the checksums to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG_REF" >/dev/null 2>&1; then
+            gh release create "$TAG_REF" --verify-tag --generate-notes
+          fi
+          gh release upload "$TAG_REF" dist-release/SHA256SUMS dist-release/SHA256SUMS-watch dist-release/SHA512SUMS-watch --clobber

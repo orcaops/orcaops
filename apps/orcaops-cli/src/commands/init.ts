@@ -88,7 +88,11 @@ import {
   stagedUserSessionHookAgents,
   type StagedUserSessionHookInstall,
 } from '../lib/session-hooks-install.js';
-import { codexConfigTomlPath, userHookCapableAgents } from '../lib/session-hooks-user.js';
+import {
+  codexConfigTomlPath,
+  codexHooksJsonPath,
+  userHookCapableAgents,
+} from '../lib/session-hooks-user.js';
 import {
   SESSION_HOOK_RESTART_NOTICE,
   sessionHookCapableAgents,
@@ -310,6 +314,7 @@ interface InitResult {
   machine_session_hooks: {
     plans: AppliedUserSessionHookInstall['plans'];
     codex_outcome: AppliedUserSessionHookInstall['codexOutcome'];
+    codex_migration: AppliedUserSessionHookInstall['codexMigration'];
     live_agents: SupportedAgentId[];
     record: string | null;
     partial_failure: boolean;
@@ -639,10 +644,7 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
     };
   }
 
-  const userHookAgents = new Set<SupportedAgentId>([
-    ...userHookCapableAgents(),
-    'codex' as SupportedAgentId,
-  ]);
+  const userHookAgents = new Set<SupportedAgentId>(userHookCapableAgents());
   const machineHookAgents = hookCapable.filter((agent) => userHookAgents.has(agent));
   if (
     !preservingConfig &&
@@ -1178,6 +1180,7 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
         : {
             plans: machineHooks.plans,
             codex_outcome: machineHooks.codexOutcome,
+            codex_migration: machineHooks.codexMigration,
             live_agents: machineHooks.liveAgents,
             record: machineHooks.record,
             partial_failure: machineHooks.partialFailure,
@@ -1538,6 +1541,13 @@ function machineSessionHookActions(r: InitResult): string[] {
         'then re-run `orcaops session-hooks install --agents codex`.'
     );
   }
+  if (machine.codex_migration === 'kept-duplicate') {
+    actions.push(
+      `Codex is registered in ${displayPath(codexHooksJsonPath())}; delete the leftover ` +
+        `orcaops hook in ${displayPath(codexConfigTomlPath())} (see the warning above), ` +
+        'or re-run `orcaops session-hooks install` to retry the move.'
+    );
+  }
   for (const plan of machine.plans) {
     if (
       plan.action === 'preserved-invalid-json' ||
@@ -1557,10 +1567,11 @@ function machineSessionHookActions(r: InitResult): string[] {
     );
   }
   // Exhaustive: an applied install leaves every consented agent either live
-  // or on one of the outcomes above (a settings-json plan is created/updated/
-  // unchanged or preserved-*, a Codex answer is written/unchanged, the manual
-  // snippet, skipped, refused or failed), and an install without a record is
-  // the last clause — so an empty list means nothing is pending.
+  // or on one of the outcomes above (a JSON plan is created/updated/unchanged
+  // or preserved-*, a Codex config.toml answer is written/unchanged, the
+  // manual snippet, skipped, refused or failed, and a move either lands or
+  // leaves the old block behind), and an install without a record is the last
+  // clause — so an empty list means nothing is pending.
   return actions;
 }
 

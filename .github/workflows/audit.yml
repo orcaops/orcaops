@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # The only write grant in either workflow, scoped to this job alone.
+      # The only write grant in this workflow, scoped to this job alone.
       issues: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -45,6 +45,14 @@ jobs:
           --fail-on-stale-exceptions
           --result-file "${{ runner.temp }}/audit-result.json"
           --github-summary
+
+      # The compiled Watch executables embed a Bun runtime the lockfile audit
+      # cannot see; this reports what GitHub advisories know about it. Advisory
+      # only: it writes the job summary and never fails the run.
+      - name: Bun runtime advisories
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-bun-advisories.mjs
 
       - name: Plan the tracking-issue action
         id: plan

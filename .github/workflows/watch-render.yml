@@ -1,0 +1,35 @@
+name: Watch render suite
+
+# The OpenTUI render and performance suites carry precedented tail-latency
+# flake on shared runners, so they run on a schedule and never gate a PR.
+# They stay runnable locally: `pnpm --filter @orcaops/watch test:render`.
+
+on:
+  schedule:
+    # Tuesdays 06:41 UTC — off the top of the hour and off the audit's slot.
+    - cron: '41 6 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: corepack enable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: '.bun-version'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm turbo run build --filter=@orcaops/watch...
+      - name: Task Review render suite
+        run: pnpm --filter @orcaops/watch test:render
+      - name: Task Review performance suite
+        if: always()
+        run: pnpm --filter @orcaops/watch perf:review

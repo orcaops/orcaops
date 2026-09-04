@@ -78,6 +78,12 @@ function booleanValue(value: unknown): boolean | null {
 
 const codePointCompare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
+const WATCH_PLATFORM_PACKAGE = /^@orcaops\/watch-(darwin|linux)-(arm64|x64)$/;
+
+function isWatchPlatformPackage(metadata: PackageMetadata): boolean {
+  return typeof metadata.name === 'string' && WATCH_PLATFORM_PACKAGE.test(metadata.name);
+}
+
 function dependencyNames(metadata: PackageMetadata): string[] {
   const names = new Set<string>();
   for (const collection of [
@@ -136,6 +142,11 @@ async function compiledRuntimeManifestSha256(root: string): Promise<string> {
     if (visited.has(packageRoot)) continue;
     visited.add(packageRoot);
     const metadata = await packageMetadata(packageRoot);
+    // A Watch UI platform package is an os/cpu-filtered optional dependency:
+    // which one npm installed says where the CLI runs, not what review code
+    // runs, and only one of the four ever exists on a host. Matched by name,
+    // never by a manifest field a package could claim, and never for the root.
+    if (packages.length > 0 && isWatchPlatformPackage(metadata)) continue;
     packages.push({
       name: nonEmpty(metadata.name) ?? 'unknown-package',
       version: nonEmpty(metadata.version) ?? 'unknown-version',

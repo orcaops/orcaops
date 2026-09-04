@@ -260,8 +260,8 @@ export class VerificationRequiredError extends CheckpointValidationError {
  * Thrown by `writeCheckpointOpened`'s evaluator-context callback when
  * a `policy_exceptions[]` entry names an unknown evaluator, names an
  * evaluator that doesn't fire at `checkpoint-open`, or names an
- * evaluator that doesn't carry `acknowledge_policy_exception` in its
- * `## on_block`. Distinct error so the user-facing envelope reports
+ * evaluator whose spec does not set `resolution.policy_exception.enabled`
+ * to true. Distinct error so the user-facing envelope reports
  * `path: 'policy_exceptions'` (not `declared_step_ids`).
  */
 export class PolicyExceptionInvalidError extends CheckpointValidationError {
@@ -403,7 +403,7 @@ export class StalePlanRevisionError extends Error {
  * one or more `step_id`s that closed cps have already claimed via
  * `completed_step_ids`, AND the input's
  * `acknowledge_drops_completed_steps` does not cover each. Mirrors
- * the `acknowledge_policy_exception` pattern — silent drop of a
+ * the explicit policy-exception opt-in pattern — silent drop of a
  * historic completion is rejected so the audit trail reflects an
  * explicit choice.
  */

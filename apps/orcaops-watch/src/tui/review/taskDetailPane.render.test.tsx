@@ -6,8 +6,9 @@ import { createTestRenderer } from '@opentui/core/testing';
 import { createRoot } from '@opentui/react';
 import { expect, test } from 'bun:test';
 
-import type { WatchTask } from '../../core/types';
-import type { WatchThread } from '../../data/types';
+import type { WatchTask } from '@orcaops/watch-data/ui';
+import type { WatchThread } from '@orcaops/watch-data/ui';
+
 import { ThemeProvider } from '../ThemeProvider';
 import { TaskDetailPane } from '../components/TaskDetailPane';
 import { buildTaskDetail } from '../detail';

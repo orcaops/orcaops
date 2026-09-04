@@ -17,18 +17,23 @@ import {
 } from '../lib/session-hooks-install.js';
 import {
   codexConfigTomlPath,
+  codexDualRepresentationNote,
   codexFenceGuidance,
   codexHooksDisabledGuidance,
-  codexHooksJsonNote,
   codexHooksShapeGuidance,
   codexInvalidTomlGuidance,
   codexMarkerLineGuidance,
+  type CodexRepresentationSurface,
+  type CodexTomlRemoveOutcome,
+  type CodexTomlState,
   evaluateUserSessionHookSurfaces,
+  isCodexHooksJsonPath,
   planCodexTomlInstall,
   planUserSessionHooks,
   readCodexTomlState,
   readUserHooksRecordState,
   removeCodexTomlBlock,
+  resolveCodexRepresentation,
   resolveUserHookPath,
   userHookCapableAgents,
   userHooksRecordPath,
@@ -54,6 +59,7 @@ export interface SessionHooksInstallOptions {
   json?: boolean;
   yes?: boolean;
   dryRun?: boolean;
+  representation?: string;
 }
 
 export interface SessionHooksUninstallOptions {
@@ -63,9 +69,7 @@ export interface SessionHooksUninstallOptions {
 }
 
 function parseAgents(list: string | undefined, json: boolean | undefined): SupportedAgentId[] {
-  // codex registers via the config.toml flow, not the settings-json
-  // machinery — still a valid install target here.
-  const capable: SupportedAgentId[] = [...userHookCapableAgents(), 'codex' as SupportedAgentId];
+  const capable = userHookCapableAgents();
   if (!list) return capable;
   const wanted = list
     .split(',')
@@ -83,16 +87,78 @@ function parseAgents(list: string | undefined, json: boolean | undefined): Suppo
   return wanted as SupportedAgentId[];
 }
 
+const CODEX_REPRESENTATIONS = ['hooks-json', 'config-toml'] as const;
+
+function parseRepresentation(
+  value: string | undefined,
+  json: boolean | undefined
+): CodexRepresentationSurface | undefined {
+  if (value === undefined) return undefined;
+  if ((CODEX_REPRESENTATIONS as readonly string[]).includes(value)) {
+    return value as CodexRepresentationSurface;
+  }
+  const msg =
+    `unknown --representation: ${value} ` + `(supported: ${CODEX_REPRESENTATIONS.join(', ')})`;
+  if (json) emitError(new Error(msg));
+  writeTerminalSafeStderr(`Error: ${msg}.\n`);
+  throw new CliExit(1);
+}
+
+/** Why a config.toml removal refused, or null when it would go cleanly. */
+function codexRemovalRefusal(
+  outcome: CodexTomlRemoveOutcome,
+  state: CodexTomlState
+): string | null {
+  if (outcome === 'removed' || outcome === 'absent') return null;
+  if (outcome === 'manual-content') {
+    return `${state.path} carries a manually-pasted or foreign orcaops hook — remove it yourself`;
+  }
+  if (outcome === 'refused-markers') {
+    return codexMarkerLineGuidance(state.path, state.markerProblemLines);
+  }
+  if (outcome === 'refused-invalid') return codexInvalidTomlGuidance(state.path);
+  if (outcome === 'refused-fence') return codexFenceGuidance(state.path);
+  return `${state.readError ?? `${state.path} could not be read`} — left untouched`;
+}
+
 export async function sessionHooksInstallAction(
   opts: SessionHooksInstallOptions = {}
 ): Promise<void> {
   const agents = parseAgents(opts.agents, opts.json);
+  const representationOverride = parseRepresentation(opts.representation, opts.json);
 
   if (opts.dryRun) {
-    const preview = await planUserSessionHooks(agents, 'preview');
+    // One resolution per command, exactly as the consent plan does it.
+    const representation = agents.includes('codex')
+      ? await resolveCodexRepresentation(representationOverride)
+      : null;
+    const preview = await planUserSessionHooks(
+      agents,
+      'preview',
+      'install',
+      [],
+      undefined,
+      representation
+    );
     const plans: Array<UserSessionHookFilePlan & { managed?: string }> = [...preview.plans];
     const warnings = [...preview.warnings];
-    if (agents.includes('codex' as SupportedAgentId)) {
+    if (representation !== null && representation.surface === 'hooks-json') {
+      // The sidecar is in the plans already; what the preview owes the reader
+      // is the config.toml block the move would take away.
+      const state = await readCodexTomlState(representation.tomlPath);
+      const removal = await removeCodexTomlBlock(representation.tomlPath, undefined, 'preview');
+      if (removal !== 'absent') {
+        const refusal = codexRemovalRefusal(removal, state);
+        plans.push({
+          agent: 'codex' as SupportedAgentId,
+          path: representation.tomlPath,
+          action: refusal === null ? 'removed' : 'preserved-invalid',
+          managed:
+            refusal === null ? 'move the registration out of config.toml' : `keep both: ${refusal}`,
+        });
+        if (refusal !== null) warnings.push(`the move would keep both registrations: ${refusal}`);
+      }
+    } else if (representation !== null) {
       // Codex registers via the config.toml chooser, not the settings-json
       // planner — the preview names the surface and the edit the managed
       // choice would make (an empty preview reads as "install would do
@@ -184,6 +250,7 @@ export async function sessionHooksInstallAction(
   const staged = await promptUserSessionHookInstall(agents, {
     say,
     output: opts.json ? process.stderr : process.stdout,
+    representationOverride,
   });
   if (staged === null) {
     say('Nothing written.\n');
@@ -199,13 +266,22 @@ export async function sessionHooksInstallAction(
       dry_run: false,
       plans: result.plans,
       record: result.record,
+      codex_migration: result.codexMigration,
+      codex_trust_carry: result.codexTrustCarry,
+      codex_trust_shift: result.codexTrustShift,
       restart_required: result.restartRequired,
       warnings: outboundWarnings,
     });
     return;
   }
+  const representation = staged.consent.representation;
   for (const p of result.plans) {
-    const note = p.agent === 'codex' && p.action === 'unchanged' ? ' (already registered)' : '';
+    const note =
+      p.agent === 'codex' && p.action === 'unchanged'
+        ? ' (already registered)'
+        : p.agent === 'codex' && p.action === 'updated' && p.path === representation?.hooksJsonPath
+          ? ' (joined existing hooks.json)'
+          : '';
     writeTerminalSafeStdout(`  ${p.action}: ${p.path}${note}\n`);
   }
   for (const w of outboundWarnings) writeTerminalSafeStdout(`  ! ${w}\n`);
@@ -215,6 +291,36 @@ export async function sessionHooksInstallAction(
       `  ${landed} ${codexConfigTomlPath()} (marker-owned block)\n` +
         '  ! Codex reviews new hooks once (hash-pinned trust) — approve the orcaops\n' +
         '    entry when asked, or it is silently skipped.\n'
+    );
+  }
+  if (result.codexMigration === 'moved' && representation !== null) {
+    const carried = result.codexTrustCarry === 'present' || result.codexTrustCarry === 'unchanged';
+    writeTerminalSafeStdout(
+      `  removed: ${representation.tomlPath} (marker block moved)\n` +
+        `  The Codex registration moved to ${representation.hooksJsonPath}; Codex now loads\n` +
+        '  it from one file instead of two.\n' +
+        (carried
+          ? '  The approval you already gave this hook moved with it, so Codex should not\n  ask about it again.\n'
+          : '  ! Codex reviews the entry once in its new file — approve it when asked, or it\n    is silently skipped.\n')
+    );
+  }
+  const shift = result.codexTrustShift;
+  if (shift.moved > 0) {
+    const moved =
+      shift.moved === 1
+        ? '1 approval already given to another hook moved with it'
+        : `${shift.moved} approvals already given to other hooks moved with them`;
+    writeTerminalSafeStdout(
+      `  The orcaops entry goes first in hooks.json, so ${moved},\n` +
+        '  and Codex should not ask about them again.\n'
+    );
+  }
+  if (shift.skipped.length > 0) {
+    const count = shift.skipped.length;
+    writeTerminalSafeStdout(
+      `  ! ${count} approval${count === 1 ? '' : 's'} for other hooks could not be moved, so Codex asks about\n` +
+        `    ${count === 1 ? 'that hook' : 'those hooks'} once:\n` +
+        shift.skipped.map((key) => `      ${key}\n`).join('')
     );
   }
   if (guidance !== null) writeTerminalSafeStdout(`\n${guidance}`);
@@ -259,9 +365,13 @@ export async function sessionHooksUninstallAction(
       unresolved.add(`${entry.agent}\0${entry.path}`);
     }
   }
+  // A recorded codex sidecar path is stripped by the JSON planner above; only
+  // config.toml paths belong to the marker-proof remover.
   const codexPaths = [
     codexConfigTomlPath(),
-    ...recordedEntries.filter((entry) => entry.agent === 'codex').map((entry) => entry.path),
+    ...recordedEntries
+      .filter((entry) => entry.agent === 'codex' && !isCodexHooksJsonPath(entry.path))
+      .map((entry) => entry.path),
   ].filter((candidate, index, all) => all.indexOf(candidate) === index);
   const codexRemovals: Array<{
     path: string;
@@ -335,7 +445,7 @@ export async function sessionHooksStatusAction(opts: { json?: boolean } = {}): P
   const recordState = await readUserHooksRecordState();
   const record = recordState.status === 'ok' ? recordState.record : null;
   const evaluated = await evaluateUserSessionHookSurfaces(record);
-  const hooksJsonNote = await codexHooksJsonNote();
+  const hooksJsonNote = await codexDualRepresentationNote();
   const codexConfig = codexConfigTomlPath();
   const rows = evaluated.map(({ agent, path, state, remedy }) => ({
     agent,

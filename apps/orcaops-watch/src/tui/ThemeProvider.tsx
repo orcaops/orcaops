@@ -20,8 +20,8 @@ import {
 } from 'react';
 
 import { type AppTheme, resolveTheme, THEMES, withTransparentSurfaces } from '@orcaops/diff-render';
+import type { AgentState } from '@orcaops/watch-data/ui';
 
-import type { AgentState } from '../core/types';
 import { loadPersistedTheme, loadTransparentBackground, persistTheme } from '../data/watchTheme';
 import { HitProvider } from './kit/hit';
 import { resolveInitialThemeId, type TerminalThemeMode } from './review/themeDetection';

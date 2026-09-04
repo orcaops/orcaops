@@ -12,6 +12,8 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { EventTypeSchema } from '@orcaops/storage';
+import { EventTailReader } from '@orcaops/watch-data';
+import type { TickerEvent, WatchThread } from '@orcaops/watch-data/ui';
 
 import { buildDetail } from './detail';
 import {
@@ -20,8 +22,6 @@ import {
   eventFamily,
   eventLabel,
 } from './eventPresentation';
-import { EventTailReader } from '../core/event-tail';
-import type { TickerEvent, WatchThread } from '../data/types';
 
 describe('the typed event-presentation mapping', () => {
   it('covers every EventTypeSchema member (and nothing forces a fallback)', () => {

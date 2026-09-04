@@ -58,7 +58,7 @@ describe('opt-in orchestration + insight skills', () => {
   });
 
   it('loose-ends: wraps the loose-ends command and pins the window semantics', () => {
-    expect(orcaopsLooseEndsSkill.description).toMatch(/come back to/);
+    expect(orcaopsLooseEndsSkill.description).toMatch(/unfinished captured work/);
     const body = bodyOf(orcaopsLooseEndsSkill);
     expect(body).toContain('orcaops loose-ends --json');
     expect(body).toContain('--artifact <id> --json');
@@ -68,7 +68,7 @@ describe('opt-in orchestration + insight skills', () => {
   });
 
   it('decisions: wraps the decisions command with the search FTS fallback', () => {
-    expect(orcaopsDecisionsSkill.description).toMatch(/what did we decide/);
+    expect(orcaopsDecisionsSkill.description).toMatch(/recorded decisions/);
     const body = bodyOf(orcaopsDecisionsSkill);
     expect(body).toContain('orcaops decisions --json');
     expect(body).toMatch(/FTS fallback/);
@@ -79,7 +79,9 @@ describe('opt-in orchestration + insight skills', () => {
 
   it('parallel-dispatch: pins the concurrent dispatch protocol', () => {
     expect(orcaopsParallelDispatchSkill.description).toMatch(/parallel/i);
-    expect(orcaopsParallelDispatchSkill.description).toContain('split this plan across subagents');
+    expect(orcaopsParallelDispatchSkill.description).toContain(
+      'split a captured plan across subagents'
+    );
     const body = bodyOf(orcaopsParallelDispatchSkill);
     expect(body).toContain('orcaops step brief <step_id> --json');
     expect(body).toMatch(/`checkpoint open` declaring exactly its own `step_id` BEFORE touching/);
@@ -87,6 +89,8 @@ describe('opt-in orchestration + insight skills', () => {
     expect(body).toMatch(/never retry with force/);
     expect(body).toMatch(/PARENT revises the plan to split/);
     expect(body).toMatch(/dropped_in_latest_revision: true.*\s+.*NEVER dispatch/);
+    expect(body).toContain('`verification` record for a command run fresh at close');
+    expect(body).toContain('`orcaops-finish`');
     expect(body).toMatch(/ABANDON/);
   });
 

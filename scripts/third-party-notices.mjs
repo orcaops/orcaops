@@ -72,7 +72,9 @@ export function collectPackages({ seeds, from, externals = [], rootDir = from })
   const found = new Map();
   const visited = new Set();
   const missing = [];
-  const queue = seeds.map((name) => ({ name, from }));
+  // A seed may carry its own base: a package's optional native companion is
+  // resolvable only from that package's real directory, not from the consumer.
+  const queue = seeds.map((seed) => (typeof seed === 'string' ? { name: seed, from } : seed));
 
   while (queue.length > 0) {
     const { name, from: base } = queue.shift();

@@ -14,7 +14,7 @@ orcaops digest --branch feat/x          # latest on another branch
 orcaops digest --artifact <id>          # one specific artifact
 orcaops digest --branch-wide            # all captured work in the current PR range
 orcaops digest --branch-wide --base origin/main
-orcaops digest --out PR-DESCRIPTION.md  # write to file in addition to stdout
+orcaops digest --out PR-DESCRIPTION.md  # write to file; stdout confirms the path
 orcaops digest --json                   # machine-readable
 \`\`\`
 

@@ -1,0 +1,32 @@
+[
+  {
+    "package": "@orcaops/watch-darwin-arm64",
+    "os": "darwin",
+    "cpu": "arm64",
+    "target": "bun-darwin-arm64",
+    "exe": "bin/orcaops-watch-ui"
+  },
+  {
+    "package": "@orcaops/watch-darwin-x64",
+    "os": "darwin",
+    "cpu": "x64",
+    "target": "bun-darwin-x64-baseline",
+    "exe": "bin/orcaops-watch-ui"
+  },
+  {
+    "package": "@orcaops/watch-linux-arm64",
+    "os": "linux",
+    "cpu": "arm64",
+    "libc": "glibc",
+    "target": "bun-linux-arm64",
+    "exe": "bin/orcaops-watch-ui"
+  },
+  {
+    "package": "@orcaops/watch-linux-x64",
+    "os": "linux",
+    "cpu": "x64",
+    "libc": "glibc",
+    "target": "bun-linux-x64-baseline",
+    "exe": "bin/orcaops-watch-ui"
+  }
+]

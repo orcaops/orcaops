@@ -6,11 +6,7 @@ export const orcaopsSeedDiscoverySkill: SkillTemplate = {
   id: 'seed-discovery',
   name: 'Orcaops: discover history gaps',
   description:
-    'Report scoped git-history coverage gaps during normal work. Use after an Orcaops ' +
-    '`why` miss, when entering a coverage-cold directory, or when prior-art search is empty for ' +
-    'an old subsystem. Read cached coverage and recommend the user-invoked seed skill without ' +
-    'previewing or importing history. Skip for the ' +
-    `initial repository-wide backfill (${skillRef('seed')} skill).`,
+    'Report a history-coverage gap found during normal work: after a provenance lookup finds nothing, in a directory with no captured history, or when prior-art search is empty for old code. Reads cached coverage only.',
   tags: ['orcaops', 'insight'],
   group: 'insight',
   defaultEnabled: true,

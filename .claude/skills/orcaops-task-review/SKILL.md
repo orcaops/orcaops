@@ -1,9 +1,9 @@
 ---
 name: "Orcaops: task review"
-description: "Generate the two-lane Task Review for a branch — a capture-grounded account lane and a capture-blind forensic lane, deterministically merged — optionally associate captured reasoning with changed code after review finalization — or address open reviewer comments. Cues: \"generate a review\" / \"generate a review using orcaops\", \"compose the review\", \"review the work in this branch\", \"anchor the review reasoning to code\", and ADDRESS-COMMENTS — \"address the open review comments on <branch>\", \"answer the reviewer\", \"work the review comments\". Skip for: adversarial verification of the work itself (adversarial-review skill) or a shareable PR summary (digest skill)."
+description: "Generate the Orcaops Task Review for a branch, anchor its reasoning to changed code, or address its comments. Select it only for an Orcaops or Task Review request, or the explicit reasoning-anchor action: \"generate the Orcaops Task Review\", \"anchor the review reasoning to code\", or \"address the open Task Review comments\"."
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "8c726c6009b1"
+  contentHash: "a2008c26058c"
 tags: ["orcaops", "review"]
 ---
 
@@ -274,11 +274,10 @@ engine assigns Act/Part ids and derives membership from nesting:
      "questions": [string | {"text": "...", "citations": ["c#", ...]}, ...]}
 
 Author clean JSON in this shape. As a bounded safety net, the engine can unwrap
-exactly one accidentally stringified outer JSON object, remove brackets from an
-exact known `[c#]` alias, and rename an unambiguous question object's
-`question` key to `text`. It records those normalizations separately from a
-clean first pass. It never recursively unwraps, guesses an unknown alias, or
-chooses between conflicting `question` and `text` keys.
+exactly one accidentally stringified outer JSON object and records that
+normalization separately from a clean first pass. It does not remove bracketed
+aliases, rename a `question` key to `text`, recursively unwrap, or guess an
+unknown alias; submit the documented shape directly.
 
 Submit on stdin in ONE command — never write payload files:
 
@@ -514,8 +513,6 @@ Map each named signal to its repair:
   one Part — keep it in exactly one.
 - STORY_UNKNOWN_CHECKPOINT_REF: a `checkpoints` alias does not resolve to an
   in-scope completed checkpoint — reference only served `k#` aliases.
-- STORY_OPEN_OR_ABANDONED_MEMBER: an open/abandoned checkpoint was placed
-  as a Part member — remove it; such checkpoints are context only.
 - SLICE_SUBMIT_AFTER_ACCEPT / TWOLANE_ATTEMPT_BUDGET: the state machine
   refused the submission (already accepted, or that lane's repair credit is
   spent); never work around it by minting a fresh run.
@@ -538,9 +535,6 @@ Map each named signal to its repair:
     engine defect — that is the deliverable for this run.
 - finalize reports "already finalized": the run record is immutable; the
   existing review.md is the deliverable.
-- "unknown --profile": only `routine` and `full` are valid; the CLI
-  fails loudly rather than silently falling back.
-
 # Mode B — address comments
 
 Read open comments with:

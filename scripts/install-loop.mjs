@@ -6,6 +6,9 @@
 //   pnpm install:loop                  # build a fresh tarball, then verify it
 //   SKIP_BUILD=1 pnpm install:loop     # reuse dist-release/
 //   pnpm install:loop --against-repo . # init into THIS repo, not a scratch one
+//   pnpm install:loop --with-watch      # also install + launch the compiled Watch companion
+//                                       # through a local registry serving dist-release/
+//   pnpm install:loop --no-bun          # prove nothing here needs Bun: scrub it from PATH
 //
 // KEEP=1 skips teardown.
 //
@@ -15,7 +18,7 @@
 // `--version` check and dies on the user's first capture. `doctor`'s `cache`
 // check opens the store, so it actually loads the addon.
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -69,6 +72,7 @@ function childEnv(overrides = {}) {
   for (const key of Object.keys(env)) {
     if (key.startsWith('ORCAOPS_')) delete env[key];
   }
+  if (NO_BUN) env.PATH = PATH_WITHOUT_BUN;
   return {
     ...env,
     CLAUDE_CONFIG_DIR: path.join(HOME, '.claude'),
@@ -141,6 +145,35 @@ const argv = process.argv.slice(2);
 const againstIdx = argv.indexOf('--against-repo');
 const againstRepo = againstIdx === -1 ? null : path.resolve(argv[againstIdx + 1] ?? '.');
 if (againstIdx !== -1 && !argv[againstIdx + 1]) fail('--against-repo needs a path');
+const WITH_WATCH = argv.includes('--with-watch');
+const NO_BUN = argv.includes('--no-bun');
+
+// The installed CLI and its compiled Watch companion must run on a host that
+// never heard of Bun. A PATH directory that also holds `bun` (Homebrew, a
+// version-manager shim dir) cannot simply be dropped — it usually holds node
+// and npm too — so it is replaced by a shadow directory linking every entry
+// except bun and bunx.
+const SHADOW_ROOT = mkdtempSync(path.join(tmpdir(), 'orcaops-loop-path-'));
+let shadowCount = 0;
+function withoutBun(dir) {
+  if (!existsSync(path.join(dir, 'bun')) && !existsSync(path.join(dir, 'bunx'))) return dir;
+  const shadow = path.join(SHADOW_ROOT, String(shadowCount++));
+  mkdirSync(shadow, { recursive: true });
+  for (const entry of readdirSync(dir)) {
+    if (entry === 'bun' || entry === 'bunx') continue;
+    try {
+      symlinkSync(path.join(dir, entry), path.join(shadow, entry));
+    } catch {
+      // An entry that cannot be linked is simply absent from the shadow.
+    }
+  }
+  return shadow;
+}
+const PATH_WITHOUT_BUN = (process.env.PATH ?? '')
+  .split(path.delimiter)
+  .filter((dir) => dir !== '')
+  .map(withoutBun)
+  .join(path.delimiter);
 
 // ---------------------------------------------------------------------------
 // Sandbox — created before anything can fail so `finally` always has it
@@ -154,12 +187,53 @@ mkdirSync(PREFIX, { recursive: true });
 for (const dir of ['.claude', '.codex', '.cursor'])
   mkdirSync(path.join(HOME, dir), { recursive: true });
 
+let registry = null;
+
+/**
+ * The registry runs in its own process: this harness drives npm with
+ * spawnSync, which would block an in-process server from ever answering.
+ */
+function startRegistryProcess(releaseDir) {
+  const child = spawn(
+    process.execPath,
+    [path.join(ROOT, 'scripts', 'local-registry.mjs'), '--release-dir', releaseDir],
+    { stdio: ['ignore', 'pipe', 'pipe'] }
+  );
+  return new Promise((resolve, reject) => {
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (chunk) => {
+      out += chunk;
+      const newline = out.indexOf('\n');
+      if (newline === -1) return;
+      const line = out.slice(0, newline).trim();
+      if (line.startsWith('http://')) {
+        resolve({
+          url: line,
+          close: () =>
+            new Promise((done) => {
+              // A child that already died has already emitted exit.
+              if (child.exitCode !== null || child.signalCode !== null) return done();
+              child.once('exit', () => done());
+              child.kill('SIGTERM');
+            }),
+        });
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      err += chunk;
+    });
+    child.once('exit', (code) => reject(new Error(`local registry exited ${code}: ${err}`)));
+  });
+}
+
 function teardown() {
   if (process.env.KEEP === '1') {
     log(`KEEP=1 — leaving ${TMP} in place`);
     return;
   }
   rmSync(TMP, { recursive: true, force: true });
+  rmSync(SHADOW_ROOT, { recursive: true, force: true });
 }
 
 try {
@@ -182,6 +256,28 @@ try {
   }
   const tarball = path.join(RELEASE, tarballs[0]);
   log(`Tarball: ${tarballs[0]}`);
+
+  if (NO_BUN) {
+    const leaked = PATH_WITHOUT_BUN.split(path.delimiter).find((dir) =>
+      existsSync(path.join(dir, 'bun'))
+    );
+    assert(leaked === undefined, 'no PATH entry offered to children can resolve `bun`');
+  }
+
+  // The four platform packages are unpublished until the release run, so a
+  // registry of our own serves them (and proxies everything else upstream):
+  // only a registry install exercises npm's optional-dependency and os/cpu
+  // filtering the way a user's install does.
+  const hostPlatformPackage = `@orcaops/watch-${process.platform}-${process.arch}`;
+  if (WITH_WATCH) {
+    const watchTarballs = readdirSync(RELEASE).filter((f) => /^orcaops-watch-.*\.tgz$/.test(f));
+    assert(
+      watchTarballs.length === 4,
+      `four Watch platform tarballs in dist-release/ (found ${watchTarballs.length}; run pnpm release:watch-platforms)`
+    );
+    registry = await startRegistryProcess(RELEASE);
+    log(`Local registry at ${registry.url} (serving dist-release/, proxying the rest)`);
+  }
 
   // ---------------------------------------------------------------------------
   // 2. Manifest assertions
@@ -209,7 +305,18 @@ try {
   // 3. Isolated global install
   // -------------------------------------------------------------------------
   log(`Installing into a throwaway prefix (Node ${process.version})…`);
-  run('npm', ['i', '-g', '--prefix', PREFIX, tarball], { stdio: 'ignore' });
+  run(
+    'npm',
+    [
+      'i',
+      '-g',
+      '--prefix',
+      PREFIX,
+      ...(registry === null ? [] : [`--@orcaops:registry=${registry.url}`]),
+      tarball,
+    ],
+    { stdio: 'ignore' }
+  );
   const bin = path.join(PREFIX, 'bin', 'orcaops');
   assert(existsSync(bin), 'orcaops bin exists in the throwaway prefix');
 
@@ -219,10 +326,36 @@ try {
     `orcaops --version runs (${ver.stdout.trim()})`
   );
 
-  // npm's allow-scripts gating can skip prebuild-install without failing the
-  // install, so check the addon is actually on disk.
-  const addon = capture('find', [PREFIX, '-name', 'better_sqlite3.node']);
-  assert(addon.stdout.trim().length > 0, 'better-sqlite3 native addon was installed');
+  // better-sqlite3 13.x ships its prebuilds in the tarball with no install
+  // script, so a blocked-script install can no longer strand us — but an
+  // unsupported host would, and it fails silently until the first DB open.
+  // The binaries are named by platform (prebuilds/darwin-arm64.node), so assert
+  // the one this host needs is present rather than a fixed filename.
+  // musl hosts get a `linuxmusl-` prebuild. Detect it the way better-sqlite3
+  // itself does: glibc builds report a glibc version, musl builds do not.
+  const isMusl =
+    process.platform === 'linux' &&
+    process.report?.getReport()?.header?.glibcVersionRuntime === undefined;
+  const hostPrebuild = `${isMusl ? 'linuxmusl' : process.platform}-${process.arch}.node`;
+  const addon = capture('find', [PREFIX, '-name', hostPrebuild, '-path', '*better-sqlite3*']);
+  assert(addon.stdout.trim().length > 0, `better-sqlite3 prebuild for this host (${hostPrebuild})`);
+
+  const installedCli = path.join(PREFIX, 'lib', 'node_modules', '@orcaops', 'cli');
+  const platformDir = path.join(installedCli, 'node_modules', hostPlatformPackage);
+  if (WITH_WATCH) {
+    assert(
+      existsSync(path.join(platformDir, 'bin', 'orcaops-watch-ui')),
+      `${hostPlatformPackage} installed beside the CLI with its executable`
+    );
+    const others = readdirSync(path.join(installedCli, 'node_modules', '@orcaops')).filter((n) =>
+      n.startsWith('watch-')
+    );
+    assert(others.length === 1, `only the host's platform package was installed (${others})`);
+    assert(
+      addon.stdout.trim().split('\n').length === 1,
+      'exactly one better-sqlite3 copy: the sidecar shares the CLI addon'
+    );
+  }
 
   // -------------------------------------------------------------------------
   // 4. Target repo — scratch by default
@@ -317,6 +450,47 @@ try {
     cache?.status === 'pass',
     `doctor's cache check passed — SQLite opened (${cache?.summary ?? 'no summary'})`
   );
+
+  // -------------------------------------------------------------------------
+  // 6b. The compiled Watch companion: launched by the CLI, Bun-less
+  // -------------------------------------------------------------------------
+  if (WITH_WATCH) {
+    log('Launching the Watch companion through the installed CLI…');
+    const companion = dchecks.find((c) => c.name === 'watch-companion');
+    assert(
+      companion?.status === 'pass' && /Task Review ready/.test(companion.summary),
+      `doctor's watch-companion check passed (${companion?.summary ?? 'missing'})`
+    );
+    const selfcheck = orcaops(bin, ['watch', '--selfcheck'], { cwd: repo, home });
+    assert(
+      selfcheck.status === 0 && selfcheck.stdout.includes('watch selfcheck ok'),
+      `orcaops watch --selfcheck boots the executable (exit ${selfcheck.status})`
+    );
+    const probe = orcaops(bin, ['watch', '--probe', '--root', repo], { cwd: repo, home });
+    assert(
+      probe.status === 0 && probe.json !== null && typeof probe.json.threads === 'number',
+      `orcaops watch --probe returns a snapshot through the shipped sidecar (${probe.stdout.trim().slice(0, 80)})`
+    );
+
+    // What a host with no build, or a pruned optional, looks like.
+    const parked = `${platformDir}.absent`;
+    run('mv', [platformDir, parked]);
+    const absent = orcaops(bin, ['watch', '--probe'], { cwd: repo, home });
+    assert(
+      absent.status === 127 && /reinstall: npm i -g @orcaops\/cli@/.test(absent.stderr),
+      `without the companion, orcaops watch exits 127 with the reinstall command`
+    );
+    const docAbsent = orcaops(bin, ['doctor', '--json'], { cwd: repo, home });
+    const absentCheck = (docAbsent.json?.data ?? docAbsent.json ?? {}).checks?.find(
+      (c) => c.name === 'watch-companion'
+    );
+    assert(
+      absentCheck?.status === 'warn' &&
+        /npm i -g @orcaops\/cli@/.test(absentCheck.details?.join('\n') ?? ''),
+      `doctor warns with the reinstall command when the companion is missing`
+    );
+    run('mv', [parked, platformDir]);
+  }
 
   // -------------------------------------------------------------------------
   // 7. Idempotency + uninstall round-trip
@@ -638,91 +812,12 @@ try {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // 11. Watch pairing — the installed Watch against a new-layout sibling.
-  //     Matching release: an empty governed sibling is a project with no
-  //     threads and nothing is created. Preceding release (when the registry
-  //     is reachable): may report the sibling as uninitialized, must create
-  //     nothing and claim no corruption.
-  // -------------------------------------------------------------------------
-  if (!againstRepo) {
-    // Its own repository AND its own home: the probe counts every project in
-    // the home's archive registry, so "no threads" must not see captures the
-    // earlier sections mirrored under the shared throwaway HOME.
-    const watchHome = path.join(TMP, 'home-watch');
-    for (const dir of ['.claude', '.codex', '.cursor'])
-      mkdirSync(path.join(watchHome, dir), { recursive: true });
-    const watchMain = path.join(TMP, 'repo-watch');
-    mkdirSync(watchMain, { recursive: true });
-    seedRepo(watchMain, 'seed');
-    const wInit = orcaops(bin, ['init', '--yes', '--json', '--no-llm'], {
-      cwd: watchMain,
-      home: watchHome,
-    });
-    assert(wInit.status === 0, 'watch pairing: personal init exits 0');
-    const watchSibling = path.join(TMP, 'repo-watch-sibling');
-    run('git', ['-C', watchMain, 'worktree', 'add', '-q', '-b', 'watch-target', watchSibling]);
-    const probeWith = (watchBin, label) => {
-      const probe = capture(watchBin, ['--probe', '--root', watchSibling], {
-        cwd: watchSibling,
-        env: { HOME: watchHome, USERPROFILE: watchHome },
-        timeout: 60_000,
-      });
-      const out = `${probe.stdout}\n${probe.stderr}`;
-      assert(!/corrupt/i.test(out), `${label}: reports no corruption for a new-layout sibling`);
-      assert(
-        !existsSync(path.join(watchSibling, '.orcaops')),
-        `${label}: created nothing in the sibling`
-      );
-      return probe;
-    };
-
-    if (process.env.SKIP_BUILD === '1') {
-      log('SKIP_BUILD=1 — reusing dist-release/ for the Watch tarball');
-    } else {
-      log('Building the Watch tarball (pnpm release:watch)…');
-      run('pnpm', ['release:watch'], { stdio: 'ignore' });
-    }
-    const watchTarballs = readdirSync(RELEASE).filter((f) => /^orcaops-watch-\d.*\.tgz$/.test(f));
-    assert(watchTarballs.length === 1, 'exactly 1 Watch tarball in dist-release/');
-    const watchPrefix = path.join(TMP, 'prefix-watch');
-    mkdirSync(watchPrefix, { recursive: true });
-    run('npm', ['i', '-g', '--prefix', watchPrefix, path.join(RELEASE, watchTarballs[0])], {
-      stdio: 'ignore',
-    });
-    const watchBin = path.join(watchPrefix, 'bin', 'orcaops-watch');
-    const matching = probeWith(watchBin, 'matching Watch');
-    assert(matching.status === 0, 'matching Watch: probe exits 0 against the empty sibling');
-    const totals = JSON.parse(matching.stdout.trim().split('\n').at(-1));
-    assert(totals.threads === 0, 'matching Watch: an empty governed sibling has no threads');
-
-    const view = capture('npm', ['view', '@orcaops/watch', 'version'], { timeout: 15_000 });
-    const previous = view.status === 0 ? view.stdout.trim() : '';
-    if (previous.length === 0) {
-      log(
-        'npm registry unreachable or @orcaops/watch unpublished — skipping the preceding-Watch pairing'
-      );
-    } else {
-      log(`Installing the preceding Watch release (@orcaops/watch@${previous})…`);
-      const prevPrefix = path.join(TMP, 'prefix-watch-prev');
-      mkdirSync(prevPrefix, { recursive: true });
-      const installed = capture(
-        'npm',
-        ['i', '-g', '--prefix', prevPrefix, `@orcaops/watch@${previous}`],
-        {
-          timeout: 120_000,
-        }
-      );
-      if (installed.status !== 0) {
-        log('preceding Watch install failed (offline?) — skipping the pairing');
-      } else {
-        // Older Watch keeps the old `.orcaops`-existence semantics: reporting
-        // the sibling as uninitialized (a non-zero exit or zero totals) is
-        // allowed; creating anything or claiming corruption is not.
-        probeWith(path.join(prevPrefix, 'bin', 'orcaops-watch'), 'preceding Watch');
-      }
-    }
-  }
+  // The Watch pairing section that lived here tested `@orcaops/watch`, the
+  // standalone interpreted wrapper. That package is retired: the UI now ships
+  // as four compiled per-platform companions the CLI installs and launches
+  // itself, and `--with-watch` exercises that properly. Nothing here survived
+  // the change — `release:watch` is gone, and so is the `orcaops-watch` bin it
+  // installed.
 
   // -------------------------------------------------------------------------
   // 12. Uninstall from the sibling silences every worktree; the shared
@@ -761,5 +856,6 @@ try {
     process.exitCode = 1;
   }
 } finally {
+  if (registry !== null) await registry.close();
   teardown();
 }

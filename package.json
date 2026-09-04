@@ -4,10 +4,11 @@
   "license": "FSL-1.1-ALv2",
   "scripts": {
     "release:cli": "node scripts/build-cli-dist.mjs",
-    "release:watch": "node scripts/build-watch-dist.mjs",
+    "release:watch-platforms": "node scripts/build-watch-platforms.mjs",
     "verify:publishable": "node scripts/verify-publishable.mjs",
     "install:loop": "node scripts/install-loop.mjs",
     "build": "turbo run build",
+    "compile": "turbo run compile --filter @orcaops/watch",
     "dev": "turbo run dev",
     "lint": "turbo run lint",
     "lint:fix": "turbo run lint:fix",
@@ -51,7 +52,7 @@
     "yaml": "^2.8.2"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.14.0"
   },
   "packageManager": "pnpm@10.18.2"
 }

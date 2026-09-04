@@ -5,6 +5,55 @@ Notable changes to the Orcaops CLI. Format follows
 [SemVer](https://semver.org/spec/v2.0.0.html). Below 1.0.0, minor releases
 may change behaviour. Anything needing action on upgrade is called out.
 
+## [0.2.0] - 2026-09-04
+
+Three things to check on upgrade: move to Node 22.14.0 or newer, uninstall
+`@orcaops/watch`, and on Windows use WSL2 if you open the Task Review UI.
+
+### Breaking changes
+
+- Node 22.14.0 or newer is required. Older versions are refused at startup.
+- The separate `@orcaops/watch` package is retired and gets no further
+  releases. Uninstall it:
+
+  ```
+  npm uninstall -g @orcaops/watch
+  ```
+
+  `orcaops watch`, the terminal UI for reviewing a branch, now ships with the
+  CLI as a prebuilt binary for your platform and no longer needs Bun.
+
+- That prebuilt UI covers macOS and Linux on x64 and arm64. On Windows it runs
+  under WSL2. The rest of the CLI is unaffected, and anywhere without a build
+  `orcaops watch` lists the platforms it supports and exits.
+
+### Added
+
+- `orcaops doctor` names the Task Review build it found, or tells you your
+  platform has none.
+
+### Changed
+
+- Installing is one command, with no native build step:
+
+  ```
+  npm i -g @orcaops/cli
+  ```
+
+- `orcaops init` registers Codex hooks in `hooks.json`. An existing orcaops
+  block in your Codex `config.toml` moves there for you and keeps the approval
+  Codex already holds, so you are not asked to approve the hook again.
+
+### Fixed
+
+- Installing under an npm version that blocks install scripts leaves a working
+  CLI. Previously the install reported success and every command that opened
+  the capture store then failed.
+- Two orcaops commands running at once no longer fail while the search index
+  is being updated.
+- When the capture store cannot be opened, the error shows the command that
+  fixes it; previously the message was cut off before it.
+
 ## [0.1.1] - 2026-09-03
 
 No action needed on upgrade.

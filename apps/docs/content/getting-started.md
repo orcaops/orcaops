@@ -31,10 +31,9 @@ that appear in Orcaops Watch, the digest, and lower-level command output.
 
 ## Prerequisites
 
-- **Node.js 22 or newer** — check with `node --version`.
+- **Node.js 22.14 or newer** — check with `node --version`.
 - **macOS or Linux** on x64 or arm64. On Windows, use WSL2.
 - A **git repository with at least one commit**.
-- **[Bun](https://bun.sh) — for `orcaops watch` only.**
 
 ## 1. Install the CLI
 
@@ -42,13 +41,6 @@ that appear in Orcaops Watch, the digest, and lower-level command output.
 npm i -g @orcaops/cli
 orcaops --version
 ```
-
-> [!NOTE]
-> Orcaops stores its task records in SQLite, whose native module is fetched by
-> `better-sqlite3`'s install script. If your npm blocks install scripts (an
-> `allow-scripts` policy or `--ignore-scripts`), the install "succeeds" but the
-> first real command fails with a missing-binding error — reinstall with
-> `npm install -g --allow-scripts=better-sqlite3 @orcaops/cli`.
 
 ## 2. Initialize your repository
 

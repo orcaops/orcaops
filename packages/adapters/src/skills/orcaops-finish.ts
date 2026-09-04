@@ -5,7 +5,7 @@ export const orcaopsFinishSkill: SkillTemplate = {
   id: 'finish',
   name: 'Orcaops: finish workflow',
   description:
-    'Close completed work in one command: run enabled pre-PR checks, pause on warnings, save the summary, sync, and render the digest.',
+    'Finalize completed work by running checks, handling warnings, saving the summary, syncing, and rendering the digest. Use for "finish this work", "wrap this up", or "get this ready for a PR".',
   tags: ['orcaops', 'capture'],
   required: true,
   body: `# When to use
@@ -20,6 +20,7 @@ ${ATTRIBUTION_INSTRUCTION}
 
 \`\`\`bash
 orcaops finish --invoked-by-agent <your-agent-id> --input - <<'EOF'
+artifact_id: <id>
 outcome: <what shipped>
 tests_written: []
 tests_run: []
@@ -28,7 +29,8 @@ deferred_decisions: []
 EOF
 \`\`\`
 
-The artifact id is optional when exactly one active artifact exists.
+The \`artifact_id\` line is optional when exactly one active artifact exists.
+Include it at the top level of the input when more than one is active.
 
 # Respond to the result
 

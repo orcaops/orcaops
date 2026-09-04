@@ -10,11 +10,7 @@ export const orcaopsEstimateSkill: SkillTemplate = {
   id: 'estimate',
   name: 'Orcaops: estimate',
   description:
-    'Ground an estimate in captured history — "how big is this task really?", "what did ' +
-    'similar work cost last time?", "how many checkpoints will this take?". Compares the new ' +
-    "plan's shape against prior artifacts' step counts, checkpoint counts, and token usage. " +
-    'Task-shaped cost data exists nowhere else. Skip for: current spend totals ' +
-    '(`orcaops usage --json` directly) or writing the plan itself (capture skill).',
+    'Estimate a task from similar captured work, step counts, checkpoints, and token use. Use for "how big is this task?", "what did similar work cost?", or "how did the estimate hold up?".',
   tags: ['orcaops', 'insight'],
   group: 'insight',
   defaultEnabled: false,

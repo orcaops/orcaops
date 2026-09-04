@@ -49,7 +49,7 @@ describe('task-review routine two-lens program', () => {
     expect(body).toContain(
       'Read these\nvalues from the final response, not by rereading review.md'
     );
-    expect(body).toContain('unknown --profile');
+    expect(body).not.toContain('unknown --profile');
   });
 
   it('reads each payload in a single ordered pass, not one indivisible read', () => {
@@ -121,7 +121,9 @@ describe('task-review routine two-lens program', () => {
     // "8 words" is the actionable lever. The validator still enforces it.
     expect(body).not.toContain('120 Unicode code points');
     expect(body).toContain('unwrap\nexactly one accidentally stringified outer JSON object');
-    expect(body).toContain('never recursively unwraps');
+    expect(body).toContain('does not remove bracketed\naliases');
+    expect(body).toContain('rename a `question` key to `text`');
+    expect(body).toContain('recursively unwrap');
     // ALL in-scope checkpoints across ALL threads are served to the Story pass.
     expect(body).toContain('ALL in-scope completed checkpoints across ALL floor');
     // The served payload opens with current-run facts, and the skill must tell
@@ -291,24 +293,12 @@ describe('task-review routine two-lens program', () => {
     expect(body).not.toContain('# Mode C');
   });
 
-  it('maps every named diagnostic to a repair action, and refusals to a stop', () => {
-    for (const code of [
-      'FORENSIC_TRANSPORT_CEILING',
-      'REVIEW_DIFF_TRUNCATED',
-      'TWOLANE_ROUTINE_ORDER',
-      'SLICE_ROUTINE_LIMITS',
-      'SLICE_PAYLOAD_SHAPE',
-      'SLICE_UNKNOWN_FILE',
-      'SLICE_UNKNOWN_CITATION',
-      'STORY_CHECKPOINT_UNCLAIMED',
-      'STORY_CHECKPOINT_DUPLICATED',
-      'STORY_UNKNOWN_CHECKPOINT_REF',
-      'STORY_OPEN_OR_ABANDONED_MEMBER',
-      'SLICE_SUBMIT_AFTER_ACCEPT',
-      'TWOLANE_ATTEMPT_BUDGET',
-    ])
-      expect(body, code).toContain(code);
-    // The two routine-start refusals are a STOP, not a repair spend.
+  it('maps repairable diagnostics to actions and refusals to a stop', () => {
+    expect(body).toContain('SLICE_UNKNOWN_FILE');
+    expect(body).toContain('SLICE_UNKNOWN_CITATION');
+    expect(body).toContain('SLICE_SUBMIT_AFTER_ACCEPT');
+    expect(body).toContain('TWOLANE_ATTEMPT_BUDGET');
+    expect(body).not.toContain('STORY_OPEN_OR_ABANDONED_MEMBER');
     expect(body).toContain('no payload was minted — NOT a repair');
   });
 

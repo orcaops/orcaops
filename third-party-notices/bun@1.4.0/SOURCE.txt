@@ -1,0 +1,16 @@
+package:  bun@1.4.0 (the runtime embedded in every compiled Watch UI executable;
+          not an npm dependency — the pin lives in .bun-version)
+declared: https://github.com/oven-sh/bun (the runtime's own repository)
+
+url:      https://api.github.com/repos/oven-sh/bun/contents/LICENSE.md?ref=bun-v1.4.0
+ref:      tag bun-v1.4.0
+commit:   34cbb9a40b4bd1bd767d134a7065e66c2432a676
+blob:     3ae7d08305e14ab003a235359065132941fce3e7
+path:     LICENSE.md (repository root)
+fetched:  2026-09-03
+
+verified: the tag's LICENSE.md is the file Bun's release notes point at for the
+          licences of the statically linked libraries (MIT for Bun itself,
+          LGPL-2 for JavaScriptCore/WebKit, and the per-library terms listed
+          under "Linked libraries" and "Polyfills"). `bun build --compile`
+          copies that runtime, so a platform package redistributes all of it.

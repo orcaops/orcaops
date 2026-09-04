@@ -1,9 +1,9 @@
 ---
 name: "Orcaops: plan approval (cloud source plan)"
-description: "Get a plan APPROVED on the cloud web surface and pin the approved version as a graded conformance anchor — \"get this plan approved\", \"upload my plan for approval\", \"is my plan approved yet?\", \"any feedback on my uploaded plan?\", \"pull the approved plan\". Drives the approval loop end to end (upload, status/view/pull/propose/comment/verdict/decline/approve/diff/reviewers via the `orcaops plan review` CLI verbs), waits on approval with the bounded watch loop, and is the path when you need to read or download a plan body (the in-review candidate, or the approved version) or pin a local plan file as a born-pinned conformance anchor. Skip for: critiquing a plan draft before capture (plan-critique skill)."
+description: "Upload, read, download, approve, or pin a plan through the Orcaops cloud approval flow. Use for \"get this plan approved\", \"is my plan approved yet?\", \"read or download the plan body\", or \"pull the approved plan\"."
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "2f6fed07ec8d"
+  contentHash: "1298b4c4ac42"
 ---
 
 # When to use
@@ -11,7 +11,7 @@ metadata:
 When the slice plan for a task is reviewed on a **web surface** (not just a
 local file), or when you want to pin a local plan file as an immutable,
 graded conformance anchor. The pin is consumed origin-agnostically by the
-`plan-conformance` evaluator; pinning is the same regardless of which track
+plan-conformance evaluators; pinning is the same regardless of which track
 produced it.
 
 # Attribution: declare your agent id
@@ -39,7 +39,8 @@ track minted it:
   `cloud:<id>@<n>` conformance anchor.
 - **Approved (pinnable)** — `orcaops plan pull <ref> --out <file>`. This is a
   DIFFERENT command and only resolves once the plan is APPROVED; it
-  `NOT_FOUND`s while the plan is still in review. Its body IS the graded pin.
+  reports `NO_INPUT` while the plan is still in review or is already pinned.
+  Its body IS the graded pin.
 - `orcaops plan review view <ref>` shows review **STATE**, not the body — it
   returns NO plan text. To read or download the body use `plan review pull
   --out` (in review) or `plan pull --out` (approved).
@@ -63,7 +64,7 @@ The plan is uploaded, approved by a human in the cloud, then pulled and pinned.
 
    The id is **crash-safe + deterministic** (re-running the same file+content
    replays onto the same draft; an edit mints a new immutable draft and the
-   prior id is reported). Note the printed `externalId`.
+   prior id is reported). Note the printed `external_id`.
 
    **Check `unresolved` in the output.** Non-empty means those reviewer tags
    matched NOBODY — the plan is in review with no reviewer requested for them
@@ -78,18 +79,19 @@ The plan is uploaded, approved by a human in the cloud, then pulled and pinned.
 3. **Pull** the approved version into the local pull-cache:
 
    ```bash
-   orcaops plan pull <externalId>            # or the slug
-   orcaops plan pull <externalId> --out docs/approved-plan.md   # also write the body
+   orcaops plan pull <external_id>            # or the slug
+   orcaops plan pull <external_id> --out docs/approved-plan.md   # also write the body
    ```
 
    It verifies the body hash and prints the ref to pin:
-   `--source-plan cloud:<externalId>@<versionNumber>`. `NOT_FOUND` means
-   there is no APPROVED version yet — get it approved first.
+   `--source-plan cloud:<external_id>@<version_number>`. If there is no
+   APPROVED version, the CLI reports `NO_INPUT` and explains that the plan
+   may already be pinned; get an unpinned version approved first.
 
 4. **Capture** against the pulled plan, then **push**:
 
    ```bash
-   orcaops capture plan --input - --invoked-by-agent <your-agent-id> --source-plan cloud:<externalId>@<version> <<'EOF'
+   orcaops capture plan --input - --invoked-by-agent <your-agent-id> --source-plan cloud:<external_id>@<version> <<'EOF'
    task: |-
      ...
    EOF
@@ -216,7 +218,7 @@ ack, NOT a 409** — that is expected, not a bug.
 - **Can't get the plan body?** `plan review view` shows STATE only (no body) —
   read the body with `orcaops plan review pull <ref> --out <file>` while
   in review, or `orcaops plan pull <ref> --out <file>` once APPROVED
-  (`plan pull` `NOT_FOUND`s before approval). A read verb that seems
+  (`plan pull` reports `NO_INPUT` before approval or after pinning). A read verb that seems
   "missing" is usually on the other track: `orcaops plan review --help` lists
   the review-track verbs (pull/propose/push/comment/view/list/status/
   reviewers/verdict/decline/approve/diff).

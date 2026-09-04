@@ -3,8 +3,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
+import { makeArchiveFixture } from '@orcaops/watch-data/testing';
+
 import { createStreamSource } from './streamSource.js';
-import { makeArchiveFixture } from '../../tests/support/fixture-archive.js';
 
 const PROJECT_ID = '019fc200-0000-7000-8000-00000000aaa1';
 const ARTIFACT_ID = '01999999-9999-7000-8000-0000000000e0';
@@ -31,11 +32,13 @@ describe('watch data sidecar failure propagation', () => {
         let poisoning = false;
         let stop = (): void => undefined;
         // fs.watch may drop the rename notification; the production fallback
-        // is a 10-second heartbeat, so the discriminator must outlast it.
+        // is a 10-second heartbeat measured from sidecar start. A cold sidecar
+        // on a loaded runner can deliver its first snapshot after that first
+        // tick, so the failing tick may be the second one: outlast two.
         const timeout = setTimeout(() => {
           stop();
           reject(new Error('sidecar stayed connected after its tick failed'));
-        }, 15_000);
+        }, 25_000);
         stop = source.start({
           onSnapshot: (snapshot) => {
             if (poisoning) return;

@@ -1,17 +1,19 @@
 ---
 name: "Orcaops: pre-PR check"
-description: "Run the final pre-PR evaluator pass before summary. Recommended, not a hard gate; a block-severity violation keeps `capture summary` BLOCKED until resolved."
+description: "Manually run final pre-PR checks for inspection or repair. Normal finalization starts with finish."
 metadata:
   generatedBy: "orcaops@0.1.0"
-  contentHash: "006f1108b428"
+  contentHash: "4b809145613c"
 tags: ["orcaops", "capture"]
 ---
 
 # When to use
 
-After the work is complete and you're about to call `capture summary`.
-Pre-PR runs the enabled `fires_at: pre-pr` evaluators across the whole
-artifact thread one more time.
+For normal finalization, use `orcaops-finish`; it runs this
+check and pauses before saving the summary when attention is needed. Use this
+standalone command when the user explicitly asks to inspect or rerun only the
+pre-PR checks. It runs the enabled `fires_at: pre-pr` evaluators across the
+whole artifact thread.
 
 Skipping this means `capture summary` runs without the final pass; the
 digest will be poorer.
@@ -47,7 +49,8 @@ id comes from `orcaops status --json`.
   "ok": true,
   "artifact_id": "a3b1f0c2",
   "evaluator_results": [
-    { "evaluator": "plan-conformance-pre-pr", "severity": "warn", "status": "violation",
+    { "evaluator_ref": "core/plan-conformance-pre-pr", "severity": "warn",
+      "run_status": "completed", "verdict": "violation",
       "body": "VIOLATION\n\nThe delivered scope differs from the approved plan..." }
   ],
   "blocking": false
@@ -59,11 +62,14 @@ returned from a successful standalone pre-PR capture; the primitive command
 does not turn them into blocks. When the normal closing path uses `finish`,
 warnings pause before summary so the agent can fix the concern or explicitly
 accept the exact reviewed finding. Severity `block` prevents summary until
-it is resolved through `orcaops-checkpoint`'s block workflow.
+it is resolved with `orcaops block acknowledge` when permitted or
+`orcaops block dismiss`.
 
 # After pre-PR passes
 
-Proceed to **orcaops-summary** to close out the artifact thread.
+If you intentionally chose the manual path, proceed to
+`orcaops-summary`. Otherwise return to
+`orcaops-finish` for normal finalization.
 
 # Re-running
 

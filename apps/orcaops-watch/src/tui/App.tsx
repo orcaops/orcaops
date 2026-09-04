@@ -3,6 +3,8 @@ import { flushSync, useKeyboard, useRenderer, useTerminalDimensions } from '@ope
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { stripTerminalFormatting } from '@orcaops/evaluator-protocol/terminal';
+import { DEFAULT_THRESHOLDS } from '@orcaops/watch-data/ui';
+import { reclassify } from '@orcaops/watch-data/ui';
 
 import { CockpitThemeContext, type ThemeRow, useThemeControls } from './ThemeProvider';
 import { executableHelpInvocation, normalizeCommandGesture } from './commandRegistry';
@@ -15,8 +17,6 @@ import {
 } from './detail';
 import { EmptyState, ErrorState, Notice, Section } from './kit';
 import { displayLen, truncate } from './layout';
-import { DEFAULT_THRESHOLDS } from '../core/liveness';
-import { reclassify } from '../core/presenters';
 import { type ResolveReviewTarget, resolveReviewTarget } from '../data/reviewTarget';
 import type { SnapshotSource } from '../data/snapshot';
 import { createSnapshotSource } from '../data/source';

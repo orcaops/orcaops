@@ -9,6 +9,13 @@
       "evidence": [".syncpackrc.json"]
     },
     {
+      "dependency": "better-sqlite3",
+      "source": "syncpack-pin",
+      "owner": "@orcaops/maintainers",
+      "rationale": "Pinned across the monorepo by .syncpackrc.json so every build resolves the same prebuilt addon. Since 13.x the package is N-API and ships its binaries in the tarball with no install script, so the pin is about reproducibility, not about matching an ABI. 13.x also requires Node >= 22.14 (WiseLibs/better-sqlite3#1514): moving the pin means re-running the install smoke across the Node floor and every platform.",
+      "evidence": [".syncpackrc.json", "docs/dependency-policy.md#manually-managed-dependencies"]
+    },
+    {
       "dependency": "@opentui/core",
       "source": "manual",
       "owner": "@orcaops/maintainers",

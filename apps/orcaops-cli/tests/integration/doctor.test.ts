@@ -813,38 +813,42 @@ describe('orcaops doctor', () => {
     expect(check.summary).toMatch(/crash-truncated tail/);
   });
 
-  it('watch-runtime stays quiet when neither Bun nor the watch binary is installed', async () => {
+  it('watch-companion passes on the workspace build with no override', async () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
     const bare = makeAgent({
       cwd: repo.path,
       env: { CLAUDE_SESSION_ID: 'test-doctor', PATH: '/usr/bin:/bin' },
     });
     const r = JSON.parse((await bare.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
-    const check = findCheck(r, 'watch-runtime');
+    const check = findCheck(r, 'watch-companion');
+    // The workspace CLI carries no platform pins, so resolution lands on the
+    // dev tier (the @orcaops/watch app's build under Bun) and there is nothing
+    // to fix.
     expect(check.status).toBe('pass');
-    expect(check.summary).toMatch(/optional/);
+    expect(check.summary).toMatch(/workspace build/);
+    expect(check.details).toBeUndefined();
   });
 
-  it('watch-runtime warns when the watch binary resolves but Bun does not', async () => {
+  it('watch-companion reports an active override that exists', async () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
     const binDir = path.join(repo.path, '.fake-bin');
     await mkdir(binDir, { recursive: true });
-    const watchBin = path.join(binDir, 'orcaops-watch');
+    const watchBin = path.join(binDir, 'orcaops-watch-ui');
     await writeFile(watchBin, '#!/bin/sh\nexit 0\n', 'utf8');
     await chmod(watchBin, 0o755);
 
-    const noBun = makeAgent({
+    const overridden = makeAgent({
       cwd: repo.path,
-      env: { CLAUDE_SESSION_ID: 'test-doctor', PATH: `${binDir}:/usr/bin:/bin` },
+      env: { CLAUDE_SESSION_ID: 'test-doctor', ORCAOPS_WATCH_BIN: watchBin },
     });
-    const r = JSON.parse((await noBun.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
-    const check = findCheck(r, 'watch-runtime');
-    expect(check.status).toBe('warn');
+    const r = JSON.parse((await overridden.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+    const check = findCheck(r, 'watch-companion');
+    expect(check.status).toBe('pass');
     expect(check.summary).toContain(watchBin);
-    expect(check.summary).toMatch(/bun is not on PATH/);
+    expect(check.summary).toMatch(/override active/);
   });
 
-  it('watch-runtime warns when ORCAOPS_WATCH_BIN points at nothing', async () => {
+  it('watch-companion warns when ORCAOPS_WATCH_BIN points at nothing', async () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
     const missing = path.join(repo.path, 'no-such-orcaops-watch');
     const overridden = makeAgent({
@@ -852,7 +856,7 @@ describe('orcaops doctor', () => {
       env: { CLAUDE_SESSION_ID: 'test-doctor', ORCAOPS_WATCH_BIN: missing },
     });
     const r = JSON.parse((await overridden.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
-    const check = findCheck(r, 'watch-runtime');
+    const check = findCheck(r, 'watch-companion');
     expect(check.status).toBe('warn');
     expect(check.summary).toContain(missing);
   });
@@ -1296,7 +1300,7 @@ describe('orcaops doctor', () => {
       'stale-snapshot-refs',
       'unresolved-blocks',
       'usage-source',
-      'watch-runtime',
+      'watch-companion',
     ]);
   });
 

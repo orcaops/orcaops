@@ -1,0 +1,54 @@
+{
+  "name": "@orcaops/watch-data",
+  "version": "0.0.0",
+  "license": "FSL-1.1-ALv2",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./ui": {
+      "types": "./dist/ui.d.ts",
+      "default": "./dist/ui.js"
+    },
+    "./sidecar": "./dist/sidecar.js",
+    "./testing": "./tests/support/fixture-archive.ts",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write . --ignore-path ../../.prettierignore",
+    "format:check": "prettier --check . --ignore-path ../../.prettierignore"
+  },
+  "prettier": "@orcaops/prettier-config",
+  "dependencies": {
+    "@orcaops/agent-activity": "workspace:*",
+    "@orcaops/project-scope": "workspace:*",
+    "@orcaops/review-core": "workspace:*",
+    "@orcaops/review-engine": "workspace:*",
+    "@orcaops/storage": "workspace:*"
+  },
+  "devDependencies": {
+    "@orcaops/core": "workspace:*",
+    "@orcaops/eslint-config": "workspace:*",
+    "@orcaops/prettier-config": "workspace:*",
+    "@orcaops/test-harness": "workspace:*",
+    "@orcaops/typescript-config": "workspace:*",
+    "typescript": "5.9.2",
+    "vitest": "^4.0.18"
+  }
+}
