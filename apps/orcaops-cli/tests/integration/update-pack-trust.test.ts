@@ -40,7 +40,7 @@ describe('orcaops eval update-pack — trust invalidation', () => {
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
     agent = makeAgent({ cwd: repo.path });
-    await agent.init({ noLlm: true });
+    await agent.init({ noLlm: true, scope: 'project' });
     tmpRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-update-trust-'));
   });
 

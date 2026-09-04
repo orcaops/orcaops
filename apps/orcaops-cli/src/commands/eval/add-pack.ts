@@ -34,8 +34,8 @@ import {
   CLI_ROOT,
   emptyEvaluatorsConfig,
   EVALUATOR_CONFIG_FILE,
-  evaluatorsConfigPath,
   readEvaluatorsConfig,
+  resolveEvaluatorsConfigLocation,
   validateEvaluatorsConfig,
   writeEvaluatorState,
 } from '../../lib/evaluators-config.js';
@@ -185,7 +185,7 @@ export async function runAddPack(opts: AddPackOptions): Promise<AddPackResult> {
     const existing = await readEvaluatorsConfig(ctx.repoRoot);
     const config = existing ?? emptyEvaluatorsConfig();
     const configCreated = existing === null;
-    const configPath = evaluatorsConfigPath(ctx.repoRoot);
+    const configPath = (await resolveEvaluatorsConfigLocation(ctx.repoRoot)).displayPath;
 
     const existingIdx = config.packages.findIndex((pack) => pack.id === configId);
     if (existingIdx !== -1 && !opts.force) {

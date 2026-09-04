@@ -63,7 +63,13 @@ describe('two-phase checkpoint lifecycle', () => {
   // give each test a ~20ms copy of the result.
   const template = createRepoTemplate(
     async (repoPath) => {
-      await makeAgent({ cwd: repoPath }).runRaw(['init', '--json', '--no-llm']);
+      await makeAgent({ cwd: repoPath }).runRaw([
+        'init',
+        '--scope',
+        'project',
+        '--json',
+        '--no-llm',
+      ]);
     },
     { initialBranch: 'main' }
   );

@@ -36,7 +36,7 @@ const RELEASE = path.join(ROOT, 'dist-release');
 // constant (apps/orcaops-cli/src/lib/git-info-exclude.ts): if the footprint
 // changes, this black-box assertion fails loudly so the change is confirmed
 // here on purpose rather than ride along silently.
-const PERSONAL_EXCLUDE_LINES = ['.orcaops/', 'CLAUDE.local.md', '.orcaops/install.local.json'];
+const PERSONAL_EXCLUDE_LINES = ['.orcaops/'];
 const ADOPTION_STAGE_COMMAND = `for path in .orcaops .gitignore .claude .agents .cursor .opencode .aider-desk AGENTS.md CLAUDE.md; do
   if [ -e "$path" ] || [ -L "$path" ]; then
     git add -A -- "$path"
@@ -263,8 +263,10 @@ try {
   }
   assert(r.dry_run === false, 'init actually wrote (dry_run false)');
   if (!againstRepo) {
-    for (const want of ['.orcaops/artifacts/', '.orcaops/cache/', '.orcaops/config.json']) {
-      assert(r.created.includes(want), `init created ${want}`);
+    assert(r.created.includes('.orcaops/config.json'), 'init created .orcaops/config.json');
+    // Data directories are created by the first capture, never by init.
+    for (const dir of ['artifacts', 'cache']) {
+      assert(!existsSync(path.join(repo, '.orcaops', dir)), `init did not create .orcaops/${dir}/`);
     }
   }
   assert(
@@ -471,9 +473,14 @@ try {
       'git status is COMPLETELY clean after the invisible init'
     );
     assert(!existsSync(path.join(repo2, '.gitignore')), 'invisible init wrote no .gitignore');
+    const sharedConfig = path.join(repo2, '.git', 'orcaops', 'config.json');
     assert(
-      existsSync(path.join(repo2, '.orcaops', 'config.json')),
-      'invisible init created the excluded .orcaops store'
+      existsSync(sharedConfig),
+      'invisible init wrote the shared config in the git common dir'
+    );
+    assert(
+      !existsSync(path.join(repo2, '.orcaops')),
+      'invisible init created no worktree data directory (the first capture does)'
     );
     const exclude = readFileSync(path.join(repo2, '.git', 'info', 'exclude'), 'utf8');
     const excludeLines = exclude.split(/\r?\n/);
@@ -486,7 +493,7 @@ try {
           JSON.stringify(PERSONAL_EXCLUDE_LINES),
       'info/exclude carries exactly the personal footprint inside its owned block'
     );
-    const cfg = JSON.parse(readFileSync(path.join(repo2, '.orcaops', 'config.json'), 'utf8'));
+    const cfg = JSON.parse(readFileSync(sharedConfig, 'utf8'));
     assert(
       cfg.install?.scope === 'personal' && cfg.gc === undefined,
       'config is a minimal delta (explicit scope, no pinned defaults)'
@@ -565,6 +572,184 @@ try {
     assert(
       JSON.stringify(stripped.hooks.SessionStart) === JSON.stringify([userGroup]),
       'uninstall stripped the orcaops user entry and preserved the user hook'
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // 10. Personal scope across worktrees — one init, every worktree, from the
+  //     tarball. Reads and hooks create nothing in a sibling; a capture creates
+  //     only that sibling's store; uninstall from the sibling silences the
+  //     main checkout and keeps the shared exclusion.
+  // -------------------------------------------------------------------------
+  let matrixMain = null;
+  let matrixSibling = null;
+  if (!againstRepo) {
+    log('Running the worktree matrix (personal init in main, sibling worktree)…');
+    matrixMain = path.join(TMP, 'repo-matrix');
+    mkdirSync(matrixMain, { recursive: true });
+    seedRepo(matrixMain, 'seed');
+    matrixSibling = path.join(TMP, 'repo-matrix-sibling');
+    run('git', ['-C', matrixMain, 'worktree', 'add', '-q', '-b', 'sibling', matrixSibling]);
+    const mInit = orcaops(bin, ['init', '--yes', '--json', '--no-llm', '--session-hooks'], {
+      cwd: matrixMain,
+      home,
+    });
+    assert(mInit.status === 0, 'matrix: personal init in the main checkout exits 0');
+    const sStatus = orcaops(bin, ['status', '--json'], { cwd: matrixSibling, home });
+    assert(
+      sStatus.status === 0 && sStatus.json?.ok === true,
+      'matrix: sibling status works with no init of its own'
+    );
+    const sHook = capture(bin, ['hook', 'session-start', '--agent', 'claude-code', '--user'], {
+      cwd: matrixSibling,
+      env: { HOME: home, USERPROFILE: home },
+    });
+    assert(
+      sHook.status === 0 && sHook.stdout.includes('[orcaops]'),
+      'matrix: the session hook emits in the sibling'
+    );
+    assert(
+      !existsSync(path.join(matrixSibling, '.orcaops')),
+      'matrix: reads and hooks created no data directory in the sibling'
+    );
+    assert(
+      capture('git', ['-C', matrixSibling, 'status', '--porcelain']).stdout.trim() === '',
+      'matrix: git status stays clean in the sibling'
+    );
+    const planFile = path.join(TMP, 'matrix-plan.json');
+    writeFileSync(
+      planFile,
+      JSON.stringify({
+        task: 'sibling capture',
+        label: 'sibling capture',
+        plan_steps: [{ text: 's1', label: 's1' }],
+        touched_scope: [],
+      })
+    );
+    const sPlan = orcaops(bin, ['capture', 'plan', '--no-llm', '--input', planFile], {
+      cwd: matrixSibling,
+      home,
+    });
+    assert(sPlan.status === 0, 'matrix: capture in the sibling exits 0');
+    assert(
+      existsSync(path.join(matrixSibling, '.orcaops', 'artifacts')) &&
+        !existsSync(path.join(matrixMain, '.orcaops')),
+      'matrix: the capture created only the sibling store'
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // 11. Watch pairing — the installed Watch against a new-layout sibling.
+  //     Matching release: an empty governed sibling is a project with no
+  //     threads and nothing is created. Preceding release (when the registry
+  //     is reachable): may report the sibling as uninitialized, must create
+  //     nothing and claim no corruption.
+  // -------------------------------------------------------------------------
+  if (!againstRepo) {
+    // Its own repository AND its own home: the probe counts every project in
+    // the home's archive registry, so "no threads" must not see captures the
+    // earlier sections mirrored under the shared throwaway HOME.
+    const watchHome = path.join(TMP, 'home-watch');
+    for (const dir of ['.claude', '.codex', '.cursor'])
+      mkdirSync(path.join(watchHome, dir), { recursive: true });
+    const watchMain = path.join(TMP, 'repo-watch');
+    mkdirSync(watchMain, { recursive: true });
+    seedRepo(watchMain, 'seed');
+    const wInit = orcaops(bin, ['init', '--yes', '--json', '--no-llm'], {
+      cwd: watchMain,
+      home: watchHome,
+    });
+    assert(wInit.status === 0, 'watch pairing: personal init exits 0');
+    const watchSibling = path.join(TMP, 'repo-watch-sibling');
+    run('git', ['-C', watchMain, 'worktree', 'add', '-q', '-b', 'watch-target', watchSibling]);
+    const probeWith = (watchBin, label) => {
+      const probe = capture(watchBin, ['--probe', '--root', watchSibling], {
+        cwd: watchSibling,
+        env: { HOME: watchHome, USERPROFILE: watchHome },
+        timeout: 60_000,
+      });
+      const out = `${probe.stdout}\n${probe.stderr}`;
+      assert(!/corrupt/i.test(out), `${label}: reports no corruption for a new-layout sibling`);
+      assert(
+        !existsSync(path.join(watchSibling, '.orcaops')),
+        `${label}: created nothing in the sibling`
+      );
+      return probe;
+    };
+
+    if (process.env.SKIP_BUILD === '1') {
+      log('SKIP_BUILD=1 — reusing dist-release/ for the Watch tarball');
+    } else {
+      log('Building the Watch tarball (pnpm release:watch)…');
+      run('pnpm', ['release:watch'], { stdio: 'ignore' });
+    }
+    const watchTarballs = readdirSync(RELEASE).filter((f) => /^orcaops-watch-\d.*\.tgz$/.test(f));
+    assert(watchTarballs.length === 1, 'exactly 1 Watch tarball in dist-release/');
+    const watchPrefix = path.join(TMP, 'prefix-watch');
+    mkdirSync(watchPrefix, { recursive: true });
+    run('npm', ['i', '-g', '--prefix', watchPrefix, path.join(RELEASE, watchTarballs[0])], {
+      stdio: 'ignore',
+    });
+    const watchBin = path.join(watchPrefix, 'bin', 'orcaops-watch');
+    const matching = probeWith(watchBin, 'matching Watch');
+    assert(matching.status === 0, 'matching Watch: probe exits 0 against the empty sibling');
+    const totals = JSON.parse(matching.stdout.trim().split('\n').at(-1));
+    assert(totals.threads === 0, 'matching Watch: an empty governed sibling has no threads');
+
+    const view = capture('npm', ['view', '@orcaops/watch', 'version'], { timeout: 15_000 });
+    const previous = view.status === 0 ? view.stdout.trim() : '';
+    if (previous.length === 0) {
+      log(
+        'npm registry unreachable or @orcaops/watch unpublished — skipping the preceding-Watch pairing'
+      );
+    } else {
+      log(`Installing the preceding Watch release (@orcaops/watch@${previous})…`);
+      const prevPrefix = path.join(TMP, 'prefix-watch-prev');
+      mkdirSync(prevPrefix, { recursive: true });
+      const installed = capture(
+        'npm',
+        ['i', '-g', '--prefix', prevPrefix, `@orcaops/watch@${previous}`],
+        {
+          timeout: 120_000,
+        }
+      );
+      if (installed.status !== 0) {
+        log('preceding Watch install failed (offline?) — skipping the pairing');
+      } else {
+        // Older Watch keeps the old `.orcaops`-existence semantics: reporting
+        // the sibling as uninitialized (a non-zero exit or zero totals) is
+        // allowed; creating anything or claiming corruption is not.
+        probeWith(path.join(prevPrefix, 'bin', 'orcaops-watch'), 'preceding Watch');
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 12. Uninstall from the sibling silences every worktree; the shared
+  //     `.orcaops/` exclusion stays so retained data is never exposed.
+  // -------------------------------------------------------------------------
+  if (!againstRepo && matrixMain !== null && matrixSibling !== null) {
+    const sUninstall = orcaops(bin, ['uninstall', '--json'], { cwd: matrixSibling, home });
+    assert(sUninstall.status === 0, 'matrix: uninstall from the sibling exits 0');
+    const mStatus = orcaops(bin, ['status', '--json'], { cwd: matrixMain, home });
+    assert(
+      mStatus.status !== 0 && mStatus.json?.error?.code === 'UNINITIALIZED',
+      'matrix: the main checkout is uninitialized after the sibling uninstall'
+    );
+    const mHook = capture(bin, ['hook', 'session-start', '--agent', 'claude-code', '--user'], {
+      cwd: matrixMain,
+      env: { HOME: home, USERPROFILE: home },
+    });
+    assert(
+      mHook.status === 0 && mHook.stdout === '',
+      'matrix: the main hook is silent after uninstall'
+    );
+    const mExclude = readFileSync(path.join(matrixMain, '.git', 'info', 'exclude'), 'utf8');
+    assert(mExclude.includes('.orcaops/'), 'matrix: the shared `.orcaops/` exclusion is retained');
+    assert(
+      existsSync(path.join(matrixMain, '.git', 'orcaops', 'personal-manifest.json')) &&
+        !existsSync(path.join(matrixMain, '.git', 'orcaops', 'config.json')),
+      'matrix: uninstall retained only the ownership manifest'
     );
   }
 

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { Repo } from '@orcaops/core';
 import { registryPath } from '@orcaops/storage';
-import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
+import { createTempRepo, type TempRepo, writeProjectConfig } from '@orcaops/test-harness';
 
 import { resolveReviewTarget } from './reviewTarget';
 
@@ -30,7 +30,8 @@ afterEach(async () => {
 async function initProject(projectId?: string): Promise<TempRepo> {
   const repo = await createTempRepo({ initialBranch: 'main' });
   cleanups.push(repo.cleanup);
-  await mkdir(path.join(repo.path, '.orcaops'), { recursive: true });
+  // Governed by a project config: a bare `.orcaops` dir no longer counts.
+  await writeProjectConfig(repo.path);
   if (projectId !== undefined) {
     await new Repo(repo.path).setLocalConfig('orcaops.projectid', projectId);
   }
@@ -39,7 +40,7 @@ async function initProject(projectId?: string): Promise<TempRepo> {
 
 async function addWorktree(repoPath: string, wtPath: string, branch: string): Promise<void> {
   await execFileAsync('git', ['worktree', 'add', wtPath, '-b', branch], { cwd: repoPath });
-  await mkdir(path.join(wtPath, '.orcaops'), { recursive: true });
+  await writeProjectConfig(wtPath);
   cleanups.push(async () => {
     await rm(wtPath, { recursive: true, force: true });
   });
@@ -124,6 +125,25 @@ describe('resolveReviewTarget', () => {
     expect(res.ok).toBe(false);
     expect(res.ok === false && res.reason).toContain('could not locate');
     expect(res.ok === false && res.reason).toContain('my-proj');
+  });
+
+  it('reports a broken candidate config instead of treating it as uninitialized', async () => {
+    const repo = await initProject(PID_A);
+    const configPath = path.join(repo.path, '.orcaops', 'config.json');
+    await writeFile(configPath, '{ broken', 'utf8');
+    const env = await withRegistry({ [PID_A]: [repo.path] });
+
+    const result = await resolveReviewTarget({
+      projectId: PID_A,
+      branch: 'main',
+      env,
+      cwd: await nonRepoDir(),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toContain('configuration error');
+    expect(result.ok === false && result.reason).toContain(configPath);
+    expect(result.ok === false && result.reason).toContain('not valid JSON');
   });
 
   it('rejects a foreign candidate path whose project id does not match', async () => {

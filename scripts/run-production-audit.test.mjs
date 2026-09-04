@@ -99,6 +99,20 @@ afterEach(() => {
   while (tempRoots.length > 0) rmSync(tempRoots.pop(), { recursive: true, force: true });
 });
 
+describe('a failed registry call', () => {
+  it('is retryable rather than a schema mismatch', () => {
+    const stdout = JSON.stringify({
+      error: { code: 'ERR_SOCKET_TIMEOUT', message: 'request to registry failed' },
+    });
+    expect(interpretAuditOutput({ stdout })).toEqual({ reason: 'registry-unreachable' });
+  });
+
+  it('still reports a genuinely unexpected shape as a schema mismatch', () => {
+    const stdout = JSON.stringify({ advisories: 'not-an-object', metadata: {} });
+    expect(interpretAuditOutput({ stdout })).toEqual({ reason: 'schema-mismatch' });
+  });
+});
+
 describe('a clean audit', () => {
   it('reports clean security state, no exceptions, and exit 0', async () => {
     const { result, exitCode } = await audit({

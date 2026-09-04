@@ -42,7 +42,7 @@ import {
 // genuinely unknown and still fails closed as `unsupported-severity`.
 export const SUPPORTED_SEVERITIES = ['info', 'low', 'moderate', 'high', 'critical'];
 export const MAX_ATTEMPTS = 3;
-const RETRYABLE_REASONS = ['command-failure', 'invalid-json'];
+const RETRYABLE_REASONS = ['command-failure', 'invalid-json', 'registry-unreachable'];
 const POLICY_FILE = 'config/dependency-policy.json';
 
 /** UTC calendar day, so expiry does not shift with the runner's timezone. */
@@ -68,6 +68,14 @@ export function interpretAuditOutput({ stdout, spawnError }) {
     report = JSON.parse(stdout);
   } catch {
     return { reason: 'invalid-json' };
+  }
+
+  // pnpm reports a failed registry call as an `error` envelope with no
+  // advisories. That is the network being unavailable, not the schema
+  // changing, and it is worth retrying — the audit endpoint times out often
+  // enough that treating it as deterministic fails builds at random.
+  if (isPlainObject(report) && isPlainObject(report.error) && report.advisories === undefined) {
+    return { reason: 'registry-unreachable' };
   }
 
   if (

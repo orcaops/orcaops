@@ -1,12 +1,13 @@
 import path from 'node:path';
 
-import { getConfigPath, Repo } from '@orcaops/core';
+import { configLocationForScope, Repo, resolveConfigSource } from '@orcaops/core';
 import { resolveConfig } from '@orcaops/storage';
 
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../io/output.js';
 import { CLI_VERSION } from '../lib/cli-version.js';
+import { displayConfigPath, resolvePersonalConfigForAdoption } from '../lib/config-file.js';
 import { buildContext } from '../lib/context.js';
 import { ORCAOPS_BASE_GITIGNORE, reconcileGitignore } from '../lib/gitignore.js';
 import {
@@ -19,12 +20,8 @@ import {
   resolveGlobalRoot,
   withGlobalInstallLock,
 } from '../lib/global-install.js';
-import { derivedIgnoreGlobs, personalScopeWarnings } from '../lib/install-agents.js';
-import {
-  INSTALL_MANIFEST_REL,
-  readInstallManifest,
-  readLocalManifest,
-} from '../lib/install-manifest.js';
+import { derivedIgnoreGlobs } from '../lib/install-agents.js';
+import { INSTALL_MANIFEST_REL, readInstallManifest } from '../lib/install-manifest.js';
 import {
   assertInvisiblePlan,
   planInstallMutations,
@@ -41,6 +38,7 @@ import {
   readRepositoryFileOrNull,
   writeMutation,
 } from '../lib/mutations.js';
+import { readEffectiveLocalManifest } from '../lib/personal-manifest.js';
 import { ensureProjectId, readProjectId } from '../lib/project-identity.js';
 import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { resolveOrcaopsRoot } from '../lib/resolve-root.js';
@@ -120,6 +118,26 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
       const ctx = await buildContext({ cwd: opts.cwd });
       try {
         const repoRoot = ctx.repoRoot;
+        if (opts.personal) opts.scope = 'personal';
+        const priorScope = opts.previousScope ?? ctx.config.install.scope;
+        const effectiveScope = opts.scope ?? ctx.config.install.scope;
+        const source = await resolveConfigSource(repoRoot);
+        const destination = await configLocationForScope(repoRoot, effectiveScope);
+        const movingSource = destination.configPath !== source.configPath;
+        const adoptedPersonalContent =
+          movingSource && source.kind === 'worktree' && effectiveScope === 'personal'
+            ? await readRepositoryFileOrNull(
+                destination.configPath,
+                destination.containmentRoot,
+                'shared personal configuration'
+              )
+            : null;
+        if (adoptedPersonalContent !== null) {
+          ctx.config = resolvePersonalConfigForAdoption(
+            adoptedPersonalContent,
+            displayConfigPath(destination, repoRoot)
+          );
+        }
         // The INSTALL set — update refreshes every agent's skills/commands
         // + the union block, not just one. An empty set (manual mode / `other`) is a
         // graceful no-op rather than an error.
@@ -130,7 +148,10 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
         // orcaops-managed .gitignore lines forward; update doesn't
         // manage the gitignore itself.
         const prevInstall = await readInstallManifest(repoRoot);
-        const prevLocal = await readLocalManifest(repoRoot);
+        // The prior install's record lives under the scope it was MADE under:
+        // configure persists the new scope before delegating here, so only
+        // `previousScope` still knows where that was.
+        const prevLocal = await readEffectiveLocalManifest(repoRoot, priorScope);
         // Preflight the GLOBAL manifest too, before any project mutation lands:
         // the global phase re-reads it under its lock, but by then project
         // writes have executed and a corrupt global file would strand a
@@ -145,24 +166,22 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
 
         // The install scope/link — a flag overrides + persists the repo's
         // durable choice; otherwise the config value drives this run.
-        if (opts.personal) opts.scope = 'personal';
-        const effectiveScope = opts.scope ?? ctx.config.install.scope;
         const effectiveLink = opts.link ?? ctx.config.install.link;
 
-        // Same advisory init surfaces: under personal, non-claude agents get
-        // skills but no instruction-block surface (only Claude Code reads
-        // CLAUDE.local.md) — a warning, not a hard stop.
-        const personalWarnings =
-          effectiveScope === 'personal'
-            ? personalScopeWarnings(installAgents, ctx.config.bootstrap)
-            : [];
+        const personalWarnings: string[] = [];
+        // Personal scope has no repo settings entries and no instruction
+        // block; a flag asking for either would persist a dead setting.
+        if (effectiveScope === 'personal' && opts.sessionHookEntries === 'project') {
+          throw new OrcaopsError(
+            ErrorCodes.INVALID_INPUT,
+            '--session-hook-entries project is not available under personal scope: personal ' +
+              'installs register hooks at the machine level only (`orcaops session-hooks install`).'
+          );
+        }
         // Leaving project scope edits tracked files (pruned trees, stripped
         // .gitignore, deleted install.json) — legitimate, but committing them
         // de-adopts the repo for the whole team, so say so once.
-        if (
-          effectiveScope === 'personal' &&
-          (opts.previousScope ?? ctx.config.install.scope) === 'project'
-        ) {
+        if (effectiveScope === 'personal' && priorScope === 'project') {
           personalWarnings.push(
             'scope changed project → personal: committed orcaops files were modified or ' +
               'removed in the worktree — review `git status`; committing those changes ' +
@@ -175,13 +194,14 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
         // --dry-run stays honest). Mutate the RAW parsed config so a user's minimal
         // config stays minimal.
         let configMutation: PlannedMutation | undefined;
+        let configRemoval: PlannedMutation | undefined;
         const prefixChange = opts.prefix !== undefined && opts.prefix !== ctx.config.naming.prefix;
         const scopeChange = opts.scope !== undefined && opts.scope !== ctx.config.install.scope;
         // What the RECONCILE needs: did this repo's scope actually move? For the
         // flag path that is exactly `scopeChange`; for a caller that persisted
         // first, only `previousScope` still knows. Kept separate from
         // `scopeChange`, which additionally gates persisting the flag itself.
-        const scopeTransition = effectiveScope !== (opts.previousScope ?? ctx.config.install.scope);
+        const scopeTransition = effectiveScope !== priorScope;
         const linkChange = opts.link !== undefined && opts.link !== ctx.config.install.link;
         const sessionHooksChange =
           opts.sessionHooks !== undefined && opts.sessionHooks !== ctx.config.session_hooks.enabled;
@@ -192,6 +212,7 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
           opts.sessionHookEntries !== undefined &&
           opts.sessionHookEntries !== ctx.config.session_hooks.entries;
         if (
+          adoptedPersonalContent !== null ||
           prefixChange ||
           scopeChange ||
           linkChange ||
@@ -209,13 +230,23 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
               );
             }
           }
-          const configPath = getConfigPath(repoRoot);
-          const configRel = path.relative(repoRoot, configPath);
-          const raw = await readRepositoryFileOrNull(configPath, repoRoot, 'orcaops configuration');
-          if (raw === null) {
-            throw new OrcaopsError(ErrorCodes.UNINITIALIZED, `${configPath} does not exist.`);
+          // Read the config in effect, but write to the one the DESTINATION
+          // scope owns: `--scope personal` publishes to the git-common file
+          // while a project config is still the effective source, and the
+          // worktree copy is removed below as part of de-adoption.
+          const configRel = path.relative(repoRoot, source.configPath);
+          const sourceContent = await readRepositoryFileOrNull(
+            source.configPath,
+            source.containmentRoot,
+            'orcaops configuration'
+          );
+          if (sourceContent === null) {
+            throw new OrcaopsError(
+              ErrorCodes.UNINITIALIZED,
+              `${displayConfigPath(source, repoRoot)} does not exist.`
+            );
           }
-          const parsed = JSON.parse(raw) as {
+          const parsed = JSON.parse(adoptedPersonalContent ?? sourceContent) as {
             naming?: Record<string, unknown>;
             install?: Record<string, unknown>;
             session_hooks?: Record<string, unknown>;
@@ -229,6 +260,13 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
             if (scopeChange) {
               parsed.install.scope = opts.scope;
               ctx.config.install.scope = opts.scope as 'project' | 'global' | 'personal';
+            }
+            // Personal scope always stores the only values it supports.
+            if (opts.scope === 'personal') {
+              (parsed as { bootstrap?: string }).bootstrap = 'manual';
+              parsed.session_hooks = { ...(parsed.session_hooks ?? {}), entries: 'none' };
+              ctx.config.bootstrap = 'manual';
+              ctx.config.session_hooks.entries = 'none';
             }
             if (linkChange) {
               parsed.install.link = opts.link;
@@ -257,7 +295,35 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
             ctx.config.session_hooks.entries = opts.sessionHookEntries as 'project' | 'none';
           }
           const desired = `${JSON.stringify(parsed, null, 2)}\n`;
-          configMutation = writeMutation(repoRoot, configRel, desired, raw, desired !== raw);
+          const priorDestination = movingSource
+            ? (adoptedPersonalContent ??
+              (await readRepositoryFileOrNull(
+                destination.configPath,
+                destination.containmentRoot,
+                'orcaops configuration'
+              )))
+            : sourceContent;
+          configMutation = writeMutation(
+            repoRoot,
+            path.relative(repoRoot, destination.configPath),
+            desired,
+            priorDestination,
+            desired !== priorDestination,
+            destination.containmentRoot,
+            destination.configPath
+          );
+          // A published personal config must not leave a worktree config
+          // behind claiming the same repository: source selection would fail
+          // closed on it, bricking every command until the user removed it by
+          // hand.
+          if (movingSource && source.kind === 'worktree') {
+            configRemoval = deleteMutation(
+              repoRoot,
+              configRel,
+              { kind: 'file', content: sourceContent },
+              true
+            );
+          }
         }
 
         // Plan generation + instruction placement + manifest refresh through the
@@ -296,8 +362,11 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
           gitignoreLines: desiredGitignore,
           prevInstall,
           prevLocal,
+          leavingPersonalScope:
+            scopeTransition && effectiveScope !== 'personal' && priorScope === 'personal',
         });
         const mutations = [...plan.mutations];
+        if (configRemoval) mutations.unshift(configRemoval);
         if (configMutation) mutations.unshift(configMutation);
 
         // Prune orphans — owned files dropped from the plan since the prior
@@ -347,7 +416,7 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
         // stripping .gitignore, removing install.json — and git surfaces
         // those to commit, so they are exempt.
         if (effectiveScope === 'personal' && !scopeTransition && prevInstall === null) {
-          assertInvisiblePlan(mutations, plan.sessionHooks);
+          await assertInvisiblePlan(repoRoot, mutations, plan.sessionHooks);
         }
 
         const removeInstallManifest = effectiveScope === 'personal' && prevInstall !== null;

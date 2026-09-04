@@ -1,14 +1,4 @@
-import {
-  access,
-  lstat,
-  mkdtemp,
-  readFile,
-  readlink,
-  rm,
-  symlink,
-  writeFile,
-} from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { access, lstat, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -219,67 +209,5 @@ describe('instruction install refusal boundary', () => {
     expect(success.repointed).toEqual([{ path: 'CLAUDE.md', from: 'notes.md', to: 'AGENTS.md' }]);
     expect(await readlink(claudePath)).toBe('AGENTS.md');
     expect(await readFile(notesPath, 'utf8')).toBe('foreign target\n');
-  });
-});
-
-describe('instruction refusal boundary — personal CLAUDE.local.md path', () => {
-  let repo: TempRepo;
-  let agent: ReturnType<typeof makeAgent>;
-  let globalRoot: string;
-
-  beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    globalRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-refusal-personal-'));
-    agent = makeAgent({
-      cwd: repo.path,
-      env: { ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_GLOBAL_ROOT: globalRoot },
-    });
-  });
-
-  afterEach(async () => {
-    await repo.cleanup();
-    await rm(globalRoot, { recursive: true, force: true });
-  });
-
-  it('personal init preserves a pre-existing CLAUDE.local.md symlink unchanged, with the warning', async () => {
-    // The invisible default drives the block at CLAUDE.local.md. With the
-    // whole single-file set occupied by a symlink there is no canonical
-    // candidate, so the placement takes its deliberate preserve-and-warn
-    // early return: nothing adopted, nothing deleted, warning surfaced —
-    // the same never-adopt posture as the multi-file refusal, minus the
-    // hard stop it reserves for replacing a foreign link.
-    await writeFile(path.join(repo.path, 'notes.md'), 'foreign target\n', 'utf8');
-    await symlink('notes.md', path.join(repo.path, 'CLAUDE.local.md'));
-
-    const result = await agent.runRaw(['init', '--personal', '--no-llm', '--agents-md', '--json']);
-
-    expect(result.exitCode).toBe(0);
-    const out = JSON.parse(result.stdout) as {
-      agents_md: Array<{ path: string; action: string }>;
-      warnings: string[];
-    };
-    expect(out.agents_md).toEqual([{ path: 'CLAUDE.local.md', action: 'unchanged' }]);
-    expect(out.warnings.join(' ')).toMatch(/preserving existing links unchanged/i);
-    // The link and its target are byte-untouched; no block was adopted.
-    expect(await readFile(path.join(repo.path, 'notes.md'), 'utf8')).toBe('foreign target\n');
-    const linkStat = await lstat(path.join(repo.path, 'CLAUDE.local.md'));
-    expect(linkStat.isSymbolicLink()).toBe(true);
-  });
-
-  it('personal update refuses malformed CLAUDE.local.md markers unless --force repairs them', async () => {
-    await agent.runRaw(['init', '--personal', '--no-llm', '--agents-md']);
-    const local = path.join(repo.path, 'CLAUDE.local.md');
-    const healthy = await readFile(local, 'utf8');
-    // Drop the end marker: the managed block becomes ambiguous.
-    expect(healthy).toContain('<!-- orcaops:end -->');
-    await writeFile(local, healthy.replace('<!-- orcaops:end -->', ''), 'utf8');
-
-    const refused = await agent.runRaw(['update']);
-    expect(refused.exitCode).toBe(1);
-    expect(refused.stderr).toMatch(/managed-block markers are malformed or ambiguous/);
-
-    const repaired = await agent.runRaw(['update', '--force']);
-    expect(repaired.exitCode).toBe(0);
-    expect(await readFile(local, 'utf8')).toContain('<!-- orcaops:end -->');
   });
 });

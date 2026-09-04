@@ -37,6 +37,8 @@ const __dirname = path.dirname(__filename);
 const EXPECTED_PUBLIC_VALUE_EXPORTS = [
   // From repo.js (kept as-is — `Repo` class is public surface).
   'Repo',
+  // One-shot worktree probe for the session-start hook.
+  'probeWorktree',
   // From snapshots.js — the documented public functions, plus the two
   // shared ref-selectors.
   'captureCheckpointSnapshot',

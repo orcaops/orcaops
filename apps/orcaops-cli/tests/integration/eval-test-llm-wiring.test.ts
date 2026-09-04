@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTempRepo, type OkEnvelope, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 /**
  * The one CLI-level test that executes an LLM evaluator end to end.
@@ -108,7 +109,7 @@ describe('eval test — LLM evaluator through the CLI boundary', () => {
     });
     await agent.init({ noLlm: true });
 
-    const configFile = path.join(repo.path, '.orcaops', 'config.json');
+    const configFile = await effectiveConfigPath(repo.path);
     const config = JSON.parse(await readFile(configFile, 'utf8')) as {
       llm?: Record<string, unknown>;
     };

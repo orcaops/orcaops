@@ -78,7 +78,10 @@ describe('orcaops eval add-pack — interactive prompt (smoke)', () => {
     repo = await createTempRepo({ initialBranch: 'main' });
     // Init the repo via the CLI so .orcaops/config.json + cache db
     // exist before we exercise add-pack.
-    await runOrcaops(['init', '--no-llm', '--json'], { cwd: repo.path, stdin: '' });
+    await runOrcaops(['init', '--scope', 'project', '--no-llm', '--json'], {
+      cwd: repo.path,
+      stdin: '',
+    });
     tmpRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-trust-smoke-'));
   });
 

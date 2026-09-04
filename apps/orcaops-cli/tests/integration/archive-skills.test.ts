@@ -1,10 +1,13 @@
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { Repo } from '@orcaops/core';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
+import { withRepositoryInstallLock } from '../../src/lib/repository-install-lock.js';
 import { makeAgent } from '../support/test-agent.js';
 
 /**
@@ -122,5 +125,34 @@ describe('archive capability + skills', () => {
     );
     expect(recap).toContain('--all-projects');
     expect(recap).toContain('Cross-project mode');
+  });
+
+  it('serializes archive and skill config edits without losing either update', async () => {
+    const configPath = path.join(repo.path, '.orcaops', 'config.json');
+    const commonDir = await new Repo(repo.path).getCommonDirAbsolute();
+    let pending: Promise<Awaited<ReturnType<typeof agent.runRaw>>[]> | undefined;
+
+    await withRepositoryInstallLock(commonDir, async () => {
+      pending = Promise.all([
+        agent.runRaw(['archive', 'disable', '--json']),
+        agent.runRaw(['skills', 'disable', 'search', '--json']),
+      ]);
+      await delay(200);
+      const held = JSON.parse(await readFile(configPath, 'utf8')) as {
+        archive?: { enabled?: boolean };
+        skills?: { enabled?: Record<string, boolean> };
+      };
+      expect(held.archive?.enabled).toBe(true);
+      expect(held.skills?.enabled?.search).toBeUndefined();
+    });
+
+    const results = await pending;
+    expect(results?.map((result) => result.exitCode)).toEqual([0, 0]);
+    const config = JSON.parse(await readFile(configPath, 'utf8')) as {
+      archive: { enabled: boolean };
+      skills: { enabled: Record<string, boolean> };
+    };
+    expect(config.archive.enabled).toBe(false);
+    expect(config.skills.enabled.search).toBe(false);
   });
 });

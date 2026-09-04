@@ -99,6 +99,31 @@ describe('orcaops link (in-process)', () => {
     expect((await lstat(claudePath)).isDirectory()).toBe(true);
     expect(await read('.orcaops/install.json')).toBe(manifestBefore);
   });
+
+  it('rejects personal scope as an invalid command instead of failing internally', async () => {
+    await rm(path.join(repo.path, '.orcaops', 'config.json'));
+    await mkdir(path.join(repo.path, '.git', 'orcaops'), { recursive: true });
+    await writeFile(
+      path.join(repo.path, '.git', 'orcaops', 'config.json'),
+      JSON.stringify({
+        schema_version: 6,
+        install: { agents: ['claude-code'], scope: 'personal' },
+      }),
+      'utf8'
+    );
+
+    for (const args of [
+      ['link', '--json'],
+      ['link', '--dry-run', '--json'],
+    ]) {
+      const result = await agent.runRaw(args);
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        error: { code: 'INVALID_INPUT' },
+      });
+      expect(result.stdout).toContain('unavailable under personal scope');
+    }
+  });
 });
 
 describe('orcaops link preserves the configured prefix', () => {

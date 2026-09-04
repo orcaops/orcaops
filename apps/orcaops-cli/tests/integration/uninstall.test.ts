@@ -1,16 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import {
-  appendFile,
-  lstat,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  stat,
-  symlink,
-  writeFile,
-} from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -20,6 +10,7 @@ import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { withRepositoryInstallLock } from '../../src/lib/repository-install-lock.js';
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 interface UninstallJson {
   ok: true;
@@ -131,16 +122,27 @@ describe('orcaops uninstall', () => {
       }
     });
 
-    it('removes the per-machine manifest under personal scope', async () => {
-      // It is the ONLY manifest personal scope writes, so gating its removal on
-      // the committed one leaves it behind on the scope that has neither.
+    it('retains the common manifest with no entries under personal scope', async () => {
+      // The ONLY manifest personal scope writes lives in the git common dir.
+      // Uninstall keeps it — emptied — so it goes on owning the harmless
+      // `.orcaops/` exclusion and Doctor can recognise uninstalled residue.
       const a = globalAgent(repo.path);
       await a.runRaw(['init', '--no-llm', '--json', '--install-agent', 'claude-code']);
       await a.runRaw(['update', '--personal', '--json']);
-      expect(await exists(p('.orcaops', 'install.local.json'))).toBe(true);
+      const manifestPath = p('.git', 'orcaops', 'personal-manifest.json');
+      expect(await exists(p('.orcaops', 'install.local.json'))).toBe(false);
+      const before = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+        info_exclude?: string[];
+      };
+      expect(before.info_exclude).toEqual(['.orcaops/']);
 
       await a.runRaw(['uninstall', '--json']);
-      expect(await exists(p('.orcaops', 'install.local.json'))).toBe(false);
+      const after = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+        entries: unknown[];
+        info_exclude?: string[];
+      };
+      expect(after.entries).toEqual([]);
+      expect(after.info_exclude).toEqual(['.orcaops/']);
     });
 
     it('releases under personal scope, which writes no committed manifest', async () => {
@@ -417,7 +419,7 @@ describe('orcaops uninstall', () => {
   it('init --with-hooks → uninstall --purge-data round-trips to pre-init state', async () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm', '--with-hooks', '--agents-md']);
     // sanity: init materialized the footprint
-    expect(await exists(p('.orcaops', 'config.json'))).toBe(true);
+    expect(await exists(await effectiveConfigPath(repo.path))).toBe(true);
     expect(await exists(p('.claude', 'skills', 'orcaops-capture', 'SKILL.md'))).toBe(true);
     expect(await exists(p('AGENTS.md'))).toBe(true);
     expect(await lexists(p('CLAUDE.md'))).toBe(true);
@@ -453,6 +455,9 @@ describe('orcaops uninstall', () => {
 
   it('default uninstall keeps .orcaops data but removes the install footprint', async () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm', '--agents-md']);
+    // Init creates no data directories; stand in for captured data.
+    await mkdir(p('.orcaops', 'artifacts'), { recursive: true });
+    await mkdir(p('.orcaops', 'cache'), { recursive: true });
     const res = await agent.runRaw(['uninstall', '--json']);
     expect(res.exitCode).toBe(0);
     const r = JSON.parse(res.stdout) as UninstallJson;
@@ -464,7 +469,7 @@ describe('orcaops uninstall', () => {
     expect(await exists(p('.orcaops', 'install.json'))).toBe(false);
     expect(await exists(p('.orcaops', 'install.local.json'))).toBe(false);
     // … but the user's captured data + config stay
-    expect(await exists(p('.orcaops', 'config.json'))).toBe(true);
+    expect(await exists(await effectiveConfigPath(repo.path))).toBe(true);
     expect(await exists(p('.orcaops', 'artifacts'))).toBe(true);
     expect(await exists(p('.orcaops', 'cache'))).toBe(true);
     // The retained .orcaops data stays git-ignored (its ignore lines are NOT removed on a
@@ -608,15 +613,15 @@ describe('orcaops uninstall', () => {
         '--install-agent',
         'claude-code',
         '--no-llm',
-        '--agents-md',
       ]);
+      // A personal install writes no worktree manifest and no instruction
+      // file; its ownership record is the common personal manifest.
       expect(await exists(p('.orcaops', 'install.json'))).toBe(false);
-      expect(await exists(p('.orcaops', 'install.local.json'))).toBe(true);
-      expect(await exists(p('CLAUDE.local.md'))).toBe(true);
+      expect(await exists(p('.orcaops', 'install.local.json'))).toBe(false);
+      expect(await exists(p('.git', 'orcaops', 'personal-manifest.json'))).toBe(true);
 
       const res = await personalAgent.runRaw(['uninstall', '--json']);
       expect(res.exitCode).toBe(0);
-      expect(await lexists(p('CLAUDE.local.md'))).toBe(false);
       expect(await exists(p('.orcaops', 'install.local.json'))).toBe(false);
       expect(
         await lexists(path.join(globalRoot, 'claude-code', 'skills', 'orcaops-capture', 'SKILL.md'))
@@ -662,7 +667,7 @@ describe('orcaops uninstall', () => {
 
       const res = await globalAgent.runRaw(['uninstall', '--purge-data', '--json']);
       expect(res.exitCode).toBe(1);
-      expect(await exists(p('.orcaops', 'config.json'))).toBe(true);
+      expect(await exists(await effectiveConfigPath(repo.path))).toBe(true);
       expect(await exists(p('AGENTS.md'))).toBe(true);
     } finally {
       await rm(globalRoot, { recursive: true, force: true });
@@ -927,6 +932,7 @@ describe('orcaops uninstall', () => {
 
   it('preserves hooks when their parent directory is redirected', async () => {
     await agent.runRaw(['init', '--no-llm', '--with-hooks']);
+    await mkdir(p('.orcaops', 'artifacts'), { recursive: true });
     const outsideDir = await mkdtemp(path.join(tmpdir(), 'orcaops-uninstall-hooks-'));
     const hooksPath = p('.git', 'hooks');
     await rm(hooksPath, { recursive: true, force: true });
@@ -949,10 +955,10 @@ describe('orcaops uninstall', () => {
         ])
       );
       expect((await lstat(hooksPath)).isSymbolicLink()).toBe(true);
-      const config = JSON.parse(
-        await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')
-      ) as { schema_version: number };
-      expect(config.schema_version).toBeGreaterThan(0);
+      // A non-purge uninstall keeps the captured data; the personal config
+      // itself is removed from the git common dir.
+      expect(await exists(p('.orcaops', 'artifacts'))).toBe(true);
+      expect(await exists(p('.git', 'orcaops', 'config.json'))).toBe(false);
     } finally {
       await rm(outsideDir, { recursive: true, force: true });
     }
@@ -1024,7 +1030,9 @@ describe('orcaops uninstall — personal (invisible) scope round-trip', () => {
     execFileSync('git', ['status', '--porcelain'], { cwd: repo.path }).toString().trim();
 
   it('non-purge: releases global refs, excises the block, KEEPS retained data hidden — status stays clean', async () => {
-    await agent.runRaw(['init', '--personal', '--json', '--no-llm', '--agents-md']);
+    await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
+    // Stand in for captured data: init itself creates no data directory.
+    await mkdir(path.join(repo.path, '.orcaops', 'artifacts'), { recursive: true });
     expect(gitStatus()).toBe('');
     const skill = path.join(globalRoot, 'claude-code', 'skills', 'orcaops-capture', 'SKILL.md');
     expect(await exists(skill)).toBe(true);
@@ -1045,14 +1053,16 @@ describe('orcaops uninstall — personal (invisible) scope round-trip', () => {
     ) as { entries: unknown[] };
     expect(manifest.entries).toEqual([]);
 
-    // CLAUDE.local.md was an orcaops-created block-only file → excised + deleted.
-    expect(out.blocks_removed).toContain('CLAUDE.local.md');
+    // Personal scope owns no instruction file, so nothing was excised.
+    expect(out.blocks_removed).toEqual([]);
     expect(await exists(path.join(repo.path, 'CLAUDE.local.md'))).toBe(false);
 
     // RETENTION: the data survives AND stays hidden — the exclude section is
     // rewritten down to `.orcaops/` (mirroring RETAINED_DATA_IGNORES), so
-    // `git status` is exactly as clean after uninstall as before it.
-    expect(await exists(path.join(repo.path, '.orcaops', 'config.json'))).toBe(true);
+    // `git status` is exactly as clean after uninstall as before it. The
+    // shared personal config is gone: re-init is a fresh install.
+    expect(await exists(path.join(repo.path, '.orcaops', 'artifacts'))).toBe(true);
+    expect(await exists(path.join(repo.path, '.git', 'orcaops', 'config.json'))).toBe(false);
     const exclude = await readFile(path.join(repo.path, '.git', 'info', 'exclude'), 'utf8');
     expect(exclude).toContain('# >>> orcaops >>>');
     expect(exclude).toContain('.orcaops/');
@@ -1060,9 +1070,11 @@ describe('orcaops uninstall — personal (invisible) scope round-trip', () => {
     expect(gitStatus()).toBe('');
   });
 
-  it('keeps a preserved CLAUDE.local.md hidden after non-purge uninstall', async () => {
-    await agent.runRaw(['init', '--personal', '--json', '--no-llm', '--agents-md']);
-    await appendFile(path.join(repo.path, 'CLAUDE.local.md'), 'User instructions stay private.\n');
+  it("leaves a user's CLAUDE.local.md alone: never edited, never hidden", async () => {
+    // Personal scope owns no instruction file, so a CLAUDE.local.md the user
+    // keeps is theirs in every respect — not excised, not excluded.
+    await writeFile(path.join(repo.path, 'CLAUDE.local.md'), 'User instructions stay private.\n');
+    await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
 
     const result = await agent.runRaw(['uninstall', '--json']);
     expect(result.exitCode).toBe(0);
@@ -1071,12 +1083,11 @@ describe('orcaops uninstall — personal (invisible) scope round-trip', () => {
     );
     const exclude = await readFile(path.join(repo.path, '.git', 'info', 'exclude'), 'utf8');
     expect(exclude).toContain('.orcaops/');
-    expect(exclude).toContain('CLAUDE.local.md');
-    expect(gitStatus()).toBe('');
+    expect(exclude).not.toContain('CLAUDE.local.md');
   });
 
   it('never creates an exclude section for a repo whose section is already gone', async () => {
-    await agent.runRaw(['init', '--personal', '--json', '--no-llm', '--agents-md']);
+    await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
     const excludePath = path.join(repo.path, '.git', 'info', 'exclude');
     const userLines = '*.swp\n';
     await writeFile(excludePath, userLines, 'utf8');
@@ -1090,7 +1101,7 @@ describe('orcaops uninstall — personal (invisible) scope round-trip', () => {
   });
 
   it('refuses the global release entirely on a CLI version mismatch: no files, no refs', async () => {
-    await agent.runRaw(['init', '--personal', '--json', '--no-llm', '--agents-md']);
+    await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
     const manifestPath = path.join(globalRoot, 'install.local.json');
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
       materialized_by: string;
@@ -1113,7 +1124,7 @@ describe('orcaops uninstall — personal (invisible) scope round-trip', () => {
   });
 
   it('forwards --force when releasing global refs', async () => {
-    await agent.runRaw(['init', '--personal', '--json', '--no-llm', '--agents-md']);
+    await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
     const manifestPath = path.join(globalRoot, 'install.local.json');
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
       materialized_by: string;
@@ -1134,7 +1145,7 @@ describe('orcaops uninstall — personal (invisible) scope round-trip', () => {
     expect(await exists(skill)).toBe(false);
   });
 
-  it('--purge-data: the store is deleted and the exclude section strips fully', async () => {
+  it('--purge-data deletes this store but retains shared exclusion ownership', async () => {
     await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
     const r = await agent.runRaw(['uninstall', '--purge-data', '--json']);
     expect(r.exitCode).toBe(0);
@@ -1142,7 +1153,11 @@ describe('orcaops uninstall — personal (invisible) scope round-trip', () => {
     const exclude = await readFile(path.join(repo.path, '.git', 'info', 'exclude'), 'utf8').catch(
       () => ''
     );
-    expect(exclude).not.toContain('# >>> orcaops >>>');
+    expect(exclude).toContain('# >>> orcaops >>>');
+    expect(exclude).toContain('.orcaops/');
+    expect(await exists(path.join(repo.path, '.git', 'orcaops', 'personal-manifest.json'))).toBe(
+      true
+    );
     expect(gitStatus()).toBe('');
   });
 

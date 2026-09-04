@@ -165,11 +165,10 @@ export async function editSessionHookEntries(
 
 /** Narrows defensively: only an explicit 'managed' grants instruction-file writes. */
 export async function editBlockChoice(
-  initial: 'managed' | 'manual',
-  scope: 'project' | 'global' | 'personal'
+  initial: 'managed' | 'manual'
 ): Promise<'managed' | 'manual' | null> {
   const { select, isCancel } = await clack();
-  const prompt = blockPrompt(scope);
+  const prompt = blockPrompt();
   const value = await select({
     message: prompt.message,
     options: prompt.options,

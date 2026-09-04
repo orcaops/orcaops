@@ -1,12 +1,18 @@
 import { access } from 'node:fs/promises';
 import path from 'node:path';
 
-import { loadConfig, Repo } from '@orcaops/core';
+import {
+  configFromSource,
+  probeWorktree,
+  Repo,
+  resolveConfigSource,
+  type WorktreeProbe,
+} from '@orcaops/core';
 import { ArtifactStore } from '@orcaops/storage';
 
 import { deriveLabel, loadInFlightOnBranch } from './active-artifact.js';
 import { getInvocationCwd } from './invocation-context.js';
-import { discoverGitRoot, resolveExplicitOverride } from './resolve-root.js';
+import { resolveExplicitOverride } from './resolve-root.js';
 
 /**
  * Idle threshold after which an open checkpoint reads as "left over from a
@@ -45,9 +51,35 @@ export type SessionStartState =
       inFlight: SessionStartArtifact[];
     };
 
-export async function resolveSessionStartRoot(cwd?: string): Promise<string | null> {
+export interface SessionStartLocation {
+  /** The worktree the hook runs in (an explicit override wins over discovery). */
+  root: string;
+  /** The one-shot git probe, or null when git could not answer for `root`. */
+  probe: WorktreeProbe | null;
+}
+
+/**
+ * Locate the checkout with ONE git process. The explicit `--root` /
+ * `ORCAOPS_ROOT` override still wins; the probe then runs there so the branch
+ * and common dir describe the overridden checkout. No `.git`-walking
+ * fallback: a personal install cannot be found safely when git cannot
+ * resolve the common dir, and guessing one would read shared state that may
+ * belong to another repository.
+ */
+export async function resolveSessionStartLocation(
+  cwd?: string
+): Promise<SessionStartLocation | null> {
   const base = path.resolve(cwd ?? getInvocationCwd());
-  return (await resolveExplicitOverride(base)) ?? (await discoverGitRoot(base));
+  const override = await resolveExplicitOverride(base);
+  const probe = await probeWorktree(override ?? base);
+  if (override !== null) return { root: override, probe };
+  if (probe === null) return null;
+  return { root: probe.worktreeRoot, probe };
+}
+
+/** The worktree root alone — kept for callers that only need the location. */
+export async function resolveSessionStartRoot(cwd?: string): Promise<string | null> {
+  return (await resolveSessionStartLocation(cwd))?.root ?? null;
 }
 
 /**
@@ -71,17 +103,21 @@ export async function resolveSessionStartRoot(cwd?: string): Promise<string | nu
  */
 export async function readSessionStartState(
   cwd?: string,
-  resolvedRoot?: string | null
+  resolved?: SessionStartLocation | null
 ): Promise<SessionStartState> {
   try {
-    const repoRoot = resolvedRoot === undefined ? await resolveSessionStartRoot(cwd) : resolvedRoot;
-    if (!repoRoot) return { kind: 'uninitialized' };
-    try {
-      await access(path.join(repoRoot, '.orcaops'));
-    } catch {
-      return { kind: 'uninitialized' };
-    }
-    const config = await loadConfig(repoRoot);
+    const location = resolved === undefined ? await resolveSessionStartLocation(cwd) : resolved;
+    if (!location) return { kind: 'uninitialized' };
+    const repoRoot = location.root;
+    // Governed by a config — this worktree's own, or the shared personal one
+    // in the git common dir — never "has a .orcaops directory": a personal
+    // sibling has no local directory until it captures. The probe's common
+    // dir is reused so this costs no second git process.
+    const source = await resolveConfigSource(repoRoot, {
+      commonDir: location.probe?.commonDir,
+    });
+    if (source.kind === 'none') return { kind: 'uninitialized' };
+    const config = configFromSource(source);
     // EMISSION gate: `session_hooks.enabled` is the per-repo switch. With
     // machine-level registration (user-level hooks fire in every repo), this
     // is what keeps a repo that never opted in silent — and it also silences
@@ -100,11 +136,15 @@ export async function readSessionStartState(
       return { kind: 'static', prefix };
     }
 
-    let branch: string;
-    try {
-      branch = await new Repo(repoRoot).getCurrentBranch();
-    } catch {
-      return { kind: 'static', prefix };
+    // The branch came with the probe; only an overridden root that git could
+    // not describe has to fall back to the static nudge.
+    let branch = location.probe?.branch ?? null;
+    if (branch === null) {
+      try {
+        branch = await new Repo(repoRoot).getCurrentBranch();
+      } catch {
+        return { kind: 'static', prefix };
+      }
     }
     if (branch === 'HEAD') branch = 'detached HEAD';
 

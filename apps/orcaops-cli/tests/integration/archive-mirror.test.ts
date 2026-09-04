@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 /**
  * Archive wiring end-to-end through the real CLI: enabling
@@ -45,7 +46,7 @@ describe('archive mirror CLI wiring', () => {
   });
 
   async function enableArchive(): Promise<void> {
-    const configPath = path.join(repo.path, '.orcaops', 'config.json');
+    const configPath = await effectiveConfigPath(repo.path);
     const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     config.archive = { enabled: true, redact_secrets: false };
     await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');

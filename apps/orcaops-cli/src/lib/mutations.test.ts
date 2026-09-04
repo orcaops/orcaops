@@ -908,3 +908,54 @@ describe('formatDryRunPreview', () => {
     expect(formatDryRunPreview([preserved])).toBe('Dry run: nothing to change.\n');
   });
 });
+
+describe('deleteMutation containment', () => {
+  it('accepts an upward path when it stays under the explicit containment root', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'orcaops-del-root-'));
+    const worktree = path.join(root, 'worktrees', 'feature');
+    const target = path.join(root, 'orcaops', 'config.json');
+    await mkdir(path.dirname(target), { recursive: true });
+    await mkdir(worktree, { recursive: true });
+    await writeFile(target, '{}', 'utf8');
+    try {
+      const mutation = deleteMutation(
+        worktree,
+        path.relative(worktree, target),
+        { kind: 'file', content: '{}' },
+        true,
+        root,
+        target
+      );
+      expect(mutation.absPath).toBe(target);
+      expect(mutation.containmentRoot).toBe(root);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('still refuses an upward path with no explicit root', () => {
+    expect(() =>
+      deleteMutation('/tmp/repo', '../elsewhere/file', { kind: 'file', content: '' }, true)
+    ).toThrow(/escapes upward/);
+  });
+
+  it('refuses an explicit target that escapes its own root', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'orcaops-del-root-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'orcaops-del-out-'));
+    try {
+      expect(() =>
+        deleteMutation(
+          root,
+          path.relative(root, path.join(outside, 'x')),
+          { kind: 'file', content: '' },
+          true,
+          root,
+          path.join(outside, 'x')
+        )
+      ).toThrow(/resolves outside/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+});

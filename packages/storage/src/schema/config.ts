@@ -58,10 +58,12 @@ export function isAcceptedConfigVersion(version: unknown): boolean {
 }
 
 /**
- * `.orcaops/config.json` must carry the literal NUMBER 6, or one of
+ * The configuration must carry the literal NUMBER 6, or one of
  * {@link ACCEPTED_PREDECESSOR_VERSIONS}. Unversioned files are not loadable,
  * and a stringified version is rejected rather than coerced so the on-disk
- * contract stays exact. A version ahead of 6 keeps the newer-orcaops message. Throws
+ * contract stays exact. Deliberately path-neutral: personal scope stores this
+ * file in the git common directory, so only the loader knows which one it read
+ * — it prefixes the resolved path. A version ahead of 6 keeps the newer-orcaops message. Throws
  * ConfigValidationError so the CLI boundary renders the INVALID_CONFIG
  * envelope.
  */
@@ -74,7 +76,7 @@ export function assertConfigVersionCurrent(raw: unknown): void {
   if (typeof v === 'number' && ACCEPTED_PREDECESSOR_VERSIONS.includes(v)) return;
   if (typeof v === 'string') {
     throw new ConfigValidationError(
-      `.orcaops/config.json schema_version must be the number ${CONFIG_SCHEMA_VERSION}, ` +
+      `orcaops configuration: schema_version must be the number ${CONFIG_SCHEMA_VERSION}, ` +
         `got the string "${v}" — edit it to an unquoted ${CONFIG_SCHEMA_VERSION}, or run ` +
         '`orcaops init --force --reset-config` to restore current defaults.',
       'schema_version'
@@ -82,14 +84,14 @@ export function assertConfigVersionCurrent(raw: unknown): void {
   }
   if (typeof v === 'number' && v > CONFIG_SCHEMA_VERSION) {
     throw new ConfigValidationError(
-      `.orcaops/config.json is schema_version ${v}, but this orcaops only understands ` +
+      `orcaops configuration: schema_version is ${v}, but this orcaops only understands ` +
         `up to ${CONFIG_SCHEMA_VERSION}. Upgrade orcaops (or check out a newer build).`,
       'schema_version'
     );
   }
   const shown = typeof v === 'number' ? String(v) : 'missing';
   throw new ConfigValidationError(
-    `.orcaops/config.json is schema_version ${shown}, but this orcaops requires ` +
+    `orcaops configuration: schema_version is ${shown}, but this orcaops requires ` +
       `${CONFIG_SCHEMA_VERSION}. Re-run \`orcaops init --force --reset-config\` to regenerate the config ` +
       `(or hand-edit it to the current v${CONFIG_SCHEMA_VERSION} shape) and retry.`,
     'schema_version'
@@ -217,9 +219,10 @@ export const ConfigSchema = z.strictObject({
        * instruction block, git hooks, and committed `install.json` are ALWAYS
        * project-scoped regardless. Default merging fills an omitted value.
        */
-      // 'personal': skills via the GLOBAL machinery, the
-      // bootstrap block in CLAUDE.local.md, no committed install.json, and
-      // .git/info/exclude keeping `git status` clean. Claude Code only in v1.
+      // 'personal': skills via the GLOBAL machinery, config and ownership
+      // record in the git common dir (shared by every worktree), no
+      // instruction file, no committed install.json, and .git/info/exclude
+      // keeping `git status` clean.
       scope: z.enum(['project', 'global', 'personal']).default('project'),
       /** How global artifacts are materialized: `copy` (default, safe) or `symlink`. */
       link: z.enum(['copy', 'symlink']).default('copy'),
@@ -651,7 +654,7 @@ export function resolveConfig(partial: unknown): Config {
   const issuePath =
     [...(issue?.path ?? []), ...unknownKeys.slice(0, 1)].map(String).join('.') || 'config';
   throw new ConfigValidationError(
-    `.orcaops/config.json is invalid at ${issuePath}: ${issue?.message ?? 'invalid value'}.`,
+    `orcaops configuration is invalid at ${issuePath}: ${issue?.message ?? 'invalid value'}.`,
     issuePath
   );
 }

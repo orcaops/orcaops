@@ -6,6 +6,7 @@ import { ArtifactStore, getDefaultConfig } from '@orcaops/storage';
 import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 // A real-shape but semantically dead JWT. Warn tier is load-bearing, not
 // incidental: capture REFUSES a refuse-tier shape outright, so a fixture like
@@ -286,7 +287,7 @@ describe('output redaction: digest / resume / why / search', () => {
     });
 
     it('config.digest.redact_secrets=false disables redaction (opt-out works)', async () => {
-      const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+      const cfgPath = await effectiveConfigPath(repo.path);
       const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as {
         digest: { redact_secrets: boolean };
       };

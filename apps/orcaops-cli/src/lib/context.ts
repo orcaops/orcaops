@@ -1,7 +1,12 @@
 import { access } from 'node:fs/promises';
 import path from 'node:path';
 
-import { loadConfig, Repo } from '@orcaops/core';
+import {
+  configFromSource,
+  Repo,
+  resolveConfigSource,
+  type ResolvedConfigSource,
+} from '@orcaops/core';
 import { ProjectIdentityError, readProjectId } from '@orcaops/project-scope';
 import {
   type ArchiveMirror,
@@ -11,7 +16,9 @@ import {
   cacheDbPath,
   type Config,
   ConfigValidationError,
+  openEmptyArtifactStore,
   prepareArtifactStoreForRead,
+  probeHotState,
   type RebuildResult,
   SchemaAheadError,
   Store,
@@ -111,22 +118,15 @@ export async function buildContext(opts: ContextOptions = {}): Promise<CliContex
     );
   }
 
-  if (opts.requireInit !== false) {
-    const orcaopsDir = path.join(repoRoot, '.orcaops');
-    try {
-      await access(orcaopsDir);
-    } catch {
-      throw new OrcaopsError(
-        ErrorCodes.UNINITIALIZED,
-        `${repoRoot} is not initialized for orcaops. Run \`orcaops init\` first ` +
-          `(resolved root: ${repoRoot}; override the root with --root or ORCAOPS_ROOT).`
-      );
-    }
-  }
-
+  // Initialization is a property of the CONFIG, not of `<worktree>/.orcaops`:
+  // a personal install lives in the git common dir, so requiring a local
+  // directory would report every linked worktree uninitialized, and a
+  // leftover data directory would report an uninstalled one as ready.
+  let source: ResolvedConfigSource;
   let config: Config;
   try {
-    config = await loadConfig(repoRoot);
+    source = await resolveConfigSource(repoRoot);
+    config = configFromSource(source);
   } catch (err) {
     // Storage's `ConfigValidationError` carries the offending dotted
     // path. Remap to the public `INVALID_CONFIG` envelope at the CLI
@@ -136,6 +136,13 @@ export async function buildContext(opts: ContextOptions = {}): Promise<CliContex
     }
     throw err;
   }
+  if (opts.requireInit !== false && source.kind === 'none') {
+    throw new OrcaopsError(
+      ErrorCodes.UNINITIALIZED,
+      `${repoRoot} is not initialized for orcaops. Run \`orcaops init\` first ` +
+        `(resolved root: ${repoRoot}; override the root with --root or ORCAOPS_ROOT).`
+    );
+  }
   // Archive wiring: fail-open — a null mirror simply means this
   // invocation does not archive. The disabled path costs nothing.
   const archive =
@@ -143,14 +150,30 @@ export async function buildContext(opts: ContextOptions = {}): Promise<CliContex
       ?.mirror ?? null;
   let store: ArtifactStore;
   let destructiveStore: Store | null = null;
+  // A read verb on a governed worktree that holds no data yet must not
+  // materialize the cache or the locks dir; it reads an in-memory projection.
+  // Write verbs (mint-on-first-use) open normally and create what they store.
+  const emptyReadOnly =
+    opts.mintArchiveIdentity === false &&
+    opts.destructiveRebuild !== true &&
+    probeHotState(repoRoot, config).empty;
   try {
-    if (opts.destructiveRebuild === true) {
-      destructiveStore = new Store(cacheDbPath(repoRoot, config), {
-        containmentRoot: repoRoot,
-        rebuildExistingProjection: true,
+    if (emptyReadOnly) {
+      store = openEmptyArtifactStore(repoRoot, config);
+    } else {
+      if (opts.destructiveRebuild === true) {
+        destructiveStore = new Store(cacheDbPath(repoRoot, config), {
+          containmentRoot: repoRoot,
+          rebuildExistingProjection: true,
+        });
+      }
+      store = new ArtifactStore({
+        repoRoot,
+        config,
+        archive,
+        store: destructiveStore ?? undefined,
       });
     }
-    store = new ArtifactStore({ repoRoot, config, archive, store: destructiveStore ?? undefined });
   } catch (err) {
     destructiveStore?.close();
     // Storage's `SchemaAheadError` fires when the on-disk SQLite cache
@@ -165,23 +188,25 @@ export async function buildContext(opts: ContextOptions = {}): Promise<CliContex
     }
     throw err;
   }
-  const preparation = await prepareArtifactStoreForRead({
-    store,
-    onPlanIdempotencyConflicts: (conflicts) => {
-      writeTerminalSafeStderr(
-        `warning: ${conflicts.length} plan idempotency key(s) appear in ` +
-          `multiple artifacts' event logs (filesystem-level corruption); ` +
-          `the first artifact holds each key — run \`orcaops doctor\`.\n`
-      );
-    },
-  });
-  if (preparation.reconciliation?.restored.length) {
+  const preparation = emptyReadOnly
+    ? null
+    : await prepareArtifactStoreForRead({
+        store,
+        onPlanIdempotencyConflicts: (conflicts) => {
+          writeTerminalSafeStderr(
+            `warning: ${conflicts.length} plan idempotency key(s) appear in ` +
+              `multiple artifacts' event logs (filesystem-level corruption); ` +
+              `the first artifact holds each key — run \`orcaops doctor\`.\n`
+          );
+        },
+      });
+  if (preparation?.reconciliation?.restored.length) {
     writeTerminalSafeStderr(
       `warning: restored ${preparation.reconciliation.restored.length} interrupted artifact ` +
         `deletion(s) from protected staging; rebuilding the SQLite projection.\n`
     );
   }
-  if (preparation.issue?.kind === 'deletion_reconciliation_failed') {
+  if (preparation?.issue?.kind === 'deletion_reconciliation_failed') {
     store.close();
     const error = preparation.issue.cause;
     if (error instanceof ArtifactDeletionRecoveryError) {
@@ -192,7 +217,7 @@ export async function buildContext(opts: ContextOptions = {}): Promise<CliContex
 
   // A failed rebuild must not wedge every command: preparation leaves durable
   // health pending and the command can disclose the incomplete projection.
-  if (preparation.issue?.kind === 'projection_rebuild_failed') {
+  if (preparation?.issue?.kind === 'projection_rebuild_failed') {
     const error = preparation.issue.cause;
     if (error instanceof ArtifactLockLeaseLostError) {
       const pendingRebuild = store.store.projectionHealth === 'rebuild_pending';
@@ -213,7 +238,7 @@ export async function buildContext(opts: ContextOptions = {}): Promise<CliContex
       );
     }
   }
-  const healResult: RebuildResult | null = preparation.rebuild;
+  const healResult: RebuildResult | null = preparation?.rebuild ?? null;
   const healedProjection = healResult !== null;
   if (healResult && healResult.skipped_artifacts > 0) {
     writeTerminalSafeStderr(

@@ -1,10 +1,9 @@
 import { spawn } from 'node:child_process';
-import { access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import { getAgentOverlay, type ToolId } from '@orcaops/adapters';
-import { getConfigPath, Repo } from '@orcaops/core';
+import { configLocationForScope, Repo, resolveConfigSource } from '@orcaops/core';
 import {
   assertConfigVersionCurrent,
   type Config,
@@ -30,6 +29,12 @@ import {
 } from '../io/output.js';
 import { CLI_VERSION } from '../lib/cli-version.js';
 import { buildConfigDelta } from '../lib/config-delta.js';
+import {
+  displayConfigPath,
+  refuseTrackedPersonalTransition,
+  resolvePersonalConfigForAdoption,
+  trackedProjectInstallPaths,
+} from '../lib/config-file.js';
 import { ORCAOPS_BASE_GITIGNORE, reconcileGitignore } from '../lib/gitignore.js';
 import {
   type GlobalInstallLockScope,
@@ -46,10 +51,9 @@ import {
   derivedIgnoreGlobs,
   isInteractiveInit,
   parseInstallAgentFlags,
-  personalScopeWarnings,
   resolveInstallAgents,
 } from '../lib/install-agents.js';
-import { readInstallManifest, readLocalManifest } from '../lib/install-manifest.js';
+import { INSTALL_MANIFEST_REL, readInstallManifest } from '../lib/install-manifest.js';
 import {
   assertInvisiblePlan,
   planInstallMutations,
@@ -62,7 +66,7 @@ import {
   getInvocationRootOverride,
 } from '../lib/invocation-context.js';
 import {
-  dirMutation,
+  deleteMutation,
   executeMutations,
   type GitHookAction,
   type MutationMode,
@@ -72,6 +76,7 @@ import {
   readRepositoryFileOrNull,
   writeMutation,
 } from '../lib/mutations.js';
+import { readEffectiveLocalManifest } from '../lib/personal-manifest.js';
 import { ensureProjectId, readProjectId } from '../lib/project-identity.js';
 import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { bestEffortRealpath, discoverGitRoot } from '../lib/resolve-root.js';
@@ -83,7 +88,7 @@ import {
   stagedUserSessionHookAgents,
   type StagedUserSessionHookInstall,
 } from '../lib/session-hooks-install.js';
-import { userHookCapableAgents } from '../lib/session-hooks-user.js';
+import { codexConfigTomlPath, userHookCapableAgents } from '../lib/session-hooks-user.js';
 import {
   SESSION_HOOK_RESTART_NOTICE,
   sessionHookCapableAgents,
@@ -312,6 +317,8 @@ interface InitResult {
   } | null;
   /** True when enabled personal hooks still need the standalone consent command. */
   machine_session_hooks_deferred: boolean;
+  /** True when the interactive consent prompt was shown and answered no. */
+  machine_session_hooks_declined: boolean;
   /**
    * True when a session-hook entry was created/updated/removed — the running
    * agent session will not see the change until restarted.
@@ -386,19 +393,33 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
     );
   }
 
-  const orcaopsDir = path.join(repoRoot, '.orcaops');
-  const alreadyInitialized = await pathExists(orcaopsDir);
   if (opts.resetConfig && !opts.force) {
     throw new OrcaopsError(
       ErrorCodes.INVALID_INPUT,
       '`--reset-config` requires `--force`; captured artifacts and cache data are preserved.'
     );
   }
+  // Re-entry is decided by the config that governs this worktree, never by the
+  // presence of `.orcaops/`: under personal scope the config is not in the
+  // worktree at all, and a worktree can hold artifacts and a cache from a
+  // checkout whose config was never written. A malformed body is tolerated
+  // here so the refusal can name the file `--reset-config` would replace; a
+  // worktree config CLAIMING personal still throws, because that state has a
+  // manual recovery and no migration path.
+  const existingSource = await resolveConfigSource(repoRoot, { tolerateUnreadable: true });
+  // A shared personal config does not stop THIS worktree from materializing
+  // its own project/global config — that file outranks the shared one the
+  // moment it exists, which is how a subdir root or a team branch adopts
+  // project scope. Only an install landing where one already is re-enters.
+  const explicitWorktreeScope = opts.scope === 'project' || opts.scope === 'global';
+  const alreadyInitialized =
+    existingSource.kind === 'worktree' ||
+    (existingSource.kind === 'common' && !explicitWorktreeScope);
   if (alreadyInitialized && !opts.force) {
     throw new OrcaopsError(
       ErrorCodes.ALREADY_INITIALIZED,
-      `${orcaopsDir} already exists. Run \`orcaops configure\` to change settings, ` +
-        'or pass --force to re-initialize.'
+      `${displayConfigPath(existingSource, repoRoot)} already exists. Run ` +
+        '`orcaops configure` to change settings, or pass --force to re-initialize.'
     );
   }
 
@@ -408,13 +429,9 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
   const mutations: PlannedMutation[] = [];
   const created: string[] = [];
 
-  for (const sub of ['artifacts', 'cache']) {
-    const rel = path.join('.orcaops', sub);
-    const exists = await pathExists(path.join(repoRoot, rel));
-    const m = dirMutation(repoRoot, rel, exists);
-    mutations.push(m);
-    if (m.changed) created.push(m.path);
-  }
+  // No eager `.orcaops/artifacts` or `.orcaops/cache`: the data directories
+  // are created by the first write that has something to store, so the
+  // initializing worktree follows the same lazy path as every sibling.
 
   // Init does not probe the environment for an LLM tool — that's doctor's
   // lazy responsibility (checkLlmTool). The config ships with `llm.tool: 'auto'`
@@ -423,13 +440,29 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
   // --force reconciles the managed install while preserving current config.
   // --reset-config is the explicit factory reset. A newer config is always
   // refused so an older CLI cannot destroy forward-only settings.
-  const configPath = getConfigPath(repoRoot);
-  const configRel = path.relative(repoRoot, configPath);
-  const currentConfig = await readRepositoryFileOrNull(
-    configPath,
-    repoRoot,
-    'orcaops configuration'
-  );
+  const existingConfigContent =
+    existingSource.kind === 'none'
+      ? null
+      : await readRepositoryFileOrNull(
+          existingSource.configPath,
+          existingSource.containmentRoot,
+          'orcaops configuration'
+        );
+  let currentConfig = existingConfigContent;
+  let preservedConfigPath = displayConfigPath(existingSource, repoRoot);
+  if (existingSource.kind === 'worktree' && (opts.personal || opts.scope === 'personal')) {
+    const shared = await configLocationForScope(repoRoot, 'personal');
+    const sharedContent = await readRepositoryFileOrNull(
+      shared.configPath,
+      shared.containmentRoot,
+      'shared personal configuration'
+    );
+    if (sharedContent !== null) {
+      resolvePersonalConfigForAdoption(sharedContent, displayConfigPath(shared, repoRoot));
+      currentConfig = sharedContent;
+      preservedConfigPath = displayConfigPath(shared, repoRoot);
+    }
+  }
   const configExists = currentConfig !== null;
   let archiveEnabledBefore = false;
   let rawCurrent: unknown = null;
@@ -460,8 +493,8 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
       if (err instanceof ConfigValidationError) throw err;
       if (!opts.resetConfig) {
         throw new ConfigValidationError(
-          '.orcaops/config.json is not valid JSON. Re-run `orcaops init --force ' +
-            '--reset-config` to discard it and restore current defaults.',
+          `${preservedConfigPath} is not valid JSON. Re-run ` +
+            '`orcaops init --force --reset-config` to discard it and restore current defaults.',
           'config'
         );
       }
@@ -472,8 +505,8 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
   if (preservingConfig) {
     if (!currentJsonReadable) {
       throw new ConfigValidationError(
-        '.orcaops/config.json is not readable. Re-run `orcaops init --force ' +
-          '--reset-config` to discard it and restore current defaults.',
+        `${preservedConfigPath} is not readable. Re-run ` +
+          '`orcaops init --force --reset-config` to discard it and restore current defaults.',
         'config'
       );
     }
@@ -542,6 +575,25 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
   if (opts.link) {
     config.install.link = opts.link;
   }
+  // Personal scope owns no instruction file and no repo settings entries: an
+  // explicit flag asking for either cannot be honoured, so refuse it rather
+  // than persist a setting nothing reads.
+  if (config.install.scope === 'personal') {
+    if (opts.agentsMd === true) {
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        '--agents-md is not available under personal scope: personal installs never edit ' +
+          'instruction files. Use `orcaops init --scope project --agents-md` to adopt a managed block.'
+      );
+    }
+    if (opts.sessionHookEntries === 'project') {
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        '--session-hook-entries project is not available under personal scope: personal ' +
+          'installs register hooks at the machine level only (`orcaops session-hooks install`).'
+      );
+    }
+  }
   // Explicit selection flags always win. A fresh or reset config uses the
   // normal interactive/default selection (a real TTY presents a checklist,
   // default = detected; non-interactive installs the deterministic
@@ -564,6 +616,7 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
   // planned mutations execute.
   const hookCapable = sessionHookCapableAgents(config.install.agents);
   let stagedMachineHooks: StagedUserSessionHookInstall | null = null;
+  let machineHooksDeclined = false;
   if (opts.sessionHookPayload !== undefined) {
     config.session_hooks = { ...config.session_hooks, payload: opts.sessionHookPayload };
   }
@@ -607,6 +660,7 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
         throw new InitCancelled();
       },
     });
+    machineHooksDeclined = stagedMachineHooks === null;
   }
 
   const expectedMachineAgents = new Set(
@@ -629,7 +683,7 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
   };
   let blockQuestionAsked = false;
   const askBlockQuestion = async (): Promise<void> => {
-    config.bootstrap = await promptBlockSelect(blockInitialChoice(), config.install.scope);
+    config.bootstrap = await promptBlockSelect(blockInitialChoice());
     blockQuestionAsked = true;
   };
 
@@ -641,9 +695,8 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
     !preservingConfig &&
     opts.agentsMd === undefined &&
     config.install.agents.length > 0 &&
-    // Under personal scope the block's only surface is CLAUDE.local.md —
-    // no claude-code in the set means there is nothing to offer.
-    (config.install.scope !== 'personal' || config.install.agents.includes('claude-code')) &&
+    // Personal scope owns no instruction file, so there is nothing to offer.
+    config.install.scope !== 'personal' &&
     isInteractiveInit(opts)
   ) {
     await askBlockQuestion();
@@ -712,7 +765,11 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
       // Which registration carries the hook (`session_hooks.entries`) — the
       // knob configure's session-hooks item offers; only meaningful once
       // hooks are enabled (flag or the interview above).
-      if (opts.sessionHookEntries === undefined && config.session_hooks.enabled) {
+      if (
+        opts.sessionHookEntries === undefined &&
+        config.session_hooks.enabled &&
+        config.install.scope !== 'personal'
+      ) {
         const entries = requireInitAnswer(
           await editSessionHookEntries(config.session_hooks.entries)
         );
@@ -724,14 +781,51 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
     }
   }
 
-  // Personal scope supports every agent (skills go global); the one
-  // structural gap — only Claude Code reads CLAUDE.local.md — surfaces as
-  // an advisory (shared helper, computed AFTER every surface that can set
-  // the scope, including the customize branch above).
-  const personalWarnings =
-    config.install.scope === 'personal'
-      ? personalScopeWarnings(config.install.agents, config.bootstrap)
-      : [];
+  // Computed AFTER every surface that can set the scope, including the
+  // customize branch above: personal scope stores exactly the values it
+  // supports, whatever an interview or a preserved config said.
+  const personalWarnings: string[] = [];
+  if (config.install.scope === 'personal') {
+    config.bootstrap = 'manual';
+    config.session_hooks = { ...config.session_hooks, entries: 'none' };
+  }
+
+  // The write target follows the scope being installed, not where a config
+  // happens to sit today: personal publishes to the git common dir so every
+  // linked worktree reads it, project/global stay in the worktree.
+  const destination = await configLocationForScope(repoRoot, config.install.scope);
+  const configRel = displayConfigPath(destination, repoRoot);
+  const movingSource = existingSource.configPath !== destination.configPath;
+  if (movingSource && config.install.scope === 'personal' && existingSource.kind === 'worktree') {
+    // `update --scope personal` is the transition command: it plans the
+    // de-adoption removals and leaves their tracked diff to review. Init must
+    // not perform that edit as a side effect of --force.
+    const tracked = await trackedProjectInstallPaths(repo, [
+      path.relative(repoRoot, existingSource.configPath),
+      INSTALL_MANIFEST_REL,
+    ]);
+    if (tracked.length > 0) throw refuseTrackedPersonalTransition(tracked);
+  }
+  const priorDestination = movingSource
+    ? await readRepositoryFileOrNull(
+        destination.configPath,
+        destination.containmentRoot,
+        'orcaops configuration'
+      )
+    : currentConfig;
+  // One shared file governs every linked worktree, so a reset run from any of
+  // them is repository-wide. Say so where the user is standing; captured
+  // artifacts and cache bytes are per-worktree and untouched either way.
+  const sharedConfigReset =
+    destination.origin === 'common' && opts.resetConfig === true && priorDestination !== null;
+  if (sharedConfigReset) {
+    personalWarnings.push(
+      '--reset-config replaced the shared personal configuration in the git common ' +
+        'directory: the new settings take effect in EVERY linked worktree of this ' +
+        'repository, not just this one. Captured artifacts and cache data are per-worktree ' +
+        'and were not touched.'
+    );
+  }
 
   // Minimal per-key delta, never the full resolved config: a fresh init
   // writes ~10 lines (portable across CLI versions), and a preserving
@@ -740,14 +834,31 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
   const desiredConfig = JSON.stringify(buildConfigDelta(config), null, 2) + '\n';
   const configMut = writeMutation(
     repoRoot,
-    configRel,
+    path.relative(repoRoot, destination.configPath),
     desiredConfig,
-    currentConfig,
-    opts.force || !configExists
+    priorDestination,
+    opts.force || priorDestination === null,
+    destination.containmentRoot,
+    destination.configPath
   );
   mutations.push(configMut);
   if (configMut.changed && !created.includes(configRel)) {
     created.push(configRel);
+  }
+  // An untracked worktree config left behind after publishing the shared one
+  // would fail source selection closed on the next command.
+  if (movingSource && existingSource.kind === 'worktree' && currentConfig !== null) {
+    if (existingConfigContent === null) {
+      throw new Error('worktree configuration disappeared while planning personal adoption');
+    }
+    mutations.push(
+      deleteMutation(
+        repoRoot,
+        path.relative(repoRoot, existingSource.configPath),
+        { kind: 'file', content: existingConfigContent },
+        true
+      )
+    );
   }
 
   // Init does not auto-install evaluator packs. The absence
@@ -783,7 +894,10 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
   // the machine-state gates directly.
   const gates = resolveSkillGates(getInvocationEnv());
   const currentInstall = await readInstallManifest(repoRoot);
-  const currentLocal = await readLocalManifest(repoRoot);
+  const currentLocal = await readEffectiveLocalManifest(
+    repoRoot,
+    existingSource.kind === 'common' ? 'personal' : config.install.scope
+  );
   const plan = await planInstallMutations({
     repoRoot,
     agents: config.install.agents,
@@ -795,6 +909,7 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
     gitignoreLines: orcaopsGitignoreLines,
     prevInstall: currentInstall,
     prevLocal: currentLocal,
+    leavingPersonalScope: existingSource.kind === 'common' && config.install.scope !== 'personal',
   });
   mutations.push(...plan.mutations);
 
@@ -880,7 +995,9 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
   // repo — a personal-scope plan mutating any tracked path is a planner bug,
   // thrown BEFORE any write (the session-hook lingering-entry strip is the
   // one sanctioned exception).
-  if (config.install.scope === 'personal') assertInvisiblePlan(mutations, plan.sessionHooks);
+  if (config.install.scope === 'personal') {
+    await assertInvisiblePlan(repoRoot, mutations, plan.sessionHooks);
+  }
 
   const mode: MutationMode = opts.dryRun ? 'preview' : 'apply';
 
@@ -1067,6 +1184,7 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
             guidance: machineHookGuidance,
           },
     machine_session_hooks_deferred: machineHooksDeferred,
+    machine_session_hooks_declined: machineHooksDeclined,
     restart_required:
       sessionHooksRestartRequired(plan.sessionHooks) || (machineHooks?.restartRequired ?? false),
     project_id: identity.projectId,
@@ -1091,15 +1209,6 @@ async function countHistoryCommits(repoRoot: string): Promise<number> {
     child.on('error', () => resolve(0));
     child.on('close', (code) => resolve(code === 0 ? Number.parseInt(stdout.trim(), 10) || 0 : 0));
   });
-}
-
-async function pathExists(p: string): Promise<boolean> {
-  try {
-    await access(p);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -1340,14 +1449,25 @@ function formatHumanInitResult(r: InitResult): string {
     lines.push('then commit the files it materializes.');
     lines.push('');
   }
+  // Declining machine hooks is a choice, not a problem to fix: say plainly
+  // what the agents have without one, and how to add it later.
+  if (r.machine_session_hooks === null && r.machine_session_hooks_declined) {
+    const agents = r.install_agents.join(', ') || 'the selected agents';
+    const plural = r.install_agents.length !== 1;
+    lines.push(
+      `Machine session hooks were not installed (prompt declined): ${agents} ` +
+        `${plural ? 'keep their' : 'keeps its'} global skills and the orcaops CLI, but ` +
+        `${plural ? 'get' : 'gets'} no automatic session reminder. ` +
+        'Run `orcaops session-hooks install` when you want one.'
+    );
+    lines.push('');
+  }
   const actions: string[] = [];
   if (r.restart_required) {
     actions.push(SESSION_HOOK_RESTART_NOTICE);
   }
   if (r.machine_session_hooks_deferred || r.machine_session_hooks?.partial_failure) {
-    actions.push(
-      'Finish machine registration with `orcaops session-hooks install` in an interactive terminal.'
-    );
+    actions.push(...machineSessionHookActions(r));
   }
   if (actions.length > 0) {
     lines.push('Action needed:');
@@ -1365,6 +1485,83 @@ function formatHumanInitResult(r: InitResult): string {
   lines.push('Change settings: `orcaops configure` · Undo: `orcaops uninstall`');
   lines.push('');
   return lines.join('\n');
+}
+
+function machineSessionHookActions(r: InitResult): string[] {
+  const machine = r.machine_session_hooks;
+  if (machine === null) {
+    // A declined prompt is reported as information above, never as an action.
+    if (r.machine_session_hooks_declined) return [];
+    if (r.dry_run) {
+      return [
+        'Machine session hooks are not written by a dry run. ' +
+          'Re-run without `--dry-run`, or run `orcaops session-hooks install`.',
+      ];
+    }
+    if (r.scope !== 'personal') {
+      return [
+        `Machine session hooks are registered separately from a ${r.scope}-scope init. ` +
+          'Run `orcaops session-hooks install` when you want them.',
+      ];
+    }
+    if (r.already_initialized) {
+      return [
+        'Machine session hooks are not re-offered by a re-init. ' +
+          'Run `orcaops session-hooks install` when you want them.',
+      ];
+    }
+    return [
+      'Finish machine registration with `orcaops session-hooks install` in an interactive terminal.',
+    ];
+  }
+  const actions: string[] = [];
+  const codex = machine.codex_outcome;
+  if (codex === 'manual-snippet') {
+    actions.push('Paste the Codex snippet above, then run `orcaops session-hooks status`.');
+  } else if (
+    codex === 'refused-invalid' ||
+    codex === 'refused-hooks-shape' ||
+    codex === 'refused-fence' ||
+    codex === 'refused-markers'
+  ) {
+    actions.push(
+      `Edit ${displayPath(codexConfigTomlPath())} as described above, ` +
+        'then re-run `orcaops session-hooks install`.'
+    );
+  } else if (codex === 'skipped') {
+    actions.push(
+      'Codex was skipped. Run `orcaops session-hooks install --agents codex` when you want it.'
+    );
+  } else if (codex === 'refused-unreadable' || codex === 'failed') {
+    actions.push(
+      `Repair ${displayPath(codexConfigTomlPath())} (see the warning above), ` +
+        'then re-run `orcaops session-hooks install --agents codex`.'
+    );
+  }
+  for (const plan of machine.plans) {
+    if (
+      plan.action === 'preserved-invalid-json' ||
+      plan.action === 'preserved-unreadable' ||
+      plan.action === 'preserved-unwritable'
+    ) {
+      actions.push(
+        `Repair ${displayPath(plan.path)} (see the warning above), ` +
+          'then re-run `orcaops session-hooks install`.'
+      );
+    }
+  }
+  if (machine.live_agents.length > 0 && machine.record === null) {
+    actions.push(
+      'The registration record was not updated (see the warning above); ' +
+        're-run `orcaops session-hooks install` once it is repaired.'
+    );
+  }
+  // Exhaustive: an applied install leaves every consented agent either live
+  // or on one of the outcomes above (a settings-json plan is created/updated/
+  // unchanged or preserved-*, a Codex answer is written/unchanged, the manual
+  // snippet, skipped, refused or failed), and an install without a record is
+  // the last clause — so an empty list means nothing is pending.
+  return actions;
 }
 
 function pathIsInside(parent: string, candidate: string): boolean {
@@ -1402,10 +1599,9 @@ async function promptArchiveEnable(initialValue: boolean): Promise<boolean> {
 }
 
 async function promptBlockSelect(
-  initialValue: 'managed' | 'manual',
-  scope: 'project' | 'global' | 'personal'
+  initialValue: 'managed' | 'manual'
 ): Promise<'managed' | 'manual'> {
-  return requireInitAnswer(await editBlockChoice(initialValue, scope));
+  return requireInitAnswer(await editBlockChoice(initialValue));
 }
 
 async function promptSessionHooksSelect(

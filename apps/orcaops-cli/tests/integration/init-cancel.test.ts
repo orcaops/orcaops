@@ -79,26 +79,29 @@ describe('interactive init cancellation', () => {
     await repo.cleanup();
   });
 
+  // The instruction-file and repo-registration prompts exist only under
+  // project scope: the personal default owns no instruction file and
+  // registers hooks at the machine level, so those rows ask for project.
   it.each([
-    ['agent selection', 'Which AI coding agents', false],
-    ['session-hook choice', 'Session-start hooks', false],
-    ['machine-hook consent', 'Continue with', false],
-    ['instruction-file choice', 'Let orcaops keep a section', false],
-    ['archive choice', 'Keep a backup', false],
-    ['customization choice', 'Customize more', false],
-    ['command prefix', 'Name prefix', true],
-    ['install scope', 'Where should', true],
-    ['link mode', 'For home-directory', true],
-    ['generated-file mode', 'Should the files', true],
-    ['workflow reminders', 'Pick extra one-line reminders', true],
-    ['custom workflow reminder', 'Add a reminder', true],
-    ['session-hook registration', 'Which registration carries', true],
-    ['git hooks', 'Install git hooks', true],
-  ])('cancelling %s aborts before any write', async (_name, message, openCustomize) => {
+    ['agent selection', 'Which AI coding agents', false, []],
+    ['session-hook choice', 'Session-start hooks', false, []],
+    ['machine-hook consent', 'Continue with', false, []],
+    ['instruction-file choice', 'Let orcaops keep a section', false, ['--scope', 'project']],
+    ['archive choice', 'Keep a backup', false, []],
+    ['customization choice', 'Customize more', false, []],
+    ['command prefix', 'Name prefix', true, []],
+    ['install scope', 'Where should', true, []],
+    ['link mode', 'For home-directory', true, []],
+    ['generated-file mode', 'Should the files', true, []],
+    ['workflow reminders', 'Pick extra one-line reminders', true, []],
+    ['custom workflow reminder', 'Add a reminder', true, []],
+    ['session-hook registration', 'Which registration carries', true, ['--scope', 'project']],
+    ['git hooks', 'Install git hooks', true, []],
+  ])('cancelling %s aborts before any write', async (_name, message, openCustomize, scopeArgs) => {
     promptState.cancelledMessage = message;
     promptState.openCustomize = openCustomize;
 
-    const result = await agent.runRaw(['init', '--json', '--no-llm']);
+    const result = await agent.runRaw(['init', ...scopeArgs, '--json', '--no-llm']);
 
     expect(result.exitCode).toBe(1);
     await expect(access(path.join(repo.path, '.orcaops'))).rejects.toMatchObject({

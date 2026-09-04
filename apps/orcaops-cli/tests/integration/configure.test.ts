@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { access, mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 /**
  * `orcaops configure` — the interactive settings menu. Under test: the menu
@@ -82,7 +84,7 @@ describe('orcaops configure (mocked TTY + clack)', () => {
   });
 
   async function configJson(): Promise<string> {
-    return readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8');
+    return readFile(await effectiveConfigPath(repo.path), 'utf8');
   }
 
   it('flips the session-hook payload end-to-end: config persisted, reconcile run, settings entry untouched', async () => {
@@ -368,6 +370,27 @@ describe('orcaops configure (mocked TTY + clack)', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('refuses a tracked project → personal move and names the transition command', async () => {
+    await agent.runRaw(['init', '--scope', 'project', '--yes', '--json', '--no-llm']);
+    execFileSync('git', ['add', '-A'], { cwd: repo.path });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'adopt'], {
+      cwd: repo.path,
+    });
+    const before = await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8');
+
+    const m = await mocks();
+    prime(m.select, 'discard', 'install', 'scope', 'personal', 'copy', 'back', 'apply', 'discard');
+    prime(m.confirm, false, true);
+
+    const r = await agent.runRaw(['configure']);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain('committed orcaops file');
+    expect(r.stderr).toContain('orcaops update --scope personal');
+    // Nothing moved: the tracked config is untouched and no shared file appeared.
+    expect(await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')).toBe(before);
+    await expect(access(path.join(repo.path, '.git', 'orcaops', 'config.json'))).rejects.toThrow();
+  });
+
   it('scope personal + widened agents applies cleanly (advisory surfaces in the reconcile)', async () => {
     // Personal supports every agent now — the old claude-code-only apply
     // gate is gone. The draft (personal + [claude-code, cursor]) persists and
@@ -439,7 +462,7 @@ describe('orcaops configure (mocked TTY + clack)', () => {
     expect(r.exitCode).toBe(0);
     const excl = await readFile(excludeAbs, 'utf8');
     expect(excl).toContain('.orcaops/');
-    expect(excl).toContain('CLAUDE.local.md');
+    expect(excl).not.toContain('CLAUDE.local.md');
     await expect(access(skillAbs)).rejects.toMatchObject({ code: 'ENOENT' });
     // The tracked file has to lose the block too, or the "invisible" install
     // still shows up in git.
@@ -474,7 +497,7 @@ describe('orcaops configure (mocked TTY + clack)', () => {
       '--agents',
       'claude-code',
     ]);
-    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfgPath = await effectiveConfigPath(repo.path);
     const parsed = JSON.parse(await configJson()) as Record<string, unknown>;
     delete parsed.bootstrap;
     delete parsed.generated_files;
@@ -514,10 +537,10 @@ describe('orcaops configure (mocked TTY + clack)', () => {
     const first = menuCalls[0][0] as {
       options: Array<{ value: string; label: string; hint?: string }>;
     };
-    // Approved top-level order, eight rows.
+    // Approved top-level order; the instruction-file row is absent under the
+    // personal default, which owns no instruction file.
     expect(first.options.map((o) => o.value)).toEqual([
       'session-hooks',
-      'block',
       'hints',
       'agents',
       'archive',
@@ -553,7 +576,7 @@ describe('orcaops configure (mocked TTY + clack)', () => {
       '--agents',
       'claude-code',
     ]);
-    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfgPath = await effectiveConfigPath(repo.path);
     const parsed = JSON.parse(await configJson()) as Record<string, unknown>;
     parsed.workflow = {
       hints: { keys: ['checkpoint-cadence'], custom: ['Old rule one.', 'Old rule two.'] },
@@ -591,7 +614,7 @@ describe('orcaops configure (mocked TTY + clack)', () => {
       '--agents',
       'claude-code',
     ]);
-    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfgPath = await effectiveConfigPath(repo.path);
     const parsed = JSON.parse(await configJson()) as Record<string, unknown>;
     parsed.workflow = { hints: { keys: [], custom: ['Keep me.'] } };
     const { writeFile } = await import('node:fs/promises');

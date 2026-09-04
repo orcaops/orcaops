@@ -20,8 +20,17 @@ The ignored `.orcaops/` directory is the hot store for the current checkout:
 | `.orcaops/reviews/`        | Local Task Review runs, Stories, comments, and review state.             |
 | `.orcaops/usage/`          | Coding-agent token-usage records, without prompt or completion text.     |
 | `.orcaops/cache/`          | Rebuildable indexes and other disposable working caches.                 |
-| `.orcaops/config.json`     | Project configuration; tracked only when you adopt project scope.        |
+| `.orcaops/config.json`     | Project/global configuration; tracked only when you adopt project scope. |
 | `.orcaops/evaluators.yaml` | Evaluator registrations and enablement for project-scoped installations. |
+
+Personal scope stores its shared files in the repository's git common
+directory instead, where every worktree sees them:
+
+| Path                                                               | Contents                                                               |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| `$(git rev-parse --git-common-dir)/orcaops/config.json`            | The shared personal configuration (`install.scope: "personal"`).       |
+| `$(git rev-parse --git-common-dir)/orcaops/evaluators.yaml`        | Personal evaluator registrations; relative packs resolve per worktree. |
+| `$(git rev-parse --git-common-dir)/orcaops/personal-manifest.json` | Ownership record and the owner of the managed `info/exclude` line.     |
 
 Orcaops also creates local git refs in the repository:
 
@@ -118,7 +127,10 @@ are explicit:
 - `orcaops snapshots prune` removes selected local snapshot refs;
 - `orcaops archive prune ... --apply` removes selected archive data;
 - `orcaops gc` cleans reported stale pins and orphans; and
-- `orcaops uninstall --purge-data` removes the repository's local capture data.
+- `orcaops uninstall --purge-data` removes the current worktree's local capture
+  data. Under personal scope, it retains the common ownership manifest and
+  managed `.orcaops/` exclusion because another worktree may still rely on
+  them.
 
 Caches are disposable and rebuildable; artifact event logs and archive mirrors
 are the durable records. Preview prune and uninstall operations before applying

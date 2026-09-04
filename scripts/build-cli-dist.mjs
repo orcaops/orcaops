@@ -349,12 +349,19 @@ writeFileSync(
 log(`Trust manifest: ${manifestPacks.length} bundled pack(s) pinned to installed bytes`);
 
 // ---------------------------------------------------------------------------
-// 6. bin + LICENSE + THIRD-PARTY-NOTICES
+// 6. bin + LICENSE + THIRD-PARTY-NOTICES + README + CHANGELOG
 // ---------------------------------------------------------------------------
 cpSync(path.join(CLI_DIR, 'bin', 'orcaops.js'), path.join(STAGING, 'bin', 'orcaops.js'));
 const rootLicense = path.join(ROOT, 'LICENSE');
 if (!existsSync(rootLicense)) fail('root LICENSE is missing; the tarball must carry it');
 cpSync(rootLicense, path.join(STAGING, 'LICENSE'));
+// npm renders whatever README and CHANGELOG the tarball carries, and a
+// published version's page is frozen — staging them is the only chance.
+for (const doc of ['README.md', 'CHANGELOG.md']) {
+  const source = path.join(ROOT, doc);
+  if (!existsSync(source)) fail(`root ${doc} is missing; the npm page needs it`);
+  cpSync(source, path.join(STAGING, doc));
+}
 generateNotices();
 
 // ---------------------------------------------------------------------------
@@ -386,7 +393,7 @@ const distPkg = {
     'cli',
   ],
   bin: { orcaops: './bin/orcaops.js' },
-  files: ['bin', 'dist', 'LICENSE', 'THIRD-PARTY-NOTICES'],
+  files: ['bin', 'dist', 'LICENSE', 'THIRD-PARTY-NOTICES', 'README.md', 'CHANGELOG.md'],
   engines: { node: '>=22' },
   dependencies: DIST_DEPENDENCIES,
   optionalDependencies: DIST_OPTIONAL_DEPENDENCIES,
@@ -414,6 +421,9 @@ log(`Tarball entries: ${listing.length}; zero .map/.ts/.d.ts ✓`);
 // npm ships a LICENSE it finds whether or not `files` lists it, so the tarball
 // listing is the evidence and the manifest is not.
 if (!listing.includes('package/LICENSE')) fail('tarball is missing package/LICENSE');
+for (const doc of ['README.md', 'CHANGELOG.md']) {
+  if (!listing.includes(`package/${doc}`)) fail(`tarball is missing package/${doc}`);
+}
 
 if (process.env.SKIP_GATE === '1') {
   log('SKIP_GATE=1 — skipping global-install smoke');

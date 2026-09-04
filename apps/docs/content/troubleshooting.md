@@ -32,7 +32,7 @@ next action. For example:
 orcaops doctor — v<version>
   repo: <repo>
 
-✓ repository           7 checks passed
+✓ repository           8 checks passed
 ✓ install surfaces     9 checks passed
 ✓ artifact state       20/21 checks passed
   archive-redaction: archive mirror stores event text verbatim (archive.redact_secrets: false)
@@ -78,6 +78,15 @@ run:
 ```bash
 orcaops update --scope global
 ```
+
+### Personal manifest is stale or unsafe
+
+If the common-dir `orcaops/personal-manifest.json` is malformed, stale, or
+redirected through a symlink, `update`, `uninstall`, and `doctor --fix` stop
+instead of guessing whether another worktree still needs the shared
+`.orcaops/` exclusion. Inspect the reported path, remove it only after
+confirming it is stale, then run `orcaops init --personal` from a worktree that
+should remain personal before retrying the interrupted command.
 
 ## Local cache needs rebuilding after an upgrade
 

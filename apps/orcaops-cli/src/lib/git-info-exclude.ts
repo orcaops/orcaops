@@ -15,17 +15,19 @@ import { type PlannedMutation, writeMutation } from './mutations.js';
  * Why info/exclude: personal scope must keep `git status` CLEAN on a
  * shared enterprise repo without touching any committed file.
  * info/exclude hides UNTRACKED files locally — exactly the personal
- * footprint (`.orcaops/`, `CLAUDE.local.md`) — and is per-checkout, so
- * teammates never see it. This module NEVER touches the repo
- * `.gitignore`.
+ * footprint (`.orcaops/`) — and lives in the git COMMON dir, so one block
+ * hides every worktree's store and teammates never see it. This module
+ * NEVER touches the repo `.gitignore`.
  */
 
-/** The personal-scope footprint hidden from `git status`. */
-export const PERSONAL_EXCLUDE_LINES = [
-  '.orcaops/',
-  'CLAUDE.local.md',
-  '.orcaops/install.local.json',
-];
+/**
+ * The personal-scope footprint hidden from `git status`. Exactly one line:
+ * personal scope owns no instruction file any more, and the ownership
+ * manifest sits in the git common dir rather than under `.orcaops/`.
+ * Reconciliation drops the lines earlier layouts managed from an existing
+ * block; nothing adds them back.
+ */
+export const PERSONAL_EXCLUDE_LINES = ['.orcaops/'];
 
 export interface InfoExcludeReconcilePlan {
   /** Absolute path of the exclude file (worktree-aware). */

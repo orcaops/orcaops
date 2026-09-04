@@ -8,6 +8,7 @@ import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { planInstallMutations } from '../../src/lib/install-plan.js';
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 vi.mock('../../src/lib/install-plan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/lib/install-plan.js')>();
@@ -267,18 +268,23 @@ describe('orcaops doctor --fix', () => {
       await personalAgent.runRaw(['update', '--json']);
       expect(await readFile(excludePath, 'utf8')).toMatch(/^\.orcaops\/\n/);
 
-      const stale = (await readFile(excludePath, 'utf8')).replace('\nCLAUDE.local.md\n', '\n');
+      // Empty the managed block (the user's own leading line stays) → stale.
+      const stale = (await readFile(excludePath, 'utf8')).replace(
+        '# >>> orcaops >>>\n.orcaops/\n',
+        '# >>> orcaops >>>\n'
+      );
       await writeFile(excludePath, stale, 'utf8');
       const fixed = await personalAgent.runRaw(['doctor', '--fix', '--json']);
       expect(fixed.exitCode).toBe(0);
       const repaired = await readFile(excludePath, 'utf8');
       expect(repaired).toMatch(/^\.orcaops\/\n/);
-      expect(repaired).toContain('\nCLAUDE.local.md\n');
+      expect(repaired).toContain('# >>> orcaops >>>\n.orcaops/\n');
+      expect(repaired).not.toContain('CLAUDE.local.md');
 
       const uninstalled = await personalAgent.runRaw(['uninstall', '--purge-data', '--json']);
       expect(uninstalled.exitCode).toBe(0);
       expect(await readFile(excludePath, 'utf8')).toMatch(/^\.orcaops\/\n/);
-      expect(await readFile(excludePath, 'utf8')).not.toContain('# >>> orcaops >>>');
+      expect(await readFile(excludePath, 'utf8')).toContain('# >>> orcaops >>>\n.orcaops/\n');
     } finally {
       await rm(globalRoot, { recursive: true, force: true });
     }
@@ -297,7 +303,7 @@ describe('orcaops doctor --fix', () => {
       await personalAgent.runRaw(['init', '--personal', '--yes', '--no-llm']);
       // The empty install set of manual mode — the interview offers it, and
       // it is what a repo driving orcaops by hand ends up with.
-      const configPath = path.join(repo.path, '.orcaops', 'config.json');
+      const configPath = await effectiveConfigPath(repo.path);
       const config = JSON.parse(await readFile(configPath, 'utf8')) as {
         install: { agents: string[] };
       };
@@ -374,9 +380,7 @@ describe('orcaops doctor --fix', () => {
     await writeFile(trackedPath, trackedContent, 'utf8');
     execFileSync('git', ['add', 'AGENTS.md'], { cwd: repo.path });
     execFileSync('git', ['commit', '-m', 'team instructions'], { cwd: repo.path });
-    await agent.runRaw(['init', '--scope', 'personal', '--json', '--no-llm', '--agents-md']);
-    const localInstructions = path.join(repo.path, 'CLAUDE.local.md');
-    await rm(localInstructions);
+    await agent.runRaw(['init', '--scope', 'personal', '--json', '--no-llm']);
 
     vi.mocked(planInstallMutations).mockImplementationOnce(async (input) => {
       const actual = await vi.importActual<typeof import('../../src/lib/install-plan.js')>(
@@ -401,11 +405,9 @@ describe('orcaops doctor --fix', () => {
       'invisible-install invariant violated'
     );
     expect(await readFile(trackedPath, 'utf8')).toBe(trackedContent);
-    expect(await readOrNull(localInstructions)).toBeNull();
 
     const repaired = await agent.runRaw(['doctor', '--fix', '--json']);
     expect(repaired.exitCode).toBe(0);
-    expect(await readOrNull(localInstructions)).not.toBeNull();
     expect(await readFile(trackedPath, 'utf8')).toBe(trackedContent);
   });
 

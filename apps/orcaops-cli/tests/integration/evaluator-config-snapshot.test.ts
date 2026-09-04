@@ -58,7 +58,7 @@ describe('evaluator config discovery snapshot', () => {
   });
 
   async function initialize(): Promise<void> {
-    const result = await agent.runRaw(['init', '--json', '--no-llm']);
+    const result = await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
     expect(result.exitCode).toBe(0);
     await mkdir(path.join(repo.path, '.orcaops'), { recursive: true });
     await writeFile(

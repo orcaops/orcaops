@@ -4,9 +4,14 @@ description: 'Understand the minimal Orcaops configuration file and find the foc
 
 # Configuration
 
-Orcaops stores repository configuration in `.orcaops/config.json`. Most users
-change it through `orcaops configure`, an interactive menu that previews the
-pending diff and reconciles every managed install surface when you apply it.
+Orcaops stores project and global configuration in the worktree's
+`.orcaops/config.json`, and personal configuration once per repository in the
+git common directory (`$(git rev-parse --git-common-dir)/orcaops/config.json`),
+where every linked worktree reads it. A worktree that carries a valid project
+config uses that instead. Most users change settings through
+`orcaops configure`, an interactive menu that previews the pending diff and
+reconciles every managed install surface when you apply it; every command
+names the file it actually read when something is wrong with it.
 
 The CLI owns the file's `schema_version` metadata; do not edit that field by
 hand. If an older CLI encounters configuration written by a newer unsupported
@@ -16,7 +21,8 @@ Use `orcaops init --force` to reconcile Orcaops-managed files while preserving
 a valid current configuration. Flags passed to that run override only their
 corresponding settings. Use `orcaops init --force --reset-config` when you
 explicitly want to replace the configuration with current defaults. Resetting
-configuration leaves captured artifacts and cache data in place.
+configuration leaves captured artifacts and cache data in place; under personal
+scope the reset changes settings for every linked worktree of the repository.
 
 ## Configuration file structure
 

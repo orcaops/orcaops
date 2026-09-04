@@ -1,7 +1,8 @@
 import { lstat, mkdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { parse as parseToml, type TomlTable } from 'smol-toml';
+import { isDeepStrictEqual } from 'node:util';
+import { parse as parseToml, type TomlTable, type TomlValue } from 'smol-toml';
 
 import { getAgentOverlay } from '@orcaops/adapters';
 import { SUPPORTED_AGENT_IDS, type SupportedAgentId } from '@orcaops/storage';
@@ -220,6 +221,7 @@ export interface UserSessionHookFilePlan {
     | SessionHookAction
     | 'absent'
     | 'foreign-content'
+    | 'preserved-invalid'
     | 'preserved-unreadable'
     | 'preserved-unwritable';
   unresolved?: boolean;
@@ -540,19 +542,41 @@ export async function planUserSessionHooks(
 
 // Codex config.toml surface.
 //
-// Shipped codex-cli (0.146.0, live-validated) never reads hooks.json: hooks
-// register as a `hooks` struct in $CODEX_HOME/config.toml, gated by
-// `[features].hooks`. That file is the user's PRIMARY Codex config, so
-// orcaops never TOML-round-trips it — the managed mode appends a
-// marker-delimited text block ONLY when the existing file parses and has no
-// root `features` or `hooks` key, and otherwise degrades to printing the
-// snippet for a manual paste (the recommended mode either way).
+// Codex loads hooks from both $CODEX_HOME/hooks.json and config.toml, and
+// hooks are on by default since 0.124, so the registration is one
+// `[[hooks.SessionStart]]` table and nothing else. config.toml stays the
+// surface because it is the one validated end to end and already carries
+// every existing registration. It is also the user's PRIMARY Codex config, so
+// orcaops never TOML-round-trips it: install appends one marker-delimited
+// block and proves the result parses; uninstall removes the block and proves
+// the parsed file lost exactly our registration. Codex itself appends its
+// hook-trust tables after the last key in the file, which lands them INSIDE
+// the fence whenever the fence is last — foreign lines between the markers
+// are expected and never rewritten.
 
 export const CODEX_TOML_MARKER_START = '# >>> orcaops session-hooks >>>';
 export const CODEX_TOML_MARKER_END = '# <<< orcaops session-hooks <<<';
 
+const CODEX_TOML_MATCHER = 'startup|resume';
+
 export function codexMarkerLineGuidance(file: string, lines: number[]): string {
   return `${file} has malformed or duplicate orcaops marker lines (${lines.join(', ')}); remove those complete lines, then re-run the command`;
+}
+
+export function codexInvalidTomlGuidance(file: string): string {
+  return `${file} is not valid TOML outside the orcaops block — fix it, then re-run`;
+}
+
+export function codexHooksShapeGuidance(file: string): string {
+  return `${file} already defines hooks.SessionStart in a form orcaops cannot append to — merge this entry manually`;
+}
+
+export function codexFenceGuidance(file: string): string {
+  return `${file} has lines inside the orcaops block that orcaops did not write — move them outside the markers, then re-run`;
+}
+
+export function codexHooksDisabledGuidance(file: string): string {
+  return `${file} sets features.hooks (or codex_hooks) = false, so Codex runs no hook; set it to true`;
 }
 
 export function codexConfigTomlPath(): string {
@@ -560,17 +584,45 @@ export function codexConfigTomlPath(): string {
   return home ? path.join(home, 'config.toml') : path.join(os.homedir(), '.codex', 'config.toml');
 }
 
+export const CODEX_HOOKS_JSON_NOTE =
+  'Codex will report loading hooks from both hooks.json and config.toml at startup; that is informational — both sets run.';
+
+/**
+ * The dual-representation note when `<codex home>/hooks.json` is a file
+ * (another tool's, e.g. Superset). Existence only — never parsed, never
+ * written; a directory or dangling symlink counts as absent.
+ */
+export async function codexHooksJsonNote(): Promise<string | null> {
+  const home = resolveUserHookHome('codex' as SupportedAgentId);
+  if (!home) return null;
+  try {
+    return (await stat(path.join(home, 'hooks.json'))).isFile() ? CODEX_HOOKS_JSON_NOTE : null;
+  } catch {
+    return null;
+  }
+}
+
+function codexHookCommand(): string {
+  return canonicalSessionHookCommand('codex' as SupportedAgentId, { user: true });
+}
+
 /** The exact TOML the registration needs — printed for manual paste and written by managed mode. */
 export function codexTomlSnippet(): string {
-  const command = canonicalSessionHookCommand('codex' as SupportedAgentId, { user: true });
   return [
-    '[features]',
-    'hooks = true',
-    '',
     '[[hooks.SessionStart]]',
-    'matcher = "startup|resume"',
-    `hooks = [{ type = "command", command = "${command}" }]`,
+    `matcher = "${CODEX_TOML_MATCHER}"`,
+    `hooks = [{ type = "command", command = "${codexHookCommand()}" }]`,
   ].join('\n');
+}
+
+function codexManagedTomlBlock(eol: string): string {
+  return [CODEX_TOML_MARKER_START, ...codexTomlSnippet().split('\n'), CODEX_TOML_MARKER_END].join(
+    eol
+  );
+}
+
+function codexTomlEol(raw: string): string {
+  return raw.includes('\r\n') ? '\r\n' : '\n';
 }
 
 export interface CodexTomlState {
@@ -582,18 +634,21 @@ export interface CodexTomlState {
   readError?: string;
   /** File content, or null when absent. */
   raw: string | null;
-  /** Our command substring is present (manual paste OR managed block). */
+  /**
+   * The file does not parse as TOML: `outside` the block (or with no block),
+   * or only once the block's own lines are read with it.
+   */
+  parseFailure: 'outside' | 'fence' | null;
+  /** The canonical `--user` command is registered under hooks.SessionStart, inside or outside the block. */
   installed: boolean;
   /** A marker-delimited orcaops block exists (managed mode owns it). */
   markerBlock: boolean;
-  /** The owned block is present but cannot currently register the hook. */
+  /** The block exists but registers nothing (stale command or gutted). */
   markerBlockBroken: boolean;
   /** Lines containing inverted, orphaned, or duplicate marker lines. */
   markerProblemLines: number[];
-  /** TOML is invalid or root `features`/`hooks` exists outside our markers. */
-  collision: boolean;
-  /** Command present but the `hooks = true` features gate is not detectable. */
-  gateMissing: boolean;
+  /** `[features]` turns Codex hooks off, so a registration runs nothing. */
+  hooksDisabled: boolean;
 }
 
 interface CodexTomlMarkerBlock {
@@ -601,9 +656,11 @@ interface CodexTomlMarkerBlock {
   end: number;
 }
 
-interface CodexTomlMarkerLine {
+interface CodexTomlLine {
   start: number;
   line: number;
+  /** Line content without its terminator (a CR before the LF is dropped too). */
+  text: string;
 }
 
 interface CodexTomlMarkerState {
@@ -611,25 +668,25 @@ interface CodexTomlMarkerState {
   problemLines: number[];
 }
 
-function markerLines(raw: string, marker: string): CodexTomlMarkerLine[] {
-  const matches: CodexTomlMarkerLine[] = [];
+function codexTomlLines(raw: string): CodexTomlLine[] {
+  const lines: CodexTomlLine[] = [];
   let start = 0;
   let line = 1;
   while (start <= raw.length) {
     const newline = raw.indexOf('\n', start);
     const end = newline === -1 ? raw.length : newline;
-    const value = raw.slice(start, end).replace(/\r$/, '');
-    if (value === marker) matches.push({ start, line });
+    lines.push({ start, line, text: raw.slice(start, end).replace(/\r$/, '') });
     if (newline === -1) break;
     start = newline + 1;
     line += 1;
   }
-  return matches;
+  return lines;
 }
 
 function codexTomlMarkerState(raw: string): CodexTomlMarkerState {
-  const starts = markerLines(raw, CODEX_TOML_MARKER_START);
-  const ends = markerLines(raw, CODEX_TOML_MARKER_END);
+  const lines = codexTomlLines(raw);
+  const starts = lines.filter((entry) => entry.text === CODEX_TOML_MARKER_START);
+  const ends = lines.filter((entry) => entry.text === CODEX_TOML_MARKER_END);
   if (starts.length === 0 && ends.length === 0) return { block: null, problemLines: [] };
 
   if (starts.length === 1 && ends.length === 1 && ends[0].start > starts[0].start) {
@@ -648,6 +705,10 @@ function codexTomlMarkerState(raw: string): CodexTomlMarkerState {
   };
 }
 
+function textOutsideCodexFence(raw: string, block: CodexTomlMarkerBlock): string {
+  return raw.slice(0, block.start) + raw.slice(block.end);
+}
+
 function parseCodexToml(raw: string): TomlTable | null {
   try {
     return parseToml(raw);
@@ -656,24 +717,70 @@ function parseCodexToml(raw: string): TomlTable | null {
   }
 }
 
+function tomlTable(value: unknown): TomlTable | null {
+  return typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !(value instanceof Date)
+    ? (value as TomlTable)
+    : null;
+}
+
 function hasOwnTomlKey(table: TomlTable, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(table, key);
 }
 
-function codexHooksFeatureEnabled(table: TomlTable | null): boolean {
-  if (table === null) return false;
-  const features = table.features;
+function codexSessionStartEntries(table: TomlTable | null): TomlValue[] {
+  const entries = tomlTable(table?.hooks)?.SessionStart;
+  return Array.isArray(entries) ? entries : [];
+}
+
+// Ownership inside the markers is deliberately wider than registration: any
+// entry whose command contains the hook command counts as ours, so a stale or
+// hand-edited variant of our line is still repaired and removed. A user's own
+// orcaops-invoking hook belongs outside the markers.
+function isOrcaopsHookEntry(value: unknown): boolean {
+  const hook = tomlTable(value);
   return (
-    typeof features === 'object' &&
-    features !== null &&
-    !Array.isArray(features) &&
-    !(features instanceof Date) &&
-    features.hooks === true
+    hook !== null &&
+    Object.keys(hook).every((key) => key === 'type' || key === 'command') &&
+    (hook.type === undefined || hook.type === 'command') &&
+    typeof hook.command === 'string' &&
+    hook.command.includes(SESSION_HOOK_COMMAND)
   );
 }
 
-function codexManagedTomlBlock(): string {
-  return `${CODEX_TOML_MARKER_START}\n${codexTomlSnippet()}\n${CODEX_TOML_MARKER_END}`;
+/** Our SessionStart element, or what a stale command or a gutted line left of one. */
+function isOrcaopsSessionStartElement(value: unknown): boolean {
+  const element = tomlTable(value);
+  return (
+    element !== null &&
+    Object.keys(element).every((key) => key === 'matcher' || key === 'hooks') &&
+    (element.matcher === undefined || element.matcher === CODEX_TOML_MATCHER) &&
+    (element.hooks === undefined ||
+      (Array.isArray(element.hooks) && element.hooks.every(isOrcaopsHookEntry)))
+  );
+}
+
+function countCodexRegistrations(table: TomlTable | null): number {
+  const command = codexHookCommand();
+  return codexSessionStartEntries(table).reduce<number>((count, entry) => {
+    const hooks = tomlTable(entry)?.hooks;
+    return (
+      count +
+      (Array.isArray(hooks)
+        ? hooks.filter((hook) => tomlTable(hook)?.command === command).length
+        : 0)
+    );
+  }, 0);
+}
+
+// `hooks` wins over its retired alias `codex_hooks` when both are set.
+function codexHooksDisabled(table: TomlTable | null): boolean {
+  const features = tomlTable(table?.features);
+  if (features === null) return false;
+  if (hasOwnTomlKey(features, 'hooks')) return features.hooks === false;
+  return features.codex_hooks === false;
 }
 
 function codexTomlOwnedRemovalRange(
@@ -691,12 +798,201 @@ function codexTomlOwnedRemovalRange(
   return { start, end };
 }
 
-function joinCodexTomlSeam(before: string, after: string): string {
+function joinCodexTomlSeam(before: string, after: string, eol: string): string {
   if (before === '' || after === '') return before + after;
   const trailing = before.match(/(?:\r?\n)+$/)?.[0] ?? '';
   const leading = after.match(/^(?:\r?\n)+/)?.[0] ?? '';
   if (trailing === '' || leading === '') return before + after;
-  return `${before.slice(0, -trailing.length)}\n\n${after.slice(leading.length)}`;
+  return `${before.slice(0, -trailing.length)}${eol}${eol}${after.slice(leading.length)}`;
+}
+
+/**
+ * A line inside the block that orcaops wrote, recognised by what it parses
+ * to rather than by its bytes. Blocks written before the snippet dropped its
+ * `[features]` gate carry two extra lines; the header is only ours when
+ * nothing else still hangs under it, so callers try both readings.
+ */
+function isCodexTomlOwnedLine(text: string, includeLegacyHeader: boolean): boolean {
+  if (text === CODEX_TOML_MARKER_START || text === CODEX_TOML_MARKER_END) return true;
+  const trimmed = text.trim();
+  if (trimmed === '' || trimmed.startsWith('#')) return false;
+  const parsed = parseCodexToml(text);
+  if (parsed === null) return false;
+  if (isDeepStrictEqual(parsed, { hooks: { SessionStart: [{}] } })) return true;
+  if (isDeepStrictEqual(parsed, { matcher: CODEX_TOML_MATCHER })) return true;
+  if (isDeepStrictEqual(parsed, { hooks: true })) return true;
+  if (includeLegacyHeader && isDeepStrictEqual(parsed, { features: {} })) return true;
+  return (
+    Object.keys(parsed).length === 1 &&
+    Array.isArray(parsed.hooks) &&
+    parsed.hooks.length > 0 &&
+    parsed.hooks.every(isOrcaopsHookEntry)
+  );
+}
+
+function codexTomlRemovalCandidates(raw: string, block: CodexTomlMarkerBlock): string[] {
+  const owned = codexTomlOwnedRemovalRange(raw, block);
+  const before = raw.slice(0, owned.start);
+  const after = raw.slice(owned.end);
+  const eol = codexTomlEol(raw);
+  const verbatim = joinCodexTomlSeam(before, after, eol);
+  const fenceLines = codexTomlLines(raw.slice(owned.start, owned.end));
+  // A comment or foreign line inside the fence is invisible to the parse
+  // proof, so dropping the whole span would pass it and still lose the line.
+  const holdsForeignLines = fenceLines.some(
+    (entry) => entry.text.trim() !== '' && !isCodexTomlOwnedLine(entry.text, true)
+  );
+  const withoutOwnedLines = (includeLegacyHeader: boolean): string => {
+    const kept = fenceLines
+      .filter((entry) => !isCodexTomlOwnedLine(entry.text, includeLegacyHeader))
+      .map((entry) => entry.text);
+    while (kept.length > 0 && kept[0].trim() === '') kept.shift();
+    while (kept.length > 0 && kept[kept.length - 1].trim() === '') kept.pop();
+    if (kept.length === 0) return verbatim;
+    const joined = [
+      before.replace(/(?:\r?\n)+$/, ''),
+      kept.join(eol),
+      after.replace(/^(?:\r?\n)+/, ''),
+    ]
+      .filter((part) => part !== '')
+      .join(`${eol}${eol}`);
+    return joined.endsWith('\n') || !/\r?\n$/.test(raw) ? joined : `${joined}${eol}`;
+  };
+  const lineLevel = [withoutOwnedLines(true), withoutOwnedLines(false)];
+  return holdsForeignLines ? lineLevel : [verbatim, ...lineLevel];
+}
+
+function chooseIndexes(indexes: number[], count: number): number[][] {
+  if (count === 0) return [[]];
+  return indexes.flatMap((index, position) =>
+    chooseIndexes(indexes.slice(position + 1), count - 1).map((rest) => [index, ...rest])
+  );
+}
+
+/**
+ * Every parse the file may legitimately have once the block's own content is
+ * gone: as many of our SessionStart elements dropped as the block contributed
+ * (identical elements can sit at more than one index, so each choice is a
+ * candidate) and, for a block that introduced the retired `[features]` gate,
+ * `features.hooks = true` dropped with it. Empty containers go with their
+ * last key. Anything else in the parse — a user's element, Codex's trust
+ * tables, a toggle Codex appended under our header — must survive unchanged.
+ */
+function codexTomlWithoutOwnedContent(parsed: TomlTable, outside: TomlTable): TomlTable[] {
+  const entries = codexSessionStartEntries(parsed);
+  const ownIndexes = entries.flatMap((entry, index) =>
+    isOrcaopsSessionStartElement(entry) ? [index] : []
+  );
+  const ownOutside = codexSessionStartEntries(outside).filter(isOrcaopsSessionStartElement).length;
+  const removals = Math.max(0, ownIndexes.length - ownOutside);
+  const legacyFeatures = tomlTable(parsed.features);
+  const legacyGate = legacyFeatures !== null && !hasOwnTomlKey(outside, 'features');
+  return chooseIndexes(ownIndexes, removals).map((removed) => {
+    const expected: TomlTable = { ...parsed };
+    const hooks = tomlTable(parsed.hooks);
+    if (hooks !== null) {
+      const nextHooks: TomlTable = { ...hooks };
+      const remaining = entries.filter((_, index) => !removed.includes(index));
+      if (remaining.length > 0) nextHooks.SessionStart = remaining;
+      else delete nextHooks.SessionStart;
+      if (Object.keys(nextHooks).length > 0) expected.hooks = nextHooks;
+      else delete expected.hooks;
+    }
+    if (legacyGate && legacyFeatures !== null) {
+      const nextFeatures: TomlTable = { ...legacyFeatures };
+      if (nextFeatures.hooks === true) delete nextFeatures.hooks;
+      if (Object.keys(nextFeatures).length > 0) expected.features = nextFeatures;
+      else delete expected.features;
+    }
+    return expected;
+  });
+}
+
+export type CodexTomlRemovalPlan =
+  | { outcome: 'removed'; next: string }
+  | {
+      outcome:
+        | 'absent'
+        | 'manual-content'
+        | 'refused-markers'
+        | 'refused-invalid'
+        | 'refused-fence';
+    };
+
+/**
+ * Remove the orcaops block and prove nothing else moved: the whole span first,
+ * then only the lines orcaops wrote when Codex or the user left something
+ * inside the markers. A removal counts only when the parsed result equals the
+ * parsed original minus our registration; otherwise the file stays as it is.
+ */
+export function planCodexTomlRemoval(raw: string): CodexTomlRemovalPlan {
+  const markers = codexTomlMarkerState(raw);
+  if (markers.problemLines.length > 0) return { outcome: 'refused-markers' };
+  const parsed = parseCodexToml(raw);
+  if (markers.block === null) {
+    // With no fence there is nothing orcaops may edit, so the only question is
+    // whether the user has content to clean up themselves: a parsed
+    // registration, or — when the file does not parse — any mention of the
+    // command, since a broken file cannot be read for a registration.
+    const manualContent =
+      parsed === null ? raw.includes(SESSION_HOOK_COMMAND) : countCodexRegistrations(parsed) > 0;
+    return { outcome: manualContent ? 'manual-content' : 'absent' };
+  }
+  const outside = parseCodexToml(textOutsideCodexFence(raw, markers.block));
+  if (outside === null) return { outcome: 'refused-invalid' };
+  if (parsed === null) return { outcome: 'refused-fence' };
+  const expected = codexTomlWithoutOwnedContent(parsed, outside);
+  for (const next of codexTomlRemovalCandidates(raw, markers.block)) {
+    const result = parseCodexToml(next);
+    if (result !== null && expected.some((table) => isDeepStrictEqual(result, table))) {
+      return { outcome: 'removed', next };
+    }
+  }
+  return { outcome: 'refused-fence' };
+}
+
+export type CodexTomlInstallPlan =
+  | { outcome: 'written'; next: string }
+  | {
+      outcome:
+        | 'unchanged'
+        | 'refused-markers'
+        | 'refused-invalid'
+        | 'refused-hooks-shape'
+        | 'refused-fence';
+    };
+
+/**
+ * Append the block and prove the result parses with exactly one registration.
+ * A file that already registers the command anywhere — fenced or pasted,
+ * whatever else sits between the markers — is left byte-for-byte alone. A
+ * block that registers nothing (stale command, gutted lines) is removed by
+ * the uninstall proof first, then appended fresh.
+ */
+export function planCodexTomlInstall(raw: string | null): CodexTomlInstallPlan {
+  if (raw === null || raw.trim() === '') {
+    return { outcome: 'written', next: `${codexManagedTomlBlock('\n')}\n` };
+  }
+  const markers = codexTomlMarkerState(raw);
+  if (markers.problemLines.length > 0) return { outcome: 'refused-markers' };
+  const parsed = parseCodexToml(raw);
+  if (parsed !== null && countCodexRegistrations(parsed) > 0) return { outcome: 'unchanged' };
+  const outside = markers.block === null ? raw : textOutsideCodexFence(raw, markers.block);
+  if (parseCodexToml(outside) === null) return { outcome: 'refused-invalid' };
+  let base = raw;
+  if (markers.block !== null) {
+    const repair = planCodexTomlRemoval(raw);
+    if (repair.outcome !== 'removed') return { outcome: 'refused-fence' };
+    base = repair.next;
+  }
+  const eol = codexTomlEol(raw);
+  const block = `${codexManagedTomlBlock(eol)}${eol}`;
+  const next = base.trim() === '' ? block : `${base}${eol}${block}`;
+  const candidate = parseCodexToml(next);
+  if (candidate === null || countCodexRegistrations(candidate) !== 1) {
+    return { outcome: 'refused-hooks-shape' };
+  }
+  return { outcome: 'written', next };
 }
 
 export async function readCodexTomlState(
@@ -723,28 +1019,25 @@ export async function readCodexTomlState(
       symlink: pathState.symlink,
       ...(readError ? { readError } : {}),
       raw,
+      parseFailure: null,
       installed: false,
       markerBlock: false,
       markerBlockBroken: false,
       markerProblemLines: [],
-      collision: false,
-      gateMissing: false,
+      hooksDisabled: false,
     };
   }
   const markerState = codexTomlMarkerState(raw);
-  const ownedBlock = markerState.block;
-  const markerBlock = ownedBlock !== null;
-  const outside = ownedBlock ? raw.slice(0, ownedBlock.start) + raw.slice(ownedBlock.end) : raw;
-  const parsedOutside = parseCodexToml(outside);
-  const collision =
-    parsedOutside === null ||
-    hasOwnTomlKey(parsedOutside, 'features') ||
-    hasOwnTomlKey(parsedOutside, 'hooks');
-  const installed = raw.includes(SESSION_HOOK_COMMAND);
-  const gateMissing = installed && !codexHooksFeatureEnabled(parseCodexToml(raw));
-  const markerBlockBroken =
-    ownedBlock !== null &&
-    (!raw.slice(ownedBlock.start, ownedBlock.end).includes(SESSION_HOOK_COMMAND) || gateMissing);
+  const block = markerState.block;
+  const parsed = parseCodexToml(raw);
+  const outside = block === null ? parsed : parseCodexToml(textOutsideCodexFence(raw, block));
+  const parseFailure = outside === null ? 'outside' : parsed === null ? 'fence' : null;
+  const installed = parsed !== null && countCodexRegistrations(parsed) > 0;
+  const blockRegisters =
+    block !== null &&
+    parsed !== null &&
+    outside !== null &&
+    countCodexRegistrations(parsed) > countCodexRegistrations(outside);
   return {
     path: p,
     resolvedPath: pathState.status === 'ok' ? pathState.writePath : null,
@@ -752,12 +1045,12 @@ export async function readCodexTomlState(
     readStatus,
     symlink: pathState.symlink,
     raw,
+    parseFailure,
     installed,
-    markerBlock,
-    markerBlockBroken,
+    markerBlock: block !== null,
+    markerBlockBroken: block !== null && parseFailure === null && !blockRegisters,
     markerProblemLines: markerState.problemLines,
-    collision,
-    gateMissing,
+    hooksDisabled: codexHooksDisabled(parsed),
   };
 }
 
@@ -800,7 +1093,12 @@ export async function evaluateUserSessionHookSurfaces(
   for (const configPath of codexPaths) {
     const codex = await readCodexTomlState(configPath);
     const recorded = isRecorded(codexAgent, configPath);
-    const owned = codex.installed || codex.markerBlock || codex.markerProblemLines.length > 0;
+    // A file that no longer parses cannot be read for a registration, so a
+    // pasted command that broke later is only recognisable by its text.
+    const brokenPaste =
+      codex.parseFailure !== null && codex.raw !== null && codex.raw.includes(SESSION_HOOK_COMMAND);
+    const owned =
+      codex.installed || codex.markerBlock || codex.markerProblemLines.length > 0 || brokenPaste;
     let state: UserSessionHookSurfaceState;
     let remedy: string | undefined;
     if (codex.readStatus === 'unreadable') {
@@ -809,9 +1107,18 @@ export async function evaluateUserSessionHookSurfaces(
     } else if (codex.markerProblemLines.length > 0) {
       state = 'registered-but-broken';
       remedy = codexMarkerLineGuidance(codex.path, codex.markerProblemLines);
-    } else if (codex.markerBlockBroken || codex.gateMissing) {
+    } else if (codex.parseFailure !== null) {
+      state = 'registered-but-broken';
+      remedy =
+        codex.parseFailure === 'fence'
+          ? codexFenceGuidance(codex.path)
+          : codexInvalidTomlGuidance(codex.path);
+    } else if (codex.markerBlockBroken) {
       state = 'registered-but-broken';
       remedy = userSessionHookInstallRemedy(codexAgent);
+    } else if (codex.installed && codex.hooksDisabled) {
+      state = 'registered-but-broken';
+      remedy = codexHooksDisabledGuidance(codex.path);
     } else if (codex.installed) {
       state = 'installed';
     } else if (recorded) {
@@ -880,10 +1187,6 @@ export async function evaluateUserSessionHookSurfaces(
   return rows;
 }
 
-/**
- * Managed mode appends a new block or rewrites the contents of an existing
- * structurally valid owned block. Content outside the block is never edited.
- */
 export interface WriteCodexTomlBlockOptions {
   configPath?: string;
   beforeWrite?: () => Promise<void>;
@@ -899,75 +1202,51 @@ function codexTomlWriteGuard(state: CodexTomlState): UserConfigWriteOptions {
   };
 }
 
+export type CodexTomlWriteOutcome =
+  | Exclude<CodexTomlInstallPlan['outcome'], 'written'>
+  | 'written'
+  | 'refused-unreadable';
+
+/** Managed mode: append the block, or repair a block that registers nothing. Content outside the block is never edited. */
 export async function writeCodexTomlBlock(
   options: WriteCodexTomlBlockOptions = {}
-): Promise<
-  'written' | 'unchanged' | 'refused-collision' | 'refused-markers' | 'refused-unreadable'
-> {
+): Promise<CodexTomlWriteOutcome> {
   const state = await readCodexTomlState(options.configPath);
   if (state.readStatus === 'unreadable') return 'refused-unreadable';
-  if (state.markerProblemLines.length > 0) return 'refused-markers';
-  // A config already carrying the registration needs no write at all, so this
-  // precedes the collision guard — which only gates an APPEND. The recommended
-  // manual paste defines the root feature/hook tables itself, so it reads as a
-  // collision, and refusing here told users their working config was invalid
-  // and handed them the snippet to paste a second time.
-  if (!state.markerBlock && state.installed) return 'unchanged';
-  if (state.collision) return 'refused-collision';
-  if (state.markerBlock && state.raw !== null) {
-    const ownedBlock = codexTomlMarkerState(state.raw).block;
-    if (ownedBlock === null) return 'refused-markers';
-    const currentBlock = state.raw.slice(ownedBlock.start, ownedBlock.end);
-    const desiredBlock = codexManagedTomlBlock();
-    if (currentBlock !== desiredBlock) {
-      await options.beforeWrite?.();
-      await writeUserConfigFile(
-        state.path,
-        state.raw.slice(0, ownedBlock.start) + desiredBlock + state.raw.slice(ownedBlock.end),
-        codexTomlWriteGuard(state)
-      );
-      return 'written';
-    }
-    return 'unchanged';
-  }
-  const block = `${codexManagedTomlBlock()}\n`;
-  const next = state.raw === null || state.raw.trim() === '' ? block : `${state.raw}\n${block}`;
+  const plan = planCodexTomlInstall(state.raw);
+  if (plan.outcome !== 'written') return plan.outcome;
   await options.beforeWrite?.();
-  await writeUserConfigFile(state.path, next, codexTomlWriteGuard(state));
+  await writeUserConfigFile(state.path, plan.next, codexTomlWriteGuard(state));
   return 'written';
 }
 
+export type CodexTomlRemoveOutcome = CodexTomlRemovalPlan['outcome'] | 'unreadable';
+
 /**
- * Remove ONLY a marker-owned block. Manual pastes (no markers) are the
- * user's content — reported, never edited.
+ * Remove ONLY a marker-owned block, and only when the removal proves clean.
+ * Manual pastes (no markers) are the user's content — reported, never edited.
  */
 export async function removeCodexTomlBlock(
   configPath?: string,
-  beforeWrite?: () => Promise<void>
-): Promise<'removed' | 'manual-content' | 'absent' | 'refused-markers' | 'unreadable'> {
+  beforeWrite?: () => Promise<void>,
+  mode: 'apply' | 'preview' = 'apply'
+): Promise<CodexTomlRemoveOutcome> {
   const state = await readCodexTomlState(configPath);
   if (state.readStatus === 'unreadable') return 'unreadable';
   if (state.raw === null) return 'absent';
-  if (state.markerProblemLines.length > 0) return 'refused-markers';
-  if (state.markerBlock) {
-    const block = codexTomlMarkerState(state.raw).block;
-    if (block === null) return 'refused-markers';
-    const owned = codexTomlOwnedRemovalRange(state.raw, block);
-    const next = joinCodexTomlSeam(state.raw.slice(0, owned.start), state.raw.slice(owned.end));
-    const guard = codexTomlWriteGuard(state);
-    await beforeWrite?.();
-    if (next.trim() === '') {
-      if (state.symlink) {
-        await writeUserConfigFile(state.path, next, guard);
-      } else if (state.resolvedPath !== null) {
-        await assertUserConfigPreImage(state.path, state.resolvedPath, guard);
-        await rm(state.resolvedPath, { force: true });
-      }
-    } else {
-      await writeUserConfigFile(state.path, next, guard);
+  const plan = planCodexTomlRemoval(state.raw);
+  if (plan.outcome !== 'removed' || mode === 'preview') return plan.outcome;
+  const guard = codexTomlWriteGuard(state);
+  await beforeWrite?.();
+  if (plan.next.trim() === '') {
+    if (state.symlink) {
+      await writeUserConfigFile(state.path, plan.next, guard);
+    } else if (state.resolvedPath !== null) {
+      await assertUserConfigPreImage(state.path, state.resolvedPath, guard);
+      await rm(state.resolvedPath, { force: true });
     }
-    return 'removed';
+  } else {
+    await writeUserConfigFile(state.path, plan.next, guard);
   }
-  if (!state.installed) return 'absent';
-  return 'manual-content';
+  return 'removed';
 }

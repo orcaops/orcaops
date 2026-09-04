@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { createLinkedWorktree, createTempRepo, type TempRepo } from '@orcaops/test-harness';
+import {
+  createLinkedWorktree,
+  createTempRepo,
+  inputFile,
+  type TempRepo,
+} from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
 
@@ -145,9 +150,16 @@ describe('orcaops in a linked worktree', () => {
       expect(entry.refs).toEqual([r.project_id]);
     }
 
-    // Initializing the MAIN checkout too resolves the SAME identity → still
-    // a single ref per key, never a second worktree-shaped duplicate.
-    const mainRes = await mainAgent.runRaw(['init', '--personal', '--no-llm', '--json']);
+    // The personal config lives in the common dir, so the MAIN checkout is
+    // already enabled: a plain init refuses, and a forced re-init from there
+    // resolves the SAME identity → still a single ref per key, never a
+    // second worktree-shaped duplicate.
+    const refused = await mainAgent.runRaw(['init', '--personal', '--no-llm', '--json']);
+    expect(refused.exitCode).toBe(1);
+    expect((JSON.parse(refused.stdout) as { error: { code: string } }).error.code).toBe(
+      'ALREADY_INITIALIZED'
+    );
+    const mainRes = await mainAgent.runRaw(['init', '--personal', '--force', '--no-llm', '--json']);
     expect(mainRes.exitCode).toBe(0);
     const m = JSON.parse(mainRes.stdout) as InitOk;
     expect(m.project_id).toBe(r.project_id);
@@ -158,6 +170,50 @@ describe('orcaops in a linked worktree', () => {
     for (const entry of after.entries) {
       expect(entry.refs).toEqual([r.project_id]);
     }
+  });
+
+  it('read verbs in an enabled sibling with no data serve an empty source and create nothing', async () => {
+    // Personal init in the MAIN checkout enables the worktree through the
+    // shared config; the worktree itself has never captured anything.
+    await mainAgent.runRaw(['init', '--personal', '--no-llm', '--json']);
+    await expect(stat(path.join(wt.path, '.orcaops'))).rejects.toThrow();
+
+    for (const args of [
+      ['status', '--json'],
+      ['list', '--json'],
+      ['search', 'anything', '--json'],
+    ]) {
+      const res = await wtAgent.runRaw(args);
+      expect(res.exitCode, args.join(' ')).toBe(0);
+      expect((JSON.parse(res.stdout) as { ok: boolean }).ok).toBe(true);
+    }
+    // Reads created no store, no cache, no locks: the tree is untouched.
+    await expect(stat(path.join(wt.path, '.orcaops'))).rejects.toThrow();
+    expect(gitStatus(wt.path)).toBe('');
+
+    // A write creates exactly this worktree's data; the sibling stays empty.
+    const plan = await wtAgent.runRaw([
+      'capture',
+      'plan',
+      '--no-llm',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          task: 'work in the linked worktree',
+          label: 'linked worktree work',
+          plan_steps: [{ text: 's1', label: 's1' }],
+          touched_scope: [],
+        })
+      ),
+    ]);
+    expect(plan.exitCode).toBe(0);
+    await expect(stat(path.join(wt.path, '.orcaops', 'artifacts'))).resolves.toBeDefined();
+    await expect(stat(path.join(main.path, '.orcaops'))).rejects.toThrow();
+    // The main checkout still reads as an empty source and lists nothing.
+    const mainList = JSON.parse((await mainAgent.runRaw(['list', '--json'])).stdout) as {
+      artifacts: unknown[];
+    };
+    expect(mainList.artifacts).toEqual([]);
   });
 
   it('doctor from the worktree resolves hooks and global refs correctly', async () => {

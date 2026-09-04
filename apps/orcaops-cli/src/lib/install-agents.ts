@@ -1,4 +1,9 @@
-import { detectInstallAgents, getAgentOverlay, getAgentSkillsDirs } from '@orcaops/adapters';
+import {
+  detectInstallAgentEvidence,
+  detectInstallAgents,
+  getAgentOverlay,
+  getAgentSkillsDirs,
+} from '@orcaops/adapters';
 import { SUPPORTED_AGENT_IDS, type SupportedAgentId } from '@orcaops/storage';
 
 import { canonicalAgents } from './install-plan.js';
@@ -96,18 +101,6 @@ export function derivedIgnoreGlobs(
  * cover them — a warning, never a hard stop. Shared by init, update, and
  * configure so all three surfaces advise identically.
  */
-export function personalScopeWarnings(
-  agents: SupportedAgentId[],
-  bootstrap: 'managed' | 'manual'
-): string[] {
-  const nonClaude = agents.filter((a) => a !== 'claude-code');
-  if (nonClaude.length === 0 || bootstrap !== 'managed') return [];
-  return [
-    `personal scope: the CLAUDE.local.md bootstrap block only reaches Claude Code — ` +
-      `${nonClaude.join(', ')} get skills but no instruction surface. Session hooks or ` +
-      `team adoption (\`orcaops update --scope project\`) cover them.`,
-  ];
-}
 
 /**
  * True when `init` should present the interactive checklist: a real TTY, no
@@ -145,12 +138,21 @@ async function promptInstallAgents(
   detected: SupportedAgentId[]
 ): Promise<SupportedAgentId[] | null> {
   const { multiselect, isCancel } = await import('@clack/prompts');
+  // The checklist ids stay whatever `detectInstallAgents` returned (callers and
+  // tests stub that alone); evidence only decorates the hint.
+  const evidence = new Map(
+    (detected.length > 0 ? await detectInstallAgentEvidence() : []).map((entry) => [
+      entry.id,
+      entry.evidence,
+    ])
+  );
   // Shared copy (message + labels) with one init-specific touch: agents found
-  // on this machine are hinted 'detected' — more useful at setup time than
-  // configure's status hint.
+  // on this machine are hinted 'detected', with the file that gave them away
+  // when detection rests on one — more useful at setup time than configure's
+  // status hint.
   const options = agentsPrompt.options().map((opt) => ({
     ...opt,
-    hint: detected.includes(opt.value) ? 'detected' : undefined,
+    hint: detected.includes(opt.value) ? detectedHint(evidence.get(opt.value) ?? null) : undefined,
   }));
   const selected = await multiselect({
     message: agentsPrompt.message,
@@ -160,4 +162,8 @@ async function promptInstallAgents(
   });
   if (isCancel(selected)) return null;
   return selected as SupportedAgentId[];
+}
+
+function detectedHint(evidence: string | null): string {
+  return evidence === null ? 'detected' : `detected: ${evidence}`;
 }

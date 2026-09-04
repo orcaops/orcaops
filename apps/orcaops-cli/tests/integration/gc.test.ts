@@ -10,7 +10,7 @@ import { ArtifactStore, pinFilePath, slugifyBranch } from '@orcaops/storage';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
-import { withCleanSession } from '../support/test-helpers.js';
+import { effectiveConfigPath, withCleanSession } from '../support/test-helpers.js';
 
 interface GcCandidates {
   stale_pins: Array<{ artifact_id: string; reason: string; pin_file: string }>;
@@ -896,7 +896,7 @@ describe('orcaops gc', () => {
     // Only the survivor's two refs remain.
     expect(reviewRefNames()).toEqual(['refs/orcaops/review/main', 'refs/orcaops/review/main-base']);
     // The root store is untouched.
-    await expect(access(path.join(repo.path, '.orcaops', 'config.json'))).resolves.toBeUndefined();
+    await expect(access(await effectiveConfigPath(repo.path))).resolves.toBeUndefined();
   });
 
   it('refuses a symlinked reviews root without deleting external data', async () => {
@@ -906,6 +906,7 @@ describe('orcaops gc', () => {
     const sentinel = path.join(externalReview, 'comments.ndjson');
     try {
       await rm(reviewsRoot, { recursive: true, force: true });
+      await mkdir(path.dirname(reviewsRoot), { recursive: true });
       await mkdir(externalReview, { recursive: true });
       await writeFile(sentinel, '{"external":true}\n', 'utf8');
       const old = new Date('2020-01-01T00:00:00.000Z');

@@ -24,6 +24,7 @@ import { sanitizeDoctorChecks } from '../../src/commands/doctor.js';
 import { makeAgent } from '../support/test-agent.js';
 import {
   commitFile,
+  effectiveConfigPath,
   installTestPack,
   plantAcknowledge,
   plantBlockViolation,
@@ -222,11 +223,18 @@ describe('orcaops doctor', () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm', '--agents-md']);
     const res = await agent.runRaw(['doctor']);
     expect(res.exitCode).toBe(0);
-    expect(res.stdout.replace(/^ {2}repo: .*$/m, '  repo: <repo>')).toMatchInlineSnapshot(`
-      "orcaops doctor — v0.1.0
+    // The version is normalized like the repo path above: pinning it would
+    // fail this snapshot on every release without telling anyone anything
+    // about doctor's output.
+    expect(
+      res.stdout
+        .replace(/^ {2}repo: .*$/m, '  repo: <repo>')
+        .replace(/^orcaops doctor — v.*$/m, 'orcaops doctor — <version>')
+    ).toMatchInlineSnapshot(`
+      "orcaops doctor — <version>
         repo: <repo>
 
-      ✓ repository           7 checks passed
+      ✓ repository           8 checks passed
       ✓ install surfaces     9 checks passed
       ✓ artifact state       22/23 checks passed
         archive-redaction: archive mirror stores event text verbatim (archive.redact_secrets: false)
@@ -373,7 +381,8 @@ describe('orcaops doctor', () => {
     { args: [] as string[], mode: 'plain doctor' },
     { args: ['--fix'], mode: 'doctor --fix' },
   ])('returns named failed checks for unsafe evaluator paths in $mode', async ({ args }) => {
-    await agent.runRaw(['init', '--no-llm']);
+    // Project scope: the evaluator registration under test is the worktree file.
+    await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
     const outside = await mkdtemp(path.join(tmpdir(), 'orcaops-doctor-evaluators-'));
     const externalConfig = path.join(outside, 'evaluators.yaml');
     const configPath = path.join(repo.path, '.orcaops', 'evaluators.yaml');
@@ -547,6 +556,7 @@ describe('orcaops doctor', () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
     // Overwrite the DB file with junk so better-sqlite3's open will reject it.
     const dbPath = path.join(repo.path, '.orcaops', 'cache', 'orcaops.db');
+    await mkdir(path.dirname(dbPath), { recursive: true });
     await writeFile(dbPath, 'definitely not a sqlite file', 'utf8');
 
     const res = await agent.runRaw(['doctor', '--json']);
@@ -852,7 +862,7 @@ describe('orcaops doctor', () => {
     // per-call `env`, so an in-process makeAgent({ env }) can sanitize
     // PATH and observe the warn path without spawning the real binary.
     await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
-    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfgPath = await effectiveConfigPath(repo.path);
     const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as { llm: { tool: string } };
     cfg.llm.tool = 'claude';
     await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
@@ -871,7 +881,7 @@ describe('orcaops doctor', () => {
 
   it('llm-tool probes the configured provider binary override', async () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
-    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfgPath = await effectiveConfigPath(repo.path);
     const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as { llm: { tool: string } };
     cfg.llm.tool = 'claude';
     await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
@@ -902,7 +912,7 @@ describe('orcaops doctor', () => {
     // Telling a user to install a CLI they already have is a wrong remedy, so
     // a probe that never answered must not read as absence.
     await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
-    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfgPath = await effectiveConfigPath(repo.path);
     const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as { llm: { tool: string } };
     cfg.llm.tool = 'claude';
     await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
@@ -1264,6 +1274,7 @@ describe('orcaops doctor', () => {
       'materialized-disposition-consistency',
       'open-checkpoint-stale',
       'persistent-evaluator-errors',
+      'personal-scope',
       'pin-displaced',
       'pin-orphan',
       'plan-idempotency',
@@ -1293,7 +1304,7 @@ describe('orcaops doctor', () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm', '--agents-md']);
     // Disable a skill, leaving its installed dir behind, and restamp it as a
     // NEWER orcaops would have written it.
-    const configPath = path.join(repo.path, '.orcaops', 'config.json');
+    const configPath = await effectiveConfigPath(repo.path);
     const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     config.skills = { enabled: { why: false } };
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
@@ -1588,6 +1599,7 @@ describe('orcaops doctor', () => {
     const outside = await mkdtemp(path.join(tmpdir(), 'orcaops-doctor-review-cache-'));
     try {
       const reviewCache = path.join(repo.path, '.orcaops', 'cache', 'source-plan');
+      await mkdir(path.dirname(reviewCache), { recursive: true });
       await rm(reviewCache, { recursive: true, force: true });
       await symlink(outside, reviewCache);
 
@@ -1683,7 +1695,7 @@ describe('orcaops doctor', () => {
   it('block-skill-refs warns when the prefix changed without an update (drift)', async () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm', '--agents-md']); // block references orcaops-* skills
     // Flip the configured prefix WITHOUT re-running update — the block is now stale.
-    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfgPath = await effectiveConfigPath(repo.path);
     const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as { naming?: { prefix: string } };
     // Init writes a minimal delta — default-valued subtrees are absent.
     cfg.naming = { ...(cfg.naming ?? {}), prefix: 'oo' };
@@ -1705,7 +1717,7 @@ describe('orcaops doctor', () => {
     const agentsMdPath = path.join(repo.path, 'AGENTS.md');
     expect(await readFile(agentsMdPath, 'utf8')).toContain('orcaops-resume');
 
-    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfgPath = await effectiveConfigPath(repo.path);
     const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as {
       skills?: { enabled: Record<string, boolean> };
     };
@@ -2306,8 +2318,8 @@ describe('orcaops doctor', () => {
     });
 
     it('reports trust and availability for an ungranted Codex override', async () => {
-      await agent.runRaw(['init', '--no-llm']);
-      const configFile = path.join(repo.path, '.orcaops', 'config.json');
+      await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
+      const configFile = await effectiveConfigPath(repo.path);
       const cfg = JSON.parse(await readFile(configFile, 'utf8')) as {
         llm?: Record<string, unknown>;
       };
@@ -2489,7 +2501,7 @@ describe('orcaops doctor', () => {
         // Switch the default to codex: dispatch now requires file-reading for
         // the implicit evaluator, which the grant does not carry. A
         // verdict-only doctor read reported this trusted; the full gate warns.
-        const configFile = path.join(repo.path, '.orcaops', 'config.json');
+        const configFile = await effectiveConfigPath(repo.path);
         const cfg = JSON.parse(await readFile(configFile, 'utf8')) as {
           llm?: Record<string, unknown>;
         };
@@ -2848,7 +2860,7 @@ describe('orcaops doctor — snapshot/fingerprint checks', () => {
     ]);
     await commitFile(repo.path, `src/${randomUUID()}.ts`, 'export const x = 1;\n', 'work');
     if (opts.disableFp) {
-      const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+      const cfgPath = await effectiveConfigPath(repo.path);
       const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
       cfg.diff_fingerprint = { enabled: false, max_diff_bytes: 2_000_000 };
       await writeFile(cfgPath, JSON.stringify(cfg, null, 2), 'utf8');

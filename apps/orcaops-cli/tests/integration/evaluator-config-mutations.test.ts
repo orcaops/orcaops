@@ -19,7 +19,8 @@ describe('evaluator config mutations', () => {
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
     agent = makeAgent({ cwd: repo.path });
-    await agent.init({ noLlm: true });
+    // Project scope: the registration under test is the worktree evaluators.yaml.
+    await agent.init({ noLlm: true, scope: 'project' });
     tmpRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-evaluator-config-'));
     packPath = path.join(tmpRoot, 'pack');
     await cp(TEST_PACK_ABS_PATH, packPath, { recursive: true });

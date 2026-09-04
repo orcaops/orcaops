@@ -1,5 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { access, appendFile, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import {
+  access,
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -8,6 +18,7 @@ import { appendUsageLedgerRecord, usageLedgerPath, usageSidecarsDir } from '@orc
 import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 /**
  * Archive enablement. `orcaops archive enable|disable` (raw
@@ -54,9 +65,9 @@ describe('orcaops archive enable/disable', () => {
   });
 
   async function archiveEnabled(): Promise<boolean> {
-    const config = JSON.parse(
-      await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')
-    ) as { archive?: { enabled?: boolean } };
+    const config = JSON.parse(await readFile(await effectiveConfigPath(repo.path), 'utf8')) as {
+      archive?: { enabled?: boolean };
+    };
     return config.archive?.enabled === true;
   }
 
@@ -100,7 +111,7 @@ describe('orcaops archive enable/disable', () => {
     await seedPlanArtifact();
     expect(await archiveEnabled()).toBe(false);
     const before = JSON.parse(
-      await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')
+      await readFile(await effectiveConfigPath(repo.path), 'utf8')
     ) as Record<string, unknown>;
 
     const r = await agent.runRaw(['archive', 'enable', '--json']);
@@ -118,7 +129,7 @@ describe('orcaops archive enable/disable', () => {
 
     // Only archive.enabled changed in the config.
     const after = JSON.parse(
-      await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')
+      await readFile(await effectiveConfigPath(repo.path), 'utf8')
     ) as Record<string, unknown>;
     expect(after.archive).toEqual({ ...(before.archive as object), enabled: true });
     expect({ ...after, archive: undefined }).toEqual({ ...before, archive: undefined });
@@ -219,6 +230,34 @@ describe('orcaops archive enable/disable', () => {
     }
   });
 
+  it('names the governing common config when archive is disabled under personal scope', async () => {
+    const worktreeConfig = path.join(repo.path, '.orcaops', 'config.json');
+    const commonConfig = path.join(repo.path, '.git', 'orcaops', 'config.json');
+    await mkdir(path.dirname(commonConfig), { recursive: true });
+    await writeFile(
+      commonConfig,
+      JSON.stringify({
+        schema_version: 6,
+        install: { agents: [], scope: 'personal' },
+        archive: { enabled: false },
+      }),
+      'utf8'
+    );
+    await rm(worktreeConfig);
+
+    const status = await agent.runRaw(['archive', 'status', '--json']);
+    const repair = await agent.runRaw(['archive', 'repair', '--json']);
+
+    expect(status.exitCode, `${status.stdout}\n${status.stderr}`).toBe(0);
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      enabled: false,
+      note: expect.stringContaining(commonConfig),
+    });
+    expect(repair.exitCode).toBe(1);
+    expect(repair.stdout).toContain(commonConfig);
+    expect(repair.stdout).not.toContain('in .orcaops/config.json');
+  });
+
   it('non-interactive init and --yes enable durable archiving', async () => {
     for (const extraArgs of [[], ['--yes']]) {
       const fresh = await createTempRepo({ initialBranch: 'main' });
@@ -230,7 +269,7 @@ describe('orcaops archive enable/disable', () => {
         const r = await freshAgent.runRaw(['init', ...extraArgs, '--json', '--no-llm']);
         expect(r.exitCode).toBe(0);
         const config = JSON.parse(
-          await readFile(path.join(fresh.path, '.orcaops', 'config.json'), 'utf8')
+          await readFile(await effectiveConfigPath(fresh.path), 'utf8')
         ) as { archive?: { enabled?: boolean } };
         expect(config.archive?.enabled).toBe(true);
       } finally {
@@ -275,7 +314,7 @@ describe('orcaops archive enable/disable', () => {
           expect.objectContaining({ initialValue: true })
         );
         const config = JSON.parse(
-          await readFile(path.join(fresh.path, '.orcaops', 'config.json'), 'utf8')
+          await readFile(await effectiveConfigPath(fresh.path), 'utf8')
         ) as { archive?: { enabled?: boolean } };
         return config.archive?.enabled === true;
       } finally {
@@ -316,7 +355,7 @@ describe('orcaops archive enable/disable', () => {
           )
         ).toBeUndefined();
         const cfgRaw = JSON.parse(
-          await readFile(path.join(fresh.path, '.orcaops', 'config.json'), 'utf8')
+          await readFile(await effectiveConfigPath(fresh.path), 'utf8')
         ) as { archive?: { enabled?: boolean } };
         expect(cfgRaw.archive?.enabled).toBe(false);
       } finally {
@@ -508,7 +547,7 @@ describe('orcaops archive enable/disable', () => {
       expect(result.stderr).not.toContain('\n    at ');
       expect(await archiveEnabled()).toBe(true);
 
-      const configPath = path.join(repo.path, '.orcaops', 'config.json');
+      const configPath = await effectiveConfigPath(repo.path);
       const config = JSON.parse(await readFile(configPath, 'utf8')) as {
         archive: { enabled: boolean };
       };
@@ -620,7 +659,7 @@ describe('orcaops archive enable/disable', () => {
         const r = await freshAgent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
         expect(r.exitCode).toBe(0);
         const config = JSON.parse(
-          await readFile(path.join(fresh.path, '.orcaops', 'config.json'), 'utf8')
+          await readFile(await effectiveConfigPath(fresh.path), 'utf8')
         ) as {
           bootstrap: string;
           session_hooks: { enabled: boolean; payload: string };
@@ -686,7 +725,7 @@ describe('orcaops archive enable/disable', () => {
         const r = await freshAgent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
         expect(r.exitCode).toBe(0);
         const config = JSON.parse(
-          await readFile(path.join(fresh.path, '.orcaops', 'config.json'), 'utf8')
+          await readFile(await effectiveConfigPath(fresh.path), 'utf8')
         ) as { bootstrap: string; session_hooks?: { enabled?: boolean } };
         // Minimal-delta config: declining hooks leaves the default (absent).
         expect(config.session_hooks?.enabled ?? false).toBe(false);
@@ -783,7 +822,7 @@ describe('orcaops archive enable/disable', () => {
         expect(
           (await freshAgent.runRaw(['init', '--scope', 'project', '--json', '--no-llm'])).exitCode
         ).toBe(0);
-        const configPath = path.join(fresh.path, '.orcaops', 'config.json');
+        const configPath = await effectiveConfigPath(fresh.path);
         const before = await readFile(configPath, 'utf8');
         // --force alone re-asks nothing; only the explicit reset re-opens the
         // interview, and cancelling it aborts before any mutation executes.

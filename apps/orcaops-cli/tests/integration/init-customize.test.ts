@@ -7,6 +7,7 @@ import { resolveConfig } from '@orcaops/storage';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 /**
  * The customize-more branch of interactive init: ONE default-No confirm after
@@ -88,9 +89,7 @@ describe('init customize-more branch (mocked TTY + @clack)', () => {
     workflow: { hints: { keys: string[]; custom?: string[] } };
     session_hooks?: { enabled?: boolean; entries?: string };
   }> {
-    return JSON.parse(
-      await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')
-    ) as never;
+    return JSON.parse(await readFile(await effectiveConfigPath(repo.path), 'utf8')) as never;
   }
 
   it('declining "Customize more?" leaves every branch setting at its default', async () => {
@@ -123,12 +122,14 @@ describe('init customize-more branch (mocked TTY + @clack)', () => {
       true /* git hooks */
     );
     prime(m.text, '', 'oo' /* prefix */, 'Review migrations before committing.', '');
+    // The instruction-file question is asked once project scope is chosen —
+    // the personal default owns no instruction file to ask about.
     prime(
       m.select,
       'static',
       'static' /* session hooks */,
-      'manual' /* section */,
       'project' /* scope */,
+      'manual' /* section */,
       'symlink' /* link */,
       'ignore' /* generated files */,
       'none' /* session-hook registration (entries) */
@@ -240,8 +241,8 @@ describe('init customize-more branch (mocked TTY + @clack)', () => {
       m.select,
       'static',
       'off' /* session hooks (kept off) */,
-      'manual' /* section */,
       'project' /* scope — the flip under test */,
+      'manual' /* section */,
       'copy' /* link */,
       'commit' /* generated files */
     );

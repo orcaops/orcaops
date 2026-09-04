@@ -213,7 +213,7 @@ const localEntrySchema = z
   })
   .transform((entry) => entry as LocalEntry);
 
-const localManifestSchema = z
+export const localManifestSchema = z
   .object({
     manifest_version: z.literal(MANIFEST_VERSION),
     entries: z.array(localEntrySchema),
@@ -262,7 +262,7 @@ function normalizeInstallManifest(manifest: InstallManifest): InstallManifest {
   return { ...manifest, entries: manifest.entries.map(normalizeInstallEntry) };
 }
 
-function normalizeLocalManifest(manifest: LocalManifest): LocalManifest {
+export function normalizeLocalManifest(manifest: LocalManifest): LocalManifest {
   return { ...manifest, entries: manifest.entries.map(normalizeLocalEntry) };
 }
 

@@ -18,7 +18,7 @@ import {
   type UsageSnapshotRow,
   uuidv7,
 } from '@orcaops/storage';
-import { createTempRepo } from '@orcaops/test-harness';
+import { createTempRepo, writeProjectConfig } from '@orcaops/test-harness';
 
 /**
  * Watch snapshot test fixtures. Real lifecycles: an ArtifactStore with a
@@ -105,6 +105,8 @@ export async function makeArchiveFixture(): Promise<ArchiveFixture> {
     withMirror: boolean
   ): Promise<FixtureProject> {
     const repo = await createTempRepo({ initialBranch: 'main' });
+    // Governed by a project config: data alone never counts as an install.
+    await writeProjectConfig(repo.path);
     repos.push(repo);
     if (mint) await new Repo(repo.path).setLocalConfig(PROJECT_ID_CONFIG_KEY, projectId);
     const mirror = withMirror
@@ -175,7 +177,7 @@ export async function makeArchiveFixture(): Promise<ArchiveFixture> {
   };
 }
 
-async function seedArtifact(store: ArtifactStore, opts: SeedArtifactOpts): Promise<void> {
+export async function seedArtifact(store: ArtifactStore, opts: SeedArtifactOpts): Promise<void> {
   const stepCount = opts.stepCount ?? 1;
   const closedSteps = opts.closedSteps ?? 0;
   const stepIds = Array.from({ length: stepCount }, () => uuidv7());

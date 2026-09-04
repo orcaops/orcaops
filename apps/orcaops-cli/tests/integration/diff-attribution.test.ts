@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createRepoTemplate, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
-import { commitFile } from '../support/test-helpers.js';
+import { commitFile, effectiveConfigPath } from '../support/test-helpers.js';
 
 /**
  * `orcaops diff --attribution`.
@@ -222,7 +222,7 @@ describe('orcaops diff --attribution', () => {
   });
 
   it('degrades to file-level attribution when checkpoints have no manifests', async () => {
-    const configPath = path.join(repo.path, '.orcaops', 'config.json');
+    const configPath = await effectiveConfigPath(repo.path);
     const existing = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     await writeFile(
       configPath,

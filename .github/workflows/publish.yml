@@ -73,9 +73,21 @@ jobs:
       - name: Verify the artifact is publishable
         run: node scripts/verify-publishable.mjs build/cli-dist/staging
 
+      # Derived, never chosen: a candidate published to `latest` is handed to
+      # every plain `npm i -g`, and npm has no undo for who already installed.
+      - name: Resolve the dist-tag this version publishes under
+        run: |
+          set -euo pipefail
+          tag="$(node --input-type=module -e "
+            import { distTagFor } from './scripts/release-channel.mjs';
+            process.stdout.write(distTagFor(process.env.VERSION));
+          ")"
+          echo "publishing ${VERSION} under dist-tag ${tag}"
+          echo "DIST_TAG=${tag}" >> "$GITHUB_ENV"
+
       # From inside staging: it is the only form carrying the bundled deps.
       - name: Publish to npm with provenance
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --tag "$DIST_TAG"
         working-directory: build/cli-dist/staging
 
       - name: Record what was published
@@ -85,5 +97,52 @@ jobs:
             echo
             echo "- tag: \`${{ github.ref_name }}\`"
             echo "- commit: \`${{ github.sha }}\`"
+            echo "- dist-tag: \`${DIST_TAG}\`"
             echo "- provenance: attested via OIDC trusted publishing"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The notes are a frozen artifact by now: drafted, leak-linted, and reviewed
+  # in the changelog PR before the freeze, then shipped inside the tarball
+  # this tag published. Publishing them is mechanical.
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Extract this version's section
+        env:
+          TAG_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG_REF#v}"
+          awk -v want="$version" '
+            /^## \[?[0-9]+\.[0-9]+\.[0-9]+/ {
+              if (seen) exit
+              line = $0
+              sub(/^## \[?/, "", line)
+              sub(/\]?[[:space:]].*$/, "", line)
+              if (line == want) { seen = 1; next }
+              next
+            }
+            seen { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for ${version}"
+            exit 1
+          fi
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          flags=(--title "$TAG_REF" --notes-file release-notes.md --verify-tag)
+          # A candidate must not sit on the repository front page as Latest.
+          case "$TAG_REF" in
+            *-*) flags+=(--prerelease) ;;
+          esac
+          gh release create "$TAG_REF" "${flags[@]}"

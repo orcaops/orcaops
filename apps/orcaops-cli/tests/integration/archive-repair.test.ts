@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 /**
  * `archive status` + `archive repair`. The load-bearing flow:
@@ -94,7 +95,7 @@ describe('archive status + repair', () => {
   });
 
   async function setArchiveEnabled(enabled: boolean): Promise<void> {
-    const configPath = path.join(repo.path, '.orcaops', 'config.json');
+    const configPath = await effectiveConfigPath(repo.path);
     const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     config.archive = { enabled, redact_secrets: false };
     await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');

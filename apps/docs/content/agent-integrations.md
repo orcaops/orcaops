@@ -36,13 +36,20 @@ skills-only: the Copilot CLI and VS Code surface installed skills as
 `install.scope` controls where generated support files are materialized:
 
 - `personal` — **the default for a fresh `orcaops init`** — keeps the installation
-  repository-invisible: skills materialize into the global skill location used by each
-  selected agent (tracked in `~/.orcaops/install.local.json`), the optional
-  bootstrap block lives in `CLAUDE.local.md`, and the whole `.orcaops/` store is
-  hidden via the git common dir's `info/exclude`. `git status` stays clean, diffs
-  stay empty, and teammates see nothing. Orcaops never edits a tracked file under
-  personal scope (enforced at runtime—a plan that would do so is a bug, not a
-  surprise diff).
+  repository-invisible and repository-wide: the configuration, the evaluator
+  registration, and the ownership manifest live in the git common directory
+  (`$(git rev-parse --git-common-dir)/orcaops/`), so one `orcaops init --personal`
+  in any worktree enables every existing and future worktree of the same
+  repository; skills materialize into the global skill location used by each
+  selected agent (tracked in `~/.orcaops/install.local.json`); and each
+  worktree's `.orcaops/` store is hidden via the common dir's `info/exclude`.
+  Personal scope writes no instruction file and no repository settings entries —
+  guidance comes from global skills and, with consent, machine-level session
+  hooks. `git status` stays clean, diffs stay empty, and teammates see nothing.
+  Orcaops never edits a tracked file under personal scope (enforced at runtime:
+  every planned write must land in the common dir's `orcaops/` files or
+  `info/exclude`, git's hooks dir, or this worktree's `.orcaops/` store, never
+  in a sibling worktree or on a tracked path).
 - `project` keeps generated skills and commands in the repo — the
   [team adoption](./team-adoption.md) mode. Switch with
   `orcaops update --scope project`, then commit
@@ -54,10 +61,22 @@ skills-only: the Copilot CLI and VS Code surface installed skills as
 
 Notes on `personal`:
 
-- Every supported agent gets skills. The bootstrap block reaches Claude Code
-  only (nothing else reads `CLAUDE.local.md`) — other agents are covered by
-  session hooks or team adoption, and init/update surface an advisory when
-  that gap applies.
+- Every supported agent gets skills. Automatic guidance comes from machine
+  session hooks; declining them leaves the agents with global skills and the
+  CLI, and `orcaops session-hooks install` adds the reminder later.
+- Artifacts, caches, reviews, and usage data stay per worktree. A sibling that
+  has never captured is a valid empty source: read commands and hooks serve it
+  without creating files, and the first capture creates that worktree's
+  `.orcaops/` store. Repository-wide enablement is not repository-wide hot
+  history — with the archive disabled, prior captures do not follow you into a
+  fresh worktree.
+- A project config checked out in a worktree wins over the shared personal
+  config for that worktree; switching branches changes the effective source
+  without changing install ownership.
+- When a worktree returns from project to personal scope, Orcaops adopts an
+  existing shared personal config and applies only the flags supplied by that
+  command. It refuses the transition if the shared config is invalid or does
+  not declare personal scope.
 - Slash commands require project scope: no supported agent declares a global
   command root, so `/orcaops:*` commands do not materialize under personal or
   global scope.
@@ -76,11 +95,6 @@ Notes on `personal`:
   `update` mints a fresh identity that applies from then on; history, pins, and
   refs already recorded under the old identity stay where they are. Do not do
   this after an ordinary move, where keeping the identity is correct.
-
-- Pulling a teammate's adoption commit while you have an untracked personal
-  `.orcaops/config.json` makes git refuse the checkout ("untracked working
-  tree file would be overwritten"): move your config aside, pull, then run
-  `orcaops update`.
 
 `install.link` controls global materialization:
 
@@ -108,8 +122,9 @@ footprint is pruned safely.
 `bootstrap` controls whether Orcaops manages the instruction block:
 
 - `managed` makes `init`, `update`, and `doctor --fix` maintain the appropriate
-  `## Orcaops` instruction block: `CLAUDE.local.md` for a personal Claude Code
-  install, or the supported repository instruction files in project scope.
+  `## Orcaops` instruction block in the supported repository instruction files
+  (project and global scope). Personal scope owns no instruction file and always
+  stores `manual`.
 - `manual` means Orcaops does not mutate instruction files. Skills and commands
   can still be managed. Automatic workflow guidance may still come from session
   hooks; only when both surfaces are off are you responsible for telling the
@@ -189,9 +204,10 @@ safe-mutation state:
 
 - expected hashes for managed generated files or managed block regions;
 - provenance (`created`, `adopted`, or `pre-existing`);
-- the `info/exclude` lines Orcaops manages on this checkout (`info_exclude` —
-  the personal-scope hiding mechanism; per-checkout git-dir state, so it never
-  belongs in the committed manifest);
+- the `info/exclude` lines Orcaops manages (`info_exclude`). Under personal
+  scope this record is the repository-wide `personal-manifest.json` in the git
+  common dir — the single owner of the managed block, which is exactly
+  `.orcaops/` — and fresh personal scope writes no worktree manifest at all;
 - delete guard (`hash`, `confirm`, or `never`);
 - local symlink/copy materialization details.
 

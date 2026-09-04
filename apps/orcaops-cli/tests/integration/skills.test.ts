@@ -324,7 +324,7 @@ describe('orcaops skills list under personal scope', () => {
       cwd: repo.path,
       env: { ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_GLOBAL_ROOT: globalRoot },
     });
-    await agent.runRaw(['init', '--personal', '--json', '--no-llm', '--agents-md']);
+    await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
   });
 
   afterEach(async () => {

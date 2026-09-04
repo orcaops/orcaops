@@ -31,7 +31,7 @@ describe('eval add-pack --dev', () => {
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
     agent = makeAgent({ cwd: repo.path });
-    await agent.init({ noLlm: true });
+    await agent.init({ noLlm: true, scope: 'project' });
     tmpRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-addpack-dev-'));
     packPath = path.join(tmpRoot, 'test-pack');
     await cp(TEST_PACK_ABS_PATH, packPath, { recursive: true });

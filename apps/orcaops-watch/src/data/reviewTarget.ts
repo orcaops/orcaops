@@ -14,7 +14,7 @@
 import { access } from 'node:fs/promises';
 import path from 'node:path';
 
-import { Repo } from '@orcaops/core';
+import { readOnlyWorktreeState, Repo } from '@orcaops/core';
 import {
   discoverGitRoot,
   ProjectIdentityError,
@@ -103,6 +103,7 @@ export async function resolveReviewTarget(
   const seen = new Set<string>();
   let locatedRepo = false;
   let identityProblem = false;
+  let configProblem: string | null = null;
   for (const candidate of candidates) {
     const key = path.resolve(candidate);
     if (seen.has(key)) continue;
@@ -110,7 +111,15 @@ export async function resolveReviewTarget(
 
     try {
       if (!(await pathExists(candidate))) continue;
-      if (!(await pathExists(path.join(candidate, '.orcaops')))) continue;
+      // Governed by a config (its own, or the shared personal one) — not
+      // "has a .orcaops directory": an enabled worktree with no data yet is
+      // still this project's repo.
+      const candidateState = await readOnlyWorktreeState(candidate);
+      if (candidateState.kind === 'broken') {
+        configProblem ??= candidateState.error.message;
+        continue;
+      }
+      if (candidateState.kind !== 'enabled') continue;
       const repo = new Repo(candidate);
       // Identity lives in git's common dir (shared across worktrees) — a match
       // proves this candidate belongs to the row's project. A mismatch is a
@@ -120,9 +129,14 @@ export async function resolveReviewTarget(
       for (const worktree of await repo.listWorktrees()) {
         if (worktree.branch !== branch) continue;
         // The review runs (and writes floor/refs/comments) in this worktree, so
-        // it must carry its own hot store; an uninitialized checkout is not a
-        // usable target.
-        if (!(await pathExists(path.join(worktree.path, '.orcaops')))) continue;
+        // it must be governed; an uninitialized checkout is not a usable
+        // target. Its hot store may still be empty — the review creates it.
+        const worktreeState = await readOnlyWorktreeState(worktree.path);
+        if (worktreeState.kind === 'broken') {
+          configProblem ??= worktreeState.error.message;
+          continue;
+        }
+        if (worktreeState.kind !== 'enabled') continue;
         return { ok: true, root: worktree.path };
       }
     } catch (error) {
@@ -135,12 +149,13 @@ export async function resolveReviewTarget(
   const identitySuffix = identityProblem
     ? '; additionally, a candidate repository has an unreadable or invalid stored project identity — run `orcaops doctor` there'
     : '';
+  const configSuffix = configProblem === null ? '' : `; configuration error: ${configProblem}`;
   if (locatedRepo) {
     return {
       ok: false,
       reason:
         `cannot review ${branch} — no live worktree has it checked out; check it out first, ` +
-        `or open its worktree${identitySuffix}`,
+        `or open its worktree${identitySuffix}${configSuffix}`,
     };
   }
   const label =
@@ -151,6 +166,6 @@ export async function resolveReviewTarget(
     ok: false,
     reason:
       `cannot review ${branch} — could not locate ${label} on disk; open it once from that ` +
-      `repo so orcaops records its path${identitySuffix}`,
+      `repo so orcaops records its path${identitySuffix}${configSuffix}`,
   };
 }

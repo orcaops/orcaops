@@ -123,11 +123,11 @@ export const AGENT_OVERLAYS: Partial<Record<ToolId, AgentOverlay>> = {
     supportsCommands: false,
     skillFrontmatterTags: false,
     subagentOrchestration: 'none',
-    // Codex hooks — live-validated against shipped codex-cli 0.146.0:
-    // `.codex/hooks.json` is never read (repo- or user-level), while the
-    // config.toml file-form registration works end-to-end (upstream flux
-    // openai/codex#17532/#21639). Hooks register via a `hooks` struct in
-    // config.toml gated by `[features].hooks`, and plain-text stdout is
+    // Codex hooks — live-validated against codex-cli 0.146-0.147: Codex
+    // loads `$CODEX_HOME/hooks.json` AND the `hooks` tables in config.toml,
+    // and hooks are on by default since 0.124 (no feature gate). config.toml
+    // is the surface here because it is the one validated end to end and
+    // already carries every existing registration. Plain-text stdout is
     // REJECTED: injection requires the hookSpecificOutput JSON envelope
     // (payload 'codex-json'; the hook command emits it). There is no project
     // settings surface: `machine-config` keeps codex session-hook capable

@@ -11,6 +11,7 @@ import {
   type DiffFingerprintManifest,
   diffSnapshotTrees,
   loadReadOnlyProjectConfig,
+  readOnlyWorktreeState,
   Repo,
 } from '@orcaops/core';
 import { type Disclosure, DISCLOSURE_CODE, slugifyBranch } from '@orcaops/review-core';
@@ -19,6 +20,7 @@ import {
   ArtifactStore,
   cacheDbPath,
   type Checkpoint,
+  openEmptyArtifactStore,
   replayAttributionDegradedRemovals,
   replayWindowOverlapRemovals,
   resolveCaptureExcludes,
@@ -554,7 +556,14 @@ export async function resolveScopeInputs(opts: {
   ignoreStickyBase?: boolean;
   rebuildCache?: boolean;
 }): Promise<ScopeInputs> {
-  const config = await loadReadOnlyProjectConfig(opts.root);
+  // Governed-but-empty worktrees are valid review roots: a sibling that has
+  // never captured must be served from an in-memory projection rather than
+  // by creating its cache on a read path.
+  const worktree = await readOnlyWorktreeState(opts.root);
+  if (worktree.kind === 'broken') throw worktree.error;
+  const config =
+    worktree.kind === 'enabled' ? worktree.config : await loadReadOnlyProjectConfig(opts.root);
+  const emptyHotState = worktree.kind === 'enabled' && worktree.hot.empty;
   const repo = new Repo(opts.root);
 
   // Validate an explicit --base up front so a typo fails loudly rather than
@@ -594,20 +603,22 @@ export async function resolveScopeInputs(opts: {
   }
 
   const rebuildStore =
-    opts.rebuildCache === true
+    opts.rebuildCache === true && !emptyHotState
       ? new Store(cacheDbPath(opts.root, config), {
           containmentRoot: opts.root,
           rebuildExistingProjection: true,
         })
       : null;
-  const store = new ArtifactStore({
-    repoRoot: opts.root,
-    config,
-    ...(rebuildStore === null ? {} : { store: rebuildStore }),
-  });
+  const store = emptyHotState
+    ? openEmptyArtifactStore(opts.root, config)
+    : new ArtifactStore({
+        repoRoot: opts.root,
+        config,
+        ...(rebuildStore === null ? {} : { store: rebuildStore }),
+      });
 
   try {
-    await requireCompleteArtifactStore(store, 'review scope');
+    if (!emptyHotState) await requireCompleteArtifactStore(store, 'review scope');
     // TWO caps, two jobs. `diff_fingerprint.max_diff_bytes` is hashed into the
     // durable checkpoint manifest, so it governs the re-derive and nothing else;
     // `review.max_diff_bytes` governs the live review diff and is free to move.

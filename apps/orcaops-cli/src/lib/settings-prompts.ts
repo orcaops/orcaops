@@ -80,8 +80,8 @@ export const sessionHookEntriesPrompt = {
   ] satisfies SettingsPromptOption<'project' | 'none'>[],
 };
 
-export function blockPrompt(scope: 'project' | 'global' | 'personal') {
-  const files = scope === 'personal' ? 'CLAUDE.local.md' : 'AGENTS.md / CLAUDE.md';
+export function blockPrompt() {
+  const files = 'AGENTS.md / CLAUDE.md';
   return {
     message: `Let orcaops keep a section in ${files} that teaches agents the capture workflow. Who maintains it?`,
     options: [

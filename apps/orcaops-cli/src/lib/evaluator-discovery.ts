@@ -1,7 +1,7 @@
 import type { EvaluatorConfig, ResolvedEvaluator } from '@orcaops/evaluator-protocol';
 import { discoverEvaluators, type EvaluatorDiscoveryError } from '@orcaops/evaluator-runner';
 
-import { CLI_ROOT } from './evaluators-config.js';
+import { CLI_ROOT, resolveEvaluatorsConfigLocation } from './evaluators-config.js';
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 
 export interface CliDiscoveryResult {
@@ -25,8 +25,11 @@ export interface CliDiscoveryResult {
  * @orcaops/evaluator-pack is not a dependency.
  */
 export async function discoverEvaluatorsForCli(repoRoot: string): Promise<CliDiscoveryResult> {
+  const location = await resolveEvaluatorsConfigLocation(repoRoot);
   const { evaluators, config, errors } = await discoverEvaluators(repoRoot, {
     cliRoot: CLI_ROOT,
+    configPath: location.configPath,
+    configContainmentRoot: location.containmentRoot,
     onError: () => undefined,
   });
   return { evaluators: [...evaluators], config, errors: [...errors] };

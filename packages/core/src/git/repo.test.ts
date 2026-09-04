@@ -12,7 +12,7 @@ import {
   type TempRepo,
 } from '@orcaops/test-harness';
 
-import { Repo } from './repo.js';
+import { probeWorktree, Repo } from './repo.js';
 
 describe('Repo.logFirstParentDetailed', () => {
   it('parses roots, bodies, parents, and non-ASCII file names without following merge sides', async () => {
@@ -787,6 +787,113 @@ describe('Repo git-path plumbing (getGitDirAbsolute / getGitPathAbsolute / getHo
       expect(hooks.source).toBe('core.hooksPath');
     } finally {
       await rm(external, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Repo.listTrackedPaths', () => {
+  let repo: TempRepo;
+
+  beforeEach(async () => {
+    repo = await createTempRepo({ initialBranch: 'main' });
+  });
+  afterEach(async () => {
+    await repo.cleanup();
+  });
+
+  const commit = (files: string[]): void => {
+    execFileSync('git', ['add', '--', ...files], { cwd: repo.path });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'add'], {
+      cwd: repo.path,
+    });
+  };
+
+  it('returns only the tracked subset, as the strings passed in', async () => {
+    await mkdir(path.join(repo.path, '.orcaops'), { recursive: true });
+    await writeFile(path.join(repo.path, '.orcaops', 'config.json'), '{}', 'utf8');
+    await writeFile(path.join(repo.path, '.orcaops', 'install.json'), '{}', 'utf8');
+    commit(['.orcaops/config.json']);
+
+    const tracked = await new Repo(repo.path).listTrackedPaths([
+      path.join('.orcaops', 'config.json'),
+      path.join('.orcaops', 'install.json'),
+      'never-existed.txt',
+    ]);
+    expect([...tracked]).toEqual([path.join('.orcaops', 'config.json')]);
+    expect(await new Repo(repo.path).isTracked(path.join('.orcaops', 'install.json'))).toBe(false);
+  });
+
+  it('answers an empty batch with an empty set instead of the whole index', async () => {
+    await writeFile(path.join(repo.path, 'tracked.txt'), 'x', 'utf8');
+    commit(['tracked.txt']);
+    expect((await new Repo(repo.path).listTrackedPaths([])).size).toBe(0);
+  });
+
+  it('treats a leading colon literally rather than as pathspec magic', async () => {
+    await writeFile(path.join(repo.path, ':odd.txt'), 'x', 'utf8');
+    await writeFile(path.join(repo.path, 'plain.txt'), 'x', 'utf8');
+    commit(['plain.txt']);
+    const tracked = await new Repo(repo.path).listTrackedPaths([':odd.txt', 'plain.txt']);
+    expect([...tracked]).toEqual(['plain.txt']);
+  });
+});
+
+describe('probeWorktree', () => {
+  let main: TempRepo;
+  let linked: TempRepo;
+
+  beforeEach(async () => {
+    main = await createTempRepo({ initialBranch: 'main' });
+    linked = await createLinkedWorktree(main.path, { branch: 'feature-probe' });
+  });
+  afterEach(async () => {
+    await linked.cleanup();
+    await main.cleanup();
+  });
+
+  it('resolves the relative common dir git prints from the main worktree root', async () => {
+    const probe = await probeWorktree(main.path);
+    expect(probe).not.toBeNull();
+    expect(probe?.worktreeRoot).toBe(await realpath(main.path));
+    expect(probe?.commonDir).toBe(await new Repo(main.path).getCommonDirAbsolute());
+    expect(probe?.branch).toBe('main');
+  });
+
+  it('resolves `../.git` against the subdirectory the process ran in', async () => {
+    const sub = path.join(main.path, 'pkg', 'src');
+    await mkdir(sub, { recursive: true });
+    const probe = await probeWorktree(sub);
+    expect(probe?.worktreeRoot).toBe(await realpath(main.path));
+    // Wrong resolution would land on <sub>/.git, which does not exist.
+    expect(probe?.commonDir).toBe(await new Repo(main.path).getCommonDirAbsolute());
+  });
+
+  it('reports the shared common dir and its own branch from a linked worktree', async () => {
+    const probe = await probeWorktree(linked.path);
+    expect(probe?.worktreeRoot).toBe(await realpath(linked.path));
+    expect(probe?.commonDir).toBe(await new Repo(main.path).getCommonDirAbsolute());
+    expect(probe?.branch).toBe('feature-probe');
+  });
+
+  it('still answers the root and common dir in a repository with no commits', async () => {
+    const empty = await mkdtemp(path.join(tmpdir(), 'orcaops-probe-empty-'));
+    try {
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: empty });
+      const probe = await probeWorktree(empty);
+      expect(probe?.worktreeRoot).toBe(await realpath(empty));
+      expect(probe?.commonDir).toBe(path.join(await realpath(empty), '.git'));
+      expect(probe?.branch).toBeNull();
+    } finally {
+      await rm(empty, { recursive: true, force: true });
+    }
+  });
+
+  it('answers null outside a repository instead of guessing', async () => {
+    const outside = await mkdtemp(path.join(tmpdir(), 'orcaops-probe-outside-'));
+    try {
+      expect(await probeWorktree(outside)).toBeNull();
+    } finally {
+      await rm(outside, { recursive: true, force: true });
     }
   });
 });

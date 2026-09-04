@@ -10,7 +10,7 @@ import {
 } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
-import { commitFile } from '../support/test-helpers.js';
+import { commitFile, effectiveConfigPath } from '../support/test-helpers.js';
 
 const FAKE_JWT =
   'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJicmFuY2gtZGlnZXN0In0.0000000000000000000000000000000000000000000';
@@ -208,7 +208,7 @@ describe('orcaops digest --branch-wide', () => {
     expect(narrowerData.data.base).toBe('feature/digest~1');
     expect(narrowerData.data.artifacts.map((artifact) => artifact.id)).toEqual([followUp]);
 
-    const configPath = path.join(repo.path, '.orcaops', 'config.json');
+    const configPath = await effectiveConfigPath(repo.path);
     const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     config.digest = { redact_secrets: false };
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
@@ -250,11 +250,12 @@ describe('orcaops digest --branch-wide', () => {
     await gitClient(repo.path).checkout('main');
     const linked = await createLinkedWorktree(repo.path, { branch: 'feature/archive-digest' });
     try {
+      // No init here: the main checkout's personal install lives in the git
+      // common dir, so the linked worktree is already enabled.
       const linkedAgent = makeAgent({
         cwd: linked.path,
         env: { ORCAOPS_DISABLE_DRAIN: '1' },
       });
-      await linkedAgent.init({ noLlm: true });
       const plan = await linkedAgent.capturePlan(
         {
           task: 'Archived branch outcome',

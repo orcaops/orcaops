@@ -7,7 +7,7 @@ import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness'
 
 import { grantsFilePath, readGrants } from '../../src/lib/evaluator-grants.js';
 import { makeAgent } from '../support/test-agent.js';
-import { TEST_PACK_ABS_PATH } from '../support/test-helpers.js';
+import { effectiveConfigPath, TEST_PACK_ABS_PATH } from '../support/test-helpers.js';
 
 /**
  * The consent gate's hostile-clone matrix (see docs/evaluator-consent.md).
@@ -47,7 +47,8 @@ describe('evaluator consent gate (hostile clone matrix)', () => {
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
     agent = makeAgent({ cwd: repo.path });
-    await agent.init({ noLlm: true });
+    // Project scope: the evaluator registration under test is the worktree file.
+    await agent.init({ noLlm: true, scope: 'project' });
     tmpRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-consent-'));
     packPath = path.join(tmpRoot, 'test-pack');
     await cp(TEST_PACK_ABS_PATH, packPath, { recursive: true });
@@ -410,11 +411,12 @@ describe('implicit-codex consent (no declared provider, codex default)', () => {
       cwd: repo.path,
       env: { ORCAOPS_CODEX_PATH: path.join(tmpdir(), 'no-such-codex-binary') },
     });
-    await agent.init({ noLlm: true });
+    // Project scope: the evaluator registration under test is the worktree file.
+    await agent.init({ noLlm: true, scope: 'project' });
     // The repo default provider is codex — the shape under attack: an
     // evaluator declaring neither provider nor tool_policy still reaches
     // codex's file-reading tools.
-    const configFile = path.join(repo.path, '.orcaops', 'config.json');
+    const configFile = await effectiveConfigPath(repo.path);
     const config = JSON.parse(await readFile(configFile, 'utf8')) as {
       llm?: Record<string, unknown>;
     };

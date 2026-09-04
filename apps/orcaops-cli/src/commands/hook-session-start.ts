@@ -15,7 +15,7 @@ import {
   settingsSpecs,
 } from '../lib/session-hooks.js';
 import { renderSessionStartGuidance } from '../lib/session-start-guidance.js';
-import { readSessionStartState, resolveSessionStartRoot } from '../lib/session-start-state.js';
+import { readSessionStartState, resolveSessionStartLocation } from '../lib/session-start-state.js';
 
 export type HookAgent = 'claude-code' | 'codex' | 'cursor' | 'opencode';
 
@@ -93,9 +93,11 @@ export async function hookSessionStartAction(opts: HookSessionStartOptions = {})
     // injecting capture guidance into that inner session is pure noise —
     // and on Codex a potential loop. Silence, exit 0.
     if (isCi(getInvocationEnv().ORCAOPS_HOOK_SUPPRESS)) return;
-    const repoRoot = await resolveSessionStartRoot(opts.cwd);
-    if (opts.user && (await projectEntryStatus(opts.agent, repoRoot)) !== 'absent') return;
-    text = renderSessionStartGuidance(await readSessionStartState(opts.cwd, repoRoot));
+    const location = await resolveSessionStartLocation(opts.cwd);
+    if (opts.user && (await projectEntryStatus(opts.agent, location?.root ?? null)) !== 'absent') {
+      return;
+    }
+    text = renderSessionStartGuidance(await readSessionStartState(opts.cwd, location));
   } catch {
     text = null;
   }

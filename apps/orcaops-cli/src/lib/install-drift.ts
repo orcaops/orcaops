@@ -15,9 +15,10 @@ import {
 } from '@orcaops/adapters';
 import { assertCanonicalRelativePath, type Config, type SupportedAgentId } from '@orcaops/storage';
 
-import { PERSONAL_EXCLUDE_LINES, reconcileInfoExclude } from './git-info-exclude.js';
+import { reconcileInfoExclude } from './git-info-exclude.js';
 import { readInstallManifest, toPortableManifestPath } from './install-manifest.js';
 import { readRepositoryRegularFileOrNull, repositoryRegularFileExists } from './mutations.js';
+import { desiredPersonalExcludeLines } from './personal-manifest.js';
 import { planSessionHookSettings } from './session-hooks.js';
 import { CLOUD_GATED_SKILL_IDS, enabledSkillTemplates, type SkillGates } from './skill-set.js';
 
@@ -136,12 +137,11 @@ export async function classifyGeneratedFile(
  * checking skills/commands.
  */
 /**
- * The instruction files orcaops manages for this install.
- * Personal scope targets CLAUDE.local.md ONLY; every other scope unions
- * the install set's adapter agentsFiles.
+ * The instruction files orcaops manages for this install. Personal scope
+ * manages none; every other scope unions the install set's adapter agentsFiles.
  */
 export function resolveManagedInstructionFiles(config: Config): string[] {
-  if (config.install.scope === 'personal') return ['CLAUDE.local.md'];
+  if (config.install.scope === 'personal') return [];
   return [...new Set(config.install.agents.flatMap((id) => getToolAdapter(id)?.agentsFiles ?? []))];
 }
 
@@ -209,8 +209,8 @@ export async function detectInstallDrift(
     }
     if (adapter.agentsFiles) for (const rel of adapter.agentsFiles) instructionFiles.add(rel);
   }
-  // Block staleness reads the scope's managed instruction files —
-  // CLAUDE.local.md under personal.
+  // Block staleness reads the scope's managed instruction files — none
+  // under personal.
   if (config.install.scope === 'personal') {
     instructionFiles.clear();
     for (const rel of resolveManagedInstructionFiles(config)) instructionFiles.add(rel);
@@ -343,7 +343,7 @@ export async function detectInstallDrift(
   try {
     const excludePlan = await reconcileInfoExclude(
       repoRoot,
-      config.install.scope === 'personal' ? PERSONAL_EXCLUDE_LINES : []
+      await desiredPersonalExcludeLines(repoRoot, config.install.scope)
     );
     if (excludePlan.desiredContent !== null) {
       staleInfoExclude.push(path.relative(repoRoot, excludePlan.excludePath));

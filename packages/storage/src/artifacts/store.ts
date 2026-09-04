@@ -165,6 +165,7 @@ export interface ArtifactStoreOptions {
   repoRoot: string;
   config: Config;
   store?: Store;
+  ownsStore?: boolean;
   lock?: ArtifactLock;
   /**
    * Optional archive mirror. When present, every event append is
@@ -614,6 +615,7 @@ export class ArtifactStore {
   readonly store: Store;
   readonly lock: ArtifactLock;
   private readonly ownsStore: boolean;
+  private storeClosed = false;
   private readonly archive: ArchiveMirror | null;
   private readonly eventBatchContext = new AsyncLocalStorage<ReadonlySet<string>>();
   private readonly dirtyBatchedArtifacts = new Set<string>();
@@ -622,7 +624,7 @@ export class ArtifactStore {
     this.config = opts.config;
     if (opts.store) {
       this.store = opts.store;
-      this.ownsStore = false;
+      this.ownsStore = opts.ownsStore ?? false;
     } else {
       this.store = new Store(cacheDbPath(this.repoRoot, this.config), {
         containmentRoot: this.repoRoot,
@@ -772,7 +774,8 @@ export class ArtifactStore {
   }
 
   close(): void {
-    if (this.ownsStore) {
+    if (this.ownsStore && !this.storeClosed) {
+      this.storeClosed = true;
       this.store.close();
     }
   }

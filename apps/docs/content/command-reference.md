@@ -24,18 +24,18 @@ version.
 
 ## Install and manage
 
-| Command                          | What it does                                                                                                                    |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `orcaops init`                   | Initialize a repository and install agent support; personal scope is the default and leaves tracked repository files unchanged. |
-| `orcaops update`                 | Reconcile generated support after upgrades or changes to scope, agents, prefix, hooks, or file posture.                         |
-| `orcaops configure`              | Open the interactive settings menu and preview changes before applying them.                                                    |
-| `orcaops link`                   | Consolidate `AGENTS.md` and `CLAUDE.md` onto a canonical file plus symlink, with lossy-change confirmation.                     |
-| `orcaops uninstall`              | Remove managed install surfaces; keep captured data unless `--purge-data` is explicitly supplied.                               |
-| `orcaops doctor`                 | Diagnose runtime, adapters, install state, authentication, evaluator packs, caches, and watch signals.                          |
-| `orcaops doctor --fix --dry-run` | Preview guarded installation repairs; omit `--dry-run` to apply the approved repair.                                            |
-| `orcaops hook session-start`     | Emit the agent session-start guidance installed by repository hooks; always exits successfully.                                 |
-| `orcaops session-hooks <verb>`   | Install, inspect, or uninstall machine-level session hooks in supported agents' user configs.                                   |
-| `orcaops skills <verb>`          | List, enable, or disable installed skill templates; run `orcaops update` after changing overrides.                              |
+| Command                          | What it does                                                                                                                                                                             |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `orcaops init`                   | Initialize a repository and install agent support; personal scope is the default, applies to every worktree of the repository, and leaves tracked repository files unchanged.            |
+| `orcaops update`                 | Reconcile generated support after upgrades or changes to scope, agents, prefix, hooks, or file posture.                                                                                  |
+| `orcaops configure`              | Open the interactive settings menu and preview changes before applying them.                                                                                                             |
+| `orcaops link`                   | Consolidate `AGENTS.md` and `CLAUDE.md` onto a canonical file plus symlink, with lossy-change confirmation; unavailable under personal scope, which owns no repository instruction file. |
+| `orcaops uninstall`              | Remove managed install surfaces; keep captured data unless `--purge-data` is explicitly supplied.                                                                                        |
+| `orcaops doctor`                 | Diagnose runtime, adapters, install state, authentication, evaluator packs, caches, and watch signals.                                                                                   |
+| `orcaops doctor --fix --dry-run` | Preview guarded installation repairs; omit `--dry-run` to apply the approved repair.                                                                                                     |
+| `orcaops hook session-start`     | Emit the agent session-start guidance installed by repository hooks; always exits successfully.                                                                                          |
+| `orcaops session-hooks <verb>`   | Install, inspect, or uninstall machine-level session hooks in supported agents' user configs.                                                                                            |
+| `orcaops skills <verb>`          | List, enable, or disable installed skill templates; run `orcaops update` after changing overrides.                                                                                       |
 
 See [Configuration](./configuration.md) for the index to agent scope, session
 hooks, capture controls, generated files, and environment variables.

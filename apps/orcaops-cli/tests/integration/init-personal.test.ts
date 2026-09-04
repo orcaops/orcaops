@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 /**
  * `orcaops init --personal` on a fixture "enterprise"
@@ -70,15 +71,17 @@ describe('orcaops init --personal', () => {
 
     const result = await agent.runRaw(['init', '--yes', '--force', '--personal', '--no-llm']);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain('personal scope is unavailable');
-    expect(result.stderr).toMatch(/AGENTS\.md|CLAUDE\.md|\.orcaops/u);
-    expect(result.stderr).toContain('--scope project');
+    // Moving a committed project install to personal scope edits tracked
+    // files, which is `update --scope personal`'s job — it shows that diff.
+    expect(result.stderr).toContain('committed orcaops file');
+    expect(result.stderr).toMatch(/\.orcaops\/config\.json|\.orcaops\/install\.json/u);
+    expect(result.stderr).toContain('orcaops update --scope personal');
     // A clean CLI error, never a raw invariant stack trace.
     expect(result.stderr).not.toMatch(/\n\s+at /u);
   });
 
-  it('keeps `git status` clean: block in CLAUDE.local.md, skills global, no committed install.json', async () => {
-    const r = await agent.runRaw(['init', '--personal', '--json', '--no-llm', '--agents-md']);
+  it('keeps `git status` clean: no instruction file, skills global, ownership in the common dir', async () => {
+    const r = await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
     expect(r.exitCode).toBe(0);
     const out = JSON.parse(r.stdout) as {
       scope: string;
@@ -94,10 +97,8 @@ describe('orcaops init --personal', () => {
       .trim();
     expect(status).toBe('');
 
-    // Bootstrap block: CLAUDE.local.md only; team files untouched.
-    const localMd = await readFile(p('CLAUDE.local.md'), 'utf8');
-    expect(localMd).toContain('<!-- orcaops:start');
-    expect(localMd).toContain('orcaops-capture');
+    // Personal scope owns no instruction file; team files untouched.
+    expect(await exists(p('CLAUDE.local.md'))).toBe(false);
     expect(await readFile(p('AGENTS.md'), 'utf8')).toBe(
       '# Team instructions\n\nDo not edit lightly.\n'
     );
@@ -116,15 +117,19 @@ describe('orcaops init --personal', () => {
     );
     expect(await exists(globalSkill)).toBe(true);
 
-    // No committed install.json; the local manifest carries everything.
+    // No committed install.json and no worktree manifest: the ownership
+    // record is the common personal manifest, shared by every worktree.
     expect(await exists(p('.orcaops', 'install.json'))).toBe(false);
-    expect(await exists(p('.orcaops', 'install.local.json'))).toBe(true);
+    expect(await exists(p('.orcaops', 'install.local.json'))).toBe(false);
+    expect(await exists(p('.git', 'orcaops', 'personal-manifest.json'))).toBe(true);
 
-    // The personal footprint hides via info/exclude — never .gitignore.
+    // The personal footprint hides via info/exclude — never .gitignore — and
+    // the managed block is exactly the store.
     const exclude = await readFile(p('.git', 'info', 'exclude'), 'utf8');
     expect(exclude).toContain('# >>> orcaops >>>');
     expect(exclude).toContain('.orcaops/');
-    expect(exclude).toContain('CLAUDE.local.md');
+    expect(exclude).not.toContain('CLAUDE.local.md');
+    expect(exclude).not.toContain('install.local.json');
     expect(await exists(p('.gitignore'))).toBe(false);
 
     // Capture still fires: the ambient lifecycle works under personal.
@@ -151,7 +156,7 @@ describe('orcaops init --personal', () => {
   });
 
   it('summarizes a fresh personal install and points to change and undo commands', async () => {
-    const result = await agent.runRaw(['init', '--personal', '--no-llm', '--agents-md']);
+    const result = await agent.runRaw(['init', '--personal', '--no-llm']);
     const repoDisplayPath = await realpath(repo.path);
     const normalized = result.stdout
       .replaceAll(repoDisplayPath, '<repo>')
@@ -163,16 +168,9 @@ describe('orcaops init --personal', () => {
       "Orcaops initialized at <repo>
 
       Created:
-        .orcaops/artifacts/
-        .orcaops/cache/
-        .orcaops/config.json
+        <repo>/.git/orcaops/config.json
 
       Installed 18 skills for claude-code → <global>/claude-code/skills
-
-      Bootstrap section written to:
-        + CLAUDE.local.md
-        (enables automatic capture on non-trivial tasks;
-         use --no-agents-md to opt out, or edit between the <!-- orcaops:* --> markers)
 
       Archive backfill: 0 event(s) replayed, 0 remaining; 0 artifact(s) rebuilt, 0 rebuild(s) remaining.
 
@@ -196,6 +194,99 @@ describe('orcaops init --personal', () => {
     `);
   });
 
+  it('warns that a personal --reset-config changes settings for every linked worktree', async () => {
+    await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
+    const result = await agent.runRaw([
+      'init',
+      '--personal',
+      '--force',
+      '--reset-config',
+      '--json',
+      '--no-llm',
+    ]);
+    expect(result.exitCode).toBe(0);
+    const out = JSON.parse(result.stdout) as { warnings: string[]; config_reset: boolean };
+    expect(out.config_reset).toBe(true);
+    expect(out.warnings.some((w) => w.includes('EVERY linked worktree'))).toBe(true);
+  });
+
+  it('moves an UNTRACKED project config to the common dir under --force --personal', async () => {
+    await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm', '--no-agents-md']);
+    const worktreeConfig = path.join(repo.path, '.orcaops', 'config.json');
+    expect(await exists(worktreeConfig)).toBe(true);
+
+    const result = await agent.runRaw(['init', '--force', '--personal', '--json', '--no-llm']);
+    expect(result.exitCode).toBe(0);
+    // Nothing was tracked, so the move is invisible: the shared config appears
+    // and the worktree copy — which would fail source selection closed — is gone.
+    expect(await exists(worktreeConfig)).toBe(false);
+    const shared = JSON.parse(await readFile(await effectiveConfigPath(repo.path), 'utf8')) as {
+      install: { scope: string };
+    };
+    expect(shared.install.scope).toBe('personal');
+    expect(await effectiveConfigPath(repo.path)).toContain(path.join('.git', 'orcaops'));
+  });
+
+  it('rejoins an existing personal config without replacing its settings', async () => {
+    await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
+    const sharedPath = await effectiveConfigPath(repo.path);
+    const shared = JSON.parse(await readFile(sharedPath, 'utf8')) as Record<string, unknown>;
+    shared.naming = { prefix: 'shared' };
+    shared.capture = { exclude: ['shared/**'] };
+    await writeFile(sharedPath, `${JSON.stringify(shared, null, 2)}\n`, 'utf8');
+    await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
+    const worktreePath = path.join(repo.path, '.orcaops', 'config.json');
+    const worktree = JSON.parse(await readFile(worktreePath, 'utf8')) as Record<string, unknown>;
+    worktree.naming = { prefix: 'worktree' };
+    await writeFile(worktreePath, `${JSON.stringify(worktree, null, 2)}\n`, 'utf8');
+
+    const result = await agent.runRaw(['init', '--force', '--personal', '--json']);
+
+    expect(result.exitCode).toBe(0);
+    expect(await exists(worktreePath)).toBe(false);
+    const adopted = JSON.parse(await readFile(sharedPath, 'utf8')) as {
+      naming: { prefix: string };
+      capture: { exclude: string[] };
+    };
+    expect(adopted.naming.prefix).toBe('shared');
+    expect(adopted.capture.exclude).toEqual(['shared/**']);
+  });
+
+  it('moves an untracked project install from a linked worktree nested in the main checkout', async () => {
+    const nested = path.join(repo.path, 'nested-worktree');
+    execFileSync('git', ['worktree', 'add', '-q', '-b', 'nested-personal', nested], {
+      cwd: repo.path,
+    });
+    try {
+      const nestedAgent = makeAgent({
+        cwd: nested,
+        env: { ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_GLOBAL_ROOT: globalRoot },
+      });
+      await nestedAgent.runRaw([
+        'init',
+        '--scope',
+        'project',
+        '--json',
+        '--no-llm',
+        '--no-agents-md',
+      ]);
+
+      const result = await nestedAgent.runRaw([
+        'init',
+        '--force',
+        '--personal',
+        '--json',
+        '--no-llm',
+      ]);
+
+      expect(result.exitCode).toBe(0);
+      expect(await exists(path.join(nested, '.orcaops', 'config.json'))).toBe(false);
+      expect(await exists(path.join(repo.path, '.git', 'orcaops', 'config.json'))).toBe(true);
+    } finally {
+      execFileSync('git', ['worktree', 'remove', '--force', nested], { cwd: repo.path });
+    }
+  });
+
   it('points an already-initialized settings change to configure', async () => {
     await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
 
@@ -206,7 +297,7 @@ describe('orcaops init --personal', () => {
 
     expect(result.exitCode).toBe(1);
     expect(normalized).toMatchInlineSnapshot(`
-      "Error: <repo>/.orcaops already exists. Run \`orcaops configure\` to change settings, or pass --force to re-initialize.
+      "Error: <repo>/.git/orcaops/config.json already exists. Run \`orcaops configure\` to change settings, or pass --force to re-initialize.
       "
     `);
   });
@@ -214,14 +305,7 @@ describe('orcaops init --personal', () => {
   it('keeps a missing git info directory absent during dry-run planning', async () => {
     await rm(p('.git', 'info'), { recursive: true });
 
-    const result = await agent.runRaw([
-      'init',
-      '--personal',
-      '--dry-run',
-      '--json',
-      '--no-llm',
-      '--agents-md',
-    ]);
+    const result = await agent.runRaw(['init', '--personal', '--dry-run', '--json', '--no-llm']);
 
     expect(result.exitCode).toBe(0);
     expect(await exists(p('.git', 'info'))).toBe(false);
@@ -237,7 +321,6 @@ describe('orcaops init --personal', () => {
       'codex',
       '--json',
       '--no-llm',
-      '--agents-md',
     ]);
     expect(r.exitCode).toBe(0);
     const out = JSON.parse(r.stdout) as {
@@ -248,9 +331,6 @@ describe('orcaops init --personal', () => {
     };
     expect(out.scope).toBe('personal');
     expect(out.install_agents).toEqual(['claude-code', 'codex']);
-    // The one structural Claude-ism surfaces as an ADVISORY, not an error:
-    // only Claude Code reads CLAUDE.local.md.
-    expect(out.warnings.some((w) => w.includes('only reaches Claude Code'))).toBe(true);
     // Both agents' skills materialize via the global machinery.
     expect(out.global).not.toBeNull();
     expect(out.global!.materialized.length).toBeGreaterThan(0);
@@ -264,7 +344,7 @@ describe('orcaops init --personal', () => {
   it('config schema accepts scope personal (round-trips through resolve)', async () => {
     const r = await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
     expect(r.exitCode).toBe(0);
-    const config = JSON.parse(await readFile(p('.orcaops', 'config.json'), 'utf8')) as {
+    const config = JSON.parse(await readFile(await effectiveConfigPath(repo.path), 'utf8')) as {
       install: { scope: string };
     };
     expect(config.install.scope).toBe('personal');

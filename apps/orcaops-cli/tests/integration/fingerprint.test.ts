@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createRepoTemplate, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
-import { commitFile } from '../support/test-helpers.js';
+import { commitFile, effectiveConfigPath } from '../support/test-helpers.js';
 
 /**
  * `orcaops fingerprint show` CLI command.
@@ -178,7 +178,7 @@ describe('orcaops fingerprint show', () => {
   }
 
   async function disableFingerprint(): Promise<void> {
-    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfgPath = await effectiveConfigPath(repo.path);
     const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
     cfg.diff_fingerprint = { enabled: false, max_diff_bytes: 2_000_000 };
     await writeFile(cfgPath, JSON.stringify(cfg, null, 2), 'utf8');

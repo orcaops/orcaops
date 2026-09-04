@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -6,6 +6,7 @@ import { CONFIG_SCHEMA_VERSION } from '@orcaops/storage';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 describe('current config gate', () => {
   let repo: TempRepo;
@@ -14,18 +15,23 @@ describe('current config gate', () => {
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
     agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
-    await agent.init({ noLlm: true });
+    await agent.init({ noLlm: true, scope: 'project' });
   });
 
   afterEach(async () => {
     await repo.cleanup();
   });
 
+  // The file under test is the WORKTREE config; a reset is a fresh init and
+  // therefore personal, so post-reset reads resolve the effective path.
   const configPath = (): string => path.join(repo.path, '.orcaops', 'config.json');
 
   it('init --force preserves current settings and artifact/cache bytes', async () => {
     const artifactSentinel = path.join(repo.path, '.orcaops', 'artifacts', 'preserve-me.txt');
     const cacheSentinel = path.join(repo.path, '.orcaops', 'cache', 'preserve-me.txt');
+    // Init no longer creates the data directories eagerly; the first write does.
+    await mkdir(path.dirname(artifactSentinel), { recursive: true });
+    await mkdir(path.dirname(cacheSentinel), { recursive: true });
     await writeFile(artifactSentinel, 'artifact bytes', 'utf8');
     await writeFile(cacheSentinel, 'cache bytes', 'utf8');
     await writeFile(
@@ -86,6 +92,9 @@ describe('current config gate', () => {
   it('init --force --reset-config restores defaults while preserving artifact/cache bytes', async () => {
     const artifactSentinel = path.join(repo.path, '.orcaops', 'artifacts', 'preserve-me.txt');
     const cacheSentinel = path.join(repo.path, '.orcaops', 'cache', 'preserve-me.txt');
+    // Init no longer creates the data directories eagerly; the first write does.
+    await mkdir(path.dirname(artifactSentinel), { recursive: true });
+    await mkdir(path.dirname(cacheSentinel), { recursive: true });
     await writeFile(artifactSentinel, 'artifact bytes', 'utf8');
     await writeFile(cacheSentinel, 'cache bytes', 'utf8');
     await writeFile(
@@ -104,7 +113,7 @@ describe('current config gate', () => {
     expect(res.exitCode).toBe(0);
     // Reset writes the MINIMAL default config: default-valued keys are
     // omitted and resolve back through the schema defaults.
-    const after = JSON.parse(await readFile(configPath(), 'utf8')) as {
+    const after = JSON.parse(await readFile(await effectiveConfigPath(repo.path), 'utf8')) as {
       naming?: { prefix?: string };
       install: { agents: string[] };
       generated_files?: string;
@@ -153,7 +162,9 @@ describe('current config gate', () => {
     );
     const res = await agent.runRaw(['init', '--force', '--reset-config', '--no-llm', '--json']);
     expect(res.exitCode).toBe(0);
-    const after = JSON.parse(await readFile(configPath(), 'utf8')) as Record<string, unknown>;
+    const after = JSON.parse(
+      await readFile(await effectiveConfigPath(repo.path), 'utf8')
+    ) as Record<string, unknown>;
     expect(after.schema_version).toBe(CONFIG_SCHEMA_VERSION);
     expect(after).not.toHaveProperty('unexpected_setting');
   });
@@ -179,7 +190,9 @@ describe('current config gate', () => {
 
     const reset = await agent.runRaw(['init', '--force', '--reset-config', '--no-llm', '--json']);
     expect(reset.exitCode).toBe(0);
-    const after = JSON.parse(await readFile(configPath(), 'utf8')) as { schema_version: number };
+    const after = JSON.parse(await readFile(await effectiveConfigPath(repo.path), 'utf8')) as {
+      schema_version: number;
+    };
     expect(after.schema_version).toBe(CONFIG_SCHEMA_VERSION);
   });
 

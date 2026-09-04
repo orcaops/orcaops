@@ -4,6 +4,11 @@ import type { SupportedAgentId } from '@orcaops/storage';
 
 import {
   codexConfigTomlPath,
+  codexFenceGuidance,
+  codexHooksDisabledGuidance,
+  codexHooksJsonNote,
+  codexHooksShapeGuidance,
+  codexInvalidTomlGuidance,
   codexMarkerLineGuidance,
   codexTomlSnippet,
   planUserSessionHookConsent,
@@ -24,7 +29,9 @@ export type CodexSessionHookOutcome =
   | 'manual-snippet'
   | 'managed-written'
   | 'managed-unchanged'
-  | 'refused-collision'
+  | 'refused-invalid'
+  | 'refused-hooks-shape'
+  | 'refused-fence'
   | 'refused-markers'
   | 'refused-unreadable'
   | 'failed'
@@ -44,6 +51,8 @@ export interface PromptUserSessionHookInstallOptions {
 
 export interface AppliedUserSessionHookInstall extends PlanUserSessionHooksResult {
   codexOutcome: CodexSessionHookOutcome;
+  /** How a managed write landed: a fresh config.toml or a block merged into an existing one. */
+  codexConfigWrite: 'created' | 'merged' | null;
   installedEntries: UserHooksRecordEntry[];
   liveAgents: SupportedAgentId[];
   record: string | null;
@@ -87,18 +96,18 @@ export async function promptUserSessionHookInstall(
       message: 'Codex registers via ~/.codex/config.toml — how should orcaops handle it?',
       options: [
         {
-          value: 'manual',
-          label: 'Print the snippet — I will paste it myself (recommended)',
-          hint: 'zero write risk to your primary Codex config',
+          value: 'managed',
+          label: 'Write a marker-owned block for me (recommended)',
+          hint: 'appends one [[hooks.SessionStart]] table between markers; never touches your other settings',
         },
         {
-          value: 'managed',
-          label: 'Write a marker-owned block for me',
-          hint: 'append-only; refuses invalid TOML or existing root features/hooks',
+          value: 'manual',
+          label: 'Print the snippet — I will paste it myself',
+          hint: 'zero write risk to your primary Codex config',
         },
         { value: 'skip', label: 'Skip Codex for now', hint: 'register later any time' },
       ],
-      initialValue: 'manual',
+      initialValue: 'managed',
       output: options.output,
     });
     if (prompts.isCancel(choice)) options.onCancel?.();
@@ -125,11 +134,13 @@ export async function applyUserSessionHookInstall(
 ): Promise<AppliedUserSessionHookInstall> {
   const result = await planUserSessionHooks(staged.consent.jsonAgents, 'apply');
   let codexOutcome: CodexSessionHookOutcome = null;
+  let codexConfigWrite: AppliedUserSessionHookInstall['codexConfigWrite'] = null;
 
   if (staged.consent.codexWanted) {
     if (staged.codexChoice === 'manual') {
       codexOutcome = 'manual-snippet';
     } else if (staged.codexChoice === 'managed') {
+      const existed = (await readCodexTomlState()).raw !== null;
       try {
         const wrote = await writeCodexTomlBlock();
         codexOutcome =
@@ -138,6 +149,7 @@ export async function applyUserSessionHookInstall(
             : wrote === 'unchanged'
               ? 'managed-unchanged'
               : wrote;
+        if (wrote === 'written') codexConfigWrite = existed ? 'merged' : 'created';
       } catch (error) {
         codexOutcome = 'failed';
         result.warnings.push(
@@ -149,6 +161,9 @@ export async function applyUserSessionHookInstall(
         result.warnings.push(
           `${state.readError ?? `${state.path} could not be read`} — left untouched`
         );
+      } else if (codexOutcome === 'managed-written' || codexOutcome === 'managed-unchanged') {
+        const state = await readCodexTomlState();
+        if (state.hooksDisabled) result.warnings.push(codexHooksDisabledGuidance(state.path));
       }
     } else {
       codexOutcome = 'skipped';
@@ -213,15 +228,33 @@ export async function applyUserSessionHookInstall(
         plan.action === 'preserved-unreadable' ||
         plan.action === 'preserved-unwritable'
     ) ||
-    codexOutcome === 'refused-collision' ||
+    codexOutcome === 'refused-invalid' ||
+    codexOutcome === 'refused-hooks-shape' ||
+    codexOutcome === 'refused-fence' ||
     codexOutcome === 'refused-markers' ||
     codexOutcome === 'refused-unreadable' ||
     codexOutcome === 'failed' ||
     (installedEntries.length > 0 && record === null);
 
+  // The settings-json planner never sees Codex; a repeat managed install
+  // still reports the surface so the envelope does not read as a no-op.
+  const plans =
+    codexOutcome === 'managed-unchanged'
+      ? [
+          ...result.plans,
+          {
+            agent: 'codex' as SupportedAgentId,
+            path: codexConfigTomlPath(),
+            action: 'unchanged' as const,
+          },
+        ]
+      : result.plans;
+
   return {
     ...result,
+    plans,
     codexOutcome,
+    codexConfigWrite,
     installedEntries,
     liveAgents,
     record,
@@ -234,16 +267,29 @@ export async function applyUserSessionHookInstall(
 export async function codexSessionHookGuidance(
   outcome: CodexSessionHookOutcome
 ): Promise<string | null> {
-  if (outcome === 'manual-snippet' || outcome === 'refused-collision') {
-    const prefix =
-      outcome === 'refused-collision'
-        ? '! Your config.toml is invalid or already defines root features/hooks — orcaops will not edit it. Paste manually:\n\n'
-        : `Paste this into ${codexConfigTomlPath()} (merge \`hooks = true\` under your existing [features] table if needed):\n\n`;
-    const trust =
+  const configPath = codexConfigTomlPath();
+  if (
+    outcome === 'manual-snippet' ||
+    outcome === 'managed-written' ||
+    outcome === 'managed-unchanged'
+  ) {
+    const snippet =
       outcome === 'manual-snippet'
-        ? '\nCodex reviews new hooks once (hash-pinned trust). Approve the orcaops entry when asked; `orcaops session-hooks status` will confirm it after the paste.\n'
+        ? `Paste this into ${configPath}:\n\n${codexTomlSnippet()}\n\n` +
+          'Codex reviews new hooks once (hash-pinned trust). Approve the orcaops entry when asked; `orcaops session-hooks status` will confirm it after the paste.\n'
         : '';
-    return `${prefix}${codexTomlSnippet()}\n${trust}`;
+    const note = await codexHooksJsonNote();
+    const text = snippet + (note === null ? '' : `${note}\n`);
+    return text.length > 0 ? text : null;
+  }
+  if (outcome === 'refused-invalid') {
+    return `! ${codexInvalidTomlGuidance(configPath)}, or paste manually:\n\n${codexTomlSnippet()}\n`;
+  }
+  if (outcome === 'refused-hooks-shape') {
+    return `! ${codexHooksShapeGuidance(configPath)}:\n\n${codexTomlSnippet()}\n`;
+  }
+  if (outcome === 'refused-fence') {
+    return `! ${codexFenceGuidance(configPath)}.\n`;
   }
   if (outcome === 'refused-markers') {
     const state = await readCodexTomlState();

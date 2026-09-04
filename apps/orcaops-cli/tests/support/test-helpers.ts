@@ -1,10 +1,10 @@
 import { mkdtempSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { DEFAULT_CLOUD_BASE_URL, FileStore, loadConfig } from '@orcaops/core';
+import { DEFAULT_CLOUD_BASE_URL, FileStore, loadConfig, resolveConfigPath } from '@orcaops/core';
 import {
   ArtifactStore,
   type EvaluatorDispositionPayload,
@@ -220,4 +220,33 @@ export function seedCloudLogin(
 /** Remove any seeded cloud credential (reset cred state between gating tests). */
 export function clearCloudLogin(): void {
   new FileStore().clearAll();
+}
+
+/**
+ * The config file governing `repoRoot` right now. A fresh init is personal
+ * and lives in the git common dir, so a test that hand-joins
+ * `<repo>/.orcaops/config.json` after init reads a file that does not exist;
+ * one that is about the worktree layout should say `--scope project`.
+ */
+export async function effectiveConfigPath(repoRoot: string): Promise<string> {
+  return resolveConfigPath(repoRoot);
+}
+
+export async function readEffectiveConfig(repoRoot: string): Promise<Record<string, unknown>> {
+  return JSON.parse(await readFile(await effectiveConfigPath(repoRoot), 'utf8')) as Record<
+    string,
+    unknown
+  >;
+}
+
+/** Read → mutate → write the effective config in place, as tests patch settings. */
+export async function patchEffectiveConfig(
+  repoRoot: string,
+  mutate: (raw: Record<string, unknown>) => void
+): Promise<string> {
+  const configPath = await effectiveConfigPath(repoRoot);
+  const raw = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+  mutate(raw);
+  await writeFile(configPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
+  return configPath;
 }

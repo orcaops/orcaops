@@ -9,6 +9,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -20,6 +21,7 @@ import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { runInInvocationContext } from '../../src/lib/invocation-context.js';
 import {
+  CODEX_HOOKS_JSON_NOTE,
   CODEX_TOML_MARKER_END,
   CODEX_TOML_MARKER_START,
   codexTomlSnippet,
@@ -454,7 +456,7 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     expect(await exists(recordPath())).toBe(false);
   });
 
-  it('codex managed mode: marker block round-trips through config.toml; collisions refuse', async () => {
+  it('codex managed mode: marker block round-trips through config.toml; invalid TOML refuses', async () => {
     const configToml = path.join(codexHome, 'config.toml');
 
     // Managed on a FRESH config.toml → marker-owned block written + recorded.
@@ -468,19 +470,25 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     const written = await readFile(configToml, 'utf8');
     expect(written).toContain('# >>> orcaops session-hooks >>>');
     expect(written).toContain('orcaops hook session-start --agent codex --user');
-    expect(written).toContain('hooks = true');
+    expect(written).not.toContain('[features]');
     const managedState = await runInInvocationContext(
       { env: { ...process.env, CODEX_HOME: codexHome } },
       readCodexTomlState
     );
-    expect(managedState).toMatchObject({ markerBlock: true, collision: false, gateMissing: false });
+    expect(managedState).toMatchObject({
+      installed: true,
+      markerBlock: true,
+      markerBlockBroken: false,
+      hooksDisabled: false,
+    });
 
     const invalidOutside = `broken = [\n${written}`;
     await writeFile(configToml, invalidOutside, 'utf8');
     (await confirmMock()).mockResolvedValueOnce(true);
     (await selectMock()).mockResolvedValueOnce('managed');
     r = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
-    expect(r.stdout).toContain('will not');
+    expect(r.stdout).toContain('is not valid TOML outside the orcaops block');
+    expect(r.stdout).toContain('[[hooks.SessionStart]]');
     expect(await readFile(configToml, 'utf8')).toBe(invalidOutside);
     await writeFile(configToml, written, 'utf8');
 
@@ -508,8 +516,9 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     expect(r.exitCode).toBe(0);
     expect(await exists(configToml)).toBe(false);
 
-    // Collision: a config.toml with an existing [features] table refuses the
-    // managed write byte-for-byte and prints the snippet instead.
+    // An existing [features] table is not our concern: the block is appended
+    // after it, the table stays byte-identical, and uninstall restores the
+    // original file exactly.
     await mkdir(codexHome, { recursive: true });
     const existing = '[features]\nshell_snapshots = true\n';
     await writeFile(configToml, existing, 'utf8');
@@ -517,15 +526,86 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     (await selectMock()).mockResolvedValueOnce('managed');
     r = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain('will not');
-    expect(r.stdout).toContain('[[hooks.SessionStart]]');
+    expect(r.stdout).not.toContain('paste');
+    const appended = await readFile(configToml, 'utf8');
+    expect(appended.startsWith(existing)).toBe(true);
+    expect(parseToml(appended)).toMatchObject({
+      features: { shell_snapshots: true },
+      hooks: { SessionStart: [{ matcher: 'startup|resume' }] },
+    });
+    r = await agent.runRaw(['session-hooks', 'uninstall', '--yes']);
+    expect(r.exitCode).toBe(0);
     expect(await readFile(configToml, 'utf8')).toBe(existing);
   });
 
-  it('preserves a symlinked Codex config and its mode through managed round-trip', async () => {
+  it('names the Codex write as created for a fresh config and merged for an existing one', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const fresh = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(fresh.exitCode).toBe(0);
+    expect(fresh.stdout).toContain(`created: ${configToml} (marker-owned block)`);
+    expect(fresh.stdout).not.toContain('merged into');
+
+    await writeFile(configToml, '[features]\nshell_snapshots = true\n', 'utf8');
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const merged = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(merged.exitCode).toBe(0);
+    expect(merged.stdout).toContain(`merged into ${configToml} (marker-owned block)`);
+    expect(merged.stdout).not.toContain(`created: ${configToml}`);
+  });
+
+  it('a repeat managed Codex install reports the surface as unchanged', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    const written = await readFile(configToml, 'utf8');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const text = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toContain(`unchanged: ${configToml} (already registered)`);
+    expect(text.stdout).not.toContain('marker-owned block');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const json = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex', '--json']);
+    expect(json.exitCode).toBe(0);
+    const out = JSON.parse(json.stdout) as {
+      plans: Array<{ agent: string; path: string; action: string }>;
+      restart_required: boolean;
+    };
+    expect(out.plans).toEqual([{ agent: 'codex', path: configToml, action: 'unchanged' }]);
+    expect(out.restart_required).toBe(false);
+    expect(await readFile(configToml, 'utf8')).toBe(written);
+  });
+
+  it('a refused Codex write beside a successful claude-code install says Codex needs attention', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    await writeFile(configToml, 'hooks = []\n', 'utf8');
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+
+    const r = await agent.runRaw(['session-hooks', 'install', '--agents', 'claude-code,codex']);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(`created: ${claudeSettings()}`);
+    expect(r.stdout).toContain('in a form orcaops cannot append to');
+    expect(r.stdout).toContain('Installed for claude-code; Codex needs attention above.');
+    expect(r.stdout).toContain('Repos opt in per-repo with `orcaops update --session-hooks`');
+    expect(r.stdout).not.toContain('Installed. Repos');
+    expect(await readFile(configToml, 'utf8')).toBe('hooks = []\n');
+    expect(await exists(claudeSettings())).toBe(true);
+  });
+
+  it('appends through a symlinked Codex config and keeps the link and mode', async () => {
     const configToml = path.join(codexHome, 'config.toml');
     const target = path.join(codexHome, 'config-target.toml');
-    await writeFile(target, '', { encoding: 'utf8', mode: 0o600 });
+    const existing = 'title = "mine"\n';
+    await writeFile(target, existing, { encoding: 'utf8', mode: 0o600 });
     await symlink(target, configToml);
     (await confirmMock()).mockResolvedValueOnce(true);
     (await selectMock()).mockResolvedValueOnce('managed');
@@ -534,14 +614,16 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     expect(install.exitCode).toBe(0);
     expect((await lstat(configToml)).isSymbolicLink()).toBe(true);
     expect(await readlink(configToml)).toBe(target);
-    expect(await readFile(target, 'utf8')).toContain(CODEX_TOML_MARKER_START);
+    const appended = await readFile(target, 'utf8');
+    expect(appended.startsWith(existing)).toBe(true);
+    expect(appended).toContain(CODEX_TOML_MARKER_START);
     expect((await stat(target)).mode & 0o777).toBe(0o600);
 
     const uninstall = await agent.runRaw(['session-hooks', 'uninstall', '--yes', '--json']);
     expect(uninstall.exitCode).toBe(0);
     expect((await lstat(configToml)).isSymbolicLink()).toBe(true);
     expect(await readlink(configToml)).toBe(target);
-    expect(await readFile(target, 'utf8')).toBe('');
+    expect(await readFile(target, 'utf8')).toBe(existing);
     expect((await stat(target)).mode & 0o777).toBe(0o600);
   });
 
@@ -582,10 +664,7 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     }
   });
 
-  it('treats the recommended manual paste as already registered, not as a collision', async () => {
-    // The snippet the consent prompt tells users to paste defines the root
-    // feature and hook tables itself, so a collision check that ran first
-    // called their WORKING config invalid and offered the snippet again.
+  it('treats the recommended manual paste as already registered', async () => {
     const configToml = path.join(codexHome, 'manual-paste.toml');
     const pasted = `title = "mine"\n\n${codexTomlSnippet()}\n`;
     await writeFile(configToml, pasted, 'utf8');
@@ -594,13 +673,21 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     expect(await readFile(configToml, 'utf8')).toBe(pasted);
   });
 
-  it('still refuses to append into a config whose root tables it does not own', async () => {
-    const configToml = path.join(codexHome, 'foreign-tables.toml');
-    const foreign = '[features]\nhooks = true\n\n[[hooks.SessionStart]]\nmatcher = "startup"\n';
-    await writeFile(configToml, foreign, 'utf8');
+  it('appends our entry alongside a user [[hooks.SessionStart]] and removes only ours', async () => {
+    const configToml = path.join(codexHome, 'user-session-start.toml');
+    const own = '[features]\nhooks = true\n\n[[hooks.SessionStart]]\nmatcher = "startup"\n';
+    await writeFile(configToml, own, 'utf8');
 
-    expect(await writeCodexTomlBlock({ configPath: configToml })).toBe('refused-collision');
-    expect(await readFile(configToml, 'utf8')).toBe(foreign);
+    expect(await writeCodexTomlBlock({ configPath: configToml })).toBe('written');
+    const written = await readFile(configToml, 'utf8');
+    expect(written.startsWith(own)).toBe(true);
+    expect(parseToml(written)).toMatchObject({
+      features: { hooks: true },
+      hooks: { SessionStart: [{ matcher: 'startup' }, { matcher: 'startup|resume' }] },
+    });
+
+    expect(await removeCodexTomlBlock(configToml)).toBe('removed');
+    expect(await readFile(configToml, 'utf8')).toBe(own);
   });
 
   it('preserves an interleaved Codex config write during managed removal', async () => {
@@ -636,32 +723,78 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     expect(await readFile(settings, 'utf8')).toBe(interleaved);
   });
 
-  it('codex managed mode detects TOML collisions by parsed root keys', async () => {
+  it('codex managed mode appends beside any [features] spelling and refuses only unparseable or unappendable files', async () => {
     const configToml = path.join(codexHome, 'config.toml');
-    const collisions = [
-      'features.hooks = false\n',
-      'features = { hooks = false }\n',
+    const appendable = [
       '[ features ]\nshell_snapshots = true\n',
       '["features"]\nshell_snapshots = true\n',
-      'hooks = []\n',
-      'features = {\n',
+      'features = { shell_snapshots = true }\n',
     ];
-
-    for (const existing of collisions) {
+    for (const existing of appendable) {
       await writeFile(configToml, existing, 'utf8');
       (await confirmMock()).mockResolvedValueOnce(true);
       (await selectMock()).mockResolvedValueOnce('managed');
 
       const result = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
-
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain('will not');
-      expect(result.stdout).toContain('[[hooks.SessionStart]]');
-      expect(await readFile(configToml, 'utf8')).toBe(existing);
+      expect(result.stdout).not.toContain('paste');
+      const written = await readFile(configToml, 'utf8');
+      expect(written.startsWith(existing)).toBe(true);
+      expect(parseToml(written)).toMatchObject({
+        features: { shell_snapshots: true },
+        hooks: { SessionStart: [{ matcher: 'startup|resume' }] },
+      });
+      await rm(configToml);
+    }
+
+    await writeFile(configToml, 'features = {\n', 'utf8');
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    let refused = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(refused.exitCode).toBe(0);
+    expect(refused.stdout).toContain('is not valid TOML outside the orcaops block');
+    expect(refused.stdout).toContain('[[hooks.SessionStart]]');
+    expect(await readFile(configToml, 'utf8')).toBe('features = {\n');
+
+    await writeFile(configToml, 'hooks = []\n', 'utf8');
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    refused = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(refused.exitCode).toBe(0);
+    expect(refused.stdout).toContain('in a form orcaops cannot append to');
+    expect(refused.stdout).toContain('[[hooks.SessionStart]]');
+    expect(await readFile(configToml, 'utf8')).toBe('hooks = []\n');
+  });
+
+  it('codex managed mode writes beside a disabled feature gate and warns once', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    for (const existing of ['features.hooks = false\n', 'features = { codex_hooks = false }\n']) {
+      await writeFile(configToml, existing, 'utf8');
+      (await confirmMock()).mockResolvedValueOnce(true);
+      (await selectMock()).mockResolvedValueOnce('managed');
+
+      const result = await agent.runRaw([
+        'session-hooks',
+        'install',
+        '--agents',
+        'codex',
+        '--json',
+      ]);
+      expect(result.exitCode).toBe(0);
+      const output = JSON.parse(result.stdout) as { warnings: string[] };
+      expect(output.warnings).toEqual([
+        expect.stringContaining('features.hooks (or codex_hooks) = false, so Codex runs no hook'),
+      ]);
+      const written = await readFile(configToml, 'utf8');
+      expect(written.startsWith(existing)).toBe(true);
+      expect(parseToml(written)).toMatchObject({
+        hooks: { SessionStart: [{ matcher: 'startup|resume' }] },
+      });
+      await rm(configToml);
     }
   });
 
-  it('codex managed mode ignores nested hooks and reads the feature gate structurally', async () => {
+  it('codex managed mode ignores hook commands that sit outside hooks.SessionStart', async () => {
     const configToml = path.join(codexHome, 'config.toml');
     const nested = '[unrelated]\nhooks = true\n';
     await writeFile(configToml, nested, 'utf8');
@@ -672,10 +805,8 @@ describe('orcaops session-hooks (machine-level registration)', () => {
 
     expect(result.exitCode).toBe(0);
     const written = await readFile(configToml, 'utf8');
-    expect(parseToml(written)).toMatchObject({
-      unrelated: { hooks: true },
-      features: { hooks: true },
-    });
+    expect(parseToml(written)).toMatchObject({ unrelated: { hooks: true } });
+    expect(parseToml(written)).not.toHaveProperty('features');
 
     const command = canonicalSessionHookCommand('codex', { user: true });
     await writeFile(configToml, `[unrelated]\nhooks = true\ncommand = "${command}"\n`, 'utf8');
@@ -684,28 +815,46 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     const output = JSON.parse(status.stdout) as {
       surfaces: Array<{ agent: string; state: string; remedy?: string }>;
     };
+    // The install above recorded this path, and a command string under an
+    // unrelated table is not a registration.
     const codex = output.surfaces.find((surface) => surface.agent === 'codex');
-    expect(codex).toMatchObject({ state: 'registered-but-broken' });
+    expect(codex).toMatchObject({ state: 'registered-but-missing' });
     expect(codex?.remedy).toContain('session-hooks install --agents codex');
     expect(status.stderr).toBe('');
   });
 
-  it('codex status accepts every parsed spelling of an enabled feature gate', async () => {
+  it('codex status reports hooks disabled for every false spelling of the feature gate', async () => {
     const configToml = path.join(codexHome, 'config.toml');
-    const command = canonicalSessionHookCommand('codex', { user: true });
-    const enabledGates = [
-      `features.hooks = true\ncommand = "${command}"\n`,
-      `features = { hooks = true }\ncommand = "${command}"\n`,
-      `[ features ]\nhooks = true\ncommand = "${command}"\n`,
-      `["features"]\nhooks = true\ncommand = "${command}"\n`,
+    const disabledGates = [
+      'features.hooks = false\n',
+      'features = { hooks = false }\n',
+      '[ features ]\nhooks = false\n',
+      '["features"]\ncodex_hooks = false\n',
+      '[features]\nhooks = false\ncodex_hooks = true\n',
     ];
+    type Status = { surfaces: Array<{ agent: string; state: string; remedy?: string }> };
 
-    for (const existing of enabledGates) {
-      await writeFile(configToml, existing, 'utf8');
+    for (const gate of disabledGates) {
+      await writeFile(configToml, `${gate}\n${codexTomlSnippet()}\n`, 'utf8');
       const status = await agent.runRaw(['session-hooks', 'status', '--json']);
       expect(status.exitCode).toBe(0);
       expect(status.stderr).toBe('');
+      const codex = (JSON.parse(status.stdout) as Status).surfaces.find((s) => s.agent === 'codex');
+      expect(codex).toMatchObject({ state: 'registered-but-broken' });
+      expect(codex?.remedy).toContain('features.hooks (or codex_hooks) = false');
+      expect(codex?.remedy).toContain('set it to true');
+      expect(codex?.remedy).not.toContain('session-hooks install');
     }
+
+    // `hooks` wins over its alias, so this spelling runs the hook.
+    await writeFile(
+      configToml,
+      `[features]\nhooks = true\ncodex_hooks = false\n\n${codexTomlSnippet()}\n`,
+      'utf8'
+    );
+    const status = await agent.runRaw(['session-hooks', 'status', '--json']);
+    const codex = (JSON.parse(status.stdout) as Status).surfaces.find((s) => s.agent === 'codex');
+    expect(codex).toMatchObject({ state: 'installed' });
   });
 
   it('codex refuses inverted and duplicate marker layouts with line guidance', async () => {
@@ -815,7 +964,7 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     // Simulate the user pasting it (no orcaops markers): status detects it,
     // uninstall reports it but never edits the user's content.
     await mkdir(codexHome, { recursive: true });
-    const pasted = `[features]\nhooks = true\n\n[[hooks.SessionStart]]\nmatcher = "startup|resume"\nhooks = [{ type = "command", command = "orcaops hook session-start --agent codex --user" }]\n`;
+    const pasted = `[features]\nhooks = true\n\n${codexTomlSnippet()}\n`;
     await writeFile(configToml, pasted, 'utf8');
     const st = await agent.runRaw(['session-hooks', 'status', '--json']);
     const out = JSON.parse(st.stdout) as { surfaces: Array<{ agent: string; state: string }> };
@@ -826,6 +975,189 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     const un = JSON.parse(r.stdout) as { warnings: string[] };
     expect(un.warnings.some((w) => w.includes('never edits content'))).toBe(true);
     expect(await readFile(configToml, 'utf8')).toBe(pasted);
+  });
+
+  it('install is unchanged when Codex trust tables sit inside the fence; uninstall keeps them', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    const trust = [
+      '',
+      '[hooks.state]',
+      '',
+      `[hooks.state."${configToml}:session_start:0:0"]`,
+      'trusted_hash = "4f1c2d9e"',
+      'enabled = true',
+    ].join('\n');
+    const fenced = `[features]\nshell_snapshots = true\n\n${CODEX_TOML_MARKER_START}\n${codexTomlSnippet()}\n${trust}\n${CODEX_TOML_MARKER_END}\n`;
+    await writeFile(configToml, fenced, 'utf8');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex', '--json']);
+    expect(install.exitCode).toBe(0);
+    expect(await readFile(configToml, 'utf8')).toBe(fenced);
+
+    const status = await agent.runRaw(['session-hooks', 'status', '--json']);
+    const surfaces = (
+      JSON.parse(status.stdout) as { surfaces: Array<{ agent: string; state: string }> }
+    ).surfaces;
+    expect(surfaces.find((s) => s.agent === 'codex')?.state).toBe('installed');
+
+    const uninstall = await agent.runRaw(['session-hooks', 'uninstall', '--yes', '--json']);
+    expect(uninstall.exitCode).toBe(0);
+    expect((JSON.parse(uninstall.stdout) as { warnings: string[] }).warnings).toEqual([]);
+    const remaining = await readFile(configToml, 'utf8');
+    expect(remaining).not.toContain(CODEX_TOML_MARKER_START);
+    expect(remaining).not.toContain('SessionStart');
+    expect(parseToml(remaining)).toEqual({
+      features: { shell_snapshots: true },
+      hooks: {
+        state: { [`${configToml}:session_start:0:0`]: { trusted_hash: '4f1c2d9e', enabled: true } },
+      },
+    });
+  });
+
+  it('install is unchanged when a user toggle sits inside a legacy fence; uninstall keeps the toggle', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    const legacy = `title = "mine"\n\n${CODEX_TOML_MARKER_START}\n[features]\nhooks = true\nshell_snapshots = true\n\n${codexTomlSnippet()}\n${CODEX_TOML_MARKER_END}\n`;
+    await writeFile(configToml, legacy, 'utf8');
+
+    expect(await writeCodexTomlBlock({ configPath: configToml })).toBe('unchanged');
+    expect(await readFile(configToml, 'utf8')).toBe(legacy);
+
+    expect(await removeCodexTomlBlock(configToml)).toBe('removed');
+    const remaining = await readFile(configToml, 'utf8');
+    expect(remaining).not.toContain(CODEX_TOML_MARKER_START);
+    expect(parseToml(remaining)).toEqual({ title: 'mine', features: { shell_snapshots: true } });
+  });
+
+  it('uninstall removes a legacy fence together with its own [features] pair', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    const existing = 'title = "mine"\n';
+    const legacy = `${existing}\n${CODEX_TOML_MARKER_START}\n[features]\nhooks = true\n\n${codexTomlSnippet()}\n${CODEX_TOML_MARKER_END}\n`;
+    await writeFile(configToml, legacy, 'utf8');
+
+    const uninstall = await agent.runRaw(['session-hooks', 'uninstall', '--yes', '--json']);
+    expect(uninstall.exitCode).toBe(0);
+    expect(await readFile(configToml, 'utf8')).toBe(existing);
+  });
+
+  it('repairs a fence whose command is stale without touching Codex tables', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    const current = canonicalSessionHookCommand('codex', { user: true });
+    const trustKey = `${configToml}:session_start:0:0`;
+    const stale = `${CODEX_TOML_MARKER_START}\n${codexTomlSnippet().replace(current, 'orcaops hook session-start --agent codex --user')}\n\n[hooks.state]\n\n[hooks.state."${trustKey}"]\ntrusted_hash = "old"\nenabled = true\n${CODEX_TOML_MARKER_END}\n`;
+    await writeFile(configToml, stale, 'utf8');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const repair = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex', '--json']);
+    expect(repair.exitCode).toBe(0);
+    const repaired = await readFile(configToml, 'utf8');
+    expect(repaired).not.toContain('command = "orcaops hook session-start --agent codex --user"');
+    expect(parseToml(repaired)).toEqual({
+      hooks: {
+        state: { [trustKey]: { trusted_hash: 'old', enabled: true } },
+        SessionStart: [
+          { matcher: 'startup|resume', hooks: [{ type: 'command', command: current }] },
+        ],
+      },
+    });
+  });
+
+  it('refuses to repair a fence holding lines it cannot prove are its own', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    const current = canonicalSessionHookCommand('codex', { user: true });
+    const foreign = `${CODEX_TOML_MARKER_START}\n${codexTomlSnippet().replace(current, 'orcaops hook session-start --agent codex --user')}\n\n[[hooks.SessionStart]]\nmatcher = "resume"\nhooks = [{ type = "command", command = "echo mine" }]\n${CODEX_TOML_MARKER_END}\n`;
+    await writeFile(configToml, foreign, 'utf8');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+    expect(install.stdout).toContain('lines inside the orcaops block that orcaops did not write');
+    expect(install.stdout).toContain('move them outside the markers');
+    expect(await readFile(configToml, 'utf8')).toBe(foreign);
+    expect(await exists(recordPath())).toBe(false);
+
+    const uninstall = await agent.runRaw(['session-hooks', 'uninstall', '--yes', '--json']);
+    expect(uninstall.exitCode).toBe(0);
+    expect((JSON.parse(uninstall.stdout) as { warnings: string[] }).warnings.join('\n')).toContain(
+      'move them outside the markers'
+    );
+    expect(await readFile(configToml, 'utf8')).toBe(foreign);
+  });
+
+  it('a commented-out paste does not count as registered', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    const commented = `${codexTomlSnippet()
+      .split('\n')
+      .map((line) => `# ${line}`)
+      .join('\n')}\n`;
+    await writeFile(configToml, commented, 'utf8');
+
+    const status = await agent.runRaw(['session-hooks', 'status', '--json']);
+    const surfaces = (
+      JSON.parse(status.stdout) as { surfaces: Array<{ agent: string; state: string }> }
+    ).surfaces;
+    expect(surfaces.find((s) => s.agent === 'codex')?.state).toBe('absent');
+
+    expect(await writeCodexTomlBlock({ configPath: configToml })).toBe('written');
+    const written = await readFile(configToml, 'utf8');
+    expect(written.startsWith(commented)).toBe(true);
+    expect(parseToml(written)).toMatchObject({
+      hooks: { SessionStart: [{ matcher: 'startup|resume' }] },
+    });
+  });
+
+  it('a manual paste plus a fence reports registered and installs unchanged', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    const both = `${codexTomlSnippet()}\n\n${CODEX_TOML_MARKER_START}\n${codexTomlSnippet()}\n${CODEX_TOML_MARKER_END}\n`;
+    await writeFile(configToml, both, 'utf8');
+
+    const status = await agent.runRaw(['session-hooks', 'status', '--json']);
+    const surfaces = (
+      JSON.parse(status.stdout) as { surfaces: Array<{ agent: string; state: string }> }
+    ).surfaces;
+    expect(surfaces.find((s) => s.agent === 'codex')?.state).toBe('installed');
+    expect(await writeCodexTomlBlock({ configPath: configToml })).toBe('unchanged');
+    expect(await readFile(configToml, 'utf8')).toBe(both);
+
+    expect(await removeCodexTomlBlock(configToml)).toBe('removed');
+    expect(await readFile(configToml, 'utf8')).toBe(`${codexTomlSnippet()}\n`);
+  });
+
+  it('appends after a [hooks] table with unrelated keys', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    const existing = '[hooks]\nfoo = 1\n';
+    await writeFile(configToml, existing, 'utf8');
+
+    expect(await writeCodexTomlBlock({ configPath: configToml })).toBe('written');
+    const written = await readFile(configToml, 'utf8');
+    expect(written.startsWith(existing)).toBe(true);
+    expect(parseToml(written)).toMatchObject({
+      hooks: { foo: 1, SessionStart: [{ matcher: 'startup|resume' }] },
+    });
+
+    expect(await removeCodexTomlBlock(configToml)).toBe('removed');
+    expect(await readFile(configToml, 'utf8')).toBe(existing);
+  });
+
+  it('CRLF files get a CRLF block and come back byte-identical', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    const existing = 'title = "mine"\r\n\r\n[features]\r\nshell_snapshots = true\r\n';
+    await writeFile(configToml, existing, 'utf8');
+
+    expect(await writeCodexTomlBlock({ configPath: configToml })).toBe('written');
+    const written = await readFile(configToml, 'utf8');
+    expect(written.startsWith(existing)).toBe(true);
+    expect(written.replace(/\r\n/g, '')).not.toContain('\n');
+    expect(written).toContain(`${CODEX_TOML_MARKER_START}\r\n[[hooks.SessionStart]]\r\n`);
+    expect(parseToml(written)).toMatchObject({
+      hooks: { SessionStart: [{ matcher: 'startup|resume' }] },
+    });
+
+    expect(await removeCodexTomlBlock(configToml)).toBe('removed');
+    expect(await readFile(configToml, 'utf8')).toBe(existing);
   });
 
   it('status classifies installed / absent / registered-but-missing', async () => {
@@ -917,15 +1249,14 @@ describe('orcaops session-hooks (machine-level registration)', () => {
 
     const configToml = path.join(codexHome, 'config.toml');
     const healthy = await readFile(configToml, 'utf8');
-    const brokenStates = [
+    const repairable = [
       healthy
         .split('\n')
         .filter((line) => !line.startsWith('hooks = [{'))
         .join('\n'),
-      healthy.replace('hooks = true', 'hooks = false'),
       null,
     ];
-    for (const broken of brokenStates) {
+    for (const broken of repairable) {
       if (broken === null) await rm(configToml);
       else await writeFile(configToml, broken, 'utf8');
 
@@ -939,6 +1270,24 @@ describe('orcaops session-hooks (machine-level registration)', () => {
       expect(repair.exitCode).toBe(0);
       expect((await doctorCheck())?.status).toBe('pass');
     }
+
+    // A gate the user turned off is reported with the fix, never edited:
+    // re-running install leaves the file alone and doctor keeps warning.
+    const disabled = `[features]\nhooks = false\n\n${healthy}`;
+    await writeFile(configToml, disabled, 'utf8');
+    const check = await doctorCheck();
+    expect(check?.status).toBe('warn');
+    const details = (check?.details ?? []).join('\n');
+    expect(details).toContain('features.hooks (or codex_hooks) = false');
+    expect(details).toContain('set it to true');
+    expect(details).not.toContain('session-hooks install --agents codex');
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const rerun = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex', '--json']);
+    expect(rerun.exitCode).toBe(0);
+    expect(await readFile(configToml, 'utf8')).toBe(disabled);
+    expect((await doctorCheck())?.status).toBe('warn');
   });
 
   it('doctor names project and machine remedies only for their finding sources', async () => {
@@ -1019,61 +1368,463 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     expect(await exists(claudeSettings())).toBe(false);
   });
 
-  it('--agents codex dry-run (non-TTY --json) names the config.toml surface instead of an empty preview', async () => {
+  it('--agents codex dry-run (non-TTY --json) names the edit managed mode would make', async () => {
     (process.stdout as unknown as { isTTY: boolean }).isTTY = false;
     const configToml = path.join(codexHome, 'config.toml');
     type DryRun = {
       dry_run: boolean;
-      plans: Array<{ agent: string; path: string; action: string }>;
+      plans: Array<{ agent: string; path: string; action: string; managed?: string }>;
       warnings: string[];
+    };
+    const preview = async (): Promise<DryRun> => {
+      const r = await agent.runRaw([
+        'session-hooks',
+        'install',
+        '--agents',
+        'codex',
+        '--dry-run',
+        '--json',
+      ]);
+      expect(r.exitCode).toBe(0);
+      return JSON.parse(r.stdout) as DryRun;
+    };
+
+    const humanLine = async (): Promise<string> => {
+      const r = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex', '--dry-run']);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('DRY RUN — nothing written.');
+      return r.stdout;
     };
 
     // Fresh: the chooser can't run in a preview, but the surface must still
     // be named — an empty plans[] would read as "install would do nothing".
-    let r = await agent.runRaw([
-      'session-hooks',
-      'install',
-      '--agents',
-      'codex',
-      '--dry-run',
-      '--json',
-    ]);
-    expect(r.exitCode).toBe(0);
-    let out = JSON.parse(r.stdout) as DryRun;
+    let out = await preview();
     expect(out.dry_run).toBe(true);
-    expect(out.plans).toEqual([{ agent: 'codex', path: configToml, action: 'created' }]);
-    expect(out.warnings.some((w) => w.includes('chooser-driven'))).toBe(true);
-    expect(await exists(configToml)).toBe(false); // read-only preview
-
-    // Collision: managed mode would refuse — the preview says so.
-    await mkdir(codexHome, { recursive: true });
-    await writeFile(configToml, '[features]\nshell_snapshots = true\n', 'utf8');
-    r = await agent.runRaw([
-      'session-hooks',
-      'install',
-      '--agents',
-      'codex',
-      '--dry-run',
-      '--json',
+    expect(out.plans).toEqual([
+      { agent: 'codex', path: configToml, action: 'created', managed: 'append the block' },
     ]);
-    out = JSON.parse(r.stdout) as DryRun;
-    expect(out.plans).toEqual([{ agent: 'codex', path: configToml, action: 'created' }]);
-    expect(out.warnings.some((w) => w.includes('REFUSE'))).toBe(true);
-
-    // Already registered (manual paste): unchanged, no chooser warning.
-    const pasted = `[features]\nhooks = true\n\n[[hooks.SessionStart]]\nmatcher = "startup|resume"\nhooks = [{ type = "command", command = "orcaops hook session-start --agent codex --user" }]\n`;
-    await writeFile(configToml, pasted, 'utf8');
-    r = await agent.runRaw([
-      'session-hooks',
-      'install',
-      '--agents',
-      'codex',
-      '--dry-run',
-      '--json',
-    ]);
-    out = JSON.parse(r.stdout) as DryRun;
-    expect(out.plans).toEqual([{ agent: 'codex', path: configToml, action: 'unchanged' }]);
     expect(out.warnings).toEqual([]);
+    expect(await humanLine()).toContain(`created: ${configToml} — append the block`);
+    expect(await exists(configToml)).toBe(false);
+
+    // An existing file is appended to, so the preview says updated, not created.
+    const features = '[features]\nshell_snapshots = true\n';
+    await writeFile(configToml, features, 'utf8');
+    out = await preview();
+    expect(out.plans).toEqual([
+      { agent: 'codex', path: configToml, action: 'updated', managed: 'append the block' },
+    ]);
+    expect(out.warnings).toEqual([]);
+    expect(await humanLine()).toContain(`updated: ${configToml} — append the block`);
+    expect(await readFile(configToml, 'utf8')).toBe(features);
+
+    await writeFile(configToml, '  \n\n', 'utf8');
+    out = await preview();
+    expect(out.plans[0]).toMatchObject({ action: 'created', managed: 'append the block' });
+
+    const pasted = `${codexTomlSnippet()}\n`;
+    await writeFile(configToml, pasted, 'utf8');
+    out = await preview();
+    expect(out.plans).toEqual([
+      {
+        agent: 'codex',
+        path: configToml,
+        action: 'unchanged',
+        managed: 'unchanged (already registered)',
+      },
+    ]);
+    expect(out.warnings).toEqual([]);
+    expect(await humanLine()).toContain(
+      `unchanged: ${configToml} — unchanged (already registered)`
+    );
+    expect(await readFile(configToml, 'utf8')).toBe(pasted);
+  });
+
+  it('dry-run names each refusal reason without writing', async () => {
+    (process.stdout as unknown as { isTTY: boolean }).isTTY = false;
+    const configToml = path.join(codexHome, 'config.toml');
+    const current = canonicalSessionHookCommand('codex', { user: true });
+    const cases: Array<{ raw: string; reason: string }> = [
+      {
+        raw: '[features\nshell_snapshots = true\n',
+        reason: 'is not valid TOML outside the orcaops block',
+      },
+      {
+        raw: 'hooks = []\n',
+        reason: 'already defines hooks.SessionStart in a form orcaops cannot append to',
+      },
+      {
+        raw: `${CODEX_TOML_MARKER_START}\n${codexTomlSnippet().replace(current, 'orcaops hook session-start --agent codex --user')}\n\n[[hooks.SessionStart]]\nmatcher = "resume"\nhooks = [{ type = "command", command = "echo mine" }]\n${CODEX_TOML_MARKER_END}\n`,
+        reason: 'has lines inside the orcaops block that orcaops did not write',
+      },
+    ];
+    for (const { raw, reason } of cases) {
+      await writeFile(configToml, raw, 'utf8');
+      const json = await agent.runRaw([
+        'session-hooks',
+        'install',
+        '--agents',
+        'codex',
+        '--dry-run',
+        '--json',
+      ]);
+      expect(json.exitCode).toBe(0);
+      const out = JSON.parse(json.stdout) as {
+        plans: Array<{ action: string; managed?: string }>;
+        warnings: string[];
+      };
+      expect(out.plans).toHaveLength(1);
+      expect(out.plans[0]?.action).toBe('preserved-invalid');
+      expect(out.plans[0]?.managed).toMatch(/^refuse: /);
+      expect(out.plans[0]?.managed).toContain(reason);
+      expect(out.warnings.join('\n')).toContain(
+        `managed mode would refuse: ${configToml} ${reason}`
+      );
+      expect(await readFile(configToml, 'utf8')).toBe(raw);
+
+      const text = await agent.runRaw([
+        'session-hooks',
+        'install',
+        '--agents',
+        'codex',
+        '--dry-run',
+      ]);
+      expect(text.exitCode).toBe(0);
+      expect(text.stdout).toContain('DRY RUN — nothing written.');
+      expect(text.stdout).toContain(
+        `preserved-invalid: ${configToml} — refuse: ${configToml} ${reason}`
+      );
+      expect(text.stdout).not.toContain(`created: ${configToml}`);
+      expect(await readFile(configToml, 'utf8')).toBe(raw);
+    }
+    expect(await exists(recordPath())).toBe(false);
+  });
+
+  it('an unparseable config.toml is reported broken with the invalid-TOML remedy, not installed', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    const invalidRemedy = `${configToml} is not valid TOML outside the orcaops block — fix it, then re-run`;
+    type Status = { surfaces: Array<{ agent: string; state: string; remedy?: string }> };
+    const codexStatus = async (): Promise<Status['surfaces'][number] | undefined> => {
+      const r = await agent.runRaw(['session-hooks', 'status', '--json']);
+      expect(r.exitCode).toBe(0);
+      return (JSON.parse(r.stdout) as Status).surfaces.find((s) => s.agent === 'codex');
+    };
+    type UninstallPreview = { codex: Array<{ path: string; outcome: string }>; warnings: string[] };
+    const uninstallPreview = async (): Promise<UninstallPreview> => {
+      const r = await agent.runRaw(['session-hooks', 'uninstall', '--dry-run', '--json']);
+      expect(r.exitCode).toBe(0);
+      return JSON.parse(r.stdout) as UninstallPreview;
+    };
+
+    // Not TOML, yet a comment line mentions the command: never "installed".
+    const mention = `not toml ===\n# ${codexTomlSnippet().split('\n').join('\n# ')}\n`;
+    await writeFile(configToml, mention, 'utf8');
+    expect(await codexStatus()).toEqual({
+      agent: 'codex',
+      path: configToml,
+      state: 'registered-but-broken',
+      remedy: invalidRemedy,
+    });
+    const human = await agent.runRaw(['session-hooks', 'status']);
+    expect(human.exitCode).toBe(0);
+    expect(human.stdout).toContain(`registered-but-broken    ${configToml}  (codex)`);
+    expect(human.stdout).toContain(`! ${invalidRemedy}`);
+    expect(human.stdout).not.toContain('installed ');
+
+    (process.stdout as unknown as { isTTY: boolean }).isTTY = false;
+    const install = await agent.runRaw([
+      'session-hooks',
+      'install',
+      '--agents',
+      'codex',
+      '--dry-run',
+      '--json',
+    ]);
+    expect(install.exitCode).toBe(0);
+    expect((JSON.parse(install.stdout) as { plans: unknown[] }).plans).toEqual([
+      {
+        agent: 'codex',
+        path: configToml,
+        action: 'preserved-invalid',
+        managed: `refuse: ${invalidRemedy}`,
+      },
+    ]);
+    (process.stdout as unknown as { isTTY: boolean }).isTTY = true;
+
+    // With no fence there is nothing to remove: the mention is the user's to clean up.
+    let removal = await uninstallPreview();
+    expect(removal.codex).toEqual([{ path: configToml, outcome: 'manual-content' }]);
+    expect(removal.warnings.join('\n')).toContain('remove it yourself');
+    expect(await readFile(configToml, 'utf8')).toBe(mention);
+
+    await writeFile(configToml, 'not toml ===\n', 'utf8');
+    expect(await codexStatus()).toMatchObject({
+      state: 'registered-but-broken',
+      remedy: invalidRemedy,
+    });
+    removal = await uninstallPreview();
+    expect(removal.codex).toEqual([]);
+    expect(removal.warnings).toEqual([]);
+
+    // A recorded managed block whose file later stopped parsing: status and
+    // doctor say broken with the same remedy; uninstall refuses to guess.
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    await rm(configToml);
+    const managed = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(managed.exitCode).toBe(0);
+    const healthy = await readFile(configToml, 'utf8');
+    const corrupted = `not toml ===\n${healthy}`;
+    await writeFile(configToml, corrupted, 'utf8');
+    expect(await codexStatus()).toMatchObject({
+      state: 'registered-but-broken',
+      remedy: invalidRemedy,
+    });
+    removal = await uninstallPreview();
+    expect(removal.codex).toEqual([{ path: configToml, outcome: 'refused-invalid' }]);
+    expect(removal.warnings.join('\n')).toContain(invalidRemedy);
+    const uninstallText = await agent.runRaw(['session-hooks', 'uninstall', '--dry-run']);
+    expect(uninstallText.stdout).toContain(`refused-invalid: ${configToml}`);
+    expect(await readFile(configToml, 'utf8')).toBe(corrupted);
+
+    await agent.runRaw(['init', '--scope', 'project', '--yes', '--json', '--no-llm']);
+    const doctor = await agent.runRaw(['doctor', '--json']);
+    const report = JSON.parse(doctor.stdout) as {
+      checks: Array<{ name: string; status: string; details?: string[] }>;
+    };
+    const check = report.checks.find((c) => c.name === 'session-hooks');
+    expect(check?.status).toBe('warn');
+    const details = (check?.details ?? []).join('\n');
+    expect(details).toContain(
+      `${configToml}: registered user-level entry is broken — ${invalidRemedy}`
+    );
+    expect(details).not.toContain('session-hooks install --agents codex');
+  });
+
+  it('doctor reports an unrecorded paste inside an unparseable config.toml as broken', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    const invalidRemedy = `${configToml} is not valid TOML outside the orcaops block — fix it, then re-run`;
+    await agent.runRaw(['init', '--scope', 'project', '--yes', '--json', '--no-llm']);
+    const sessionHooksCheck = async (): Promise<{ status?: string; details: string }> => {
+      const doctor = await agent.runRaw(['doctor', '--json']);
+      const report = JSON.parse(doctor.stdout) as {
+        checks: Array<{ name: string; status: string; details?: string[] }>;
+      };
+      const check = report.checks.find((c) => c.name === 'session-hooks');
+      return { status: check?.status, details: (check?.details ?? []).join('\n') };
+    };
+
+    // A manual paste, never recorded or fenced, in a file that later stopped parsing.
+    await writeFile(configToml, `${codexTomlSnippet()}\nnot toml ===\n`, 'utf8');
+    const broken = await sessionHooksCheck();
+    expect(broken.status).toBe('warn');
+    expect(broken.details).toContain(
+      `${configToml}: registered user-level entry is broken — ${invalidRemedy}`
+    );
+    expect(broken.details).not.toContain('session-hooks install --agents codex');
+    expect(await exists(recordPath())).toBe(false);
+
+    // The same unparseable file without any trace of the command is not ours to report.
+    await writeFile(configToml, 'not toml ===\n', 'utf8');
+    const silent = await sessionHooksCheck();
+    expect(silent.details).not.toContain(configToml);
+    expect(silent.details).not.toContain('codex');
+  });
+
+  it('uninstall dry-run reports what removal would prove without writing', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    type Preview = {
+      dry_run: boolean;
+      codex: Array<{ path: string; outcome: string }>;
+      warnings: string[];
+    };
+    const preview = async (): Promise<Preview> => {
+      const r = await agent.runRaw(['session-hooks', 'uninstall', '--dry-run', '--json']);
+      expect(r.exitCode).toBe(0);
+      return JSON.parse(r.stdout) as Preview;
+    };
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex', '--json']);
+    expect(install.exitCode).toBe(0);
+    const clean = await readFile(configToml, 'utf8');
+    expect(clean).toContain(CODEX_TOML_MARKER_START);
+    let out = await preview();
+    expect(out.dry_run).toBe(true);
+    expect(out.codex).toEqual([{ path: configToml, outcome: 'removed' }]);
+    expect(out.warnings).toEqual([]);
+    expect(await readFile(configToml, 'utf8')).toBe(clean);
+    expect(await exists(recordPath())).toBe(true);
+
+    const trusted = `[features]\nshell_snapshots = true\n\n${CODEX_TOML_MARKER_START}\n${codexTomlSnippet()}\n\n[hooks.state]\n\n[hooks.state."${configToml}:session_start:0:0"]\ntrusted_hash = "4f1c2d9e"\nenabled = true\n${CODEX_TOML_MARKER_END}\n`;
+    await writeFile(configToml, trusted, 'utf8');
+    out = await preview();
+    expect(out.codex).toEqual([{ path: configToml, outcome: 'removed' }]);
+    expect(await readFile(configToml, 'utf8')).toBe(trusted);
+
+    const foreign = `${CODEX_TOML_MARKER_START}\n${codexTomlSnippet()}\n\n[[hooks.SessionStart]]\nmatcher = "resume"\nhooks = [{ type = "command", command = "echo mine" }]\n${CODEX_TOML_MARKER_END}\n`;
+    await writeFile(configToml, foreign, 'utf8');
+    out = await preview();
+    expect(out.codex).toEqual([{ path: configToml, outcome: 'refused-fence' }]);
+    expect(out.warnings.join('\n')).toContain('move them outside the markers');
+    expect(await readFile(configToml, 'utf8')).toBe(foreign);
+
+    const text = await agent.runRaw(['session-hooks', 'uninstall', '--dry-run']);
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toContain('DRY RUN — nothing written.');
+    expect(text.stdout).toContain(`refused-fence: ${configToml}`);
+    expect(await readFile(configToml, 'utf8')).toBe(foreign);
+    expect(await exists(recordPath())).toBe(true);
+  });
+
+  it('chooser defaults to managed and the default answer writes the block', async () => {
+    const configToml = path.join(codexHome, 'config.toml');
+    const features = '[features]\nshell_snapshots = true\n';
+    await writeFile(configToml, features, 'utf8');
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockImplementationOnce(
+      async ({ initialValue }: { initialValue?: unknown }) => initialValue
+    );
+
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex', '--json']);
+    expect(install.exitCode).toBe(0);
+
+    const chooser = (await selectMock()).mock.calls[0]?.[0] as {
+      initialValue: string;
+      options: Array<{ value: string; label: string; hint?: string }>;
+    };
+    expect(chooser.initialValue).toBe('managed');
+    expect(chooser.options.map((option) => option.value)).toEqual(['managed', 'manual', 'skip']);
+    expect(chooser.options[0]?.label).toContain('(recommended)');
+    expect(chooser.options[1]?.label).not.toContain('recommended');
+    expect(chooser.options.map((option) => option.hint).join('\n')).not.toContain('root features');
+
+    const written = await readFile(configToml, 'utf8');
+    expect(written.startsWith(features)).toBe(true);
+    expect(written).toContain(CODEX_TOML_MARKER_START);
+    expect(parseToml(written)).toEqual({
+      features: { shell_snapshots: true },
+      hooks: {
+        SessionStart: [
+          {
+            matcher: 'startup|resume',
+            hooks: [
+              { type: 'command', command: canonicalSessionHookCommand('codex', { user: true }) },
+            ],
+          },
+        ],
+      },
+    });
+    expect(await exists(recordPath())).toBe(true);
+  });
+
+  const noteCount = (text: string): number => text.split(CODEX_HOOKS_JSON_NOTE).length - 1;
+
+  it('notes a hooks.json sidecar even when it is not valid JSON', async () => {
+    await writeFile(codexHooks(), '{ not json', 'utf8');
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+    expect(noteCount(install.stdout)).toBe(1);
+    expect(install.stdout).not.toContain(`! ${CODEX_HOOKS_JSON_NOTE}`);
+
+    const human = await agent.runRaw(['session-hooks', 'status']);
+    expect(noteCount(human.stdout)).toBe(1);
+    const st = await agent.runRaw(['session-hooks', 'status', '--json']);
+    const out = JSON.parse(st.stdout) as {
+      surfaces: Array<{ agent: string; state: string; note?: string }>;
+    };
+    expect(out.surfaces.find((row) => row.agent === 'codex')).toMatchObject({
+      state: 'installed',
+      note: CODEX_HOOKS_JSON_NOTE,
+    });
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const again = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(noteCount(again.stdout)).toBe(1);
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('manual');
+    const manual = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(manual.stdout).toContain('Paste this into');
+    expect(noteCount(manual.stdout)).toBe(1);
+
+    const doctor = await agent.runRaw(['doctor', '--json']);
+    expect(doctor.stdout).not.toContain('loading hooks from both');
+  });
+
+  it('hooks.json bytes and mtime are untouched by install and uninstall', async () => {
+    const sidecar = '{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[]}]}}\n';
+    await writeFile(codexHooks(), sidecar, 'utf8');
+    const past = new Date('2024-01-02T03:04:05Z');
+    await utimes(codexHooks(), past, past);
+    const before = await stat(codexHooks());
+
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+    expect(await readFile(path.join(codexHome, 'config.toml'), 'utf8')).toContain(
+      CODEX_TOML_MARKER_START
+    );
+    const uninstall = await agent.runRaw(['session-hooks', 'uninstall', '--yes']);
+    expect(uninstall.exitCode).toBe(0);
+
+    const after = await stat(codexHooks());
+    expect(await readFile(codexHooks(), 'utf8')).toBe(sidecar);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.mode).toBe(before.mode);
+  });
+
+  it('the hooks.json note follows CODEX_HOME rather than ~/.codex', async () => {
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const plain = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(plain.exitCode).toBe(0);
+    expect(noteCount(plain.stdout)).toBe(0);
+    expect(noteCount((await agent.runRaw(['session-hooks', 'status'])).stdout)).toBe(0);
+
+    const otherHome = await mkdtemp(path.join(tmpdir(), 'orcaops-uh-codex-other-'));
+    await writeFile(path.join(otherHome, 'hooks.json'), '{}\n', 'utf8');
+    const other = makeAgent({
+      cwd: repo.path,
+      env: {
+        ORCAOPS_DISABLE_DRAIN: '1',
+        ORCAOPS_GLOBAL_ROOT: globalRoot,
+        CLAUDE_CONFIG_DIR: claudeHome,
+        CODEX_HOME: otherHome,
+      },
+    });
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const moved = await other.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(moved.exitCode).toBe(0);
+    expect(noteCount(moved.stdout)).toBe(1);
+    expect(await exists(path.join(otherHome, 'config.toml'))).toBe(true);
+    const status = await other.runRaw(['session-hooks', 'status', '--json']);
+    const out = JSON.parse(status.stdout) as {
+      surfaces: Array<{ agent: string; path: string; note?: string }>;
+    };
+    expect(out.surfaces.find((row) => row.path === path.join(otherHome, 'config.toml'))?.note).toBe(
+      CODEX_HOOKS_JSON_NOTE
+    );
+    await rm(otherHome, { recursive: true, force: true });
+  });
+
+  it('a hooks.json that is a directory produces no note', async () => {
+    await mkdir(codexHooks());
+    (await confirmMock()).mockResolvedValueOnce(true);
+    (await selectMock()).mockResolvedValueOnce('managed');
+    const install = await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+    expect(install.exitCode).toBe(0);
+    expect(noteCount(install.stdout)).toBe(0);
+    const status = await agent.runRaw(['session-hooks', 'status']);
+    expect(status.exitCode).toBe(0);
+    expect(noteCount(status.stdout)).toBe(0);
+    expect((await stat(codexHooks())).isDirectory()).toBe(true);
   });
 
   it('a record naming an agent with no user surface → registered-unsupported + doctor warning', async () => {

@@ -366,3 +366,27 @@ export function createRepoTemplate(
     },
   };
 }
+
+/**
+ * Make a checkout GOVERNED by a project-scope config. Orcaops treats a
+ * worktree as initialized only when a config governs it — its own, or the
+ * shared personal one — never because a `.orcaops/` directory exists, so a
+ * fixture that only creates artifact or cache files reads as uninitialized.
+ */
+export async function writeProjectConfig(
+  repoPath: string,
+  extra: Record<string, unknown> = {}
+): Promise<string> {
+  const configPath = path.join(repoPath, '.orcaops', 'config.json');
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(
+    configPath,
+    `${JSON.stringify(
+      { schema_version: 6, install: { agents: [], scope: 'project' }, ...extra },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+  return configPath;
+}

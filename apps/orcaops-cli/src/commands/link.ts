@@ -24,7 +24,6 @@ import {
   INSTALL_MANIFEST_REL,
   LOCAL_MANIFEST_REL,
   readInstallManifest,
-  readLocalManifest,
 } from '../lib/install-manifest.js';
 import {
   canonicalAgents,
@@ -40,6 +39,7 @@ import {
   readRepositoryFileOrNull,
   writeMutation,
 } from '../lib/mutations.js';
+import { readEffectiveLocalManifest } from '../lib/personal-manifest.js';
 import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { resolveOrcaopsRoot } from '../lib/resolve-root.js';
 import { enabledSkillTemplates } from '../lib/skill-set.js';
@@ -68,6 +68,12 @@ export async function linkAction(opts: LinkOptions = {}): Promise<void> {
       const ctx = await buildContext({ cwd: opts.cwd });
       try {
         const repoRoot = ctx.repoRoot;
+        if (ctx.config.install.scope === 'personal') {
+          throw new OrcaopsError(
+            ErrorCodes.INVALID_INPUT,
+            '`orcaops link` is unavailable under personal scope because personal installs own no repository instruction files or worktree manifests.'
+          );
+        }
         const installAgents = ctx.config.install.agents;
         const adapters = installAgents
           .map((id) => getToolAdapter(id))
@@ -208,7 +214,7 @@ export async function linkAction(opts: LinkOptions = {}): Promise<void> {
             }
           }
         }
-        const currentLocal = await readLocalManifest(repoRoot);
+        const currentLocal = await readEffectiveLocalManifest(repoRoot, ctx.config.install.scope);
         // Through the manifest choke point, not `buildManifests` directly: link
         // rebuilds the committed manifest from the GATED skill set, so on a
         // machine without credentials a direct build drops the cloud entries a

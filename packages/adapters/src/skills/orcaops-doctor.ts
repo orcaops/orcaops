@@ -38,10 +38,10 @@ Checks are reported as \`pass\` / \`warn\` / \`fail\`:
 | Check | What it verifies |
 |---|---|
 | \`git-repo\` | Current branch + HEAD resolvable. |
-| \`init\` | \`.orcaops/\` exists. |
-| \`config\` | \`.orcaops/config.json\` parses; agent + llm.tool resolvable. |
+| \`init\` | A configuration governs the worktree — its own, or the shared personal one in the git common dir. |
+| \`config\` | The governing configuration parses; agent + llm.tool resolvable. |
 | \`cache\` | SQLite cache opens; schema at \`CURRENT_VERSION\`; row counts. |
-| \`evaluators\` | Every pack declared in \`.orcaops/evaluators.yaml\` resolves + validates (manifest, specs, command runtimes, prompt files). |
+| \`evaluators\` | Every pack declared in the evaluator registration resolves + validates (manifest, specs, command runtimes, prompt files). |
 | \`llm-tool\` | Configured CLI (claude / codex) is on PATH. |
 | \`agent-skills\` | Configured adapter's skills + commands present and stamped at the current orcaops version. |
 | \`seed\` | Existing git history has live or imported artifact coverage; partial imports are resumable. |

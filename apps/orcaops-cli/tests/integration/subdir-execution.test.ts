@@ -257,7 +257,18 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
     ]);
     expect(code(envIgnored.stdout)).toBe('INIT_NOT_AT_ROOT');
 
-    const here = await sub().runRaw(['init', '--json', '--agents', '', '--no-agents-md', '--here']);
+    // Personal scope already covers the whole repository from the root init,
+    // so a subdir root of its own is a project install.
+    const here = await sub().runRaw([
+      'init',
+      '--json',
+      '--agents',
+      '',
+      '--no-agents-md',
+      '--here',
+      '--scope',
+      'project',
+    ]);
     expect(here.exitCode).toBe(0);
     expect((JSON.parse(here.stdout) as { ok: boolean }).ok).toBe(true);
   });
@@ -279,8 +290,11 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
     ]);
     expect(res.exitCode).toBe(0);
     expect((JSON.parse(res.stdout) as { ok: boolean }).ok).toBe(true);
-    // created at the ROOT, not the subdir
-    expect(existsSync(path.join(fresh.path, '.orcaops'))).toBe(true);
+    // Anchored at the ROOT, not the subdir: the personal config lands in the
+    // repository's git common dir, and no data directory is created anywhere
+    // until something is captured.
+    expect(existsSync(path.join(fresh.path, '.git', 'orcaops', 'config.json'))).toBe(true);
+    expect(existsSync(path.join(fresh.path, '.orcaops'))).toBe(false);
     expect(existsSync(path.join(freshSub, '.orcaops'))).toBe(false);
   });
 

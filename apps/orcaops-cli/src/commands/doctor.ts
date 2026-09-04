@@ -23,6 +23,7 @@ import {
   type ArtifactSnapshot,
   collectBaselineRefsForArtifact,
   collectPrunableRefsForArtifact,
+  commonConfigLocation,
   computeArtifactHash,
   computeUnresolvedBlocks,
   listRawBaselineRefNames,
@@ -35,6 +36,7 @@ import {
   resolveCloudTarget,
   resolveCredentialStore,
   scrubAndBound,
+  worktreeState,
 } from '@orcaops/core';
 import { runBoundedSubprocess } from '@orcaops/evaluator-protocol/subprocess';
 import {
@@ -71,9 +73,11 @@ import {
   checkoutsRoot,
   computeMirrorLag,
   type Config,
+  ConfigValidationError,
   type CorruptEntry,
   CURRENT_VERSION,
   DETERMINISTIC_CLOUD_SYNC_KINDS,
+  EMPTY_PROJECTION_DB,
   hasArtifactEventLogs,
   hasDurableCacheSources,
   indexRoot,
@@ -84,6 +88,7 @@ import {
   parseCacheSchemaVersion,
   type Pin,
   PLAN_IDEMPOTENCY_PENDING_REMEDY,
+  probeHotState,
   readEventLog,
   RecoveryRefusedError,
   registryPath,
@@ -103,12 +108,13 @@ import { CliExit } from '../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../io/output.js';
 import { CLI_VERSION } from '../lib/cli-version.js';
 import { resolveAgentSession } from '../lib/coding-session.js';
+import { displayConfigPath, resolvePersonalConfigForAdoption } from '../lib/config-file.js';
 import { discoverEvaluatorsForCli } from '../lib/evaluator-discovery.js';
 import { computePackTrustDecisions, type PackTrustDecision } from '../lib/evaluator-grants.js';
 import { CLI_ROOT } from '../lib/evaluators-config.js';
 import { readDerivedCache } from '../lib/fingerprint-cache.js';
 import { hooksDirCandidates } from '../lib/git-hooks-dir.js';
-import { PERSONAL_EXCLUDE_LINES, reconcileInfoExclude } from '../lib/git-info-exclude.js';
+import { reconcileInfoExclude } from '../lib/git-info-exclude.js';
 import {
   activeEntries,
   readGlobalManifest,
@@ -121,11 +127,7 @@ import {
   readGeneratedByStamp,
 } from '../lib/install-drift.js';
 import { resolveManagedInstructionFiles } from '../lib/install-drift.js';
-import {
-  readInstallManifest,
-  readLocalManifest,
-  toPortableManifestPath,
-} from '../lib/install-manifest.js';
+import { readInstallManifest, toPortableManifestPath } from '../lib/install-manifest.js';
 import {
   assertInvisiblePlan,
   planInstallMutations,
@@ -146,6 +148,11 @@ import {
   readRepositoryRegularFileOrNull,
   resolveRepositoryPath,
 } from '../lib/mutations.js';
+import {
+  desiredPersonalExcludeLines,
+  readEffectiveLocalManifest,
+  readPersonalManifestState,
+} from '../lib/personal-manifest.js';
 import { resolveRepoKey } from '../lib/repo-key.js';
 import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { discoverGitRoot, resolveExplicitOverride } from '../lib/resolve-root.js';
@@ -261,6 +268,7 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
   checks.push(await checkGitRepo(repoRoot));
   checks.push(await checkIndexConflicts(repoRoot));
   checks.push(await checkInit(repoRoot));
+  checks.push(await guardRepositoryCheck('personal-scope', () => checkPersonalScope(repoRoot)));
 
   // Resolved here because doctor must still run in a repo too broken for buildContext.
   const gates = resolveSkillGates(getInvocationEnv());
@@ -303,14 +311,29 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
             })
           );
     defaultLlmProvider = selectDefaultProvider(config.llm.tool, providerSnapshot);
+    // Plain doctor is a read: a governed worktree that has captured nothing
+    // is inspected through an in-memory projection, because opening the real
+    // cache (or the deletion-recovery lock) would create it. `--fix` is a
+    // repair and opens the real store it may write to.
+    const emptyRead = probeHotState(repoRoot, config).empty && !opts.fix;
     try {
-      store = new Store(cacheDbPath(repoRoot, config), {
-        containmentRoot: repoRoot,
-        rebuildFreshProjection: hasDurableCacheSources(repoRoot, config),
-      });
-      checks.push(checkCacheSchema(store, hasArtifactEventLogs(repoRoot, config)));
-      const deletionRecovery = await checkArtifactDeletionRecovery(repoRoot, store);
-      if (deletionRecovery) checks.push(deletionRecovery);
+      if (emptyRead) {
+        store = new Store(EMPTY_PROJECTION_DB);
+        checks.push({
+          name: 'cache',
+          status: 'pass',
+          summary:
+            'no local hot state yet — nothing captured in this worktree; the cache is created by the first capture',
+        });
+      } else {
+        store = new Store(cacheDbPath(repoRoot, config), {
+          containmentRoot: repoRoot,
+          rebuildFreshProjection: hasDurableCacheSources(repoRoot, config),
+        });
+        checks.push(checkCacheSchema(store, hasArtifactEventLogs(repoRoot, config)));
+        const deletionRecovery = await checkArtifactDeletionRecovery(repoRoot, store);
+        if (deletionRecovery) checks.push(deletionRecovery);
+      }
     } catch (err) {
       store?.close();
       store = null;
@@ -464,7 +487,7 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
       guardRepositoryCheck('fix', async () => {
         const currentConfig = await loadConfig(repoRoot, { allowMissing: false });
         const prevInstall = await readInstallManifest(repoRoot);
-        const prevLocal = await readLocalManifest(repoRoot);
+        const prevLocal = await readEffectiveLocalManifest(repoRoot, currentConfig.install.scope);
         const gitignoreLines = (prevInstall?.entries ?? [])
           .filter((e) => e.kind === 'gitignore-entry')
           .map((e) => e.path);
@@ -499,7 +522,7 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
           );
         }
         if (currentConfig.install.scope === 'personal' && prevInstall === null) {
-          assertInvisiblePlan(mutations, plan.sessionHooks);
+          await assertInvisiblePlan(repoRoot, mutations, plan.sessionHooks);
         }
         const mode = opts.dryRun ? 'preview' : 'apply';
         await installLease.verify();
@@ -814,22 +837,130 @@ async function checkGitRepo(repoRoot: string): Promise<DoctorCheck> {
   }
 }
 
+/**
+ * Initialized means governed by a config — this worktree's own, or the
+ * shared personal one in the git common dir — never that `.orcaops/` exists:
+ * a personal sibling has no local directory until it captures, and a stray
+ * data directory without a config is residue, not an install.
+ */
 async function checkInit(repoRoot: string): Promise<DoctorCheck> {
-  const orcaopsDir = path.join(repoRoot, '.orcaops');
-  try {
-    await access(orcaopsDir);
+  const state = await worktreeState(repoRoot);
+  if (state.kind === 'enabled') {
     return {
       name: 'init',
       status: 'pass',
-      summary: '.orcaops/ exists',
+      summary: `governed by ${displayConfigPath(state.source, repoRoot)} (${state.source.origin} config)`,
     };
-  } catch {
+  }
+  if (state.kind === 'broken') {
+    const residue =
+      state.error instanceof ConfigValidationError && state.error.path === 'install.scope';
     return {
       name: 'init',
       status: 'fail',
-      summary: '.orcaops/ missing — run `orcaops init`',
+      summary: residue
+        ? `unsupported residue: ${state.error.message}`
+        : `configuration cannot be used: ${state.error.message}`,
     };
   }
+  return {
+    name: 'init',
+    status: 'fail',
+    summary: 'no orcaops configuration governs this worktree — run `orcaops init`',
+  };
+}
+
+/**
+ * `personal-scope`: the shared files a personal install depends on, reported
+ * apart from the worktree's own hot state (the `cache` check) and from the
+ * machine hooks (their own check). Names the effective source, verifies the
+ * common config and ownership manifest are safely contained regular files,
+ * and recognises the two residue shapes: an emptied manifest left by
+ * uninstall, and a stale one a fresh init would replace.
+ */
+async function checkPersonalScope(repoRoot: string): Promise<DoctorCheck> {
+  const name = 'personal-scope';
+  const state = await worktreeState(repoRoot);
+  if (state.kind !== 'enabled') {
+    return { name, status: 'pass', summary: 'not applicable — no governing configuration' };
+  }
+  const details: string[] = [`  - effective config: ${displayConfigPath(state.source, repoRoot)}`];
+  let manifest: Awaited<ReturnType<typeof readPersonalManifestState>>;
+  try {
+    manifest = await readPersonalManifestState(repoRoot);
+  } catch (err) {
+    return {
+      name,
+      status: 'fail',
+      summary: 'the common personal manifest is unsafe',
+      details: [...details, `  - ${(err as Error).message}`],
+    };
+  }
+  if (state.source.origin !== 'common') {
+    const residue: string[] = [];
+    if (manifest.kind === 'valid' && manifest.manifest.entries.length === 0) {
+      const shared = await commonConfigLocation(repoRoot);
+      const sharedContent = await readRepositoryFileOrNull(
+        shared.configPath,
+        shared.containmentRoot,
+        'shared personal configuration'
+      );
+      let livePersonalConfig = false;
+      if (sharedContent !== null) {
+        try {
+          resolvePersonalConfigForAdoption(sharedContent, shared.configPath);
+          livePersonalConfig = true;
+        } catch {
+          livePersonalConfig = false;
+        }
+      }
+      residue.push(
+        livePersonalConfig
+          ? `  - live shared personal config remains at ${shared.configPath}; this worktree uses its project override`
+          : `  - ${manifest.location.manifestPath} is uninstalled personal residue; it keeps the ` +
+              '`.orcaops/` exclusion so retained data in any linked worktree stays hidden'
+      );
+    }
+    return {
+      name,
+      status: 'pass',
+      summary: `${state.source.origin} config governs this worktree`,
+      ...(residue.length > 0 ? { details: residue } : {}),
+    };
+  }
+  details.push(`  - shared config: ${state.source.configPath} (git common dir)`);
+  if (manifest.kind === 'absent') {
+    return {
+      name,
+      status: 'warn',
+      summary: 'shared personal config without its ownership manifest',
+      details: [...details, '  - run `orcaops update` to rewrite personal-manifest.json'],
+    };
+  }
+  if (manifest.kind === 'stale') {
+    return {
+      name,
+      status: 'warn',
+      summary: 'the common personal manifest is stale',
+      details: [
+        ...details,
+        `  - ${manifest.location.manifestPath}: ${manifest.reason}; rerun \`orcaops init --personal --force\` to rewrite it`,
+      ],
+    };
+  }
+  const claims = (manifest.manifest.info_exclude ?? []).includes('.orcaops/');
+  details.push(
+    `  - ownership manifest: ${manifest.location.manifestPath} (${manifest.manifest.entries.length} entries, ` +
+      `${claims ? 'owns' : 'does not own'} the \`.orcaops/\` exclusion)`
+  );
+  return {
+    name,
+    status: claims ? 'pass' : 'warn',
+    summary: claims
+      ? 'shared personal config and manifest are healthy'
+      : 'the personal manifest no longer claims the `.orcaops/` exclusion',
+    details,
+  };
 }
 
 function checkCacheSchema(store: Store, artifactEventLogsExist: boolean): DoctorCheck {
@@ -1729,7 +1860,10 @@ async function checkInfoExclude(repoRoot: string, config: Config): Promise<Docto
   const name = 'info-exclude';
   const personal = config.install.scope === 'personal';
   try {
-    const plan = await reconcileInfoExclude(repoRoot, personal ? PERSONAL_EXCLUDE_LINES : []);
+    const plan = await reconcileInfoExclude(
+      repoRoot,
+      await desiredPersonalExcludeLines(repoRoot, config.install.scope)
+    );
     if (plan.desiredContent === null) {
       return {
         name,
@@ -4090,6 +4224,7 @@ const DOCTOR_SECTIONS = [
       'git-repo',
       'index-conflicts',
       'init',
+      'personal-scope',
       'config',
       'cache',
       'llm-tool',

@@ -15,8 +15,9 @@ Orcaops setup; it is not a replacement for the shared team workflow in Cloud.
 ## What project scope changes
 
 The default personal install keeps skills in the current developer's home
-directory and hides `.orcaops/` from the worktree. Project scope instead
-materializes the selected agent support into the repository:
+directory, keeps its configuration in the repository's git common directory,
+and hides each worktree's `.orcaops/` store. Project scope instead materializes
+the selected agent support into the repository:
 
 - generated skills and any supported slash commands;
 - the Orcaops block in agent instruction files;
@@ -78,12 +79,15 @@ and enable evaluators, but it cannot grant user-local execution trust. Each
 developer retains control over the capabilities third-party evaluator code may
 use.
 
-## Avoid the personal-config pull collision
+## Personal installs and the adoption commit
 
-If a teammate adopts project scope while another developer still has an
-untracked personal `.orcaops/config.json`, git can refuse to check out the
-tracked file. Move the personal config aside, pull the adoption commit, then run
-`orcaops update` to reconcile the installation.
+A personal install keeps nothing in the worktree that an adoption commit would
+collide with: its configuration lives in the git common directory, so pulling a
+teammate's `.orcaops/config.json` simply makes that project config win in the
+checked-out worktree. Switching a worktree to project scope yourself releases
+the shared `info/exclude` claim so the materialized files are visible to
+`git add`; a sibling worktree that stays personal re-adds the block on its next
+`orcaops update`.
 
 ## Connect the shared workflow
 

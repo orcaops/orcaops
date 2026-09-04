@@ -34,6 +34,14 @@ export interface DiscoverEvaluatorsOptions {
    * pin a synthetic CLI root.
    */
   cliRoot?: string;
+  /**
+   * Where the registration file lives when it is not the worktree default —
+   * the git common dir under personal scope — and the root it resolves
+   * within. Pack sources declared with relative paths still resolve from
+   * `repoRoot`: the pack is code in that checkout, not in `.git`.
+   */
+  configPath?: string;
+  configContainmentRoot?: string;
 }
 
 export interface DiscoveryResult {
@@ -88,7 +96,12 @@ export async function discoverEvaluators(
     }
   };
 
-  const config = await loadEvaluatorConfig(repoRoot).catch((err: unknown) => {
+  const config = await loadEvaluatorConfig(repoRoot, {
+    ...(opts.configPath !== undefined ? { configPath: opts.configPath } : {}),
+    ...(opts.configContainmentRoot !== undefined
+      ? { containmentRoot: opts.configContainmentRoot }
+      : {}),
+  }).catch((err: unknown) => {
     if (err instanceof EvaluatorDiscoveryError) {
       collect(err);
       return null;

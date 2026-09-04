@@ -9,7 +9,7 @@ import {
   resolveHintLines,
   type ToolAdapter,
 } from '@orcaops/adapters';
-import { Repo } from '@orcaops/core';
+import { Repo, resolveConfigSource, worktreeConfigLocation } from '@orcaops/core';
 import { assertSafePathSegment } from '@orcaops/storage';
 
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
@@ -38,7 +38,6 @@ import {
   type LocalManifest,
   type OwnershipKind,
   readInstallManifest,
-  readLocalManifest,
   reconstructLocalManifest,
 } from '../lib/install-manifest.js';
 import { evaluateEntryDeleteGuard } from '../lib/install-prune.js';
@@ -55,6 +54,13 @@ import {
   resolveRepositoryPath,
   writeMutation,
 } from '../lib/mutations.js';
+import {
+  personalManifestClaimsExclude,
+  planPersonalManifestWrite,
+  readEffectiveLocalManifest,
+  readPersonalManifestState,
+  retainedPersonalManifest,
+} from '../lib/personal-manifest.js';
 import { resolveRepoKey } from '../lib/repo-key.js';
 import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { resolveOrcaopsRoot } from '../lib/resolve-root.js';
@@ -128,7 +134,9 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
           .filter((a): a is ToolAdapter => a !== undefined);
 
         const prevInstall = await readInstallManifest(repoRoot);
-        const prevLocal = await readLocalManifest(repoRoot);
+        const prevLocal = await readEffectiveLocalManifest(repoRoot, config.install.scope);
+        const personalManifestState =
+          config.install.scope === 'personal' ? await readPersonalManifestState(repoRoot) : null;
         const prevInstallContent = await readRepositoryFileOrNull(
           path.join(repoRoot, INSTALL_MANIFEST_REL),
           repoRoot,
@@ -139,10 +147,15 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
           repoRoot,
           'local install manifest'
         );
+        // `--purge-data` removes the worktree data directory, so the config it
+        // restores on a failed purge is the worktree one by construction — the
+        // shared personal config is not in this tree and is handled by the
+        // uninstall plan, not by the purge.
+        const worktreeConfig = worktreeConfigLocation(repoRoot);
         const configContent = opts.purgeData
           ? await readRepositoryFileOrNull(
-              path.join(repoRoot, '.orcaops', 'config.json'),
-              repoRoot,
+              worktreeConfig.configPath,
+              worktreeConfig.containmentRoot,
               'orcaops configuration'
             )
           : null;
@@ -264,13 +277,8 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
 
           // 2. Excise the managed block from each REAL instruction file (never the host).
           //    Over the DEDUPED UNION across the install set (every agent shares
-          //    AGENTS.md) so a shared file is excised once. CLAUDE.local.md joins
-          //    the union unconditionally: it's the personal-scope block surface,
-          //    and excising an absent block is a no-op — so ex-personal repos
-          //    clean up regardless of their current scope.
-          const instructionFiles = [
-            ...new Set([...adapters.flatMap((a) => a.agentsFiles ?? []), 'CLAUDE.local.md']),
-          ];
+          //    AGENTS.md) so a shared file is excised once.
+          const instructionFiles = [...new Set(adapters.flatMap((a) => a.agentsFiles ?? []))];
           if (instructionFiles.length > 0) {
             const removal = await planRemoveInstructionBlocks({
               repoRoot,
@@ -424,32 +432,17 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
         // keeps CLAUDE.local.md hidden when removing the managed block leaves
         // user prose behind. The kept lines are unmanaged until re-init reclaims
         // them; both self-heal into the managed section on that path.
-        // `--purge-data` deletes the store, so the section strips fully.
         // Best-effort in degraded repos.
         let infoExcludeRemoved: string[] = [];
         // Only repos that were HIDING via exclude keep the line — a project
-        // repo that never had a section must not gain one on uninstall.
+        // repo that never had a section must not gain one on uninstall. Both
+        // signals count: an effective personal config, or a common manifest
+        // still claiming the line (a partial uninstall must never expose the
+        // retained data of any linked worktree).
         const wasExcludeHidden =
-          config.install.scope === 'personal' || (prevLocal?.info_exclude ?? []).length > 0;
+          config.install.scope === 'personal' || (await personalManifestClaimsExclude(repoRoot));
         try {
-          const personalInstructionExists =
-            (await readRepositoryFileOrNull(
-              path.join(repoRoot, 'CLAUDE.local.md'),
-              repoRoot,
-              'CLAUDE.local.md'
-            )) !== null;
-          const personalInstructionWillBeDeleted = mutations.some(
-            (mutation) => mutation.kind === 'delete' && mutation.path === 'CLAUDE.local.md'
-          );
-          const desiredExclude =
-            !opts.purgeData && wasExcludeHidden
-              ? [
-                  '.orcaops/',
-                  ...(personalInstructionExists && !personalInstructionWillBeDeleted
-                    ? ['CLAUDE.local.md']
-                    : []),
-                ]
-              : [];
+          const desiredExclude = wasExcludeHidden ? ['.orcaops/'] : [];
           const excludePlan = await planInfoExcludeMutation({
             repoRoot,
             desired: desiredExclude,
@@ -468,8 +461,24 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
         }
 
         // 5. Keep ownership metadata until every managed path has been reconciled.
-        // Personal installs intentionally have only the local manifest.
-        if (!opts.purgeData && hasOwnershipManifest) {
+        // A personal install's record is the common manifest: it is retained
+        // with no entries so it keeps owning the harmless `.orcaops/` exclusion
+        // (and lets Doctor recognise uninstalled residue). Purging this
+        // worktree cannot prove that sibling worktrees have no retained data.
+        if (personalManifestState !== null && personalManifestState.kind !== 'absent') {
+          const { location, content } = personalManifestState;
+          if (personalManifestState.kind === 'valid') {
+            mutations.push(
+              planPersonalManifestWrite(
+                repoRoot,
+                location,
+                retainedPersonalManifest(personalManifestState.manifest),
+                content
+              )
+            );
+          }
+        }
+        if (!opts.purgeData && hasOwnershipManifest && config.install.scope !== 'personal') {
           if (prevLocalContent !== null) {
             mutations.push(
               deleteMutation(
@@ -487,6 +496,34 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
                 INSTALL_MANIFEST_REL,
                 { kind: 'file', content: prevInstallContent },
                 true
+              )
+            );
+          }
+        }
+
+        // 5b. A personal install's config and evaluator registration live in
+        // the git common dir; leaving them would keep every worktree enabled
+        // after the uninstall. Locks and the ownership manifest stay.
+        const source = await resolveConfigSource(repoRoot);
+        if (source.kind === 'common') {
+          for (const [rel, absolute] of [
+            [path.relative(repoRoot, source.configPath), source.configPath],
+            [path.relative(repoRoot, source.evaluatorsPath), source.evaluatorsPath],
+          ] as const) {
+            const content = await readRepositoryFileOrNull(
+              absolute,
+              source.containmentRoot,
+              'shared personal configuration'
+            );
+            if (content === null) continue;
+            mutations.push(
+              deleteMutation(
+                repoRoot,
+                rel,
+                { kind: 'file', content },
+                true,
+                source.containmentRoot,
+                absolute
               )
             );
           }
@@ -517,9 +554,6 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
           // their dir alive naturally.
           removedDirs = await rmdirEmptyAncestors(repoRoot, [...removed, ...sessionHooksRemoved]);
           if (opts.purgeData) {
-            if (configContent === null) {
-              throw new Error('orcaops configuration disappeared before purge');
-            }
             closeStore();
             await installLease.verify();
             // Deliberately leaves `orcaops.projectid` in .git/config: the
@@ -715,10 +749,22 @@ async function finishInterruptedEmptyPurge(
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     state = null;
   }
+  // An interrupted purge is a data directory with NO governing config. Under
+  // personal scope the config is in the git common dir and the data directory
+  // may not exist at all yet, so governance is decided first: a governed repo
+  // always takes the normal uninstall path. A config the resolver refuses
+  // still counts as present: the normal path reports that error instead of
+  // purging around it.
+  let governed = true;
+  try {
+    governed = (await resolveConfigSource(repoRoot)).kind !== 'none';
+  } catch {
+    governed = true;
+  }
+  if (governed) return false;
   if (state !== null) {
     if (!state.isDirectory() || state.isSymbolicLink()) return false;
     const entries = await readdir(dataRoot);
-    if (entries.includes('config.json')) return false;
     if (entries.length > 0) {
       throw new OrcaopsError(
         ErrorCodes.INVALID_INPUT,
@@ -817,10 +863,19 @@ async function finishInterruptedEmptyPurge(
   return true;
 }
 
-async function purgeProjectData(repoRoot: string, configContent: string): Promise<void> {
+/**
+ * `configContent` is the worktree config to restore if the purge cannot
+ * finish, or null when this worktree never had one (personal scope keeps its
+ * config in the git common dir).
+ */
+async function purgeProjectData(repoRoot: string, configContent: string | null): Promise<void> {
+  // Deliberately the WORKTREE data directory: purge removes this checkout's
+  // artifacts, cache, and config. A shared personal config lives outside it
+  // and is never reachable from here.
+  const worktreeConfig = worktreeConfigLocation(repoRoot);
   const dataRoot = resolveRepositoryPath(
-    path.join(repoRoot, '.orcaops'),
-    repoRoot,
+    path.dirname(worktreeConfig.configPath),
+    worktreeConfig.containmentRoot,
     'orcaops data directory'
   );
   const entries = await readdir(dataRoot);
@@ -840,14 +895,16 @@ async function purgeProjectData(repoRoot: string, configContent: string): Promis
     }
   }
 
-  const configPath = path.join(dataRoot, 'config.json');
-  await rm(configPath, { force: false });
+  const configPath = worktreeConfig.configPath;
+  await rm(configPath, { force: configContent === null });
   try {
     await rmdir(dataRoot);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     try {
-      await restoreConfigIfAbsent(dataRoot, configPath, configContent);
+      if (configContent !== null) {
+        await restoreConfigIfAbsent(dataRoot, configPath, configContent);
+      }
     } catch (restoreError) {
       throw new AggregateError(
         [error, restoreError],

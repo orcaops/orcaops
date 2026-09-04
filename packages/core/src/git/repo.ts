@@ -226,6 +226,69 @@ async function readDetailedCommits(
   return commits.map((commit) => ({ ...commit, files: files.get(commit.sha) ?? [] }));
 }
 
+/** What a session-start hook needs to know about the checkout it runs in. */
+export interface WorktreeProbe {
+  /** Canonical worktree root (`--show-toplevel`). */
+  worktreeRoot: string;
+  /** Canonical git common dir — shared by every worktree of the repository. */
+  commonDir: string;
+  /** `--abbrev-ref HEAD`; `HEAD` when detached; null in a repository with no commits. */
+  branch: string | null;
+}
+
+/**
+ * Worktree root, git common dir, and branch from ONE git process — the
+ * session-start hook runs at every agent session and must not pay three.
+ *
+ * `--git-common-dir` prints a cwd-RELATIVE path from the main worktree
+ * (`.git`, or `../.git` from a subdirectory) and an absolute one from a
+ * linked worktree, so the value is resolved against the exact directory the
+ * process ran in rather than against the toplevel. `--path-format=absolute`
+ * would do that in git, but only from 2.31 — an unstated floor this avoids.
+ * Returns null wherever git cannot answer: outside a repository, or in one
+ * too broken to resolve — a personal install cannot be found safely there
+ * and nothing may guess a common path.
+ */
+export async function probeWorktree(cwd: string): Promise<WorktreeProbe | null> {
+  let out: string;
+  let branch: string | null = null;
+  try {
+    out = await runGitText(cwd, [
+      'rev-parse',
+      '--show-toplevel',
+      '--git-common-dir',
+      '--abbrev-ref',
+      'HEAD',
+    ]);
+    branch = out.split(/\r?\n/)[2] ?? null;
+  } catch {
+    // A repository with no commits has no HEAD to abbreviate, which fails the
+    // whole call; the root and common dir are still answerable, and that is
+    // enough to find the config (the hook then falls back to its static text).
+    try {
+      out = await runGitText(cwd, ['rev-parse', '--show-toplevel', '--git-common-dir']);
+    } catch {
+      return null;
+    }
+  }
+  const [toplevel, commonDirRaw] = out.split(/\r?\n/);
+  if (!toplevel || !commonDirRaw) return null;
+  const canonical = async (target: string): Promise<string> => {
+    try {
+      return await realpath(target);
+    } catch {
+      return target;
+    }
+  };
+  return {
+    worktreeRoot: await canonical(toplevel),
+    commonDir: await canonical(
+      path.isAbsolute(commonDirRaw) ? commonDirRaw : path.resolve(cwd, commonDirRaw)
+    ),
+    branch,
+  };
+}
+
 export class Repo {
   /** Memoized HEAD sha — resolved once per Repo lifetime; see getHeadSha. */
   private headShaPromise?: Promise<string>;
@@ -266,6 +329,40 @@ export class Repo {
   async getHeadSha(): Promise<string> {
     this.headShaPromise ??= this.runGit(['rev-parse', 'HEAD']).then((r) => r.trim());
     return this.headShaPromise;
+  }
+
+  /**
+   * The subset of `relPaths` git tracks in THIS worktree, as the same
+   * worktree-relative strings that were passed in. One `ls-files` for the
+   * whole batch: a mutation plan asks about every path it would touch, and a
+   * probe per path would cost a subprocess per file.
+   *
+   * Each path goes through as `:(literal)` — a leading `:` is pathspec magic
+   * even after `--`, so an unescaped path could quietly match something else.
+   */
+  async listTrackedPaths(relPaths: readonly string[]): Promise<Set<string>> {
+    // A bare `ls-files` with no pathspec lists the WHOLE index; an empty batch
+    // has to short-circuit rather than answer "everything is tracked".
+    if (relPaths.length === 0) return new Set();
+    const posix = new Map<string, string>();
+    for (const rel of relPaths) posix.set(rel.replaceAll('\\', '/'), rel);
+    const out = await this.runGit([
+      'ls-files',
+      '-z',
+      '--',
+      ...[...posix.keys()].map((rel) => `:(literal)${rel}`),
+    ]);
+    const tracked = new Set<string>();
+    for (const entry of out.split('\0')) {
+      const original = posix.get(entry);
+      if (original !== undefined) tracked.add(original);
+    }
+    return tracked;
+  }
+
+  /** Whether git tracks `relPath` in this worktree. */
+  async isTracked(relPath: string): Promise<boolean> {
+    return (await this.listTrackedPaths([relPath])).has(relPath);
   }
 
   /** Tree SHA represented by the real Git index, without reading worktree bytes. */

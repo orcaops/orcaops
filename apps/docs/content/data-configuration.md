@@ -113,9 +113,12 @@ It is narrow on purpose:
   reads — louder than the refusal it bypasses. Nothing at runtime checks that
   the file is committed or clean, so this is reviewability rather than a
   restriction on who may add one. Under `personal` scope — the scope a fresh
-  `orcaops init` writes — `.git/info/exclude` hides the whole `.orcaops/` store
-  and Orcaops writes no tracked file at all, so an entry made there reaches no
-  reviewer; only the exact-string rule above still constrains it.
+  `orcaops init` writes — the configuration lives outside the worktree in the
+  repository's git common directory, shared by every worktree and never a
+  tracked file, so an entry made there reaches no reviewer; only the
+  exact-string rule above still constrains it. The read-only projection that
+  applies `redact.allow` before a capture reads that same shared file, so the
+  allowlist is neither lost nor broadened in a sibling worktree.
 - Globs and regex are not accepted. A pattern entry would be an agent-reachable
   bypass, and evaluating user regex over every payload string would create a
   denial-of-service risk.

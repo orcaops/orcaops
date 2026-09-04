@@ -54,17 +54,26 @@ If a machine-level invocation cannot read or parse the repo's project settings
 file, it also stays silent rather than risk duplicate guidance. Doctor reports
 the invalid file; until it is repaired, that repo may receive no guidance.
 
-Codex is special (codex-cli 0.146+): its
-`hooks.json` files are not read — hooks register via a `hooks` struct in
-`~/.codex/config.toml`, gated by `hooks = true` under `[features]`, and the
-`orcaops hook` emits the JSON envelope that build requires. Because
-`config.toml` is your primary Codex config, `session-hooks install` offers a
-choice: print the exact TOML snippet for you to paste (recommended — zero
-write risk), or write an Orcaops marker-owned block for you, which is
-append-only and refuses outright if your config already has `[features]` or
-`hooks` tables it could collide with. Codex also reviews each new hook once
-(hash-pinned trust) — approve the Orcaops entry when asked, or it is
-silently skipped; the entry is version-free, so the approval never repeats.
+Codex registers through `~/.codex/config.toml`. No feature flag is needed:
+hooks are on by default since codex-cli 0.124, so the registration is one
+`[[hooks.SessionStart]]` table and nothing else (the `orcaops hook` emits the
+JSON envelope Codex requires). Because `config.toml` is your primary Codex
+config, `session-hooks install` offers a choice: write an Orcaops
+marker-owned block for you (recommended), or print the exact TOML snippet for
+you to paste. Managed mode appends that one table between marker comments and
+never edits anything else — your `[features]` table, your own hooks, and the
+trust tables Codex writes are left byte-identical, even when Codex places
+them inside the markers. A manual paste is detected by content, so status
+reports it as installed. Managed mode refuses, and writes nothing, when the
+file is not valid TOML outside the Orcaops block, when `hooks.SessionStart`
+already has a shape it cannot append to, or when the block holds lines it
+cannot prove are its own. Current Codex also reads `~/.codex/hooks.json`; if
+another tool (Superset, for example) owns one, Codex prints an informational
+"loading hooks from both" warning at startup — both sets run, and Orcaops
+tells you so after install and in `session-hooks status`. Codex also reviews
+each new hook once (hash-pinned trust) — approve the Orcaops entry when
+asked, or it is silently skipped (`codex exec` skips an untrusted hook
+without a message); the entry is version-free, so the approval never repeats.
 Uninstall removes only a marker-owned block; a manual paste is yours and is
 reported, never edited.
 
@@ -106,12 +115,12 @@ orcaops update --session-hook-payload static
 
 Per-agent surfaces (project entries):
 
-| Agent       | Surface                                                   | Notes                                                                                        |
-| ----------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Claude Code | entry in `.claude/settings.json`                          | `SessionStart` hook; stdout is added to the model context                                    |
-| Codex CLI   | none — machine-level only (`~/.codex/config.toml`)        | shipped codex-cli never reads a project `.codex/hooks.json`                                  |
-| Cursor      | entry in `.cursor/hooks.json`                             | `sessionStart` hook; hooks.json is VCS-checked and auto-reloads                              |
-| OpenCode    | generated `.opencode/plugins/<prefix>-session-context.js` | **beta** — plugin injection rides `chat.message`; falls back cleanly to silence on any error |
+| Agent       | Surface                                                   | Notes                                                                                           |
+| ----------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Claude Code | entry in `.claude/settings.json`                          | `SessionStart` hook; stdout is added to the model context                                       |
+| Codex CLI   | none — machine-level only (`~/.codex/config.toml`)        | one `[[hooks.SessionStart]]` table, no feature flag; Orcaops writes no project-level Codex file |
+| Cursor      | entry in `.cursor/hooks.json`                             | `sessionStart` hook; hooks.json is VCS-checked and auto-reloads                                 |
+| OpenCode    | generated `.opencode/plugins/<prefix>-session-context.js` | **beta** — plugin injection rides `chat.message`; falls back cleanly to silence on any error    |
 
 The settings files are co-owned with you: Orcaops manages only the exact
 canonical command, never deletes your

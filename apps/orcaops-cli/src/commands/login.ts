@@ -419,7 +419,8 @@ async function materializeCloudSkillsAfterLogin(): Promise<CloudSkillsOutcome> {
     const scope = ctx.config.install.scope;
     if (scope === 'global' || scope === 'personal') return { status: 'update-required', scope };
 
-    const { readInstallManifest, readLocalManifest } = await import('../lib/install-manifest.js');
+    const { readInstallManifest } = await import('../lib/install-manifest.js');
+    const { readEffectiveLocalManifest } = await import('../lib/personal-manifest.js');
     const prevInstall = await readInstallManifest(ctx.repoRoot);
     // Not installed here, so generating files would be a surprise write.
     if (!prevInstall) return { status: 'skipped', reason: 'not-installed' };
@@ -435,7 +436,7 @@ async function materializeCloudSkillsAfterLogin(): Promise<CloudSkillsOutcome> {
       config: ctx.config,
       generatedBy: cliPkg.version,
       prevInstall,
-      prevLocal: await readLocalManifest(ctx.repoRoot),
+      prevLocal: await readEffectiveLocalManifest(ctx.repoRoot, ctx.config.install.scope),
     });
     if (plan.refusal) return { status: 'skipped', reason: 'stale-install', refusal: plan.refusal };
     await executeMutations(plan.mutations, 'apply');

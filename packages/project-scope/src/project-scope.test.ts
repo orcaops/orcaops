@@ -1,7 +1,7 @@
 import { access, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Repo } from '@orcaops/core';
 import {
@@ -17,7 +17,7 @@ import {
   projectIndexMetaPath,
   type Registry,
 } from '@orcaops/storage';
-import { createLinkedWorktree, createTempRepo } from '@orcaops/test-harness';
+import { createLinkedWorktree, createTempRepo, writeProjectConfig } from '@orcaops/test-harness';
 
 import { archiveLastWriteMs, hotLastWriteMs, resolveArtifactSource } from './artifact-source.js';
 import {
@@ -188,6 +188,8 @@ async function makeHotProject(
   artifactId: string
 ): Promise<Seeded> {
   const repo = await createTempRepo({ initialBranch: 'main' });
+  // Governed by a project config: data alone never counts as an install.
+  await writeProjectConfig(repo.path);
   await new Repo(repo.path).setLocalConfig(PROJECT_ID_CONFIG_KEY, projectId);
   const projectDir = archiveProjectDir(dataRoot, projectId);
   const mirror = new ArchiveMirror({
@@ -613,7 +615,8 @@ describe('openAllProjects — includeArchiveForHot (sibling worktrees)', () => {
     const hot = await makeHotProject(PROJ_HOT, 'main worktree work', ART_HOT);
     const linked = await createLinkedWorktree(hot.repo.path, { branch: 'feature-linked' });
     cleanups.push(() => linked.cleanup());
-    await mkdir(path.join(linked.path, '.orcaops'), { recursive: true });
+    // Governed, with no data of its own: an empty hot source.
+    await writeProjectConfig(linked.path);
 
     const scope = await openAllProjects({
       cwd: linked.path,
@@ -687,7 +690,9 @@ describe('openAllProjects — allowUnidentifiedHot', () => {
         allowUnidentifiedHot: true,
         throwOnHotOpenError: true,
       })
-    ).rejects.toMatchObject({ code: 'ELOOP' });
+      // The config resolver refuses the symlinked metadata dir before any
+      // loop is followed; either way the strict consumer sees the failure.
+    ).rejects.toThrow(/orcaops configuration|ELOOP/);
   });
 
   it('can surface an initialized hot checkout configuration failure to strict consumers', async () => {
@@ -718,9 +723,10 @@ describe('openAllProjects — allowUnidentifiedHot', () => {
   });
 
   it('surfaces a .orcaops repo with no minted id as unidentifiedHot, leaves projects[] untouched, and never writes git config', async () => {
-    // A repo with `.orcaops` (created by constructing a store) but NO minted id.
+    // A governed repo with hot data but NO minted id.
     const repo = await createTempRepo({ initialBranch: 'main' });
     cleanups.push(() => repo.cleanup());
+    await writeProjectConfig(repo.path);
     const store = new ArtifactStore({ repoRoot: repo.path, config: getDefaultConfig() });
     await seedArtifact(store, ART_HOT, 'unarchived local work');
     cleanups.push(() => store.close());
@@ -772,6 +778,7 @@ describe('openAllProjects — allowUnidentifiedHot', () => {
   it('keeps a readable hot store available while its project identity is invalid', async () => {
     const repo = await createTempRepo({ initialBranch: 'main' });
     cleanups.push(() => repo.cleanup());
+    await writeProjectConfig(repo.path);
     const store = new ArtifactStore({ repoRoot: repo.path, config: getDefaultConfig() });
     await seedArtifact(store, ART_HOT, 'local work under repair');
     cleanups.push(() => store.close());
@@ -899,6 +906,7 @@ describe('readProjectId containment', () => {
 
   it('surfaces empty, whitespace-only, and malformed identity through the multi-project reader', async () => {
     const repo = await createTempRepo({ initialBranch: 'main' });
+    await writeProjectConfig(repo.path);
     try {
       await mkdir(path.join(repo.path, '.orcaops'), { recursive: true });
       for (const stored of ['', '   ', 'not-a-uuid']) {
@@ -956,6 +964,95 @@ describe('readProjectId containment', () => {
       await expect(access(projectIndexDbPath(indexRoot(env()), 'not-a-uuid'))).rejects.toThrow();
     } finally {
       scope.close();
+    }
+  });
+});
+
+describe('openCurrentProject — an enabled worktree with no data is an empty source', () => {
+  it('serves the current project from memory and creates nothing on disk', async () => {
+    const { clearCommonDirCache, commonConfigLocation } = await import('@orcaops/core');
+    clearCommonDirCache();
+    const main = await createTempRepo({ initialBranch: 'main' });
+    const linked = await createLinkedWorktree(main.path);
+    try {
+      const shared = await commonConfigLocation(main.path);
+      await mkdir(path.dirname(shared.configPath), { recursive: true });
+      await writeFile(
+        shared.configPath,
+        JSON.stringify({
+          schema_version: 6,
+          install: { agents: ['claude-code'], scope: 'personal' },
+        }),
+        'utf8'
+      );
+      await new Repo(main.path).setLocalConfig(
+        'orcaops.projectid',
+        '019f0000-cccc-7000-8000-000000000003'
+      );
+
+      const scope = await openAllProjects({ cwd: linked.path, env: env() });
+      try {
+        const hot = scope.projects.find((project) => project.hot);
+        expect(hot).toBeDefined();
+        expect(hot?.store.listArtifacts().length).toBe(0);
+      } finally {
+        scope.close();
+      }
+      await expect(access(path.join(linked.path, '.orcaops'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      await linked.cleanup();
+      await main.cleanup();
+      clearCommonDirCache();
+    }
+  });
+
+  it('promotes the empty source after the worktree receives its first capture', async () => {
+    const { clearCommonDirCache, commonConfigLocation } = await import('@orcaops/core');
+    clearCommonDirCache();
+    const main = await createTempRepo({ initialBranch: 'main' });
+    const linked = await createLinkedWorktree(main.path);
+    try {
+      const shared = await commonConfigLocation(main.path);
+      await mkdir(path.dirname(shared.configPath), { recursive: true });
+      await writeFile(
+        shared.configPath,
+        JSON.stringify({
+          schema_version: 6,
+          install: { agents: ['claude-code'], scope: 'personal' },
+          archive: { enabled: false },
+        }),
+        'utf8'
+      );
+      await new Repo(main.path).setLocalConfig(
+        'orcaops.projectid',
+        '019f0000-cccc-7000-8000-000000000004'
+      );
+
+      const scope = await openAllProjects({ cwd: linked.path, env: env() });
+      try {
+        const hot = scope.projects.find((project) => project.hot);
+        expect(hot).toBeDefined();
+        const closeEmpty = vi.spyOn(hot!.store, 'close');
+
+        const writer = new ArtifactStore({
+          repoRoot: linked.path,
+          config: getDefaultConfig(),
+        });
+        await seedArtifact(writer, ART_HOT, 'first local capture');
+        writer.close();
+
+        await scope.prepareHotStoresForRead();
+        expect(hot?.store.getArtifact(ART_HOT)?.task).toBe('first local capture');
+        expect(closeEmpty).toHaveBeenCalledTimes(1);
+      } finally {
+        scope.close();
+      }
+    } finally {
+      await linked.cleanup();
+      await main.cleanup();
+      clearCommonDirCache();
     }
   });
 });

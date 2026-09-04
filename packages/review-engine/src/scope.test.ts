@@ -171,3 +171,33 @@ describe('resolveScopeInputs — capture.exclude on the pinned review tree', () 
     );
   });
 });
+
+describe('resolveScopeInputs — an enabled sibling with no data', () => {
+  it('serves an empty scope from memory and creates no cache or locks', async () => {
+    const { access, mkdir, writeFile } = await import('node:fs/promises');
+    const { clearCommonDirCache, commonConfigLocation } = await import('@orcaops/core');
+    const { createLinkedWorktree } = await import('@orcaops/test-harness');
+    clearCommonDirCache();
+    const main = await createTempRepo({ initialBranch: 'main' });
+    const linked = await createLinkedWorktree(main.path, { branch: 'feature-empty' });
+    try {
+      const shared = await commonConfigLocation(main.path);
+      await mkdir(path.dirname(shared.configPath), { recursive: true });
+      await writeFile(
+        shared.configPath,
+        JSON.stringify({ schema_version: 6, install: { agents: [], scope: 'personal' } }),
+        'utf8'
+      );
+
+      const scope = await resolveScopeInputs({ root: linked.path, branch: 'feature-empty' });
+      expect(scope.input.artifacts).toEqual([]);
+      await expect(access(path.join(linked.path, '.orcaops'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      await linked.cleanup();
+      await main.cleanup();
+      clearCommonDirCache();
+    }
+  });
+});

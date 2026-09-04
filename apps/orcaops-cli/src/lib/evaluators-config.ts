@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
+import { resolveConfigSource } from '@orcaops/core';
 import { type EvaluatorConfig, EvaluatorConfigSchema } from '@orcaops/evaluator-protocol';
 import { assertResolvedWithin } from '@orcaops/storage';
 
@@ -32,8 +33,42 @@ export const CONFIG_YAML_HEADER =
   '# Edit by hand to tweak provider / model / timeout / severity / params / enable flags; full schema:\n' +
   '#   https://docs.orcaops.ai/evaluators\n';
 
+/** The worktree-local registration path — right for project/global scope only. */
 export function evaluatorsConfigPath(repoRoot: string): string {
   return path.join(repoRoot, EVALUATOR_CONFIG_FILE);
+}
+
+export interface EvaluatorsConfigLocation {
+  configPath: string;
+  /** The worktree root, or the git common dir under personal scope. */
+  containmentRoot: string;
+  /** Repo-relative for a worktree file, absolute for the shared one. */
+  displayPath: string;
+}
+
+/**
+ * The registration file that goes with the config governing this worktree:
+ * `.orcaops/evaluators.yaml` beside a project/global config, the common dir's
+ * `orcaops/evaluators.yaml` beside the shared personal one. An uninitialized
+ * repository resolves to the worktree default so the usual "run init first"
+ * refusals keep their wording.
+ */
+export async function resolveEvaluatorsConfigLocation(
+  repoRoot: string
+): Promise<EvaluatorsConfigLocation> {
+  const source = await resolveConfigSource(repoRoot);
+  if (source.kind === 'common') {
+    return {
+      configPath: source.evaluatorsPath,
+      containmentRoot: source.containmentRoot,
+      displayPath: source.evaluatorsPath,
+    };
+  }
+  return {
+    configPath: evaluatorsConfigPath(repoRoot),
+    containmentRoot: repoRoot,
+    displayPath: EVALUATOR_CONFIG_FILE,
+  };
 }
 
 export function emptyEvaluatorsConfig(): EvaluatorConfig {
@@ -75,9 +110,10 @@ export function validateEvaluatorsConfig(value: unknown): EvaluatorConfig {
  * instead of the old blind cast's downstream misbehavior.
  */
 export async function readEvaluatorsConfig(repoRoot: string): Promise<EvaluatorConfig | null> {
+  const location = await resolveEvaluatorsConfigLocation(repoRoot);
   const configPath = assertResolvedWithin(
-    evaluatorsConfigPath(repoRoot),
-    repoRoot,
+    location.configPath,
+    location.containmentRoot,
     'evaluators configuration',
     { rejectSymlinks: true }
   );
@@ -112,7 +148,8 @@ export async function writeEvaluatorsConfig(
 ): Promise<void> {
   const canonical = parseEvaluatorConfig(config);
   const body = stringifyYaml(canonical, { indent: 2, lineWidth: 0 });
-  await atomicWriteFile(evaluatorsConfigPath(repoRoot), CONFIG_YAML_HEADER + body, repoRoot);
+  const location = await resolveEvaluatorsConfigLocation(repoRoot);
+  await atomicWriteFile(location.configPath, CONFIG_YAML_HEADER + body, location.containmentRoot);
 }
 
 export async function writeEvaluatorState(
@@ -120,7 +157,8 @@ export async function writeEvaluatorState(
   config: EvaluatorConfig,
   grantMutation: EvaluatorGrantMutation
 ): Promise<boolean> {
-  const configPath = evaluatorsConfigPath(repoRoot);
+  const location = await resolveEvaluatorsConfigLocation(repoRoot);
+  const configPath = location.configPath;
   let snapshot: Buffer | null | undefined;
   try {
     const { grantChanged } = await withGrantMutation(grantMutation, { repoRoot }, async () => {
@@ -131,7 +169,7 @@ export async function writeEvaluatorState(
   } catch (error) {
     if (snapshot === undefined) throw error;
     try {
-      await restoreConfigSnapshot(configPath, repoRoot, snapshot);
+      await restoreConfigSnapshot(configPath, location.containmentRoot, snapshot);
     } catch (rollbackError) {
       throw new AggregateError(
         [error, rollbackError],

@@ -13,7 +13,7 @@ import {
 } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
-import { commitFile } from '../support/test-helpers.js';
+import { commitFile, effectiveConfigPath } from '../support/test-helpers.js';
 
 /**
  * `--all-projects` on decisions / loose-ends. The load-bearing
@@ -142,7 +142,7 @@ describe('--all-projects decisions/loose-ends', () => {
   });
 
   async function enableArchive(repoPath: string): Promise<void> {
-    const configPath = path.join(repoPath, '.orcaops', 'config.json');
+    const configPath = await effectiveConfigPath(repoPath);
     const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     config.archive = { enabled: true, redact_secrets: false };
     await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
@@ -188,8 +188,8 @@ describe('--all-projects decisions/loose-ends', () => {
   it('serves decisions and loose ends captured in a linked worktree of the current project', async () => {
     const linked = await createLinkedWorktree(repoA.path, { branch: 'feature-insights' });
     try {
+      // The shared personal install already enables the linked worktree.
       const linkedAgent = makeAgent({ cwd: linked.path, env });
-      parseOk(await linkedAgent.runRaw(['init', '--json', '--no-llm']));
       await enableArchive(linked.path);
       const plan = parseOk<{ artifact_id: string; plan_steps: Array<{ step_id: string }> }>(
         await linkedAgent.runRaw([

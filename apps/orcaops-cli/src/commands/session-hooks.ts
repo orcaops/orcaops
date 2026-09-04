@@ -17,8 +17,14 @@ import {
 } from '../lib/session-hooks-install.js';
 import {
   codexConfigTomlPath,
+  codexFenceGuidance,
+  codexHooksDisabledGuidance,
+  codexHooksJsonNote,
+  codexHooksShapeGuidance,
+  codexInvalidTomlGuidance,
   codexMarkerLineGuidance,
   evaluateUserSessionHookSurfaces,
+  planCodexTomlInstall,
   planUserSessionHooks,
   readCodexTomlState,
   readUserHooksRecordState,
@@ -26,6 +32,7 @@ import {
   resolveUserHookPath,
   userHookCapableAgents,
   userHooksRecordPath,
+  type UserSessionHookFilePlan,
   writeUserHooksRecord,
 } from '../lib/session-hooks-user.js';
 import { SESSION_HOOK_RESTART_NOTICE, sessionHooksRestartRequired } from '../lib/session-hooks.js';
@@ -83,44 +90,54 @@ export async function sessionHooksInstallAction(
 
   if (opts.dryRun) {
     const preview = await planUserSessionHooks(agents, 'preview');
-    const plans = [...preview.plans];
+    const plans: Array<UserSessionHookFilePlan & { managed?: string }> = [...preview.plans];
     const warnings = [...preview.warnings];
     if (agents.includes('codex' as SupportedAgentId)) {
       // Codex registers via the config.toml chooser, not the settings-json
-      // planner — the preview must still name the surface instead of
-      // silently omitting it (an empty preview reads as "install would do
+      // planner — the preview names the surface and the edit the managed
+      // choice would make (an empty preview reads as "install would do
       // nothing", which is false).
       const state = await readCodexTomlState();
-      plans.push({
-        agent: 'codex' as SupportedAgentId,
-        path: state.path,
-        action:
-          state.readStatus === 'unreadable'
-            ? 'preserved-unreadable'
-            : state.installed
-              ? 'unchanged'
-              : 'created',
-      });
       if (state.readStatus === 'unreadable') {
+        plans.push({
+          agent: 'codex' as SupportedAgentId,
+          path: state.path,
+          action: 'preserved-unreadable',
+        });
         warnings.push(`${state.readError ?? `${state.path} could not be read`} — left untouched`);
-      } else if (state.markerProblemLines.length > 0) {
-        warnings.push(codexMarkerLineGuidance(state.path, state.markerProblemLines));
-      } else if (state.markerBlockBroken) {
-        warnings.push(
-          `${state.path}: owned marker block is incomplete; re-run install and choose managed mode to repair it`
-        );
-      } else if (!state.installed) {
-        warnings.push(
-          `${state.path}: codex registration is chooser-driven at install — ` +
-            `manual snippet paste (recommended) or a managed marker block` +
-            (state.collision
-              ? '; managed mode would REFUSE here (invalid TOML or root features/hooks already present), manual paste only'
-              : '')
-        );
-      } else if (state.gateMissing) {
-        warnings.push(
-          `${state.path}: hook command present but no \`hooks = true\` features gate detected`
-        );
+      } else {
+        const outcome = planCodexTomlInstall(state.raw).outcome;
+        const refusal =
+          outcome === 'refused-invalid'
+            ? codexInvalidTomlGuidance(state.path)
+            : outcome === 'refused-hooks-shape'
+              ? codexHooksShapeGuidance(state.path)
+              : outcome === 'refused-fence'
+                ? codexFenceGuidance(state.path)
+                : outcome === 'refused-markers'
+                  ? codexMarkerLineGuidance(state.path, state.markerProblemLines)
+                  : null;
+        const action: UserSessionHookFilePlan['action'] =
+          outcome === 'unchanged'
+            ? 'unchanged'
+            : refusal !== null
+              ? 'preserved-invalid'
+              : state.raw !== null && state.raw.trim() !== ''
+                ? 'updated'
+                : 'created';
+        plans.push({
+          agent: 'codex' as SupportedAgentId,
+          path: state.path,
+          action,
+          managed:
+            outcome === 'written'
+              ? 'append the block'
+              : outcome === 'unchanged'
+                ? 'unchanged (already registered)'
+                : `refuse: ${refusal}`,
+        });
+        if (refusal !== null) warnings.push(`managed mode would refuse: ${refusal}`);
+        if (state.hooksDisabled) warnings.push(codexHooksDisabledGuidance(state.path));
       }
     }
     const outboundWarnings = warnings.map(scrubOutboundText);
@@ -134,7 +151,11 @@ export async function sessionHooksInstallAction(
       });
     } else {
       writeTerminalSafeStdout('DRY RUN — nothing written.\n');
-      for (const p of plans) writeTerminalSafeStdout(`  ${p.action}: ${p.path}\n`);
+      for (const p of plans) {
+        writeTerminalSafeStdout(
+          `  ${p.action}: ${p.path}${p.managed === undefined ? '' : ` — ${p.managed}`}\n`
+        );
+      }
       for (const w of outboundWarnings) writeTerminalSafeStdout(`  ! ${w}\n`);
     }
     return;
@@ -170,9 +191,9 @@ export async function sessionHooksInstallAction(
   }
   const result = await applyUserSessionHookInstall(staged, CLI_VERSION);
   const guidance = await codexSessionHookGuidance(result.codexOutcome);
-  if (guidance !== null) say(`\n${guidance}\n`);
   const outboundWarnings = result.warnings.map(scrubOutboundText);
   if (opts.json) {
+    if (guidance !== null) say(`\n${guidance}\n`);
     emitOk({
       command: 'session-hooks install',
       dry_run: false,
@@ -183,18 +204,29 @@ export async function sessionHooksInstallAction(
     });
     return;
   }
-  for (const p of result.plans) writeTerminalSafeStdout(`  ${p.action}: ${p.path}\n`);
+  for (const p of result.plans) {
+    const note = p.agent === 'codex' && p.action === 'unchanged' ? ' (already registered)' : '';
+    writeTerminalSafeStdout(`  ${p.action}: ${p.path}${note}\n`);
+  }
   for (const w of outboundWarnings) writeTerminalSafeStdout(`  ! ${w}\n`);
   if (result.codexOutcome === 'managed-written') {
+    const landed = result.codexConfigWrite === 'merged' ? 'merged into' : 'created:';
     writeTerminalSafeStdout(
-      `  created: ${codexConfigTomlPath()} (marker-owned block)\n` +
+      `  ${landed} ${codexConfigTomlPath()} (marker-owned block)\n` +
         '  ! Codex reviews new hooks once (hash-pinned trust) — approve the orcaops\n' +
         '    entry when asked, or it is silently skipped.\n'
     );
   }
+  if (guidance !== null) writeTerminalSafeStdout(`\n${guidance}`);
   if (result.installedEntries.length > 0) {
+    const codexNeedsAttention =
+      result.codexOutcome !== null &&
+      (result.codexOutcome.startsWith('refused-') || result.codexOutcome === 'failed');
+    const installed = codexNeedsAttention
+      ? `Installed for ${result.liveAgents.join(', ')}; Codex needs attention above.\n`
+      : 'Installed. ';
     writeTerminalSafeStdout(
-      '\nInstalled. Repos opt in per-repo with `orcaops update --session-hooks`\n' +
+      `\n${installed}Repos opt in per-repo with \`orcaops update --session-hooks\`\n` +
         '(the hook stays silent everywhere else). Remove any time with\n' +
         '`orcaops session-hooks uninstall`.\n'
     );
@@ -237,17 +269,7 @@ export async function sessionHooksUninstallAction(
   }> = [];
   for (const configPath of codexPaths) {
     const state = await readCodexTomlState(configPath);
-    const outcome = opts.dryRun
-      ? state.readStatus === 'unreadable'
-        ? 'unreadable'
-        : state.markerProblemLines.length > 0
-          ? 'refused-markers'
-          : state.markerBlock
-            ? 'removed'
-            : state.installed
-              ? 'manual-content'
-              : 'absent'
-      : await removeCodexTomlBlock(configPath);
+    const outcome = await removeCodexTomlBlock(configPath, undefined, mode);
     codexRemovals.push({ path: configPath, outcome });
     if (outcome === 'manual-content') {
       result.warnings.push(
@@ -255,6 +277,12 @@ export async function sessionHooksUninstallAction(
       );
     } else if (outcome === 'refused-markers') {
       result.warnings.push(codexMarkerLineGuidance(configPath, state.markerProblemLines));
+      unresolved.add(`codex\0${configPath}`);
+    } else if (outcome === 'refused-fence') {
+      result.warnings.push(codexFenceGuidance(configPath));
+      unresolved.add(`codex\0${configPath}`);
+    } else if (outcome === 'refused-invalid') {
+      result.warnings.push(codexInvalidTomlGuidance(configPath));
       unresolved.add(`codex\0${configPath}`);
     } else if (outcome === 'unreadable') {
       result.warnings.push(
@@ -275,24 +303,27 @@ export async function sessionHooksUninstallAction(
 
   const restart = sessionHooksRestartRequired(result.plans);
   const outboundWarnings = result.warnings.map(scrubOutboundText);
+  const codexRows = codexRemovals.filter((entry) => entry.outcome !== 'absent');
   if (opts.json) {
     emitOk({
       command: 'session-hooks uninstall',
       dry_run: !!opts.dryRun,
       plans: result.plans,
+      codex: codexRows,
       restart_required: !opts.dryRun && restart,
       warnings: outboundWarnings,
     });
     return;
   }
-  if (result.plans.length === 0 && codexRemovals.every((entry) => entry.outcome === 'absent')) {
+  if (opts.dryRun) writeTerminalSafeStdout('DRY RUN — nothing written.\n');
+  if (result.plans.length === 0 && codexRows.length === 0) {
     writeTerminalSafeStdout('No orcaops session-hook entries in any user config.\n');
   }
   for (const p of result.plans) writeTerminalSafeStdout(`  ${p.action}: ${p.path}\n`);
-  for (const removal of codexRemovals) {
-    if (removal.outcome === 'removed') {
-      writeTerminalSafeStdout(`  removed: ${removal.path} (marker-owned block)\n`);
-    }
+  for (const removal of codexRows) {
+    writeTerminalSafeStdout(
+      `  ${removal.outcome}: ${removal.path}${removal.outcome === 'removed' ? ' (marker-owned block)' : ''}\n`
+    );
   }
   for (const w of outboundWarnings) writeTerminalSafeStdout(`  ! ${w}\n`);
   if (!opts.dryRun && restart) {
@@ -304,11 +335,16 @@ export async function sessionHooksStatusAction(opts: { json?: boolean } = {}): P
   const recordState = await readUserHooksRecordState();
   const record = recordState.status === 'ok' ? recordState.record : null;
   const evaluated = await evaluateUserSessionHookSurfaces(record);
+  const hooksJsonNote = await codexHooksJsonNote();
+  const codexConfig = codexConfigTomlPath();
   const rows = evaluated.map(({ agent, path, state, remedy }) => ({
     agent,
     path,
     state,
     ...(remedy ? { remedy: scrubOutboundText(remedy) } : {}),
+    ...(hooksJsonNote !== null && agent === 'codex' && path === codexConfig
+      ? { note: hooksJsonNote }
+      : {}),
   }));
   const recordError =
     recordState.status === 'unreadable' ? scrubOutboundText(recordState.message) : null;
@@ -333,6 +369,7 @@ export async function sessionHooksStatusAction(opts: { json?: boolean } = {}): P
   for (const r of rows) {
     writeTerminalSafeStdout(`  ${r.state.padEnd(24)} ${r.path}  (${r.agent})\n`);
     if (r.remedy) writeTerminalSafeStdout(`  ! ${r.remedy}\n`);
+    if (r.note) writeTerminalSafeStdout(`  ${r.note}\n`);
   }
   if (rows.some((r) => r.state === 'registered-but-missing')) {
     writeTerminalSafeStdout(

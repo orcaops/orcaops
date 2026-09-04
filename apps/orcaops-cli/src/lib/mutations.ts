@@ -859,14 +859,27 @@ export function deleteMutation(
   repoRoot: string,
   rel: string,
   expectation: DeleteExpectation,
-  changed: boolean
+  changed: boolean,
+  containmentRoot?: string,
+  absoluteTarget?: string
 ): PlannedMutation {
-  assertCanonicalRelativePath(rel, 'repository delete path');
+  // A target under its own containment root (the git common dir's orcaops/
+  // files) is upward-relative from every linked worktree, so the repo-rooted
+  // canonical check would refuse the very path it is meant to guard. Contain
+  // it against the root it was planned under instead — the executor repeats
+  // that same check before touching anything.
+  if (absoluteTarget === undefined) {
+    assertCanonicalRelativePath(rel, 'repository delete path');
+  } else {
+    assertResolvedWithin(absoluteTarget, containmentRoot ?? repoRoot, 'repository delete path', {
+      rejectSymlinks: true,
+    });
+  }
   return {
     kind: 'delete',
     path: rel,
-    absPath: path.join(repoRoot, rel),
-    containmentRoot: repoRoot,
+    absPath: absoluteTarget ?? path.join(repoRoot, rel),
+    containmentRoot: containmentRoot ?? repoRoot,
     desiredContent: null,
     currentContent: expectation.kind === 'file' ? expectation.content : null,
     changed,

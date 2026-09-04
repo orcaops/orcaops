@@ -3,20 +3,11 @@ import { describe, expect, it } from 'vitest';
 import { blockPrompt, hintsPrompt, sessionHooksPrompt } from './settings-prompts.js';
 
 describe('settings prompt copy', () => {
-  it('names the instruction files for the selected scope', () => {
-    const personal = blockPrompt('personal');
-    expect(personal.message).toContain('CLAUDE.local.md');
-    expect(personal.options).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ hint: expect.stringContaining('added to CLAUDE.local.md') }),
-        expect.objectContaining({ hint: 'CLAUDE.local.md will never be edited by orcaops' }),
-      ])
-    );
-    expect(personal.message).not.toContain('AGENTS.md');
-
-    const project = blockPrompt('project');
-    expect(project.message).toContain('AGENTS.md / CLAUDE.md');
-    expect(project.options).toEqual(
+  it('names the repository instruction files — personal scope has none to offer', () => {
+    const prompt = blockPrompt();
+    expect(prompt.message).toContain('AGENTS.md / CLAUDE.md');
+    expect(prompt.message).not.toContain('CLAUDE.local.md');
+    expect(prompt.options).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           hint: expect.stringContaining('added to AGENTS.md / CLAUDE.md'),

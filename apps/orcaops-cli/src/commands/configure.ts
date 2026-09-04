@@ -1,18 +1,26 @@
 import path from 'node:path';
 
-import { getConfigPath, Repo } from '@orcaops/core';
+import { configLocationForScope, Repo, resolveConfigSource } from '@orcaops/core';
 import { type HintKey, type SupportedAgentId } from '@orcaops/storage';
 
 import { archiveDisableAction, archiveEnableAction } from './archive.js';
 import { updateAction } from './update.js';
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
-import { writeTerminalSafeStderr, writeTerminalSafeStdout } from '../io/output.js';
+import { writeErrorLine, writeTerminalSafeStderr, writeTerminalSafeStdout } from '../io/output.js';
 import { CLI_VERSION } from '../lib/cli-version.js';
+import {
+  displayConfigPath,
+  refuseTrackedPersonalTransition,
+  resolvePersonalConfigForAdoption,
+  trackedProjectInstallPaths,
+} from '../lib/config-file.js';
 import { buildContext } from '../lib/context.js';
 import { hooksDirCandidates } from '../lib/git-hooks-dir.js';
+import { INSTALL_MANIFEST_REL } from '../lib/install-manifest.js';
 import { isCi } from '../lib/invocation-context.js';
 import {
+  deleteMutation,
   executeMutations,
   planGitHookMutation,
   planRemoveGitHooks,
@@ -20,6 +28,7 @@ import {
   readRepositoryFileOrNull,
   writeMutation,
 } from '../lib/mutations.js';
+import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { readUserHooksRecord } from '../lib/session-hooks-user.js';
 import {
   editArchiveEnabled,
@@ -176,11 +185,16 @@ export async function configureAction(opts: ConfigureOptions = {}): Promise<void
           label: mark('Session-start hooks', changed.sessionHooks),
           hint: hintFor(changed.sessionHooks, showHooks(original), showHooks(draft)),
         },
-        {
-          value: 'block',
-          label: mark('Instructions file section', changed.block),
-          hint: hintFor(changed.block, original.bootstrap, draft.bootstrap),
-        },
+        // Personal scope owns no instruction file, so the row is not offered.
+        ...(draft.scope === 'personal'
+          ? []
+          : [
+              {
+                value: 'block',
+                label: mark('Instructions file section', changed.block),
+                hint: hintFor(changed.block, original.bootstrap, draft.bootstrap),
+              },
+            ]),
         {
           value: 'hints',
           label: mark('Workflow reminders', changed.hints),
@@ -321,7 +335,9 @@ async function editItem(
       );
       if (choice === null) return;
       let entries = draft.sessionHookEntries;
-      if (choice !== 'off') {
+      // Personal scope registers hooks at the machine level only; there is
+      // no repo-entries choice to make.
+      if (choice !== 'off' && draft.scope !== 'personal') {
         const picked = await editSessionHookEntries(entries);
         if (picked === null) return;
         entries = picked;
@@ -331,7 +347,7 @@ async function editItem(
       return;
     }
     case 'block': {
-      const choice = await editBlockChoice(draft.bootstrap, draft.scope);
+      const choice = await editBlockChoice(draft.bootstrap);
       if (choice !== null) draft.bootstrap = choice;
       return;
     }
@@ -347,6 +363,11 @@ async function editItem(
       if (link === null) return;
       draft.scope = scope;
       draft.link = link;
+      // Personal scope stores exactly the values it supports.
+      if (scope === 'personal') {
+        draft.bootstrap = 'manual';
+        draft.sessionHookEntries = 'none';
+      }
       return;
     }
     case 'generated': {
@@ -450,72 +471,136 @@ async function applyDraft(
     JSON.stringify(original.hintCustom) !== JSON.stringify(draft.hintCustom);
 
   if (configChanged) {
-    const configPath = getConfigPath(repoRoot);
-    const raw = await readRepositoryFileOrNull(configPath, repoRoot, 'orcaops configuration');
-    if (raw === null) {
-      throw new OrcaopsError(ErrorCodes.UNINITIALIZED, `${configPath} does not exist.`);
-    }
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    // Per-key deltas ONLY (update's flag-persistence discipline): a key the
-    // user never touched must not materialize in raw config.json — writing
-    // today's resolved value would pin today's DEFAULT, silently detaching
-    // the repo from a future default change.
-    const install = { ...((parsed.install ?? {}) as Record<string, unknown>) };
-    let installChanged = false;
-    if (JSON.stringify(original.agents) !== JSON.stringify(draft.agents)) {
-      install.agents = draft.agents;
-      installChanged = true;
-    }
-    if (original.scope !== draft.scope) {
-      install.scope = draft.scope;
-      installChanged = true;
-    }
-    if (original.link !== draft.link) {
-      install.link = draft.link;
-      installChanged = true;
-    }
-    if (installChanged) parsed.install = install;
-    if (original.prefix !== draft.prefix) {
-      parsed.naming = {
-        ...((parsed.naming ?? {}) as Record<string, unknown>),
-        prefix: draft.prefix,
-      };
-    }
-    if (original.bootstrap !== draft.bootstrap) parsed.bootstrap = draft.bootstrap;
-    if (original.generatedFiles !== draft.generatedFiles) {
-      parsed.generated_files = draft.generatedFiles;
-    }
-    if (
-      original.sessionHooks !== draft.sessionHooks ||
-      original.sessionHookEntries !== draft.sessionHookEntries
-    ) {
-      parsed.session_hooks = {
-        ...((parsed.session_hooks ?? {}) as Record<string, unknown>),
-        enabled: draft.sessionHooks !== 'off',
-        // 'off' keeps the prior payload preference so a later re-enable
-        // resumes it.
-        ...(draft.sessionHooks !== 'off' ? { payload: draft.sessionHooks } : {}),
-        ...(original.sessionHookEntries !== draft.sessionHookEntries
-          ? { entries: draft.sessionHookEntries }
-          : {}),
-      };
-    }
-    if (
-      JSON.stringify(original.hintKeys) !== JSON.stringify(draft.hintKeys) ||
-      JSON.stringify(original.hintCustom) !== JSON.stringify(draft.hintCustom)
-    ) {
-      const workflow = (parsed.workflow ?? {}) as Record<string, unknown>;
-      const hints = (workflow.hints ?? {}) as Record<string, unknown>;
-      parsed.workflow = {
-        ...workflow,
-        hints: { ...hints, keys: draft.hintKeys, custom: draft.hintCustom },
-      };
-    }
+    const commonDir = await new Repo(repoRoot).getCommonDirAbsolute();
+    let updatedConfigPath = '';
+    await withRepositoryInstallLock(commonDir, async (installLease) => {
+      // Read the config in effect; write to the one the DESTINATION scope owns.
+      const source = await resolveConfigSource(repoRoot);
+      const destination = await configLocationForScope(repoRoot, draft.scope);
+      if (destination.configPath !== source.configPath && draft.scope === 'personal') {
+        const tracked = await trackedProjectInstallPaths(new Repo(repoRoot), [
+          path.relative(repoRoot, source.configPath),
+          INSTALL_MANIFEST_REL,
+        ]);
+        if (tracked.length > 0) {
+          // Rendered here: configure's apply path has no envelope boundary of
+          // its own, and an unrendered OrcaopsError would surface as a stack.
+          writeErrorLine(refuseTrackedPersonalTransition(tracked));
+          throw new CliExit(1);
+        }
+      }
+      const raw = await readRepositoryFileOrNull(
+        source.configPath,
+        source.containmentRoot,
+        'orcaops configuration'
+      );
+      if (raw === null) {
+        throw new OrcaopsError(
+          ErrorCodes.UNINITIALIZED,
+          `${displayConfigPath(source, repoRoot)} does not exist.`
+        );
+      }
+      const movingSource = destination.configPath !== source.configPath;
+      const priorDestination = movingSource
+        ? await readRepositoryFileOrNull(
+            destination.configPath,
+            destination.containmentRoot,
+            'orcaops configuration'
+          )
+        : raw;
+      if (movingSource && draft.scope === 'personal' && priorDestination !== null) {
+        resolvePersonalConfigForAdoption(
+          priorDestination,
+          displayConfigPath(destination, repoRoot)
+        );
+      }
+      const parsed = JSON.parse(priorDestination ?? raw) as Record<string, unknown>;
+      // Per-key deltas ONLY (update's flag-persistence discipline): a key the
+      // user never touched must not materialize in raw config.json — writing
+      // today's resolved value would pin today's DEFAULT, silently detaching
+      // the repo from a future default change.
+      const install = { ...((parsed.install ?? {}) as Record<string, unknown>) };
+      let installChanged = false;
+      if (JSON.stringify(original.agents) !== JSON.stringify(draft.agents)) {
+        install.agents = draft.agents;
+        installChanged = true;
+      }
+      if (original.scope !== draft.scope) {
+        install.scope = draft.scope;
+        installChanged = true;
+      }
+      if (original.link !== draft.link) {
+        install.link = draft.link;
+        installChanged = true;
+      }
+      if (installChanged) parsed.install = install;
+      if (original.prefix !== draft.prefix) {
+        parsed.naming = {
+          ...((parsed.naming ?? {}) as Record<string, unknown>),
+          prefix: draft.prefix,
+        };
+      }
+      if (original.bootstrap !== draft.bootstrap) parsed.bootstrap = draft.bootstrap;
+      if (original.generatedFiles !== draft.generatedFiles) {
+        parsed.generated_files = draft.generatedFiles;
+      }
+      if (
+        original.sessionHooks !== draft.sessionHooks ||
+        original.sessionHookEntries !== draft.sessionHookEntries
+      ) {
+        parsed.session_hooks = {
+          ...((parsed.session_hooks ?? {}) as Record<string, unknown>),
+          enabled: draft.sessionHooks !== 'off',
+          // 'off' keeps the prior payload preference so a later re-enable
+          // resumes it.
+          ...(draft.sessionHooks !== 'off' ? { payload: draft.sessionHooks } : {}),
+          ...(original.sessionHookEntries !== draft.sessionHookEntries
+            ? { entries: draft.sessionHookEntries }
+            : {}),
+        };
+      }
+      if (
+        JSON.stringify(original.hintKeys) !== JSON.stringify(draft.hintKeys) ||
+        JSON.stringify(original.hintCustom) !== JSON.stringify(draft.hintCustom)
+      ) {
+        const workflow = (parsed.workflow ?? {}) as Record<string, unknown>;
+        const hints = (workflow.hints ?? {}) as Record<string, unknown>;
+        parsed.workflow = {
+          ...workflow,
+          hints: { ...hints, keys: draft.hintKeys, custom: draft.hintCustom },
+        };
+      }
 
-    const desired = `${JSON.stringify(parsed, null, 2)}\n`;
-    const rel = path.relative(repoRoot, configPath);
-    await executeMutations([writeMutation(repoRoot, rel, desired, raw, desired !== raw)], 'apply');
-    out(`Updated ${rel}.`);
+      const desired = `${JSON.stringify(parsed, null, 2)}\n`;
+      const writes = [
+        writeMutation(
+          repoRoot,
+          path.relative(repoRoot, destination.configPath),
+          desired,
+          priorDestination,
+          desired !== priorDestination,
+          destination.containmentRoot,
+          destination.configPath
+        ),
+      ];
+      // Leaving a worktree config behind after publishing to the shared file
+      // would brick every command: source selection fails closed on a
+      // worktree config that claims personal.
+      if (movingSource && source.kind === 'worktree') {
+        writes.push(
+          deleteMutation(
+            repoRoot,
+            path.relative(repoRoot, source.configPath),
+            { kind: 'file', content: raw },
+            true
+          )
+        );
+      }
+      await installLease.verify();
+      await executeMutations(writes, 'apply');
+      updatedConfigPath = displayConfigPath(destination, repoRoot);
+    });
+    out(`Updated ${updatedConfigPath}.`);
     out('');
     // The ONE shared reconcile: update re-reads the persisted config and
     // reports the file effects (installed/refreshed/pruned, session-hook

@@ -58,8 +58,12 @@ Run this once from the repository root:
 orcaops init
 ```
 
-`init` detects your supported coding agents and installs the matching Orcaops
-skills. Interactive setup shows the agents it detected, then asks:
+`init` looks for evidence of installed coding agents — a file the agent itself
+wrote under your home directory — and installs the matching Orcaops skills.
+Interactive setup pre-ticks each agent it found and shows why (for example
+`detected: ~/.cursor/cli-config.json`); untick any you do not use. Editors that
+leave no footprint of their own, such as Copilot in JetBrains or Neovim, are not
+pre-ticked, so tick them yourself. Setup then asks:
 
 - which agents should receive Orcaops skills;
 - whether to add the recommended session-start reminder so those agents remember
@@ -68,20 +72,24 @@ skills. Interactive setup shows the agents it detected, then asks:
   is supported and still needed; and
 - whether to keep a durable backup of captured history in your home directory.
 
+A repository that was initialized earlier keeps its agent list. To drop an agent
+that was ticked by the older directory-only detection, run `orcaops configure`
+and untick it (or `orcaops init --force --reset-config` to start over).
+
 ### What `init` changes
 
 The default personal setup is designed for one developer to try Orcaops without
 changing the repository for anyone else.
 
-| Surface             | What happens                                                                                                                                                                                                | Why                                                                                     |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Agent skills        | Installs skills in the repository or in each selected agent's global skill location, depending on install scope. The default personal setup uses global locations, so no skill files enter the repository.  | Your agent can run the capture and review workflows without committing generated files. |
-| `.orcaops/`         | Creates `.orcaops/artifacts/`, `.orcaops/cache/`, and `.orcaops/config.json` inside the checkout. The directory is hidden with git's local `info/exclude`.                                                  | Task records stay beside the repository while `git status` remains clean.               |
-| Repository identity | Stores a repository ID in local git config, shared by its worktrees.                                                                                                                                        | Orcaops can recognize the same repository without deriving identity from its path.      |
-| Workflow guidance   | Offers a recommended session-start hook and, where supported, a managed instruction-file section. Hooks emit only in initialized repositories; managed instructions stay within the selected install scope. | The agent remembers to run the lifecycle when you give it an ordinary development task. |
-| History archive     | If enabled, mirrors captured history to the per-user Orcaops data directory (`~/.orcaops` or the platform's XDG data directory).                                                                            | The task record can survive a deleted worktree.                                         |
-| LLM tool            | Selects an available local coding-agent CLI automatically when an Orcaops workflow needs a model; it reuses that tool's login rather than asking Orcaops for an API key.                                    | You keep using the coding-agent subscription already configured on the machine.         |
-| Tracked repository  | No tracked files, `.gitignore` edits, tracked instruction-file edits, git hooks, or background services are added by the default personal setup.                                                            | You can evaluate Orcaops without affecting teammates or the project diff.               |
+| Surface             | What happens                                                                                                                                                                                                                         | Why                                                                                     |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| Agent skills        | Installs skills in the repository or in each selected agent's global skill location, depending on install scope. The default personal setup uses global locations, so no skill files enter the repository.                           | Your agent can run the capture and review workflows without committing generated files. |
+| `.orcaops/`         | Reserved for this checkout's task records and caches; created by the first capture, not by init, and hidden with git's local `info/exclude`. The personal config itself lives in the git common directory, shared by every worktree. | Task records stay beside the repository while `git status` remains clean.               |
+| Repository identity | Stores a repository ID in local git config, shared by its worktrees.                                                                                                                                                                 | Orcaops can recognize the same repository without deriving identity from its path.      |
+| Workflow guidance   | Offers a recommended session-start hook and, where supported, a managed instruction-file section. Hooks emit only in initialized repositories; managed instructions stay within the selected install scope.                          | The agent remembers to run the lifecycle when you give it an ordinary development task. |
+| History archive     | If enabled, mirrors captured history to the per-user Orcaops data directory (`~/.orcaops` or the platform's XDG data directory).                                                                                                     | The task record can survive a deleted worktree.                                         |
+| LLM tool            | Selects an available local coding-agent CLI automatically when an Orcaops workflow needs a model; it reuses that tool's login rather than asking Orcaops for an API key.                                                             | You keep using the coding-agent subscription already configured on the machine.         |
+| Tracked repository  | No tracked files, `.gitignore` edits, tracked instruction-file edits, git hooks, or background services are added by the default personal setup.                                                                                     | You can evaluate Orcaops without affecting teammates or the project diff.               |
 
 Keep either the recommended session reminder or managed instruction section
 enabled to get the automatic workflow described below. Skills are installed even
@@ -133,9 +141,7 @@ determine the exact paths and counts.
 Orcaops initialized at <repo>
 
 Created:
-  .orcaops/artifacts/
-  .orcaops/cache/
-  .orcaops/config.json
+  <repo>/.git/orcaops/config.json
 
 Installed 18 skills for claude-code → <agent-skills-dir>
 

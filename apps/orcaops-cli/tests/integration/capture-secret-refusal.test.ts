@@ -7,6 +7,7 @@ import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/te
 
 import { cloudRecord } from '../support/source-plan-test-helpers.js';
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 // Real-shape, semantically dead. A refuse-tier vendor prefix.
 const FAKE_GH_TOKEN = 'ghp_ABCDEF1234567890abcdef1234567890ABCDEF';
@@ -493,7 +494,7 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
   });
 
   it('accepts an exactly allowlisted secret in an approved cloud pin', async () => {
-    const configPath = path.join(repo.path, '.orcaops', 'config.json');
+    const configPath = await effectiveConfigPath(repo.path);
     const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     await writeFile(
       configPath,
@@ -533,7 +534,7 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
     // The secret sits in the source-plan file, so this exercises
     // `assertNoSecretsOutbound` (through source-plan-resolver) rather than the
     // capture-payload gate the other cases here cover.
-    const configPath = path.join(repo.path, '.orcaops', 'config.json');
+    const configPath = await effectiveConfigPath(repo.path);
     const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     await writeFile(
       configPath,
@@ -716,7 +717,7 @@ describe('an unreadable redact.allow is reported, not swallowed', () => {
   ];
 
   const writeConfig = async (body: string): Promise<void> => {
-    await writeFile(path.join(repo.path, '.orcaops', 'config.json'), body, 'utf8');
+    await writeFile(await effectiveConfigPath(repo.path), body, 'utf8');
   };
 
   beforeEach(async () => {
@@ -731,7 +732,7 @@ describe('an unreadable redact.allow is reported, not swallowed', () => {
 
   it('warns on stderr when a malformed allowlist turns into a refusal', async () => {
     const config = JSON.parse(
-      await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')
+      await readFile(await effectiveConfigPath(repo.path), 'utf8')
     ) as Record<string, unknown>;
     await writeConfig(JSON.stringify({ ...config, redact: { allow: FAKE_GH_TOKEN } }));
 
@@ -772,7 +773,7 @@ describe('an unreadable redact.allow is reported, not swallowed', () => {
   });
 
   it('stays silent when no config file exists', async () => {
-    await rm(path.join(repo.path, '.orcaops', 'config.json'));
+    await rm(await effectiveConfigPath(repo.path));
 
     const res = await agent.runRaw(planArgs('wire the deploy'));
 

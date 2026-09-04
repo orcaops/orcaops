@@ -104,7 +104,18 @@ describe('packed api-signature-drift runtime', () => {
 
     run(
       'npm',
-      ['install', '--no-save', '--no-package-lock', '--omit=dev', '--ignore-scripts', ...tarballs],
+      // --no-audit: this installs to check module resolution, and npm's audit
+      // endpoint can hang for minutes, which is budget this test does not have.
+      // Dependency advisories are the production audit's job, not this test's.
+      [
+        'install',
+        '--no-save',
+        '--no-package-lock',
+        '--omit=dev',
+        '--ignore-scripts',
+        '--no-audit',
+        ...tarballs,
+      ],
       installDir
     );
 

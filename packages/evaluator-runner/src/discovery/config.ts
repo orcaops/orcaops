@@ -26,10 +26,23 @@ export const EVALUATOR_CONFIG_FILE = '.orcaops/evaluators.yaml';
  * can distinguish "config missing" from "permission denied / I/O
  * error reading config."
  */
-export async function loadEvaluatorConfig(repoRoot: string): Promise<EvaluatorConfig | null> {
+export interface LoadEvaluatorConfigOptions {
+  /**
+   * The registration file to read instead of `<repoRoot>/.orcaops/evaluators.yaml`
+   * — personal scope keeps it in the git common dir — with the root it must
+   * resolve within (that dir sits outside every linked worktree).
+   */
+  configPath?: string;
+  containmentRoot?: string;
+}
+
+export async function loadEvaluatorConfig(
+  repoRoot: string,
+  opts: LoadEvaluatorConfigOptions = {}
+): Promise<EvaluatorConfig | null> {
   const configPath = assertResolvedWithin(
-    path.join(repoRoot, EVALUATOR_CONFIG_FILE),
-    repoRoot,
+    opts.configPath ?? path.join(repoRoot, EVALUATOR_CONFIG_FILE),
+    opts.containmentRoot ?? repoRoot,
     EVALUATOR_CONFIG_FILE,
     { rejectSymlinks: true }
   );

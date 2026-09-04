@@ -1,14 +1,11 @@
-import path from 'node:path';
-
-import { getConfigPath } from '@orcaops/core';
-import type { Config } from '@orcaops/storage';
+import { type Config, resolveConfig } from '@orcaops/storage';
 
 import { ErrorCodes, OrcaopsError } from '../../io/errors.js';
 import { CliExit } from '../../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../../io/output.js';
-import { atomicWriteFile } from '../../lib/atomic-write.js';
+import { openEffectiveConfig, writeConfigDocument } from '../../lib/config-file.js';
 import { buildContext } from '../../lib/context.js';
-import { readRepositoryFileOrNull } from '../../lib/mutations.js';
+import { withRepositoryInstallLock } from '../../lib/repository-install-lock.js';
 import {
   currentSkillCapabilities,
   resolveSkillSet,
@@ -125,23 +122,22 @@ async function runToggle(opts: ToggleSkillOptions, enabled: boolean): Promise<vo
   try {
     const ctx = await buildContext();
     try {
-      const plan = planSkillToggle(ctx.config, opts.id, enabled, ctx.gates);
-
-      // Raw config.json edit (update.ts prefix/scope pattern): parse the
-      // on-disk JSON, mutate ONLY skills.enabled, and rewrite atomically —
-      // never serialize the resolved Config (that would freeze every default).
-      const configPath = getConfigPath(ctx.repoRoot);
-      const configRel = path.relative(ctx.repoRoot, configPath);
-      const raw = await readRepositoryFileOrNull(configPath, ctx.repoRoot, 'orcaops configuration');
-      if (raw === null) {
-        throw new OrcaopsError(ErrorCodes.UNINITIALIZED, `${configPath} does not exist.`);
-      }
-      const parsed = JSON.parse(raw) as { skills?: { enabled?: Record<string, boolean> } };
-      parsed.skills = {
-        ...(parsed.skills ?? {}),
-        enabled: { ...(parsed.skills?.enabled ?? {}), [opts.id]: enabled },
-      };
-      await atomicWriteFile(configPath, `${JSON.stringify(parsed, null, 2)}\n`, ctx.repoRoot);
+      const commonDir = await ctx.repo.getCommonDirAbsolute();
+      const { plan, configRel } = await withRepositoryInstallLock(
+        commonDir,
+        async (installLease) => {
+          const document = await openEffectiveConfig(ctx.repoRoot);
+          const plan = planSkillToggle(resolveConfig(document.raw), opts.id, enabled, ctx.gates);
+          const skills = (document.raw.skills ?? {}) as { enabled?: Record<string, boolean> };
+          document.raw.skills = {
+            ...skills,
+            enabled: { ...(skills.enabled ?? {}), [opts.id]: enabled },
+          };
+          await installLease.verify();
+          await writeConfigDocument(document);
+          return { plan, configRel: document.displayPath };
+        }
+      );
 
       const result = {
         ok: true as const,

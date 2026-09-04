@@ -13,6 +13,7 @@ import {
 } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 /**
  * `--all-projects` on list / search / stats. Two archived projects (real CLI
@@ -41,13 +42,24 @@ describe('--all-projects', () => {
   let artifactA: string;
   let artifactB: string;
 
-  async function setupProject(repo: TempRepo, task: string): Promise<string> {
+  /**
+   * `alreadyEnabled`: a linked worktree of an initialized repo shares its
+   * personal config from the git common dir, so it is neither initialized
+   * again nor given its own archive setting.
+   */
+  async function setupProject(
+    repo: TempRepo,
+    task: string,
+    opts: { alreadyEnabled?: boolean } = {}
+  ): Promise<string> {
     const agent = makeAgent({ cwd: repo.path, env });
-    parseOk(await agent.runRaw(['init', '--json', '--no-llm']));
-    const configPath = path.join(repo.path, '.orcaops', 'config.json');
-    const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
-    config.archive = { enabled: true, redact_secrets: false };
-    await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
+    if (!opts.alreadyEnabled) {
+      parseOk(await agent.runRaw(['init', '--json', '--no-llm']));
+      const configPath = await effectiveConfigPath(repo.path);
+      const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+      config.archive = { enabled: true, redact_secrets: false };
+      await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
+    }
     const plan = parseOk<{ artifact_id: string; plan_steps: Array<{ step_id: string }> }>(
       await agent.runRaw([
         'capture',
@@ -174,8 +186,10 @@ describe('--all-projects', () => {
   it('includes archive-resident work from a linked worktree of the current project', async () => {
     const linked = await createLinkedWorktree(repoA.path, { branch: 'feature-linked' });
     try {
-      const linkedArtifact = await setupProject(linked, 'linked worktree work');
-      const configPath = path.join(repoA.path, '.orcaops', 'config.json');
+      const linkedArtifact = await setupProject(linked, 'linked worktree work', {
+        alreadyEnabled: true,
+      });
+      const configPath = await effectiveConfigPath(repoA.path);
       const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
       config.archive = { enabled: false, redact_secrets: false };
       await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
@@ -197,7 +211,7 @@ describe('--all-projects', () => {
   it('stats counts linked-worktree artifacts once in the current project rollup', async () => {
     const linked = await createLinkedWorktree(repoA.path, { branch: 'feature-stats' });
     try {
-      await setupProject(linked, 'linked stats work');
+      await setupProject(linked, 'linked stats work', { alreadyEnabled: true });
       const inside = parseOk<{
         projects: Array<{ hot: boolean; artifacts: { total: number } }>;
         totals: { artifacts: number; checkpoints: number };
@@ -378,7 +392,7 @@ describe('--all-projects', () => {
   });
 
   it('fails loudly when the included hot project cannot be opened', async () => {
-    await writeFile(path.join(repoA.path, '.orcaops', 'config.json'), '{not-json', 'utf8');
+    await writeFile(await effectiveConfigPath(repoA.path), '{not-json', 'utf8');
 
     const result = await agentA.runRaw(['list', '--all-projects', '--json']);
     expect(result.exitCode).toBe(1);
@@ -393,7 +407,7 @@ describe('--all-projects', () => {
     try {
       const agentC = makeAgent({ cwd: repoC.path, env });
       parseOk(await agentC.runRaw(['init', '--json', '--no-llm']));
-      const configPath = path.join(repoC.path, '.orcaops', 'config.json');
+      const configPath = await effectiveConfigPath(repoC.path);
       const healthyConfig = await readFile(configPath, 'utf8');
 
       await writeFile(configPath, '{not-json', 'utf8');

@@ -1,15 +1,22 @@
-import { access, readdir } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import { loadReadOnlyProjectConfig, Repo, scrubAndBound } from '@orcaops/core';
+import {
+  loadReadOnlyProjectConfig,
+  readOnlyWorktreeState,
+  Repo,
+  scrubAndBound,
+} from '@orcaops/core';
 import {
   type ArchiveArtifactIssue,
   archiveProjectDir,
   archiveRoot,
   ArtifactStore,
   indexRoot,
+  isEmptyProjection,
   isUuidV7,
   loadRegistry,
+  openEmptyArtifactStore,
   openProjectIndex,
   prepareArtifactStoreForRead,
   type ProjectIndex,
@@ -366,6 +373,13 @@ export async function openAllProjects(
     prepareHotStoresForRead: async () => {
       for (const project of projects) {
         if (!project.hotStore) continue;
+        const promoted = await promoteEmptyHotStore(project.hotStore);
+        if (promoted !== project.hotStore) {
+          const previous = project.hotStore;
+          project.hotStore = promoted;
+          project.store = promoted.store;
+          previous.close();
+        }
         const issue = await prepareHotProjection(
           project.hotStore,
           project.projectId,
@@ -376,9 +390,22 @@ export async function openAllProjects(
           ...(issue ? [issue] : []),
         ];
       }
-      unidentifiedProjectionIssue = unidentifiedHot
-        ? await prepareHotProjection(unidentifiedHot.hotStore, null, unidentifiedHot.displayName)
-        : null;
+      if (unidentifiedHot) {
+        const promoted = await promoteEmptyHotStore(unidentifiedHot.hotStore);
+        if (promoted !== unidentifiedHot.hotStore) {
+          const previous = unidentifiedHot.hotStore;
+          unidentifiedHot.hotStore = promoted;
+          unidentifiedHot.store = promoted.store;
+          previous.close();
+        }
+        unidentifiedProjectionIssue = await prepareHotProjection(
+          unidentifiedHot.hotStore,
+          null,
+          unidentifiedHot.displayName
+        );
+      } else {
+        unidentifiedProjectionIssue = null;
+      }
     },
     close: () => {
       for (const p of projects) p.close();
@@ -389,11 +416,22 @@ export async function openAllProjects(
   return scope;
 }
 
+async function promoteEmptyHotStore(store: ArtifactStore): Promise<ArtifactStore> {
+  if (!isEmptyProjection(store)) return store;
+  const state = await readOnlyWorktreeState(store.repoRoot);
+  if (state.kind === 'broken') throw state.error;
+  if (state.kind !== 'enabled' || state.hot.empty) return store;
+  return new ArtifactStore({ repoRoot: store.repoRoot, config: state.config });
+}
+
 async function prepareHotProjection(
   store: ArtifactStore,
   projectId: string | null,
   project: string
 ): Promise<HotProjectionIncompleteScopeIssue | null> {
+  // An empty projection has nothing to reconcile, and preparing it would
+  // create the locks directory in a worktree that holds no data.
+  if (isEmptyProjection(store)) return null;
   const preparation = await prepareArtifactStoreForRead({ store });
   if (preparation.issue === null && preparation.projectionHealth === 'healthy') return null;
   const detail = preparation.issue
@@ -524,7 +562,12 @@ async function openCurrentHotProject(
     root =
       (await resolveExplicitOverride(abscwd, env, rootOverride)) ?? (await discoverGitRoot(abscwd));
     if (!root) return null;
-    await access(path.join(root, '.orcaops'));
+    // Initialized means governed by a config — this worktree's own or the
+    // shared personal one — never "has a .orcaops directory": an enabled
+    // sibling with no local data is a valid, empty hot source.
+    const state = await readOnlyWorktreeState(root);
+    if (state.kind === 'uninitialized') return null;
+    if (state.kind === 'broken') throw state.error;
     initialized = true;
     repo = new Repo(root);
     const projectId = await readProjectId(repo);
@@ -604,8 +647,19 @@ async function openCurrentHotProject(
   }
 }
 
+/**
+ * Open this worktree's hot store for reading. An enabled worktree with no
+ * data yet is served from an in-memory projection: the `ArtifactStore`
+ * constructor would otherwise create the cache file (and read preparation
+ * the locks dir) in a checkout the user has never captured in.
+ */
 async function openHotArtifactStore(repoRoot: string): Promise<ArtifactStore> {
-  return new ArtifactStore({ repoRoot, config: await loadReadOnlyProjectConfig(repoRoot) });
+  const state = await readOnlyWorktreeState(repoRoot);
+  if (state.kind === 'broken') throw state.error;
+  const config =
+    state.kind === 'enabled' ? state.config : await loadReadOnlyProjectConfig(repoRoot);
+  if (state.kind === 'enabled' && state.hot.empty) return openEmptyArtifactStore(repoRoot, config);
+  return new ArtifactStore({ repoRoot, config });
 }
 
 /** Read-only recovery guidance derived from registry hints, never identity. */

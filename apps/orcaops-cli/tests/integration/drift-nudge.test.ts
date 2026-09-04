@@ -1,11 +1,13 @@
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { CONFIG_SCHEMA_VERSION } from '@orcaops/storage';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { effectiveConfigPath } from '../support/test-helpers.js';
 
 interface DriftField {
   staleSkills: string[];
@@ -30,7 +32,7 @@ async function setConfig(
   repoPath: string,
   mutate: (cfg: Record<string, unknown>) => void
 ): Promise<void> {
-  const cfgPath = path.join(repoPath, '.orcaops', 'config.json');
+  const cfgPath = await effectiveConfigPath(repoPath);
   const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
   mutate(cfg);
   await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
@@ -271,14 +273,24 @@ describe('orcaops drift nudge', () => {
     parsed = JSON.parse((await agent.runRaw(['status', '--json'])).stdout) as StatusJson;
     expect(parsed.drift?.staleInfoExclude).toContain(excludeRel);
 
-    // Restore, then flip the CONFIG to project scope without reconciling —
-    // the lingering hide lines are now a pending strip, drift again.
+    // Restore, then let a PROJECT config appear in the worktree without
+    // reconciling (a branch checkout carrying one) — it outranks the shared
+    // personal config. The block is common state, so it stays while the
+    // personal manifest still claims it; once that claim is gone too, the
+    // lingering hide lines are a pending strip: drift again.
     await agent.runRaw(['update', '--json']);
     parsed = JSON.parse((await agent.runRaw(['status', '--json'])).stdout) as StatusJson;
     expect(parsed.drift).toBeUndefined();
-    await setConfig(repo.path, (cfg) => {
-      (cfg.install as Record<string, unknown>).scope = 'project';
-    });
+    await rm(path.join(repo.path, '.git', 'orcaops', 'personal-manifest.json'));
+    await mkdir(path.join(repo.path, '.orcaops'), { recursive: true });
+    await writeFile(
+      path.join(repo.path, '.orcaops', 'config.json'),
+      JSON.stringify({
+        schema_version: CONFIG_SCHEMA_VERSION,
+        install: { agents: ['claude-code'], scope: 'project' },
+      }),
+      'utf8'
+    );
     parsed = JSON.parse((await agent.runRaw(['status', '--json'])).stdout) as StatusJson;
     expect(parsed.drift?.staleInfoExclude).toContain(excludeRel);
   });

@@ -1,17 +1,29 @@
-import { mkdir, readFile, rename, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
-import { Repo } from '@orcaops/core';
+import { clearCommonDirCache, commonConfigLocation, Repo } from '@orcaops/core';
 import { openAllProjects, PROJECT_ID_CONFIG_KEY } from '@orcaops/project-scope';
-import { indexRoot, projectIndexMetaPath } from '@orcaops/storage';
+import { ArtifactStore, getDefaultConfig, indexRoot, projectIndexMetaPath } from '@orcaops/storage';
+import { createLinkedWorktree, createTempRepo } from '@orcaops/test-harness';
 
 import { AgentActivityReader } from './agent-activity.js';
 import { SnapshotEngine } from './engine.js';
 import { FsWatch } from './fs-watch.js';
 import { collectFromScope } from './snapshot.js';
 import type { WatchSnapshot, WatchThread } from './types.js';
-import { makeArchiveFixture } from '../../tests/support/fixture-archive.js';
+import { makeArchiveFixture, seedArtifact } from '../../tests/support/fixture-archive.js';
 
 const ARTX = '01999999-9999-7000-8000-0000000000e0';
 const ARTY = '01999999-9999-7000-8000-0000000000f0';
@@ -26,6 +38,46 @@ function findAgent(s: WatchSnapshot, id: string): WatchThread | undefined {
 }
 
 describe('SnapshotEngine', () => {
+  it('observes the first capture made after starting from an empty personal worktree', async () => {
+    clearCommonDirCache();
+    const main = await createTempRepo({ initialBranch: 'main' });
+    const linked = await createLinkedWorktree(main.path);
+    const dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-watch-empty-'));
+    const config = getDefaultConfig();
+    config.install.scope = 'personal';
+    config.archive.enabled = false;
+    let engine: SnapshotEngine | undefined;
+    try {
+      const shared = await commonConfigLocation(main.path);
+      await mkdir(path.dirname(shared.configPath), { recursive: true });
+      await writeFile(shared.configPath, JSON.stringify(config), 'utf8');
+      await new Repo(main.path).setLocalConfig(PROJECT_ID_CONFIG_KEY, PROJECT_A);
+
+      const snapshots: WatchSnapshot[] = [];
+      engine = new SnapshotEngine({
+        cwd: linked.path,
+        env: { ORCAOPS_DATA_DIR: dataRoot },
+      });
+      engine.on('snapshot', (snapshot: WatchSnapshot) => snapshots.push(snapshot));
+      await engine.start();
+      await expect(access(path.join(linked.path, '.orcaops'))).rejects.toThrow();
+      expect(findAgent(snapshots.at(-1) as WatchSnapshot, ARTX)).toBeUndefined();
+
+      const writer = new ArtifactStore({ repoRoot: linked.path, config });
+      await seedArtifact(writer, { artifactId: ARTX });
+      writer.close();
+      await engine.tick(NOW);
+
+      expect(findAgent(snapshots.at(-1) as WatchSnapshot, ARTX)).toBeDefined();
+    } finally {
+      engine?.close();
+      await rm(dataRoot, { recursive: true, force: true });
+      await linked.cleanup();
+      await main.cleanup();
+      clearCommonDirCache();
+    }
+  });
+
   it('retains one provider instance across ticks', async () => {
     const fx = await makeArchiveFixture();
     try {

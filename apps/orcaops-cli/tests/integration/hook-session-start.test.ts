@@ -4,7 +4,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
+import {
+  createLinkedWorktree,
+  createTempRepo,
+  gitClient,
+  inputFile,
+  type TempRepo,
+} from '@orcaops/test-harness';
 
 import { canonicalSessionHookCommand, settingsSpecs } from '../../src/lib/session-hooks.js';
 import { renderSessionStartGuidance } from '../../src/lib/session-start-guidance.js';
@@ -363,6 +369,9 @@ describe('orcaops hook session-start', () => {
       '--session-hooks',
     ]);
     const dbPath = path.join(repo.path, '.orcaops', 'cache', 'orcaops.db');
+    // Init no longer creates the cache directory; the corrupt file stands in
+    // for a cache a capture created and something later damaged.
+    await mkdir(path.dirname(dbPath), { recursive: true });
     await writeFile(dbPath, 'this is not a sqlite database\n', 'utf8');
     const aware = await agent.runRaw(['hook', 'session-start']);
     expect(aware.exitCode).toBe(0);
@@ -650,5 +659,102 @@ describe('renderSessionStartGuidance (pure)', () => {
     expect(text).toContain('Checkpoint 1 is OPEN.');
     expect(text).not.toContain('NaN');
     expect(text).not.toContain('opened ');
+  });
+});
+
+describe('orcaops hook session-start — shared personal config across worktrees', () => {
+  let main: TempRepo;
+  let linked: TempRepo;
+  let mainAgent: ReturnType<typeof makeAgent>;
+  let globalRoot: string;
+
+  beforeEach(async () => {
+    main = await createTempRepo({ initialBranch: 'main' });
+    linked = await createLinkedWorktree(main.path, { branch: 'feature-hooks' });
+    globalRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-hook-global-'));
+    mainAgent = makeAgent({ cwd: main.path, env: { ORCAOPS_GLOBAL_ROOT: globalRoot } });
+  });
+  afterEach(async () => {
+    await linked.cleanup();
+    await main.cleanup();
+    await rm(globalRoot, { recursive: true, force: true });
+  });
+
+  const hookIn = (cwd: string, ...extra: string[]) =>
+    makeAgent({ cwd, env: { ORCAOPS_GLOBAL_ROOT: globalRoot } }).runRaw([
+      'hook',
+      'session-start',
+      '--agent',
+      'claude-code',
+      '--user',
+      ...extra,
+    ]);
+
+  it('emits exactly once from the main root, a main subdirectory, and a linked worktree', async () => {
+    await mainAgent.runRaw(['init', '--personal', '--session-hooks', '--no-llm', '--json']);
+    const sub = path.join(main.path, 'pkg', 'src');
+    await mkdir(sub, { recursive: true });
+
+    for (const cwd of [main.path, sub, linked.path]) {
+      const r = await hookIn(cwd);
+      expect(r.exitCode, cwd).toBe(0);
+      const nudges = r.stdout.split('[orcaops] This repo captures AI coding sessions').length - 1;
+      expect(nudges, cwd).toBe(1);
+    }
+    // Static hooks read config only: no data directory appeared anywhere.
+    await expect(access(path.join(linked.path, '.orcaops'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(access(path.join(main.path, '.orcaops'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('stays silent with hooks disabled, in an unrelated repo, and with an unusable config', async () => {
+    await mainAgent.runRaw(['init', '--personal', '--no-llm', '--json']);
+    expect((await hookIn(linked.path)).stdout).toBe('');
+
+    await mainAgent.runRaw(['update', '--session-hooks', '--json']);
+    expect((await hookIn(linked.path)).stdout).not.toBe('');
+
+    const unrelated = await createTempRepo({ initialBranch: 'main' });
+    try {
+      expect((await hookIn(unrelated.path)).stdout).toBe('');
+    } finally {
+      await unrelated.cleanup();
+    }
+
+    // A worktree config claiming personal is refused by the resolver; the
+    // hook degrades to silence rather than a banner.
+    await mkdir(path.join(linked.path, '.orcaops'), { recursive: true });
+    await writeFile(
+      path.join(linked.path, '.orcaops', 'config.json'),
+      JSON.stringify({
+        schema_version: 6,
+        install: { agents: ['claude-code'], scope: 'personal' },
+      }),
+      'utf8'
+    );
+    const r = await hookIn(linked.path);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+
+  it('state-aware payload in an empty sibling reports the cache as unavailable and creates nothing', async () => {
+    await mainAgent.runRaw([
+      'init',
+      '--personal',
+      '--session-hooks',
+      '--session-hook-payload',
+      'state-aware',
+      '--no-llm',
+      '--json',
+    ]);
+    const r = await hookIn(linked.path);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('no cached thread state is available on branch `feature-hooks`');
+    await expect(access(path.join(linked.path, '.orcaops'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 });

@@ -3,3 +3,4 @@ export * from './paths.js';
 export * from './atomic-write.js';
 export * from './artifact-json.js';
 export * from './errors.js';
+export * from './empty-projection.js';

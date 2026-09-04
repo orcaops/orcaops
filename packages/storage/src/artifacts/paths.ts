@@ -150,6 +150,49 @@ export function hasArtifactDirectories(
   }
 }
 
+/**
+ * What this worktree's hot store holds, read WITHOUT opening or creating
+ * anything. An enabled worktree that has never captured is a valid empty
+ * source: read paths must be able to say so before an `ArtifactStore` (whose
+ * constructor creates the cache) or a direct `Store` ever exists.
+ */
+export interface HotStateProbe {
+  artifacts: boolean;
+  cache: boolean;
+  usage: boolean;
+  /** A protected artifact deletion is parked and awaits reconciliation. */
+  staged: boolean;
+  /** No artifact directories, no cache file, no usage ledger, nothing staged. */
+  empty: boolean;
+}
+
+export function probeHotState(
+  repoRoot: string,
+  config: Pick<Config, 'artifacts' | 'cache'>
+): HotStateProbe {
+  // A data path that fails containment (a poisoned artifacts root, a
+  // symlinked cache) is not "nothing here": report it as present so the
+  // strict open runs and surfaces the refusal instead of serving an empty
+  // projection over unsafe state.
+  try {
+    const artifacts = hasArtifactDirectories(repoRoot, config);
+    const cache = existsSync(cacheDbPath(repoRoot, config));
+    const usage = existsSync(usageLedgerPath(repoRoot));
+    const staged = existsSync(artifactDeletionStagingRoot(repoRoot));
+    return { artifacts, cache, usage, staged, empty: !artifacts && !cache && !usage && !staged };
+  } catch (err) {
+    if (err instanceof PathContainmentError) {
+      return { artifacts: true, cache: true, usage: false, staged: false, empty: false };
+    }
+    throw err;
+  }
+}
+
+/** `<repoRoot>/.orcaops/tmp/artifact-deletions` — where protected deletions are parked. */
+export function artifactDeletionStagingRoot(repoRoot: string): string {
+  return path.join(repoRoot, '.orcaops', 'tmp', 'artifact-deletions');
+}
+
 /** True when a fresh SQLite projection must inspect surviving durable state. */
 export function hasDurableCacheSources(
   repoRoot: string,

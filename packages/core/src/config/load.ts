@@ -1,15 +1,20 @@
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
   assertConfigVersionCurrent,
-  assertResolvedWithin,
   type Config,
+  ConfigValidationError,
   getDefaultConfig,
   resolveConfig,
 } from '@orcaops/storage';
 
-const CONFIG_RELATIVE_PATH = path.join('.orcaops', 'config.json');
+import {
+  CONFIG_RELATIVE_PATH,
+  resolveConfigSource,
+  type ResolvedConfigSource,
+  resolveWorktreeState,
+  type WorktreeState,
+} from './source.js';
 
 export interface LoadConfigOptions {
   /** If true (default), missing config returns defaults. If false, missing throws. */
@@ -57,45 +62,36 @@ function projectReadOnlyConfig(raw: unknown): unknown {
   return projected;
 }
 
-async function readConfigJson(
-  repoRoot: string,
-  opts: LoadConfigOptions
-): Promise<unknown | undefined> {
-  const { allowMissing = true } = opts;
-  const configPath = path.join(repoRoot, CONFIG_RELATIVE_PATH);
-  const safeConfigPath = assertResolvedWithin(configPath, repoRoot, 'orcaops configuration', {
-    rejectSymlinks: true,
-  });
-
-  let raw: string;
+/**
+ * Validate an already-resolved source into a full Config. Exactly the current
+ * schema version loads; mismatches reject with regeneration or upgrade
+ * guidance, and nothing is ever written back.
+ */
+export function configFromSource(source: ResolvedConfigSource): Config {
+  if (source.kind === 'none' || source.unreadable) return getDefaultConfig();
   try {
-    raw = await readFile(safeConfigPath, 'utf8');
+    assertConfigVersionCurrent(source.raw);
+    return resolveConfig(source.raw);
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' && allowMissing) return undefined;
+    // Storage validates the DOCUMENT and cannot know which file it came from;
+    // only the resolver does. Name it here so the user is not sent to
+    // `.orcaops/config.json` when the offending file is the shared one.
+    if (err instanceof ConfigValidationError) {
+      throw new ConfigValidationError(`${source.configPath}: ${err.message}`, err.path);
+    }
     throw err;
-  }
-
-  try {
-    return JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`${configPath} is not valid JSON: ${(err as Error).message}`);
   }
 }
 
 /**
- * Load and validate `.orcaops/config.json` from a repo root, deep-merged
- * with built-in defaults. Returns a fully-defaulted Config even when no
- * file exists.
+ * Load and validate the configuration governing `repoRoot`, deep-merged with
+ * built-in defaults. The file is the worktree's own `.orcaops/config.json`, or
+ * — under personal scope — the shared one in the git common directory; see
+ * `resolveConfigSource` for the precedence and its fail-closed cases. Returns
+ * a fully-defaulted Config even when no file exists.
  */
 export async function loadConfig(repoRoot: string, opts: LoadConfigOptions = {}): Promise<Config> {
-  const json = await readConfigJson(repoRoot, opts);
-  if (json === undefined) return getDefaultConfig();
-
-  // Exactly the current schema version loads; mismatches reject with
-  // regeneration or upgrade guidance, and nothing is ever written back.
-  assertConfigVersionCurrent(json);
-  return resolveConfig(json);
+  return configFromSource(await resolveConfigSource(repoRoot, opts));
 }
 
 /**
@@ -111,16 +107,43 @@ export async function loadConfig(repoRoot: string, opts: LoadConfigOptions = {})
  * the built-in set on this path alone. Gating it would buy nothing:
  * `schema_version` lives in the same file as the exclude set, so whoever can
  * write one can write the other.
+ *
+ * Source selection is shared with `loadConfig`, so the two never read different
+ * files — a projection that disagreed with the CLI about which config governs
+ * would resolve artifacts under one `artifacts.path` and capture under another.
  */
 export async function loadReadOnlyProjectConfig(
   repoRoot: string,
   opts: LoadConfigOptions = {}
 ): Promise<Config> {
-  const json = await readConfigJson(repoRoot, opts);
-  if (json === undefined) return getDefaultConfig();
-  return resolveConfig(projectReadOnlyConfig(json));
+  return readOnlyProjectConfigFromSource(await resolveConfigSource(repoRoot, opts));
 }
 
+export function readOnlyProjectConfigFromSource(source: ResolvedConfigSource): Config {
+  if (source.kind === 'none' || source.unreadable) return getDefaultConfig();
+  return resolveConfig(projectReadOnlyConfig(source.raw));
+}
+
+/**
+ * The worktree-local config path. Personal scope does not live here — callers
+ * that need the config actually in effect must resolve the source; this
+ * remains the right answer only for a project/global destination.
+ */
 export function getConfigPath(repoRoot: string): string {
   return path.join(repoRoot, CONFIG_RELATIVE_PATH);
+}
+
+/** Absolute path of the config actually governing `repoRoot`. */
+export async function resolveConfigPath(repoRoot: string): Promise<string> {
+  return (await resolveConfigSource(repoRoot)).configPath;
+}
+
+/** {@link resolveWorktreeState} with the version-gated loader. */
+export function worktreeState(worktreeRoot: string): Promise<WorktreeState> {
+  return resolveWorktreeState(worktreeRoot, configFromSource);
+}
+
+/** {@link resolveWorktreeState} with the read-only projection (watch, review floors). */
+export function readOnlyWorktreeState(worktreeRoot: string): Promise<WorktreeState> {
+  return resolveWorktreeState(worktreeRoot, readOnlyProjectConfigFromSource);
 }

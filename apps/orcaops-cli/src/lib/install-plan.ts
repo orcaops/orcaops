@@ -12,9 +12,15 @@ import {
   resolveHintLines,
   type ToolAdapter,
 } from '@orcaops/adapters';
-import { type Config, SUPPORTED_AGENT_IDS, type SupportedAgentId } from '@orcaops/storage';
+import { commonOrcaopsDirFrom, Repo, resolveCommonDir } from '@orcaops/core';
+import {
+  type Config,
+  resolveCanonicalPath,
+  SUPPORTED_AGENT_IDS,
+  type SupportedAgentId,
+} from '@orcaops/storage';
 
-import { PERSONAL_EXCLUDE_LINES, planInfoExcludeMutation } from './git-info-exclude.js';
+import { planInfoExcludeMutation } from './git-info-exclude.js';
 import {
   generatedFileOrder,
   type PreservedGeneratedFile,
@@ -28,6 +34,7 @@ import {
   type LocalEntry,
   localEntryFromPlannedFile,
   type LocalManifest,
+  readLocalManifest,
   toPortableManifestPath,
 } from './install-manifest.js';
 import { evaluateEntryDeleteGuard } from './install-prune.js';
@@ -38,6 +45,12 @@ import {
   resolveInstructionPlacement,
 } from './instruction-placement.js';
 import { deleteMutation, fileMutation, type PlannedMutation, writeMutation } from './mutations.js';
+import {
+  desiredPersonalExcludeLines,
+  personalManifestClaimsExclude,
+  planPersonalManifestWrite,
+  readPersonalManifestState,
+} from './personal-manifest.js';
 import { planSessionHookSettings, type SessionHookFilePlan } from './session-hooks.js';
 import { CLOUD_GATED_SKILL_IDS, enabledSkillTemplates, type SkillGates } from './skill-set.js';
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
@@ -81,6 +94,14 @@ export interface PlanInstallMutationsInput {
   prevInstall: InstallManifest | null;
   /** Prior local manifest — churn-free writeMutation. */
   prevLocal: LocalManifest | null;
+  /**
+   * This worktree is explicitly leaving personal scope. The common manifest
+   * releases its claim on the `info/exclude` block and the block is stripped,
+   * so the files project scope materializes are not hidden from `git add`.
+   * A sibling worktree that is still personal re-adds the block on its next
+   * update — drift reports the gap until it does.
+   */
+  leavingPersonalScope?: boolean;
 }
 
 export interface PlanInstallMutationsResult {
@@ -278,12 +299,11 @@ export async function planInstallMutations(
   // (hash-guarded) instead.
   const agentsMd: InstructionFileResult[] = [];
   let instructionPlacements: InstructionPlacement[] = [];
-  // Personal scope targets the bootstrap block at CLAUDE.local.md ONLY
-  // — natively read by Claude Code, never committed, hidden via info/exclude.
+  // Personal scope owns NO instruction file: guidance reaches the agent
+  // through machine session hooks or global skills, and the repository stays
+  // untouched. Project/global inject into the union of adapter files.
   const instructionFiles =
-    input.scope === 'personal'
-      ? ['CLAUDE.local.md']
-      : [...new Set(adapters.flatMap((a) => a.agentsFiles ?? []))];
+    input.scope === 'personal' ? [] : [...new Set(adapters.flatMap((a) => a.agentsFiles ?? []))];
 
   const priorInstructionEntries = (
     input.prevInstall?.entries ??
@@ -291,15 +311,9 @@ export async function planInstallMutations(
     []
   ).filter((entry) => entry.kind === 'injected-block');
   const leavingProjectScope = input.scope === 'personal' && input.prevInstall !== null;
-  const leavingPersonalScope =
-    input.scope !== 'personal' &&
-    input.prevInstall === null &&
-    priorInstructionEntries.some((entry) => entry.path === 'CLAUDE.local.md');
   const outgoingInstructionFiles = leavingProjectScope
     ? priorInstructionEntries.map((entry) => entry.path)
-    : leavingPersonalScope
-      ? ['CLAUDE.local.md']
-      : [];
+    : [];
 
   if (outgoingInstructionFiles.length > 0) {
     const priorLocalEntries = new Map(
@@ -437,13 +451,26 @@ export async function planInstallMutations(
   warnings.push(...sessionHookPlan.warnings);
 
   // info/exclude rides the shared planner too: personal scope hides its
-  // untracked footprint via the COMMON dir's exclude file; every other scope
-  // reconciles the section AWAY (the scope-exit strip that makes team
-  // adoption a plain `git add`). Degraded repos (rev-parse failure) get a
-  // warning, not a planner crash — there is no git status to keep clean there
-  // anyway.
-  const desiredExcludeLines = input.scope === 'personal' ? PERSONAL_EXCLUDE_LINES : [];
+  // untracked footprint via the COMMON dir's exclude file. The desired set
+  // comes from the one helper every reconciler shares, so a worktree leaving
+  // personal scope strips the section only when no sibling still relies on
+  // it. Degraded repos (rev-parse failure) get a warning, not a planner crash
+  // — there is no git status to keep clean there anyway.
+  let desiredExcludeLines: string[] = [];
   try {
+    desiredExcludeLines = input.leavingPersonalScope
+      ? []
+      : await desiredPersonalExcludeLines(repoRoot, input.scope ?? 'project');
+    if (input.leavingPersonalScope) {
+      await personalManifestClaimsExclude(repoRoot);
+      const state = await readPersonalManifestState(repoRoot);
+      if (state.kind === 'valid' && (state.manifest.info_exclude ?? []).length > 0) {
+        const { info_exclude: _released, ...released } = state.manifest;
+        mutations.push(
+          planPersonalManifestWrite(repoRoot, state.location, released, state.content)
+        );
+      }
+    }
     const excludePlan = await planInfoExcludeMutation({
       repoRoot,
       desired: desiredExcludeLines,
@@ -475,11 +502,31 @@ export async function planInstallMutations(
   const prevInstallJson = input.prevInstall
     ? `${JSON.stringify(input.prevInstall, null, 2)}\n`
     : null;
-  const prevLocalJson = input.prevLocal ? `${JSON.stringify(input.prevLocal, null, 2)}\n` : null;
-  // Personal scope writes NO committed install.json — a shared enterprise
-  // repo must see zero tracked-file changes. The local manifest carries
-  // everything (it is itself excluded via .git/info/exclude).
-  if (input.scope !== 'personal') {
+  // The churn-free compare must read the file AT THE DESTINATION: on a
+  // personal→project switch `input.prevLocal` is the common manifest while
+  // the worktree manifest does not exist yet, and a "replace" planned against
+  // absent bytes is refused at apply.
+  const currentWorktreeLocal = await readLocalManifest(repoRoot);
+  const prevLocalJson = currentWorktreeLocal
+    ? `${JSON.stringify(currentWorktreeLocal, null, 2)}\n`
+    : null;
+  // Personal scope writes NO committed install.json and NO worktree
+  // manifest — a shared enterprise repo must see zero tracked-file changes,
+  // and the ownership record belongs to the repository, not one checkout. It
+  // goes to the common personal manifest, which also owns the exclusion.
+  if (input.scope === 'personal') {
+    // A residual manifest from an earlier install is reconciled when valid
+    // and replaced when stale; an unsafe one throws the manual recovery.
+    const state = await readPersonalManifestState(repoRoot);
+    mutations.push(
+      planPersonalManifestWrite(
+        repoRoot,
+        state.location,
+        local,
+        state.kind === 'absent' ? null : state.content
+      )
+    );
+  } else {
     mutations.push(
       writeMutation(
         repoRoot,
@@ -489,16 +536,16 @@ export async function planInstallMutations(
         installJson !== prevInstallJson
       )
     );
+    mutations.push(
+      writeMutation(
+        repoRoot,
+        LOCAL_MANIFEST_REL,
+        localJson,
+        prevLocalJson,
+        localJson !== prevLocalJson
+      )
+    );
   }
-  mutations.push(
-    writeMutation(
-      repoRoot,
-      LOCAL_MANIFEST_REL,
-      localJson,
-      prevLocalJson,
-      localJson !== prevLocalJson
-    )
-  );
 
   return {
     mutations,
@@ -515,41 +562,111 @@ export async function planInstallMutations(
   };
 }
 
-/**
- * The invisible-install allowlist. Under personal scope a planned mutation
- * may touch ONLY: the excluded `.orcaops/` store, `CLAUDE.local.md` (itself
- * info/exclude-hidden), or git-dir state — repo-relative paths into `.git/`,
- * or `../…` paths reaching a linked worktree's common dir (nothing outside
- * the worktree can be a tracked file). Everything else is a tracked-surface
- * write the invisible mode promised never to make.
- */
-export function isInvisibleAllowedPath(relPath: string): boolean {
-  const normalized = relPath.replaceAll('\\', '/');
-  return (
-    normalized === 'CLAUDE.local.md' ||
-    normalized === '.orcaops' ||
-    normalized.startsWith('.orcaops/') ||
-    normalized.startsWith('.git/') ||
-    normalized.startsWith('../')
-  );
+function isWithin(target: string, root: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 /**
- * Runtime enforcement of the never-touch list: called by init/update before
- * executing a personal-scope plan. The ONE sanctioned tracked-file exception
- * is a session-hook STRIP of a lingering orcaops entry (`action:'removed'`
- * — the deliberate scope-agnostic self-clean; see session-hooks.ts). A
- * violation is a planner BUG — throw loudly instead of dirtying a shared
- * repo.
+ * Where a personal-scope mutation is allowed to land, as ABSOLUTE roots:
+ * the git common dir's `orcaops/` directory, the exact common `info/exclude`
+ * file, and this worktree's excluded `.orcaops/` store. A relative-path
+ * shape (`../…`, `.git/…`) is not a boundary — every target is resolved and
+ * checked against the root it was planned under.
  */
-export function assertInvisiblePlan(
+export interface InvisibleTargets {
+  commonOrcaopsDir: string;
+  commonInfoExclude: string;
+  /**
+   * Git's own hooks dir — git-dir state shared by every worktree, never a
+   * tracked file. Null under `core.hooksPath`: a hook-manager-owned dir is
+   * refused as before.
+   */
+  gitHooksDir: string | null;
+  worktreeStore: string;
+  /** Every OTHER worktree of the repository — never a valid target. */
+  siblingWorktrees: string[];
+}
+
+export async function resolveInvisibleTargets(repoRoot: string): Promise<InvisibleTargets> {
+  const repo = new Repo(repoRoot);
+  const commonDir = await resolveCommonDir(repoRoot);
+  const here = canonical(repoRoot);
+  const siblings: string[] = [];
+  for (const worktree of await repo.listWorktrees()) {
+    const resolved = canonical(worktree.path);
+    if (resolved !== here) siblings.push(resolved);
+  }
+  const hooks = await repo.getHooksDir();
+  return {
+    commonOrcaopsDir: commonOrcaopsDirFrom(commonDir),
+    commonInfoExclude: await repo.getGitPathAbsolute(path.join('info', 'exclude')),
+    gitHooksDir: hooks.source === 'git' ? canonical(hooks.dir) : null,
+    worktreeStore: path.join(here, '.orcaops'),
+    siblingWorktrees: siblings,
+  };
+}
+
+/**
+ * Canonical form of a path that may not exist yet: the deepest existing
+ * ancestor is realpath-resolved and the rest re-appended. A plain realpath
+ * fails on a planned CREATE and would leave the raw path (`/var/…`) to be
+ * compared against canonical roots (`/private/var/…`).
+ */
+function canonical(target: string): string {
+  return resolveCanonicalPath(path.resolve(target), 'personal mutation target');
+}
+
+/**
+ * Runtime enforcement of the never-touch list: called by init/update/doctor
+ * before executing a personal-scope plan. Each changed mutation must resolve
+ * under one of the allowed roots, never inside a sibling worktree, and — for
+ * a target in this worktree — never onto a tracked file (the git index is an
+ * extra guard here, not protection for sibling paths, which are rejected
+ * outright). The ONE sanctioned exception is a session-hook STRIP of a
+ * lingering orcaops entry (`action:'removed'` — the deliberate scope-agnostic
+ * self-clean; see session-hooks.ts). A violation is a planner BUG — throw
+ * loudly instead of dirtying a shared repo.
+ */
+export async function assertInvisiblePlan(
+  repoRoot: string,
   mutations: PlannedMutation[],
   sessionHooks: SessionHookFilePlan[]
-): void {
+): Promise<void> {
   const stripPaths = new Set(sessionHooks.filter((p) => p.action === 'removed').map((p) => p.path));
-  const offending = mutations.filter(
-    (m) => m.changed && !isInvisibleAllowedPath(m.path) && !stripPaths.has(m.path)
-  );
+  const targets = await resolveInvisibleTargets(repoRoot);
+  const offending: PlannedMutation[] = [];
+  const inWorktreeStore: PlannedMutation[] = [];
+  for (const m of mutations) {
+    if (!m.changed || stripPaths.has(m.path)) continue;
+    const abs = canonical(m.absPath);
+    // Git-dir targets first: from a linked worktree the common dir sits INSIDE
+    // the main checkout, which is itself a sibling here, so the sibling test
+    // below would refuse the very files personal scope exists to write.
+    if (
+      abs === targets.commonInfoExclude ||
+      isWithin(abs, targets.commonOrcaopsDir) ||
+      (targets.gitHooksDir !== null && isWithin(abs, targets.gitHooksDir))
+    ) {
+      continue;
+    } else if (isWithin(abs, targets.worktreeStore)) {
+      inWorktreeStore.push(m);
+    } else if (targets.siblingWorktrees.some((sibling) => isWithin(abs, sibling))) {
+      offending.push(m);
+    } else {
+      offending.push(m);
+    }
+  }
+  if (inWorktreeStore.length > 0) {
+    let tracked = new Set<string>();
+    try {
+      tracked = await new Repo(repoRoot).listTrackedPaths(inWorktreeStore.map((m) => m.path));
+    } catch {
+      // A repo that cannot answer ls-files cannot prove a path untracked either.
+      offending.push(...inWorktreeStore);
+    }
+    offending.push(...inWorktreeStore.filter((m) => tracked.has(m.path)));
+  }
   if (offending.length > 0) {
     // Still the invariant — the OrcaopsError shape only makes the refusal
     // render as a clean CLI error instead of a raw stack trace.

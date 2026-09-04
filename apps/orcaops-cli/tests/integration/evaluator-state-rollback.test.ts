@@ -35,7 +35,7 @@ describe('evaluator config and grant rollback', () => {
     renameFailure.enabled = false;
     repo = await createTempRepo({ initialBranch: 'main' });
     agent = makeAgent({ cwd: repo.path });
-    await agent.init({ noLlm: true });
+    await agent.init({ noLlm: true, scope: 'project' });
     tmpRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-evaluator-rollback-'));
   });
 

@@ -1,7 +1,7 @@
 import { access, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import { getConfigPath, scrubError } from '@orcaops/core';
+import { Repo, resolveConfigSource, scrubError } from '@orcaops/core';
 import {
   archiveArtifactPaths,
   archiveProjectDir,
@@ -16,6 +16,7 @@ import {
   inspectArtifactSources,
   isUuidV7,
   type MirrorLagReport,
+  probeHotState,
   readEventLog,
   replaceHotArtifactFromArchive,
   replayMissingEvents,
@@ -25,11 +26,11 @@ import {
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../io/output.js';
-import { atomicWriteFile } from '../lib/atomic-write.js';
+import { displayConfigPath, openEffectiveConfig, writeConfigDocument } from '../lib/config-file.js';
 import { buildContext, type CliContext } from '../lib/context.js';
 import { getInvocationEnv } from '../lib/invocation-context.js';
-import { readRepositoryFileOrNull } from '../lib/mutations.js';
-import { ProjectIdentityError, readProjectId } from '../lib/project-identity.js';
+import { ensureProjectId, ProjectIdentityError, readProjectId } from '../lib/project-identity.js';
+import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 
 /**
  * `orcaops archive status|repair`. Status is pure read;
@@ -104,11 +105,16 @@ async function checkPerms(dirs: string[]): Promise<boolean | null> {
   return sawAny ? true : null;
 }
 
-function requireEnabled(ctx: CliContext): void {
+async function effectiveConfigDisplayPath(ctx: CliContext): Promise<string> {
+  return displayConfigPath(await resolveConfigSource(ctx.repoRoot), ctx.repoRoot);
+}
+
+async function requireEnabled(ctx: CliContext): Promise<void> {
   if (!ctx.config.archive.enabled) {
+    const configPath = await effectiveConfigDisplayPath(ctx);
     throw new OrcaopsError(
       ErrorCodes.INVALID_INPUT,
-      'Archive is disabled (`archive.enabled: false` in .orcaops/config.json). ' +
+      `Archive is disabled (\`archive.enabled: false\` in ${configPath}). ` +
         'Enable it, then re-run.'
     );
   }
@@ -119,9 +125,10 @@ export async function archiveStatusAction(opts: ArchiveStatusOptions = {}): Prom
     const ctx = await buildContext({ mintArchiveIdentity: false });
     try {
       if (!ctx.config.archive.enabled) {
+        const configPath = await effectiveConfigDisplayPath(ctx);
         const payload = {
           enabled: false,
-          note: 'Archive is disabled; nothing is being mirrored. Set `archive.enabled: true` in .orcaops/config.json to opt in.',
+          note: `Archive is disabled; nothing is being mirrored. Set \`archive.enabled: true\` in ${configPath} to opt in.`,
         };
         if (opts.json) {
           emitOk(payload);
@@ -327,13 +334,44 @@ async function activateArchiveAndBackfill(repoRoot?: string): Promise<ArchiveAct
   let alreadyEnabled = false;
   let archiveFlagApplied = false;
   try {
-    const ctx = await buildContext({ root: repoRoot });
+    // Flipping the flag needs the config and the root, not a store: a
+    // read-only context serves an untouched worktree from memory.
+    const ctx = await buildContext({ root: repoRoot, mintArchiveIdentity: false });
+    let resolvedRoot: string;
+    let hotEmpty: boolean;
     try {
       alreadyEnabled = ctx.config.archive.enabled === true;
       await patchArchiveEnabled(ctx.repoRoot, true);
       archiveFlagApplied = true;
+      resolvedRoot = ctx.repoRoot;
+      hotEmpty = probeHotState(ctx.repoRoot, ctx.config).empty;
     } finally {
       ctx.store.close();
+    }
+
+    // Nothing captured here yet means nothing to replay. Mint the identity
+    // (the archive keys on it) but open no store: the initializing worktree
+    // follows the same lazy path as every sibling, creating its data
+    // directories on the first write that has something to store.
+    if (hotEmpty) {
+      const { projectId } = await ensureProjectId(new Repo(resolvedRoot));
+      return {
+        alreadyEnabled,
+        backfill: {
+          projectId,
+          missingBefore: 0,
+          replayedEvents: 0,
+          remainingMissing: 0,
+          blockedMissing: 0,
+          quarantinedUsageEvents: 0,
+          blockedArtifacts: 0,
+          complete: true,
+          artifactIssues: [],
+          rebuiltArtifacts: [],
+          remainingRebuilds: 0,
+          corruptLines: 0,
+        },
+      };
     }
 
     {
@@ -480,14 +518,14 @@ export async function archiveDisableAction(opts: ArchiveToggleOptions = {}): Pro
 
 /** Raw config.json edit: mutate ONLY archive.enabled, atomic write. */
 async function patchArchiveEnabled(repoRoot: string, enabled: boolean): Promise<void> {
-  const configPath = getConfigPath(repoRoot);
-  const raw = await readRepositoryFileOrNull(configPath, repoRoot, 'orcaops configuration');
-  if (raw === null) {
-    throw new OrcaopsError(ErrorCodes.UNINITIALIZED, `${configPath} does not exist.`);
-  }
-  const parsed = JSON.parse(raw) as { archive?: Record<string, unknown> };
-  parsed.archive = { ...(parsed.archive ?? {}), enabled };
-  await atomicWriteFile(configPath, `${JSON.stringify(parsed, null, 2)}\n`, repoRoot);
+  const commonDir = await new Repo(repoRoot).getCommonDirAbsolute();
+  await withRepositoryInstallLock(commonDir, async (installLease) => {
+    const document = await openEffectiveConfig(repoRoot);
+    const archive = (document.raw.archive ?? {}) as Record<string, unknown>;
+    document.raw.archive = { ...archive, enabled };
+    await installLease.verify();
+    await writeConfigDocument(document);
+  });
 }
 
 export interface ArchiveRepairOptions {
@@ -498,7 +536,7 @@ export async function archiveRepairAction(opts: ArchiveRepairOptions = {}): Prom
   try {
     const ctx = await buildContext();
     try {
-      requireEnabled(ctx);
+      await requireEnabled(ctx);
       const backfill = await runArchiveBackfill(ctx);
       if (opts.json) {
         emitOk({
@@ -572,7 +610,7 @@ export async function archiveResolveAction(opts: ArchiveResolveOptions): Promise
   try {
     const ctx = await buildContext();
     try {
-      requireEnabled(ctx);
+      await requireEnabled(ctx);
       const survey = await surveyArchive(ctx);
       const sourceState = await inspectArtifactSources({
         repoRoot: ctx.repoRoot,
