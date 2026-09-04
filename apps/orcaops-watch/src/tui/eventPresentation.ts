@@ -21,6 +21,7 @@ export interface EventPresentation {
 export const EVENT_PRESENTATION = {
   plan_captured: { label: 'plan captured', family: 'plan' },
   plan_revised: { label: 'plan revised', family: 'plan' },
+  git_import_enriched: { label: 'git import enriched', family: 'plan' },
   checkpoint_opened: { label: 'checkpoint opened', family: 'checkpoint' },
   checkpoint_closed: { label: 'checkpoint closed', family: 'checkpoint' },
   checkpoint_abandoned: { label: 'checkpoint abandoned', family: 'checkpoint' },

@@ -33,14 +33,22 @@ export const DecisionBaseSchema = z.object({
 
 export type DecisionBase = z.infer<typeof DecisionBaseSchema>;
 
+export const GitCommitDecisionEvidenceSchema = z.strictObject({
+  kind: z.literal('git-commit'),
+  commit_sha: z.string().regex(/^[0-9a-f]{40}$/u),
+  quote: proseText(),
+});
+
+export type GitCommitDecisionEvidence = z.infer<typeof GitCommitDecisionEvidenceSchema>;
+
 /**
  * A plan-time decision — the architectural choice captured where it is
  * actually made (plan mode), distinct from checkpoint-close decisions
  * captured per chunk of work.
  *
- * Adds `revision_n`: the plan revision the decision was made at. It is
- * *persisted metadata stamped by the write path* — the agent NEVER
- * supplies it (capture inputs use `DecisionBaseSchema`). Plan decisions
+ * Adds metadata stamped by storage-direct writers: `revision_n`, and optional
+ * git evidence for imported decisions. Capture inputs use
+ * `DecisionBaseSchema`, so live agents cannot supply either field. Plan decisions
  * are append-only / cumulative across revisions: a later revision adds
  * new entries (each tagged with its own `revision_n`) without erasing
  * earlier ones, so the latest plan always holds the full set and the
@@ -48,6 +56,7 @@ export type DecisionBase = z.infer<typeof DecisionBaseSchema>;
  */
 export const PlanDecisionSchema = DecisionBaseSchema.extend({
   revision_n: z.number().int().nonnegative(),
+  evidence: GitCommitDecisionEvidenceSchema.optional(),
 });
 
 export type PlanDecision = z.infer<typeof PlanDecisionSchema>;

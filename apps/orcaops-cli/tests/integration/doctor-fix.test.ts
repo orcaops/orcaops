@@ -1,11 +1,13 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { loadConfig } from '@orcaops/core';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
+import { seedStateDir } from '../../src/commands/seed/journal.js';
 import { planInstallMutations } from '../../src/lib/install-plan.js';
 import { makeAgent } from '../support/test-agent.js';
 import { effectiveConfigPath } from '../support/test-helpers.js';
@@ -92,6 +94,29 @@ describe('orcaops doctor --fix', () => {
     const repaired = await readFile(skillPath, 'utf8');
     expect(repaired).not.toContain('0.0.0-stale-fix');
     expect(repaired).toContain(`orcaops@${r.orcaops_version}`);
+  });
+
+  it('refuses invalid persisted enrichment instead of importing a skeleton', async () => {
+    await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
+    const preview = JSON.parse((await agent.runRaw(['seed', '--dry-run', '--json'])).stdout) as {
+      clusters: Array<{ artifact_id: string }>;
+    };
+    const config = await loadConfig(repo.path);
+    const persisted = path.join(
+      seedStateDir(repo.path, config),
+      'enrichment',
+      `${preview.clusters[0]!.artifact_id}.json`
+    );
+    await mkdir(path.dirname(persisted), { recursive: true });
+    await writeFile(persisted, '{"schema_version":1}\n', 'utf8');
+
+    const repaired = await agent.runRaw(['doctor', '--fix', '--json']);
+
+    expect(repaired.exitCode).toBe(1);
+    expect(`${repaired.stdout}\n${repaired.stderr}`).toContain('no pending clusters were imported');
+    expect(JSON.parse((await agent.runRaw(['seed', 'status', '--json'])).stdout)).toMatchObject({
+      imported_artifacts: 0,
+    });
   });
 
   it('leaves an AHEAD skill byte-identical and keeps warning (a behind CLI is not "fixed")', async () => {

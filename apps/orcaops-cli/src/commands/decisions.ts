@@ -49,6 +49,7 @@ export interface DecisionRecord {
   decision: string;
   reason: string | null;
   alternatives_considered?: Array<{ option: string; rejected_because: string }>;
+  evidence?: { kind: 'git-commit'; commit_sha: string; quote: string };
   /** Plan records: the revision that added the decision. */
   revision_n?: number;
   /** Checkpoint records: the closing checkpoint's n. */
@@ -61,6 +62,7 @@ export interface CollectDecisionsInput {
     decision: string;
     reason?: string | null;
     alternatives_considered?: ReadonlyArray<{ option: string; rejected_because: string }>;
+    evidence?: { kind: 'git-commit'; commit_sha: string; quote: string };
     revision_n: number;
   }>;
   /** revision_n → captured_at (from listPlanRevisions). */
@@ -118,6 +120,7 @@ export function collectArtifactDecisions(
       ...(d.alternatives_considered && d.alternatives_considered.length > 0
         ? { alternatives_considered: [...d.alternatives_considered] }
         : {}),
+      ...(d.evidence ? { evidence: d.evidence } : {}),
       revision_n: d.revision_n,
     });
   }
@@ -469,7 +472,16 @@ function formatHuman(artifacts: ArtifactDecisions[], importedPointer = 0): strin
             ? `cp #${r.checkpoint_n}`
             : 'summary (deferred)';
       lines.push(`  [${r.ts ?? 'unknown ts'}] (${provenance}) ${r.decision}`);
-      const citation = imported && r.reason !== null ? splitEvidenceCitation(r.reason) : null;
+      const citation =
+        imported && r.evidence?.kind === 'git-commit'
+          ? {
+              prose: r.reason ?? '',
+              sha: r.evidence.commit_sha.slice(0, 7),
+              quote: r.evidence.quote,
+            }
+          : imported && r.reason !== null
+            ? splitEvidenceCitation(r.reason)
+            : null;
       if (citation) {
         if (citation.prose.length > 0) lines.push(`      reason: ${citation.prose}`);
         lines.push(`      evidence: commit ${citation.sha} — "${citation.quote}"`);

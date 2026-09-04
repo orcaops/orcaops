@@ -88,6 +88,7 @@ describe('synthesizeSeedCluster', () => {
       member_shas_hash: createHash('sha256')
         .update(JSON.stringify(options.cluster.commits.map((commit) => commit.sha).sort()), 'utf8')
         .digest('hex'),
+      member_shas: options.cluster.commits.map((commit) => commit.sha).sort(),
     });
     expect(synthesis.plan.plan_steps.map((step) => step.label)).toEqual([
       'feat: repeated work',
@@ -167,6 +168,7 @@ describe('synthesizeSeedCluster', () => {
     const forwardOrigin = synthesizeSeedCluster(options).plan.origin;
     const reversedOrigin = synthesizeSeedCluster({ ...options, cluster: reversed }).plan.origin;
     expect(reversedOrigin?.member_shas_hash).toBe(forwardOrigin?.member_shas_hash);
+    expect(reversedOrigin?.member_shas).toEqual(forwardOrigin?.member_shas);
   });
 
   it('normalizes git timezone offsets for protocol datetime fields', () => {

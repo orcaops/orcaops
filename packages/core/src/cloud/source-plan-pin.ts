@@ -247,6 +247,21 @@ export function bornPinExternalId(artifactId: string): string {
   return sha256Hex(`source-plan-pin:${artifactId}`);
 }
 
+export async function resolveBranchBPinTitle(
+  client: PreflightClient,
+  args: { artifactId: string; planLabel: string }
+): Promise<string> {
+  try {
+    const existing = await client.sourcePlan.get({
+      slugOrExternalId: bornPinExternalId(args.artifactId),
+    });
+    return existing.title;
+  } catch (err) {
+    if (isNotFoundError(err) && !isMissingProcedureError(err)) return args.planLabel;
+    throw err;
+  }
+}
+
 /**
  * Branch B (local): a born-pin sealed at `version_number: 1`.
  *

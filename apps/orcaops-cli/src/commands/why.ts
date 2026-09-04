@@ -567,6 +567,9 @@ function renderMatch(
   if (renderPlanDecisions) {
     for (const dec of m.plan_decisions) {
       lines.push(`  decision (plan rev ${dec.revision_n}): ${dec.decision} — ${dec.reason}`);
+      if (dec.evidence) {
+        lines.push(`    evidence: commit ${dec.evidence.commit_sha} — ${dec.evidence.quote}`);
+      }
       renderAlts(dec.alternatives_considered);
     }
   }

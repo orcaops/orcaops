@@ -1,4 +1,5 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readdir, readFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 
@@ -8,10 +9,16 @@ import {
   distinctInformativeSubjects,
   Repo,
 } from '@orcaops/core';
-import { ARTIFACT_LABEL_MAX, atomicWriteFile, type Config } from '@orcaops/storage';
+import {
+  ARTIFACT_LABEL_MAX,
+  atomicWriteFile,
+  type Config,
+  PlanInputSchema,
+} from '@orcaops/storage';
 
 import { seedStateDir } from './journal.js';
 import type { SeedClusterSynthesis } from './synthesize.js';
+import { ErrorCodes, OrcaopsError } from '../../io/errors.js';
 
 const EnrichmentDecisionSchema = z.strictObject({
   decision: z.string().min(1),
@@ -28,7 +35,7 @@ const EnrichmentDecisionSchema = z.strictObject({
 
 const NominationDispositionSchema = z
   .strictObject({
-    nomination: z.string().min(1),
+    nomination_id: z.string().regex(/^[0-9a-f]{64}$/u),
     disposition: z.enum(['decision', 'skipped']),
     reason: z.string().min(1).optional(),
   })
@@ -37,7 +44,7 @@ const NominationDispositionSchema = z
   });
 
 const SeedEnrichmentSchema = z.strictObject({
-  schema_version: z.literal(1),
+  schema_version: z.literal(2),
   cluster_key: z.string().min(1),
   options_hash: z.string().min(1),
   used_pr_context: z.boolean(),
@@ -64,10 +71,7 @@ type PersistedSeedEnrichment = z.infer<typeof PersistedSeedEnrichmentSchema>;
 
 const SeedSelectionRecordSchema = z.strictObject({
   since: z.string().min(1),
-  // Optional so pre-existing pending manifests still parse. Targeted lanes
-  // only enforce the window when since was explicit, so a flag-less apply
-  // must adopt the explicitness alongside the value.
-  since_explicit: z.boolean().optional(),
+  since_explicit: z.boolean(),
   max_commits: z.number().int().positive(),
   author: z.string().nullable(),
   include_bots: z.boolean(),
@@ -76,12 +80,34 @@ const SeedSelectionRecordSchema = z.strictObject({
   importance: z.boolean(),
 });
 
-// `selection` is optional so manifests written before it existed still parse.
-const SeedEnrichmentManifestSchema = z.object({
-  schema_version: z.literal(1),
+const SeedEnrichmentBundleManifestEntrySchema = z.strictObject({
+  filename: z.string().min(1),
+  artifact_id: z.string().min(1),
+  cluster_key: z.string().min(1),
+  kind: z.enum(['merge', 'squash', 'run', 'release']),
+  label: z.string().min(1),
+  date: z.string().datetime(),
+  commit_count: z.number().int().positive(),
+  checkpoint_count: z.number().int().positive(),
+  warnings: z.array(z.string()),
+  nomination_count: z.number().int().nonnegative(),
+  distinct_task_count: z.number().int().positive(),
+});
+
+const SeedEnrichmentManifestSchema = z.strictObject({
+  schema_version: z.literal(2),
   options_hash: z.string().min(1),
   selection: SeedSelectionRecordSchema.optional(),
-  files: z.array(z.string()),
+  amendment: z
+    .strictObject({
+      artifact_id: z.string().min(1),
+      prior_enrichment_event_id: z.string().min(1).nullable(),
+      member_shas_hash: z.string().regex(/^[0-9a-f]{64}$/u),
+      decision_mode: z.enum(['preserve', 'replace']),
+      pr_context_consented: z.boolean(),
+    })
+    .optional(),
+  bundles: z.array(SeedEnrichmentBundleManifestEntrySchema),
 });
 
 export type SeedSelectionRecord = z.infer<typeof SeedSelectionRecordSchema>;
@@ -205,6 +231,42 @@ function endsWithoutTerminalBoundary(text: string): boolean {
   return /[,;:—–\-…([{"']$/u.test(text.trimEnd());
 }
 
+export function dispositionAccountingWarnings(
+  enrichment: SeedEnrichment,
+  candidates: readonly SeedCandidateCue[]
+): string[] {
+  const dispositions = enrichment.nomination_dispositions ?? [];
+  const expected = new Set(candidates.map((candidate) => candidate.nominationId));
+  const seen = new Set<string>();
+  const duplicateIds = new Set<string>();
+  const unknownIds = new Set<string>();
+  for (const entry of dispositions) {
+    if (seen.has(entry.nomination_id)) duplicateIds.add(entry.nomination_id);
+    seen.add(entry.nomination_id);
+    if (!expected.has(entry.nomination_id)) unknownIds.add(entry.nomination_id);
+  }
+  const missingIds = [...expected].filter((id) => !seen.has(id));
+  const claimed = dispositions.filter((entry) => entry.disposition === 'decision').length;
+  const warnings: string[] = [];
+  if (missingIds.length > 0) {
+    warnings.push(`${missingIds.length} candidate nomination(s) have no disposition`);
+  }
+  if (duplicateIds.size > 0) {
+    warnings.push(`${duplicateIds.size} nomination id(s) have duplicate dispositions`);
+  }
+  if (unknownIds.size > 0) {
+    warnings.push(`${unknownIds.size} disposition(s) reference unknown nomination ids`);
+  }
+  if (claimed > enrichment.decisions.length) {
+    warnings.push(
+      `${claimed} nomination(s) recorded as "disposition": "decision" but only ` +
+        `${enrichment.decisions.length} decision(s) present — every minted nomination ` +
+        'needs its cited decision'
+    );
+  }
+  return warnings;
+}
+
 /**
  * Authoring-quality WARNINGS (never rejections — at-cap text can be
  * legitimate) for an enrichment that passed the evidence gate: fields
@@ -214,23 +276,6 @@ function endsWithoutTerminalBoundary(text: string): boolean {
  * legally emits at-cap labels, and warning on an unedited template value
  * blames the author for text they never wrote.
  */
-/**
- * Deliberately one-sided: more "decision" rows than decisions means the file
- * claims nominations it never cited, while more decisions is legal and expected
- * — one cited from an un-nominated in-cluster commit has no nomination to
- * account for. A miscount, not an invalid file, so it warns and never rejects.
- */
-export function dispositionAccountingWarnings(enrichment: SeedEnrichment): string[] {
-  const dispositions = enrichment.nomination_dispositions ?? [];
-  const claimed = dispositions.filter((entry) => entry.disposition === 'decision').length;
-  if (claimed <= enrichment.decisions.length) return [];
-  return [
-    `${claimed} nomination(s) recorded as "disposition": "decision" but only ` +
-      `${enrichment.decisions.length} decision(s) present — every minted nomination ` +
-      'needs its cited decision',
-  ];
-}
-
 export function authoringClipWarnings(
   enrichment: SeedEnrichment,
   synthesis: SeedClusterSynthesis
@@ -313,6 +358,14 @@ function pendingDir(repoRoot: string, config: Pick<Config, 'cache'>): string {
   return path.join(seedStateDir(repoRoot, config), 'pending');
 }
 
+export function importedArtifactEnrichmentDir(
+  repoRoot: string,
+  config: Pick<Config, 'cache'>,
+  artifactId: string
+): string {
+  return path.join(seedStateDir(repoRoot, config), 'amend', artifactId);
+}
+
 function persistedPath(
   repoRoot: string,
   config: Pick<Config, 'cache'>,
@@ -321,9 +374,14 @@ function persistedPath(
   return path.join(seedStateDir(repoRoot, config), 'enrichment', `${artifactId}.json`);
 }
 
+function commitsForPrefix(synthesis: SeedClusterSynthesis, shaPrefix: string) {
+  return synthesis.cluster.commits.filter((candidate) => candidate.sha.startsWith(shaPrefix));
+}
+
 function messageFor(synthesis: SeedClusterSynthesis, shaPrefix: string): string | null {
-  const commit = synthesis.cluster.commits.find((candidate) => candidate.sha.startsWith(shaPrefix));
-  return commit ? `${commit.subject}\n${commit.body}` : null;
+  const commits = commitsForPrefix(synthesis, shaPrefix);
+  if (commits.length !== 1) return null;
+  return `${commits[0]!.subject}\n${commits[0]!.body}`;
 }
 
 function validateEvidence(
@@ -353,8 +411,17 @@ function validateEvidence(
           '(evidence: commit <sha7> — "<quote>"); PR context may inform only label, task, and outcome'
       );
     }
-    const message = messageFor(synthesis, citation[1]!);
-    if (!message) return `decision cites a commit outside the cluster: ${citation[1]}`;
+    if (decision.reason.slice(0, citation.index).includes('(evidence:')) {
+      return 'decision reason contains more than one evidence marker';
+    }
+    const matchingCommits = commitsForPrefix(synthesis, citation[1]!);
+    if (matchingCommits.length === 0) {
+      return `decision cites a commit outside the cluster: ${citation[1]}`;
+    }
+    if (matchingCommits.length > 1) {
+      return `decision citation sha is ambiguous within the cluster: ${citation[1]}`;
+    }
+    const message = `${matchingCommits[0]!.subject}\n${matchingCommits[0]!.body}`;
     const quote = citation[2]!;
     if (!message.includes(quote)) {
       return `decision quote is not an exact commit-message substring: ${citation[1]}`;
@@ -369,7 +436,37 @@ function validateEvidence(
   if (guardedProse.some((text) => DECISION_CUE.test(text)) && enrichment.decisions.length === 0) {
     return 'causal or choice language in outcome/checkpoint summaries requires a cited decision';
   }
+  const candidatePlan = {
+    ...synthesis.plan,
+    label: enrichment.label,
+    task: enrichment.task,
+    plan_steps: synthesis.plan.plan_steps.map((step, index) => ({
+      ...step,
+      label: enrichment.steps[index]!.label,
+      text: enrichment.steps[index]!.text,
+    })),
+    decisions: enrichedDecisions(synthesis, enrichment),
+  };
+  const parsedPlan = PlanInputSchema.safeParse(candidatePlan);
+  if (!parsedPlan.success) return humanSchemaReason(parsedPlan.error, candidatePlan);
   return null;
+}
+
+function enrichedDecisions(synthesis: SeedClusterSynthesis, enrichment: SeedEnrichment) {
+  return enrichment.decisions.map((decision) => {
+    const citation = COMMIT_CITATION.exec(decision.reason)!;
+    const commit = commitsForPrefix(synthesis, citation[1]!)[0]!;
+    return {
+      ...decision,
+      reason: decision.reason.slice(0, citation.index).trimEnd(),
+      revision_n: 0,
+      evidence: {
+        kind: 'git-commit' as const,
+        commit_sha: commit.sha,
+        quote: citation[2]!,
+      },
+    };
+  });
 }
 
 /**
@@ -415,9 +512,33 @@ function sentenceBlocks(body: string): string[] {
   return blocks;
 }
 
-function candidateEvidence(synthesis: SeedClusterSynthesis): string[] {
-  const candidates: string[] = [];
-  const nominate = (sha: string, text: string): void => {
+export interface SeedCandidateCue {
+  nominationId: string;
+  commitSha: string;
+  source: 'subject' | 'body';
+  ordinal: number;
+  text: string;
+}
+
+function nominationId(
+  clusterKey: string,
+  commitSha: string,
+  source: SeedCandidateCue['source'],
+  ordinal: number
+): string {
+  return createHash('sha256')
+    .update(JSON.stringify([clusterKey, commitSha, source, ordinal]))
+    .digest('hex');
+}
+
+export function candidateCues(synthesis: SeedClusterSynthesis): SeedCandidateCue[] {
+  const candidates: SeedCandidateCue[] = [];
+  const nominate = (
+    sha: string,
+    source: SeedCandidateCue['source'],
+    ordinal: number,
+    text: string
+  ): void => {
     if (
       DECISION_CUE.test(text) ||
       CHOICE_VERB_CUE.test(text) ||
@@ -425,7 +546,13 @@ function candidateEvidence(synthesis: SeedClusterSynthesis): string[] {
       /^Revert "/u.test(text) ||
       /This reverts commit /u.test(text)
     ) {
-      candidates.push(`${sha.slice(0, 7)} — ${text}`);
+      candidates.push({
+        nominationId: nominationId(synthesis.cluster.key, sha, source, ordinal),
+        commitSha: sha,
+        source,
+        ordinal,
+        text,
+      });
     }
   };
   for (const commit of synthesis.cluster.commits) {
@@ -437,12 +564,12 @@ function candidateEvidence(synthesis: SeedClusterSynthesis): string[] {
       .split(/(?<=[.!?])\s+|[;,]\s+/u)
       .map((clause) => clause.trim())
       .filter(Boolean);
-    for (const clause of clauses) nominate(commit.sha, clause);
+    clauses.forEach((clause, index) => nominate(commit.sha, 'subject', index, clause));
     const sentences = sentenceBlocks(commit.body)
       .flatMap((block) => block.split(/(?<=[.!?])\s+/u))
       .map((sentence) => sentence.trim())
       .filter(Boolean);
-    for (const sentence of sentences) nominate(commit.sha, sentence);
+    sentences.forEach((sentence, index) => nominate(commit.sha, 'body', index, sentence));
   }
   return candidates;
 }
@@ -457,7 +584,7 @@ function renderBundle(
   }
 ): string {
   const bodyCount = synthesis.cluster.commits.filter((commit) => commit.body.trim()).length;
-  const candidates = candidateEvidence(synthesis);
+  const candidates = candidateCues(synthesis);
   const distinctTasks = Math.max(1, distinctInformativeSubjects(synthesis.cluster.commits));
   const commits = synthesis.cluster.commits.flatMap((commit) => [
     `### ${commit.sha.slice(0, 7)} ${commit.subject}`,
@@ -468,7 +595,7 @@ function renderBundle(
     '',
   ]);
   const template = {
-    schema_version: 1,
+    schema_version: 2,
     cluster_key: synthesis.cluster.key,
     options_hash: input.optionsHash,
     used_pr_context: false,
@@ -477,7 +604,20 @@ function renderBundle(
     steps: synthesis.plan.plan_steps.map((step) => ({ label: step.label, text: step.text })),
     checkpoint_summaries: synthesis.checkpoints.map((checkpoint) => checkpoint.summary),
     outcome: synthesis.summary.outcome,
-    decisions: [],
+    decisions: synthesis.plan.decisions.flatMap((decision) => {
+      if (!decision.evidence) return [];
+      return [
+        {
+          decision: decision.decision,
+          reason:
+            `${decision.reason} (evidence: commit ${decision.evidence.commit_sha.slice(0, 7)} ` +
+            `— ${JSON.stringify(decision.evidence.quote)})`,
+          ...(decision.alternatives_considered
+            ? { alternatives_considered: decision.alternatives_considered }
+            : {}),
+        },
+      ];
+    }),
     nomination_dispositions: [],
   };
   return [
@@ -501,10 +641,13 @@ function renderBundle(
     'and later deleted is in the union and not in the net diff, so they legitimately differ. Do',
     'not reconcile them; if you reword the outcome, keep its number or drop the count entirely.',
     '',
-    '## Candidate decision evidence',
+    '## Candidate decision cues',
     '',
     ...(candidates.length > 0
-      ? candidates.map((candidate) => `- ${candidate}`)
+      ? candidates.map(
+          (candidate) =>
+            `- [${candidate.nominationId}] ${candidate.commitSha.slice(0, 7)} — ${candidate.text}`
+        )
       : ['- None met the nomination patterns. Do not invent decisions.']),
     '',
     '## Commits',
@@ -525,9 +668,9 @@ function renderBundle(
     '- The quote is delimited by double quotes, so choose a verbatim span containing no `"` character. A commit whose only choice language sits inside a quoted phrase cannot be cited — record that nomination as `skipped` with exactly that reason.',
     '- Cite ANY commit listed under `## Commits` above, nominated or not. The candidate list is where to start looking, not a whitelist: a decision whose best evidence sits in an un-nominated commit of this cluster is legal and welcome.',
     '- `alternatives_considered[].option` must appear (case-insensitively) inside the QUOTED evidence span itself, not merely somewhere in the commit message. Widen the quote until it names the alternative, or drop the alternative.',
-    '- Account for EVERY candidate decision nomination above, one by one — the target is zero unaccounted nominations. Each nomination gets exactly one entry in `nomination_dispositions`: a usable one becomes a cited entry in `decisions` AND `{"nomination": "<sha7 — sentence>", "disposition": "decision"}` (no `reason` needed on a decision); an unusable one becomes `{"nomination": "<sha7 — sentence>", "disposition": "skipped", "reason": "<why>"}`.',
+    '- Account for EVERY candidate decision nomination above, one by one — the target is zero unaccounted nominations. Each nomination gets exactly one entry in `nomination_dispositions`: a usable one becomes a cited entry in `decisions` AND `{"nomination_id": "<64-character id>", "disposition": "decision"}` (no `reason` needed on a decision); an unusable one becomes `{"nomination_id": "<64-character id>", "disposition": "skipped", "reason": "<why>"}`. Missing, duplicate, and unknown IDs are reported as warnings.',
     '- `nomination_dispositions` accounts for the NOMINATIONS above, not for your decisions. A decision you mint from an un-nominated commit is legal and gets no row — there is no nomination for it to account for — and the apply report is right not to count it: that report says how the candidate list was dispositioned, not how many decisions the bundle produced. Never invent a nomination row to make a number move.',
-    `- Effort ceiling: at most ${BUNDLE_DECISION_CEILING} decisions from this bundle. It is a CAP, not a quota — a bundle with three usable nominations mints three and stops, and fewer nominations than the ceiling is expected rather than a shortfall. When the usable evidence exceeds the ceiling, rank it by strength — revert pairs first, then sentences carrying both a choice cue and a causal cue, then choice-only — mint the strongest ${BUNDLE_DECISION_CEILING}, and bulk-record the remainder as \`skipped\` with one honest shared reason (for example "beyond this bundle's ${BUNDLE_DECISION_CEILING}-decision ceiling; lower-signal nomination"). Never skip a bundle wholesale for being large, and never invent a decision to reach a number.`,
+    `- Effort ceiling: ${BUNDLE_DECISION_CEILING} decisions from this bundle is an advisory CAP, not a quota — a bundle with three usable nominations mints three and stops, and fewer nominations than the ceiling is expected rather than a shortfall. When more than ${BUNDLE_DECISION_CEILING} nominations are genuinely useful, keep the most concrete choices and record the remainder as \`skipped\` with an honest shared reason. A valid file above the advisory ceiling is warned, not rejected. Never skip a bundle wholesale for being large, and never invent a decision to reach a number.`,
     '- With no nominations at all, mint nothing: leave `decisions` and `nomination_dispositions` empty and enrich only `label`, `task`, `steps`, `checkpoint_summaries`, and `outcome`.',
     `- Save this cluster's JSON as \`${bundleStem(synthesis.cluster.key)}.json\` in \`${input.directory}\` (beside this bundle), then pass that directory to \`--enrichment-dir\`.`,
     '',
@@ -540,17 +683,16 @@ function renderBundle(
 
 export async function readSeedEnrichmentManifest(
   repoRoot: string,
-  config: Pick<Config, 'cache'>
+  config: Pick<Config, 'cache'>,
+  directory = pendingDir(repoRoot, config)
 ): Promise<SeedEnrichmentManifest | null> {
   try {
     return SeedEnrichmentManifestSchema.parse(
-      JSON.parse(
-        await readFile(path.join(pendingDir(repoRoot, config), BUNDLE_MANIFEST_FILENAME), 'utf8')
-      )
+      JSON.parse(await readFile(path.join(directory, BUNDLE_MANIFEST_FILENAME), 'utf8'))
     );
   } catch {
-    // A missing or unreadable manifest only forfeits since-adoption; the
-    // apply then resolves its own selection and mismatches reject loudly.
+    // A missing or unreadable manifest only forfeits since-adoption; apply
+    // resolves its own selection and mismatches reject loudly.
     return null;
   }
 }
@@ -559,10 +701,113 @@ export async function writeSeedEnrichmentBundles(
   repoRoot: string,
   config: Pick<Config, 'cache'>,
   syntheses: readonly SeedClusterSynthesis[],
-  input: { optionsHash: string; prContextConsented: boolean; selection?: SeedSelectionRecord }
-): Promise<{ directory: string; count: number }> {
-  const directory = pendingDir(repoRoot, config);
-  const files: string[] = [];
+  input: {
+    optionsHash: string;
+    prContextConsented: boolean;
+    selection?: SeedSelectionRecord;
+    directory?: string;
+    amendment?: NonNullable<SeedEnrichmentManifest['amendment']>;
+  }
+): Promise<{
+  directory: string;
+  count: number;
+  cueBearingCount: number;
+  cueFreeCount: number;
+  candidateCueCount: number;
+  estimatedReadingTasks: number;
+}> {
+  const directory = input.directory ?? pendingDir(repoRoot, config);
+  const directoryRecovery =
+    input.directory === undefined
+      ? `Move or remove the managed bundle directory ${JSON.stringify(directory)}, then retry.`
+      : 'Choose another enrichment directory.';
+  await mkdir(directory, { recursive: true });
+  const existingEntries = await readdir(directory, { withFileTypes: true });
+  const existingByName = new Map(existingEntries.map((entry) => [entry.name, entry]));
+  const manifestEntry = existingByName.get(BUNDLE_MANIFEST_FILENAME);
+  let priorManifest: SeedEnrichmentManifest | null = null;
+  if (manifestEntry) {
+    if (!manifestEntry.isFile()) {
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        `${path.join(directory, BUNDLE_MANIFEST_FILENAME)} is not a regular file. ` +
+          directoryRecovery
+      );
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(await readFile(path.join(directory, BUNDLE_MANIFEST_FILENAME), 'utf8'));
+    } catch (error) {
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        `Cannot replace unrecognized enrichment manifest in ${directory}: ` +
+          `${error instanceof Error ? error.message : String(error)}. ${directoryRecovery}`
+      );
+    }
+    const parsed = SeedEnrichmentManifestSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        `Cannot replace unrecognized enrichment manifest in ${directory}: ` +
+          `${humanSchemaReason(parsed.error, raw)}. ${directoryRecovery}`
+      );
+    }
+    priorManifest = parsed.data;
+    const sameUse = input.amendment
+      ? priorManifest.amendment?.artifact_id === input.amendment.artifact_id
+      : priorManifest.amendment === undefined;
+    if (!sameUse) {
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        `The enrichment manifest in ${directory} belongs to a different seed workflow; ` +
+          directoryRecovery
+      );
+    }
+  }
+
+  const owned = new Set<string>();
+  for (const bundle of priorManifest?.bundles ?? []) {
+    const filename = bundle.filename;
+    if (
+      path.isAbsolute(filename) ||
+      path.basename(filename) !== filename ||
+      !filename.endsWith('.md') ||
+      filename === BUNDLE_MANIFEST_FILENAME
+    ) {
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        `The enrichment manifest in ${directory} contains an unsafe bundle filename: ` +
+          `${JSON.stringify(filename)}. ${directoryRecovery}`
+      );
+    }
+    if (owned.has(filename)) {
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        `The enrichment manifest in ${directory} repeats bundle filename ` +
+          `${JSON.stringify(filename)}. ${directoryRecovery}`
+      );
+    }
+    owned.add(filename);
+  }
+
+  const nextBundleNames = syntheses.map((synthesis) => `${bundleStem(synthesis.cluster.key)}.md`);
+  for (const filename of nextBundleNames) {
+    if (existingByName.has(filename) && !owned.has(filename)) {
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        `Refusing to overwrite unowned file ${path.join(directory, filename)}; ` + directoryRecovery
+      );
+    }
+  }
+  await Promise.all(
+    [...owned, ...(manifestEntry ? [BUNDLE_MANIFEST_FILENAME] : [])]
+      .filter((filename) => existingByName.get(filename)?.isFile())
+      .map((filename) => unlink(path.join(directory, filename)))
+  );
+  const bundles: z.infer<typeof SeedEnrichmentBundleManifestEntrySchema>[] = [];
+  let cueBearingCount = 0;
+  let candidateCueCount = 0;
+  let estimatedReadingTasks = 0;
   const repo = new Repo(repoRoot);
   const stats = new Array<BundleDiffStats | null>(syntheses.length).fill(null);
   let nextIndex = 0;
@@ -587,29 +832,54 @@ export async function writeSeedEnrichmentBundles(
   });
   await Promise.all(workers);
   for (const [index, synthesis] of syntheses.entries()) {
+    const candidateCount = candidateCues(synthesis).length;
+    const distinctTaskCount = Math.max(1, distinctInformativeSubjects(synthesis.cluster.commits));
+    if (candidateCount > 0) cueBearingCount += 1;
+    candidateCueCount += candidateCount;
+    estimatedReadingTasks += distinctTaskCount;
     const filename = `${bundleStem(synthesis.cluster.key)}.md`;
     await atomicWriteFile(
       path.join(directory, filename),
       renderBundle(synthesis, { ...input, diffStats: stats[index] ?? null, directory }),
       repoRoot
     );
-    files.push(filename);
+    bundles.push({
+      filename,
+      artifact_id: synthesis.artifactId,
+      cluster_key: synthesis.cluster.key,
+      kind: synthesis.cluster.kind,
+      label: synthesis.plan.label,
+      date: new Date(synthesis.cluster.displayDateIso).toISOString(),
+      commit_count: synthesis.cluster.commits.length,
+      checkpoint_count: synthesis.checkpoints.length,
+      warnings: synthesis.cluster.warnings,
+      nomination_count: candidateCount,
+      distinct_task_count: distinctTaskCount,
+    });
   }
   await atomicWriteFile(
     path.join(directory, BUNDLE_MANIFEST_FILENAME),
     `${JSON.stringify(
       {
-        schema_version: 1,
+        schema_version: 2,
         options_hash: input.optionsHash,
         ...(input.selection ? { selection: input.selection } : {}),
-        files,
+        ...(input.amendment ? { amendment: input.amendment } : {}),
+        bundles,
       },
       null,
       2
     )}\n`,
     repoRoot
   );
-  return { directory, count: syntheses.length };
+  return {
+    directory,
+    count: syntheses.length,
+    cueBearingCount,
+    cueFreeCount: syntheses.length - cueBearingCount,
+    candidateCueCount,
+    estimatedReadingTasks,
+  };
 }
 
 function applyEnrichment(
@@ -627,7 +897,7 @@ function applyEnrichment(
         label: enrichment.steps[index]!.label,
         text: enrichment.steps[index]!.text,
       })),
-      decisions: enrichment.decisions.map((decision) => ({ ...decision, revision_n: 0 })),
+      decisions: enrichedDecisions(synthesis, enrichment),
       origin: synthesis.plan.origin
         ? { ...synthesis.plan.origin, enriched_at: enrichment.enriched_at }
         : undefined,
@@ -644,17 +914,20 @@ async function readPersisted(
   repoRoot: string,
   config: Pick<Config, 'cache'>,
   artifactId: string
-): Promise<PersistedSeedEnrichment | null> {
+): Promise<
+  { enrichment: PersistedSeedEnrichment } | { reason: string; issues?: unknown[] } | null
+> {
   try {
-    return PersistedSeedEnrichmentSchema.parse(
-      JSON.parse(await readFile(persistedPath(repoRoot, config, artifactId), 'utf8'))
-    );
+    const raw = JSON.parse(await readFile(persistedPath(repoRoot, config, artifactId), 'utf8'));
+    const parsed = PersistedSeedEnrichmentSchema.safeParse(raw);
+    if (parsed.success) return { enrichment: parsed.data };
+    return {
+      reason: humanSchemaReason(parsed.error, raw),
+      issues: parsed.error.issues,
+    };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    // A persisted payload the tightened schema now rejects (e.g. a >70-char
-    // label stored before the gate enforced the artifact limit) falls back
-    // to the skeleton instead of aborting the whole run.
-    if (error instanceof z.ZodError) return null;
+    if (error instanceof SyntaxError) return { reason: `invalid JSON: ${error.message}` };
     throw error;
   }
 }
@@ -674,6 +947,8 @@ export async function resolveSeedEnrichment(
      * "matched no current cluster".
      */
     coveredClusters?: ReadonlyMap<string, 'already-imported' | 'covered-by-captured-work'>;
+    usePersisted?: boolean;
+    persistAccepted?: boolean;
   }
 ): Promise<ResolvedSeedEnrichment> {
   const byCluster = new Map(syntheses.map((synthesis) => [synthesis.cluster.key, synthesis]));
@@ -749,7 +1024,13 @@ export async function resolveSeedEnrichment(
       }
       for (const warning of [
         ...authoringClipWarnings(parsed.data, synthesis),
-        ...dispositionAccountingWarnings(parsed.data),
+        ...dispositionAccountingWarnings(parsed.data, candidateCues(synthesis)),
+        ...(parsed.data.decisions.length > BUNDLE_DECISION_CEILING
+          ? [
+              `${parsed.data.decisions.length} decisions exceed the advisory ` +
+                `${BUNDLE_DECISION_CEILING}-decision effort ceiling`,
+            ]
+          : []),
       ]) {
         warnings.push({ file, cluster_key: parsed.data.cluster_key, warning });
       }
@@ -760,6 +1041,7 @@ export async function resolveSeedEnrichment(
       accepted.set(parsed.data.cluster_key, persisted);
     }
     for (const [clusterKey, persisted] of accepted) {
+      if (input.persistAccepted === false) continue;
       if (invalidClusterKeys.has(clusterKey)) continue;
       const synthesis = byCluster.get(clusterKey)!;
       await atomicWriteFile(
@@ -775,11 +1057,36 @@ export async function resolveSeedEnrichment(
   const dispositions = { nominations: 0, minted: 0, skipped: 0 };
   for (const synthesis of syntheses) {
     let enrichment = accepted.get(synthesis.cluster.key) ?? null;
-    if (!enrichment && !invalidClusterKeys.has(synthesis.cluster.key)) {
-      enrichment = await readPersisted(repoRoot, config, synthesis.artifactId);
-      if (enrichment) {
+    if (
+      input.usePersisted !== false &&
+      !enrichment &&
+      !invalidClusterKeys.has(synthesis.cluster.key)
+    ) {
+      const persisted = await readPersisted(repoRoot, config, synthesis.artifactId);
+      if (persisted && 'reason' in persisted) {
+        const file = persistedPath(repoRoot, config, synthesis.artifactId);
+        invalid.push({
+          file,
+          cluster_key: synthesis.cluster.key,
+          reason:
+            `persisted enrichment is invalid: ${persisted.reason}. ` +
+            `Move or remove ${file} before retrying.`,
+          ...(persisted.issues ? { issues: persisted.issues } : {}),
+        });
+      } else if (persisted) {
+        enrichment = persisted.enrichment;
         const evidenceError = validateEvidence(synthesis, enrichment, input);
-        if (evidenceError) enrichment = null;
+        if (evidenceError) {
+          const file = persistedPath(repoRoot, config, synthesis.artifactId);
+          invalid.push({
+            file,
+            cluster_key: synthesis.cluster.key,
+            reason:
+              `persisted enrichment is invalid: ${evidenceError}. ` +
+              `Move or remove ${file} before retrying.`,
+          });
+          enrichment = null;
+        }
       }
     }
     if (enrichment) {

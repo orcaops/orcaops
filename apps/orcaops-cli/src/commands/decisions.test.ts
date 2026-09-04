@@ -8,7 +8,12 @@ import {
 
 const BASE: CollectDecisionsInput = {
   planDecisions: [
-    { decision: 'use redis', reason: 'already deployed', revision_n: 0 },
+    {
+      decision: 'use redis',
+      reason: 'already deployed',
+      evidence: { kind: 'git-commit', commit_sha: 'a'.repeat(40), quote: 'use redis' },
+      revision_n: 0,
+    },
     {
       decision: 'load config from env',
       reason: 'per-route thresholds',
@@ -50,6 +55,11 @@ describe('collectArtifactDecisions', () => {
     const plan = records.filter((r) => r.source === 'plan');
     expect(plan.map((r) => r.ts)).toEqual(['2026-06-01T10:00:00.000Z', '2026-06-20T10:00:00.000Z']);
     expect(plan[1].alternatives_considered).toHaveLength(1);
+    expect(plan[0].evidence).toEqual({
+      kind: 'git-commit',
+      commit_sha: 'a'.repeat(40),
+      quote: 'use redis',
+    });
     expect(plan.map((r) => r.revision_n)).toEqual([0, 1]);
 
     const cps = records.filter((r) => r.source === 'checkpoint');

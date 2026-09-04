@@ -1,6 +1,7 @@
 import { blockingEvaluatorFailureKind, GateAuditPayloadSchema } from '@orcaops/evaluator-protocol';
 
 import { type EventRecord, type EventType, loadEventPayload } from './event-log.js';
+import { RecoveryRefusedError } from '../artifacts/errors.js';
 import {
   type ArtifactJson,
   type ArtifactState,
@@ -34,7 +35,11 @@ import {
   type MaterializedEvaluatorDisposition,
   type MaterializedEvaluatorRun,
 } from '../schema/evaluator-run.js';
-import { ArtifactOriginSchema } from '../schema/origin.js';
+import {
+  type GitImportEnrichmentPayload,
+  GitImportEnrichmentPayloadSchema,
+} from '../schema/git-import-enrichment.js';
+import { ArtifactOriginSchema, computeMemberShasHash } from '../schema/origin.js';
 import { type Plan, PlanSchema } from '../schema/plan.js';
 import { prePrCheckedOutcome, PrePrCheckedPayloadSchema } from '../schema/pre-pr-checked.js';
 import { SourcePlanPinSchema } from '../schema/source-plan.js';
@@ -82,6 +87,154 @@ export interface RebuiltPlan {
   sourceEventId: string;
 }
 
+export function latestPlanRevisionEventId(events: readonly EventWithPayload[]): string | null {
+  return (
+    events
+      .filter(
+        (event) => event.record.type === 'plan_captured' || event.record.type === 'plan_revised'
+      )
+      .at(-1)?.record.event_id ?? null
+  );
+}
+
+interface ValidatedGitImportEnrichment {
+  event: EventWithPayload;
+  payload: GitImportEnrichmentPayload;
+}
+
+interface ValidatedPlanState {
+  rebuilt: RebuiltPlan;
+  enrichments: ValidatedGitImportEnrichment[];
+}
+
+function refuseGitImportEnrichment(
+  artifactId: string,
+  eventId: string | null,
+  reason: string
+): never {
+  throw new RecoveryRefusedError(
+    `artifact ${artifactId} is unreadable: git-import enrichment` +
+      `${eventId ? ` event ${eventId}` : ''} ${reason} — run \`orcaops doctor\`; ` +
+      'restore events.ndjson from a backup or archive mirror before reading this artifact.',
+    artifactId
+  );
+}
+
+function validateGitImportEnrichments(
+  events: readonly EventWithPayload[],
+  basePlan: Plan
+): ValidatedGitImportEnrichment[] {
+  const candidates = events.filter((event) => event.record.type === 'git_import_enriched');
+  if (candidates.length === 0) return [];
+
+  const origin = basePlan.origin;
+  if (
+    origin?.kind !== 'git-import' ||
+    !origin.cluster_key ||
+    !origin.member_shas ||
+    !origin.member_shas_hash ||
+    computeMemberShasHash(origin.member_shas) !== origin.member_shas_hash
+  ) {
+    refuseGitImportEnrichment(
+      basePlan.artifact_id,
+      null,
+      'requires immutable exact-member provenance'
+    );
+  }
+
+  const memberShas = new Set(origin.member_shas);
+  const expectedCheckpointNumbers = basePlan.plan_steps.map((_, index) => index + 1);
+  let planEventIndex = -1;
+  const summaryEventIndexes: number[] = [];
+  const closedCheckpointEventIndex = new Map<number, number>();
+  events.forEach((event, index) => {
+    if (event.record.type === 'plan_captured' || event.record.type === 'plan_revised') {
+      planEventIndex = index;
+    }
+    if (event.record.type === 'summary_captured') summaryEventIndexes.push(index);
+    if (event.record.type !== 'checkpoint_closed') return;
+    const n = (event.payload as { n?: unknown }).n;
+    if (typeof n === 'number' && Number.isInteger(n) && n > 0) {
+      closedCheckpointEventIndex.set(n, index);
+    }
+  });
+  let priorEventId: string | null = null;
+  const validated: ValidatedGitImportEnrichment[] = [];
+  for (const event of candidates) {
+    const parsedPayload = GitImportEnrichmentPayloadSchema.safeParse(event.payload);
+    if (!parsedPayload.success) {
+      refuseGitImportEnrichment(
+        basePlan.artifact_id,
+        event.record.event_id,
+        `has an invalid payload: ${parsedPayload.error.issues
+          .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+          .join('; ')}`
+      );
+    }
+    const payload = parsedPayload.data;
+    const eventIndex = events.indexOf(event);
+    if (
+      payload.artifact_id !== basePlan.artifact_id ||
+      payload.cluster_key !== origin.cluster_key ||
+      payload.member_shas_hash !== origin.member_shas_hash
+    ) {
+      refuseGitImportEnrichment(
+        basePlan.artifact_id,
+        event.record.event_id,
+        'does not match the imported artifact identity'
+      );
+    }
+    // Imported threads are frozen after summary capture. Evaluating against the
+    // final log makes a later structural event invalidate the whole amendment.
+    if (
+      eventIndex <= planEventIndex ||
+      !summaryEventIndexes.some((index) => index < eventIndex) ||
+      expectedCheckpointNumbers.some(
+        (n) =>
+          closedCheckpointEventIndex.get(n) === undefined ||
+          closedCheckpointEventIndex.get(n)! >= eventIndex
+      )
+    ) {
+      refuseGitImportEnrichment(
+        basePlan.artifact_id,
+        event.record.event_id,
+        'must follow a complete imported thread'
+      );
+    }
+    if (payload.prior_enrichment_event_id !== priorEventId) {
+      refuseGitImportEnrichment(
+        basePlan.artifact_id,
+        event.record.event_id,
+        'has a stale prior_enrichment_event_id'
+      );
+    }
+    if (
+      payload.steps.length !== basePlan.plan_steps.length ||
+      JSON.stringify(payload.checkpoint_summaries.map((entry) => entry.n)) !==
+        JSON.stringify(expectedCheckpointNumbers)
+    ) {
+      refuseGitImportEnrichment(
+        basePlan.artifact_id,
+        event.record.event_id,
+        'does not cover the imported step and checkpoint shape'
+      );
+    }
+    if (
+      payload.decisions.mode === 'replace' &&
+      payload.decisions.decisions.some((decision) => !memberShas.has(decision.evidence.commit_sha))
+    ) {
+      refuseGitImportEnrichment(
+        basePlan.artifact_id,
+        event.record.event_id,
+        'cites a commit outside the imported member set'
+      );
+    }
+    validated.push({ event, payload });
+    priorEventId = event.record.event_id;
+  }
+  return validated;
+}
+
 /**
  * Latest of `plan_captured | plan_revised` wins. Defense-in-depth:
  * a `plan_revised` event must be preceded by a `plan_captured` for
@@ -90,7 +243,9 @@ export interface RebuiltPlan {
  * corruption. Strict precedence within the log: revisions appear
  * AFTER the initial capture in event-log time order.
  */
-export function rebuildPlanFromEvents(events: readonly EventWithPayload[]): RebuiltPlan | null {
+function rebuildValidatedPlanStateFromEvents(
+  events: readonly EventWithPayload[]
+): ValidatedPlanState | null {
   const planEvents: EventWithPayload[] = [];
   for (const ev of events) {
     if (ev.record.type === 'plan_captured' || ev.record.type === 'plan_revised') {
@@ -121,8 +276,31 @@ export function rebuildPlanFromEvents(events: readonly EventWithPayload[]): Rebu
 
   const latest = planEvents[planEvents.length - 1];
   const planRaw = latest.payload as Record<string, unknown>;
-  const plan = PlanSchema.parse({ ...planRaw, source_event_id: latest.record.event_id });
-  return { plan, sourceEventId: latest.record.event_id };
+  let plan = PlanSchema.parse({ ...planRaw, source_event_id: latest.record.event_id });
+  let sourceEventId = latest.record.event_id;
+  const enrichments = validateGitImportEnrichments(events, plan);
+  for (const enrichment of enrichments) {
+    const payload = enrichment.payload;
+    plan = PlanSchema.parse({
+      ...plan,
+      label: payload.label,
+      task: payload.task,
+      plan_steps: plan.plan_steps.map((step, index) => ({
+        ...step,
+        ...payload.steps[index],
+      })),
+      decisions:
+        payload.decisions.mode === 'replace' ? payload.decisions.decisions : plan.decisions,
+      origin: { ...plan.origin, enriched_at: payload.enriched_at },
+      source_event_id: enrichment.event.record.event_id,
+    });
+    sourceEventId = enrichment.event.record.event_id;
+  }
+  return { rebuilt: { plan, sourceEventId }, enrichments };
+}
+
+export function rebuildPlanFromEvents(events: readonly EventWithPayload[]): RebuiltPlan | null {
+  return rebuildValidatedPlanStateFromEvents(events)?.rebuilt ?? null;
 }
 
 // ── checkpoint ───────────────────────────────────────────────────────
@@ -280,9 +458,10 @@ function checkpointEvents(
  * enforcement). Defense-in-depth ordering check: a close/abandon must
  * appear AFTER its matching open in the event log.
  */
-export function rebuildCheckpointFromEvents(
+function rebuildCheckpointFromEventsWithPlanState(
   events: readonly EventWithPayload[],
-  n: number
+  n: number,
+  validatedPlanState?: ValidatedPlanState | null
 ): RebuiltCheckpoint | null {
   const opens = checkpointEvents(events, n, 'checkpoint_opened');
   const closes = checkpointEvents(events, n, 'checkpoint_closed');
@@ -376,6 +555,24 @@ export function rebuildCheckpointFromEvents(
 
   if (decisive === 'closed' && closeEv) {
     const closePayload = closeEv.payload as ClosedEventPayload;
+    const hasEnrichment = events.some((event) => event.record.type === 'git_import_enriched');
+    const planState = hasEnrichment
+      ? validatedPlanState === undefined
+        ? rebuildValidatedPlanStateFromEvents(events)
+        : validatedPlanState
+      : null;
+    if (hasEnrichment && !planState) {
+      refuseGitImportEnrichment(
+        openPayload.artifact_id,
+        null,
+        'cannot be projected because the imported plan is missing'
+      );
+    }
+    const enrichment = planState?.enrichments.at(-1);
+    const enrichedSummary = enrichment
+      ? enrichment.payload.checkpoint_summaries.find((entry) => entry.n === n)?.summary
+      : undefined;
+    const sourceEventId = enrichment?.event.record.event_id ?? closeEv.record.event_id;
     const closed: ClosedCheckpoint = ClosedCheckpointSchema.parse({
       schema_version: 4,
       status: 'closed',
@@ -398,7 +595,7 @@ export function rebuildCheckpointFromEvents(
       // Close-time fields.
       closed_at: closePayload.ts,
       closed_by_agent: closePayload.closed_by_agent,
-      summary: closePayload.summary,
+      summary: enrichedSummary ?? closePayload.summary,
       files_changed: closePayload.files_changed,
       decisions: closePayload.decisions,
       uncertainty: closePayload.uncertainty,
@@ -420,9 +617,9 @@ export function rebuildCheckpointFromEvents(
       close_snapshot: closePayload.close_snapshot,
       diff_fingerprint_summary: closePayload.diff_fingerprint_summary,
       source_event_ids: { opened: openEv.record.event_id, closed: closeEv.record.event_id },
-      source_event_id: closeEv.record.event_id,
+      source_event_id: sourceEventId,
     });
-    return { checkpoint: closed, sourceEventId: closeEv.record.event_id };
+    return { checkpoint: closed, sourceEventId };
   }
 
   // decisive === 'abandoned'
@@ -456,6 +653,13 @@ export function rebuildCheckpointFromEvents(
     source_event_id: abandonEv.record.event_id,
   });
   return { checkpoint: abandoned, sourceEventId: abandonEv.record.event_id };
+}
+
+export function rebuildCheckpointFromEvents(
+  events: readonly EventWithPayload[],
+  n: number
+): RebuiltCheckpoint | null {
+  return rebuildCheckpointFromEventsWithPlanState(events, n);
 }
 
 /**
@@ -494,9 +698,11 @@ export function checkpointNsInEvents(events: readonly EventWithPayload[]): numbe
  */
 export function rebuildAllCheckpointsFromEvents(events: readonly EventWithPayload[]): Checkpoint[] {
   const ns = checkpointNsInEvents(events);
+  const hasEnrichment = events.some((event) => event.record.type === 'git_import_enriched');
+  const planState = hasEnrichment ? rebuildValidatedPlanStateFromEvents(events) : null;
   const out: Checkpoint[] = [];
   for (const n of ns) {
-    const r = rebuildCheckpointFromEvents(events, n);
+    const r = rebuildCheckpointFromEventsWithPlanState(events, n, planState);
     if (r) out.push(r.checkpoint);
   }
 
@@ -555,11 +761,29 @@ export function rebuildSummaryFromEvents(
   if (latest === null) return null;
 
   const summaryRaw = latest.payload as Record<string, unknown>;
+  const hasEnrichment = events.some((event) => event.record.type === 'git_import_enriched');
+  const planState = hasEnrichment ? rebuildValidatedPlanStateFromEvents(events) : null;
+  if (hasEnrichment && !planState) {
+    refuseGitImportEnrichment(
+      String(summaryRaw.artifact_id ?? 'unknown'),
+      null,
+      'cannot be projected because the imported plan is missing'
+    );
+  }
+  const enrichment = planState?.enrichments.at(-1);
+  const enrichmentPayload = enrichment?.payload ?? null;
+  const enrichmentIsLatest = enrichment
+    ? events.indexOf(enrichment.event) > events.indexOf(latest)
+    : false;
+  const sourceEventId = enrichmentIsLatest
+    ? enrichment!.event.record.event_id
+    : latest.record.event_id;
   const summary = SummarySchema.parse({
     ...summaryRaw,
-    source_event_id: latest.record.event_id,
+    ...(enrichmentPayload && enrichmentIsLatest ? { outcome: enrichmentPayload.outcome } : {}),
+    source_event_id: sourceEventId,
   });
-  return { summary, sourceEventId: latest.record.event_id };
+  return { summary, sourceEventId };
 }
 
 // ── evaluator log ──────────────────────────────────────────────────
@@ -916,8 +1140,11 @@ export function rebuildArtifactJsonFromEvents(
     typeof planPayload.superseded_artifact_id === 'string'
       ? planPayload.superseded_artifact_id
       : null;
-  const origin =
+  const initialOrigin =
     planPayload.origin === undefined ? undefined : ArtifactOriginSchema.parse(planPayload.origin);
+  const hasEnrichment = events.some((event) => event.record.type === 'git_import_enriched');
+  const planState = hasEnrichment ? rebuildValidatedPlanStateFromEvents(events) : null;
+  const origin = planState?.rebuilt.plan.origin ?? initialOrigin;
 
   const branchLineage: BranchLineageEntry[] = [
     { branch, head_sha: baseSha, ts: createdAt, event: 'created' },
@@ -947,6 +1174,10 @@ export function rebuildArtifactJsonFromEvents(
       case 'plan_revised':
         planRevisionCount += 1;
         planLastRevisedAt = ev.record.ts;
+        updatedAt = ev.record.ts;
+        latestEventId = ev.record.event_id;
+        break;
+      case 'git_import_enriched':
         updatedAt = ev.record.ts;
         latestEventId = ev.record.event_id;
         break;

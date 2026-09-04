@@ -20,6 +20,7 @@ import {
   buildBranchBPin,
   type PreflightClient,
   preflightSourcePlan,
+  resolveBranchBPinTitle,
 } from './source-plan-pin.js';
 
 const sha = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex');
@@ -196,6 +197,60 @@ describe('Branch-B builder', () => {
       repoRoot,
     });
     expect(payload.derived_from).toBeNull();
+  });
+});
+
+describe('Branch-B replay title', () => {
+  it('uses the title stored under the deterministic born-pin id', async () => {
+    const client = getClient({
+      externalId: bornPinExternalId('artifact-123'),
+      slug: 'stored-title',
+      title: 'Stored title',
+      status: 'PINNED',
+      approvedVersionNumber: null,
+      webUrl: 'https://cloud.example/plans/stored-title',
+      captureThread: { externalId: 'artifact-123', label: 'Current label', taskNumber: null },
+    });
+
+    await expect(
+      resolveBranchBPinTitle(client, {
+        artifactId: 'artifact-123',
+        planLabel: 'Current label',
+      })
+    ).resolves.toBe('Stored title');
+    expect(client.sourcePlan.get).toHaveBeenCalledWith({
+      slugOrExternalId: bornPinExternalId('artifact-123'),
+    });
+  });
+
+  it('uses the current label only when the born pin does not exist', async () => {
+    const client = getClient(() => {
+      throw new TrpcRequestError('missing', { code: 'NOT_FOUND', httpStatus: 404 });
+    });
+
+    await expect(
+      resolveBranchBPinTitle(client, {
+        artifactId: 'artifact-123',
+        planLabel: 'Current label',
+      })
+    ).resolves.toBe('Current label');
+  });
+
+  it('does not treat a missing procedure as a missing born pin', async () => {
+    const client = getClient(() => {
+      throw new TrpcRequestError('missing', {
+        code: 'NOT_FOUND',
+        httpStatus: 404,
+        appCode: 'UNKNOWN_PROCEDURE',
+      });
+    });
+
+    await expect(
+      resolveBranchBPinTitle(client, {
+        artifactId: 'artifact-123',
+        planLabel: 'Current label',
+      })
+    ).rejects.toMatchObject({ data: { appCode: 'UNKNOWN_PROCEDURE' } });
   });
 });
 

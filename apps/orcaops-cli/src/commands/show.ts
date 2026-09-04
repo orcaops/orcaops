@@ -160,6 +160,11 @@ export async function showAction(artifactId: string, opts: ShowOptions = {}): Pr
           for (const dec of plan.decisions) {
             lines.push(`  - ${dec.decision}  (plan rev ${dec.revision_n})`);
             lines.push(`      ${dec.reason}`);
+            if (dec.evidence) {
+              lines.push(
+                `      evidence: commit ${dec.evidence.commit_sha} — ${dec.evidence.quote}`
+              );
+            }
             for (const alt of dec.alternatives_considered ?? []) {
               lines.push(
                 `      ◦ considered ${alt.option} — rejected because ${alt.rejected_because}`

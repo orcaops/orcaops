@@ -49,6 +49,12 @@ export interface SeedClusterSelection {
 
 export interface LoadedSeedHistory extends SeedClusterSelection {
   branch: ResolvedSeedBranch;
+  checkedOut: {
+    branch: string | null;
+    headSha: string | null;
+    excludedCommitCount: number;
+    fullyRepresented: boolean;
+  };
   firstParentCommits: DetailedCommit[];
   graphCommits: DetailedCommit[];
 }
@@ -250,10 +256,16 @@ export async function loadSeedHistory(
   opts: SelectSeedClustersOptions & { branch?: string; includeBots?: boolean } = {}
 ): Promise<LoadedSeedHistory> {
   const branch = await resolveSeedBranch(repo, opts.branch);
-  const [firstParentCommits, graphCommits] = await Promise.all([
+  const [firstParentCommits, graphCommits, currentBranch, currentHeadSha] = await Promise.all([
     repo.logFirstParentDetailed(branch.sha),
     repo.logDetailed(branch.sha),
+    repo.getCurrentBranch(),
+    repo.resolveCommit('HEAD'),
   ]);
+  const excludedCommitCount =
+    currentHeadSha && currentHeadSha !== branch.sha
+      ? (await repo.listCommitShasBetween(branch.sha, currentHeadSha)).length
+      : 0;
   const sinceIso = opts.sinceIso ?? defaultSeedSince(opts.now);
   // Targeted lanes select from canonical clusters over full history: the
   // window trim would silently drop the very merge members --commit names.
@@ -264,6 +276,12 @@ export async function loadSeedHistory(
   });
   return {
     branch,
+    checkedOut: {
+      branch: currentBranch === 'HEAD' ? null : currentBranch,
+      headSha: currentHeadSha,
+      excludedCommitCount,
+      fullyRepresented: excludedCommitCount === 0,
+    },
     firstParentCommits,
     graphCommits,
     ...selectSeedClusters(canonicalClusters, { ...opts, sinceIso }),

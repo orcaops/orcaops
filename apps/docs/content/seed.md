@@ -20,7 +20,10 @@ Backfill this repository's existing git history into Orcaops.
 
 The agent inspects any existing seed state, prepares a local preview, and
 reports the selected branch, commits, proposed artifacts, authors, coverage,
-and any truncation. Previewing does not create artifacts or contact a network.
+and any truncation. Previewing writes precious seed state, may mint project
+identity in repository Git config, and writes generated bundle files when
+clusters are pending. It does not write the seed journal or artifacts and does
+not contact a network by default.
 
 You can narrow the request in ordinary language when you do not want the whole
 default history selection:
@@ -59,6 +62,7 @@ Seed preview — main (main)
   2025-01-02T11:00:00Z  run  paginate the activity feed + cover pagination boundaries  (2 commits)
 Pending 2; covered 0; commits 3
 Enrichment bundles: 2 in <repo>/.orcaops/cache/seed/pending
+Candidate cues: 1 across 1 bundle(s); 1 bundle(s) have none. Estimated reading: 3 distinct task(s).
 Run `orcaops seed --yes` to write these artifacts.
 ```
 
@@ -88,9 +92,10 @@ imported results specifically when you want to inspect the backfill.
 
 ## Enrichment remains evidence-bound
 
-The agent can turn strong commit evidence into clearer labels, outcomes,
-checkpoint summaries, and decisions before applying the import. It prioritizes
-the highest-signal clusters rather than manufacturing detail for every commit.
+The agent can turn commit evidence into clearer labels, outcomes, checkpoint
+summaries, and decisions before applying the import. When the user limits the
+scope, it prioritizes cue-bearing bundles by candidate-cue count, recency, and
+commit count rather than claiming to measure semantic evidence strength.
 
 Every synthesized decision requires an exact commit-message citation. Git
 structure, authorship, and file changes cannot be rewritten by enrichment, and
@@ -98,6 +103,11 @@ invalid enrichment falls back to the truthful skeleton rather than blocking the
 import. Pull-request titles, bodies, and threads are an optional additional
 source for labels and outcomes only; the agent asks before using that context
 because retrieving it can contact the source-control provider.
+
+An imported artifact can also be enriched later without deleting or re-importing
+it. The agent generates a bundle for one explicit artifact, validates the authored
+JSON in a second preview, asks for confirmation, and appends an amendment. Use a
+prose-only amendment when the existing decisions should remain unchanged.
 
 ## Fill gaps as you encounter them
 
@@ -129,6 +139,8 @@ orcaops seed --importance --dry-run
 orcaops seed --importance --yes
 orcaops seed --commit <sha> --dry-run
 orcaops seed --commit <sha> --yes
+orcaops seed enrich --artifact <artifact-id> --dry-run
+orcaops seed enrich --artifact <artifact-id> --yes
 ```
 
 Use `--since`, `--max-commits`, `--branch`, `--author`, or `--path` to narrow a
@@ -136,6 +148,10 @@ preview. Preserve the same selectors when applying it. `--yes` is the explicit
 write authorization; omit it for inspection. Pass `--enrichment-dir <path>`
 only with a prepared enrichment directory. Run `orcaops seed --help` for the
 complete current flags.
+
+The enrichment apply must use the same decision mode, PR-context consent, and
+bundle directory as its validated preview. Add `--preserve-decisions` to both
+commands for a prose-only amendment.
 
 Use `orcaops list --imported` to inspect the imported set or
 `orcaops search --no-imported` to exclude it from a search. To suppress another

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { getToolAdapter } from '../registry.js';
+import { getToolAdapter, listToolAdapters } from '../registry.js';
 import { orcaopsSeedDiscoverySkill } from './orcaops-seed-discovery.js';
 import { orcaopsSeedSkill } from './orcaops-seed.js';
 
@@ -26,12 +26,27 @@ describe('seed skills', () => {
       generatedBy: 'test',
     });
 
-    expect(claude).toContain('enrich the dry-run bundles in parallel');
+    expect(claude).toContain('enrich the approved bundle set through a');
+    expect(claude).toContain('bounded worker queue');
+    expect(claude).toContain('dispatch the next queued bundle');
+    expect(claude).toContain('never silently drop it');
     expect(claudeDiscovery).toContain('subagents to assess disjoint directories');
     expect(codex).toContain('process the dry-run bundles serially');
     expect(aider).toContain('process the dry-run bundles serially');
     expect(codexDiscovery).not.toContain('subagents to assess');
     expect(aiderDiscovery).not.toContain('subagents to assess');
+  });
+
+  it('isolates enrichment worker scratch from the shared bundle directory', () => {
+    for (const adapter of listToolAdapters()) {
+      const rendered = adapter.skills!.format(orcaopsSeedSkill, { generatedBy: 'test' });
+      expect(rendered).toMatch(/private scratch directory OUTSIDE the\s+shared bundle directory/u);
+      expect(rendered).toMatch(/must not write helper files into the shared\s+directory/u);
+      expect(rendered).toMatch(/run any helper script it did not create for this task/u);
+      expect(rendered).toMatch(
+        /final\s+enrichment JSON is the only file it may write outside its private directory/u
+      );
+    }
   });
 
   it('keeps explicit consent, disclosure, and single-apply rules in the import workflow', () => {
@@ -46,6 +61,9 @@ describe('seed skills', () => {
     expect(rendered).toContain('commit authors');
     expect(rendered).toContain('ONE');
     expect(rendered).toContain('--enrichment-dir');
+    expect(rendered).toContain('writes precious seed state');
+    expect(rendered).toContain('may mint project identity in repository');
+    expect(rendered).toContain('does not write the seed journal or artifacts');
     expect(rendered).not.toContain('seed --push');
   });
 
@@ -74,9 +92,16 @@ describe('seed skills', () => {
     // 196-task cluster, and the honest response to that is to skip the bundle.
     expect(rendered).toContain('per-bundle effort ceiling');
     expect(rendered).toContain('bulk-disposition');
+    expect(rendered).toContain('nomination_id');
+    expect(rendered).not.toContain('evidence strength');
     expect(rendered).toContain('never a reason to skip it wholesale');
     expect(rendered).toContain('Triage before authoring');
-    expect(rendered).toContain('20 bundles per');
+    expect(rendered).not.toContain('20 bundles per');
+    expect(rendered).toMatch(/all\s+bundles, cue-bearing bundles/u);
+    expect(rendered).toContain('user-specified maximum');
+    expect(rendered).toMatch(/remain\s+eligible for later enrichment/u);
+    expect(rendered).toContain('orcaops seed enrich --artifact <id>');
+    expect(rendered).toMatch(/remain eligible for a later\s+seed run/u);
   });
 
   it('names the enrichment output directory rather than leaving it to a guess', () => {

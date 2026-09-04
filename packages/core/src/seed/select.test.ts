@@ -141,6 +141,35 @@ describe('seed history discovery', () => {
         sinceIso: '2024-01-01T00:00:00.000Z',
       });
       expect(loaded.clusters.find((item) => item.kind === 'merge')?.commits).toHaveLength(1);
+      expect(loaded.checkedOut).toMatchObject({
+        branch: 'main',
+        headSha: history.shas.merge,
+        excludedCommitCount: 0,
+        fullyRepresented: true,
+      });
+    } finally {
+      await history.cleanup();
+    }
+  });
+
+  it('reports commits on the checked-out branch that the selected ref excludes', async () => {
+    const history = await createHistoryRepo([
+      { type: 'commit', label: 'root', files: { 'root.ts': 'root\n' } },
+      { type: 'branch', name: 'feature' },
+      { type: 'checkout', branch: 'feature' },
+      { type: 'commit', label: 'ahead', files: { 'ahead.ts': 'ahead\n' } },
+    ]);
+    try {
+      const loaded = await loadSeedHistory(new Repo(history.path), {
+        branch: 'main',
+        sinceIso: '2024-01-01T00:00:00.000Z',
+      });
+      expect(loaded.checkedOut).toMatchObject({
+        branch: 'feature',
+        headSha: history.shas.ahead,
+        excludedCommitCount: 1,
+        fullyRepresented: false,
+      });
     } finally {
       await history.cleanup();
     }

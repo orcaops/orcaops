@@ -690,6 +690,15 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
   const clustersBeyondBudget = importanceLaneRan
     ? importanceClustersBeyond
     : history.truncatedClusterCount;
+  const truncationCounts = importanceLaneRan
+    ? {
+        mass_bearing_commits_beyond: commitsBeyondBudget,
+        mass_bearing_clusters_beyond: clustersBeyondBudget,
+      }
+    : {
+        commits_beyond: commitsBeyondBudget,
+        clusters_beyond: clustersBeyondBudget,
+      };
   if (opts.commit && selectedCommitCount > maxCommits) {
     throw invalidInput(
       `The canonical cluster for ${opts.commit} expands to ${selectedCommitCount} commits, exceeding --max-commits ${maxCommits}.`
@@ -746,8 +755,8 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
       if (containing.length === 0 && covered.has(commitSha)) {
         notes.push(
           `commit ${sha7} is already covered by an imported or captured artifact; ` +
-            "enriching existing imports isn't supported yet — enrichment happens at " +
-            'import time (fresh store or before apply).'
+            'use `orcaops seed enrich --artifact <id> --dry-run` when the covering ' +
+            'artifact is an imported Git thread.'
         );
       } else if (containing.length > 0 && sinceExplicit && !containing.some(withinWindow)) {
         notes.push(
@@ -871,6 +880,34 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
     const rightIncomplete = ctx.store.store.getArtifact(right.artifactId) !== null ? 1 : 0;
     return rightIncomplete - leftIncomplete;
   });
+  const coveredClusterReasons = new Map(
+    skips
+      .filter(
+        (
+          skip
+        ): skip is {
+          cluster_key: string;
+          reason: 'already-imported' | 'covered-by-captured-work';
+        } => skip.reason === 'already-imported' || skip.reason === 'covered-by-captured-work'
+      )
+      .map((skip) => [skip.cluster_key, skip.reason] as const)
+  );
+  const enrichment = await resolveSeedEnrichment(ctx.repoRoot, ctx.config, pending, {
+    ...(opts.enrichmentDir ? { enrichmentDir: opts.enrichmentDir } : {}),
+    optionsHash: journal.options_hash,
+    prContextConsented: precious.pr_context,
+    coveredClusters: coveredClusterReasons,
+  });
+  if (enrichment.report.invalid.length > 0) {
+    const details = enrichment.report.invalid
+      .map((entry) => `${entry.file}: ${entry.reason}`)
+      .join('; ');
+    throw invalidInput(
+      `${enrichment.report.invalid.length} enrichment file(s) were rejected; ` +
+        `no pending clusters were imported. Correct or remove them and retry. ${details}`
+    );
+  }
+  pending = enrichment.syntheses;
   // Crash residue from an earlier seed run. An artifact this run will write
   // resumes for free — the deterministic open key replays onto the stranded
   // checkpoint and the close completes it — but one outside the pending set
@@ -934,6 +971,7 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
 
   const preview = pending.map((synthesis) => ({
     artifact_id: synthesis.artifactId,
+    cluster_key: synthesis.cluster.key,
     kind: synthesis.cluster.kind,
     label: synthesis.plan.label,
     commits: synthesis.cluster.commits.length,
@@ -952,6 +990,12 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
       confirmation_required: opts.yes !== true,
       open_checkpoint_guard: openCheckpointGuard,
       branch: history.branch,
+      checked_out: {
+        branch: history.checkedOut.branch,
+        head_sha: history.checkedOut.headSha,
+        excluded_from_selected_commit_count: history.checkedOut.excludedCommitCount,
+        fully_represented: history.checkedOut.fullyRepresented,
+      },
       since: history.sinceIso,
       notes,
       preflight,
@@ -964,11 +1008,10 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
         commits: pending.reduce((total, item) => total + item.cluster.commits.length, 0),
       },
       truncation: {
-        commit_cap: history.truncatedByCommitCap,
-        artifact_ceiling: history.truncatedByArtifactCeiling,
+        recency_commit_cap: history.truncatedByCommitCap,
+        recency_artifact_ceiling: history.truncatedByArtifactCeiling,
         importance: importanceTruncated,
-        commits_beyond: commitsBeyondBudget,
-        clusters_beyond: clustersBeyondBudget,
+        ...truncationCounts,
       },
       pending_importance: pendingImportance,
       importance: {
@@ -978,30 +1021,14 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
       enrichment: {
         bundle_directory: bundles.directory,
         bundle_count: bundles.count,
+        cue_bearing_bundle_count: bundles.cueBearingCount,
+        cue_free_bundle_count: bundles.cueFreeCount,
+        candidate_cue_count: bundles.candidateCueCount,
+        estimated_reading_tasks: bundles.estimatedReadingTasks,
         pr_context_consented: precious.pr_context,
       },
     };
   }
-
-  const coveredClusterReasons = new Map(
-    skips
-      .filter(
-        (
-          skip
-        ): skip is {
-          cluster_key: string;
-          reason: 'already-imported' | 'covered-by-captured-work';
-        } => skip.reason === 'already-imported' || skip.reason === 'covered-by-captured-work'
-      )
-      .map((skip) => [skip.cluster_key, skip.reason] as const)
-  );
-  const enrichment = await resolveSeedEnrichment(ctx.repoRoot, ctx.config, pending, {
-    ...(opts.enrichmentDir ? { enrichmentDir: opts.enrichmentDir } : {}),
-    optionsHash: journal.options_hash,
-    prContextConsented: precious.pr_context,
-    coveredClusters: coveredClusterReasons,
-  });
-  pending = enrichment.syntheses;
 
   const prepared = await prepareSeedSnapshots(ctx.repo, pending, {
     fingerprints: ctx.config.diff_fingerprint.enabled && !preflight.partialClone,
@@ -1106,11 +1133,10 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
       failed: Object.values(journal.clusters).filter((entry) => entry.status === 'failed').length,
     },
     truncation: {
-      commit_cap: history.truncatedByCommitCap,
-      artifact_ceiling: history.truncatedByArtifactCeiling,
+      recency_commit_cap: history.truncatedByCommitCap,
+      recency_artifact_ceiling: history.truncatedByArtifactCeiling,
       importance: importanceTruncated,
-      commits_beyond: commitsBeyondBudget,
-      clusters_beyond: clustersBeyondBudget,
+      ...truncationCounts,
     },
     pending_importance: pendingImportance,
     importance: {
@@ -1692,6 +1718,20 @@ export function renderSeedResult(result: Record<string, unknown>): string {
     if (openCheckpointGuard.recovery_message) {
       lines.push(`${openCheckpointGuard.recovery_message} — the next apply resolves it.`);
     }
+    const checkedOut = result.checked_out as {
+      branch: string | null;
+      head_sha: string | null;
+      excluded_from_selected_commit_count: number;
+      fully_represented: boolean;
+    };
+    if (!checkedOut.fully_represented) {
+      const checkoutRef = checkedOut.branch ?? checkedOut.head_sha ?? 'HEAD';
+      lines.push(
+        `warning: checked-out ${checkoutRef} has ` +
+          `${checkedOut.excluded_from_selected_commit_count} commit(s) not reachable from ` +
+          `${branch.ref}; preview it with \`orcaops seed --branch ${checkoutRef} --dry-run\`.`
+      );
+    }
     for (const cluster of result.clusters as Array<Record<string, unknown>>) {
       lines.push(
         `  ${cluster.date}  ${cluster.kind}  ${cluster.label}  ` +
@@ -1706,8 +1746,18 @@ export function renderSeedResult(result: Record<string, unknown>): string {
     const enrichment = result.enrichment as {
       bundle_directory: string;
       bundle_count: number;
+      cue_bearing_bundle_count: number;
+      cue_free_bundle_count: number;
+      candidate_cue_count: number;
+      estimated_reading_tasks: number;
     };
     lines.push(`Enrichment bundles: ${enrichment.bundle_count} in ${enrichment.bundle_directory}`);
+    lines.push(
+      `Candidate cues: ${enrichment.candidate_cue_count} across ` +
+        `${enrichment.cue_bearing_bundle_count} bundle(s); ` +
+        `${enrichment.cue_free_bundle_count} bundle(s) have none. ` +
+        `Estimated reading: ${enrichment.estimated_reading_tasks} distinct task(s).`
+    );
     if (result.confirmation_required && !openCheckpointGuard.blocked) {
       lines.push(
         (totals.pending ?? 0) > 0
@@ -1760,8 +1810,8 @@ export function renderSeedResult(result: Record<string, unknown>): string {
     if (coveredTargets.length > 0) {
       lines.push(
         `${coveredTargets.length} enrichment file(s) target clusters that are already ` +
-          "imported or covered by captured work; enriching existing imports isn't supported " +
-          'yet — enrichment happens at import time (fresh store or before apply):'
+          'imported or covered by captured work. For an imported artifact, generate a fresh ' +
+          'amendment bundle with `orcaops seed enrich --artifact <id> --dry-run`:'
       );
       for (const entry of coveredTargets) {
         lines.push(`  ${entry.reason} ${entry.file}: cluster_key ${entry.cluster_key}`);
@@ -1778,15 +1828,27 @@ export function renderSeedResult(result: Record<string, unknown>): string {
     }
   }
   const truncation = result.truncation as {
-    commit_cap: boolean;
-    artifact_ceiling: boolean;
+    recency_commit_cap: boolean;
+    recency_artifact_ceiling: boolean;
     importance: boolean;
-    commits_beyond: number;
-    clusters_beyond: number;
+    commits_beyond?: number;
+    clusters_beyond?: number;
+    mass_bearing_commits_beyond?: number;
+    mass_bearing_clusters_beyond?: number;
   };
-  if (truncation.commits_beyond > 0 || truncation.clusters_beyond > 0) {
+  const massBearing = truncation.mass_bearing_commits_beyond !== undefined;
+  const beyond = {
+    commits_beyond: massBearing
+      ? truncation.mass_bearing_commits_beyond!
+      : (truncation.commits_beyond ?? 0),
+    clusters_beyond: massBearing
+      ? (truncation.mass_bearing_clusters_beyond ?? 0)
+      : (truncation.clusters_beyond ?? 0),
+  };
+  if (beyond.commits_beyond > 0 || beyond.clusters_beyond > 0) {
     lines.push(
-      `History selection was budget-truncated — ${formatBeyondBudget(truncation)}; ` +
+      `${massBearing ? 'Mass-bearing history' : 'History'} selection was budget-truncated — ` +
+        `${formatBeyondBudget(beyond)}; ` +
         'widen with --max-commits/--since.'
     );
   }

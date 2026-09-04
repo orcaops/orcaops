@@ -207,13 +207,14 @@ if (dryRun) {
 // The registry must now hold exactly these bytes: the recorded integrity and
 // a fresh download both have to match the artifact. A just-published version
 // can stay invisible behind the registry's CDN for a while, so wait for it.
-const VERIFY_WINDOW_MS = 4 * 60 * 1000;
+// The packaging runbook records replication lag as two to five minutes, so a
+// four-minute window sat inside the range it exists to absorb.
+const VERIFY_WINDOW_MS = 10 * 60 * 1000;
 const VERIFY_STEP_MS = 10 * 1000;
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-async function awaitIntegrity(name) {
-  const deadline = Date.now() + VERIFY_WINDOW_MS;
+async function awaitIntegrity(name, deadline) {
   for (;;) {
     const recorded = registryIntegrity(name);
     if (recorded !== null) return recorded;
@@ -222,20 +223,36 @@ async function awaitIntegrity(name) {
     await sleep(VERIFY_STEP_MS);
   }
 }
-const downloads = mkdtempSync(path.join(tmpdir(), 'publish-platforms-verify-'));
-try {
-  for (const p of plan) {
-    const recorded = await awaitIntegrity(p.name);
-    if (recorded !== p.integrity)
-      fail(`${p.name}@${version}: registry integrity ${recorded} ≠ artifact ${p.integrity}`);
+
+// A readable integrity does not mean a downloadable tarball: the two are served
+// by different endpoints and propagate independently, so a pack issued the
+// instant integrity appeared has lost this race in a real release. Both reads
+// share one deadline, so waiting for the package to become fully visible stays
+// bounded instead of doubling.
+async function awaitPack(name, dest, deadline) {
+  for (;;) {
     const packed = npm([
       'pack',
-      `${p.name}@${version}`,
+      `${name}@${version}`,
       '--pack-destination',
-      downloads,
+      dest,
       '--json',
       '--prefer-online',
     ]);
+    if (packed.status === 0) return packed;
+    if (Date.now() >= deadline) return packed;
+    log(`${name}@${version} not downloadable yet; retrying in ${VERIFY_STEP_MS / 1000}s`);
+    await sleep(VERIFY_STEP_MS);
+  }
+}
+const downloads = mkdtempSync(path.join(tmpdir(), 'publish-platforms-verify-'));
+try {
+  for (const p of plan) {
+    const deadline = Date.now() + VERIFY_WINDOW_MS;
+    const recorded = await awaitIntegrity(p.name, deadline);
+    if (recorded !== p.integrity)
+      fail(`${p.name}@${version}: registry integrity ${recorded} ≠ artifact ${p.integrity}`);
+    const packed = await awaitPack(p.name, downloads, deadline);
     if (packed.status !== 0) fail(`could not re-download ${p.name}@${version}: ${packed.stderr}`);
     const [info] = JSON.parse(packed.stdout);
     const downloaded = sri(path.join(downloads, info.filename));

@@ -23,6 +23,7 @@ export function buildPlanSearchContent(plan: {
     decision: string;
     reason: string;
     alternatives_considered?: ReadonlyArray<{ option: string; rejected_because: string }>;
+    evidence?: { kind: 'git-commit'; commit_sha: string; quote: string };
   }>;
 }): string {
   const parts: string[] = [plan.label, plan.task, ...plan.plan_steps.map((s) => s.text)];
@@ -35,7 +36,10 @@ export function buildPlanSearchContent(plan: {
         const alts = (d.alternatives_considered ?? [])
           .map((a) => `${a.option}: ${a.rejected_because}`)
           .join(' · ');
-        return alts ? `${d.decision} — ${d.reason} · ${alts}` : `${d.decision} — ${d.reason}`;
+        const evidence = d.evidence
+          ? `evidence: commit ${d.evidence.commit_sha} — ${d.evidence.quote}`
+          : '';
+        return [`${d.decision} — ${d.reason}`, alts, evidence].filter(Boolean).join(' · ');
       })
       .join(' · ');
     parts.push(`decisions: ${decisionsText}`);

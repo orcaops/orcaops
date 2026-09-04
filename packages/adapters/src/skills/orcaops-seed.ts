@@ -27,34 +27,43 @@ export const orcaopsSeedSkill: SkillTemplate = {
 
    If the run is partial, say that the next apply resumes it. If imports already
    exist and the run is complete, report that and do not create duplicates.
-2. Preview locally; this command does not write artifacts or contact a network:
+2. Preview locally:
 
    \`\`\`bash
    orcaops seed --dry-run --json
    \`\`\`
 
+   Preview writes precious seed state, may mint project identity in repository
+   Git config, and writes generated bundle files when clusters are pending. It
+   does not write the seed journal or artifacts and does not contact a network
+   in the default flow.
+
    Summarize the selected branch, commit/artifact counts, truncation, author
-   distribution, enrichment bundle directory, and coverage denominator. Suggest
+   distribution, enrichment bundle directory, candidate-cue totals, estimated
+   reading size, and coverage denominator. Suggest
    \`--author <pattern>\` (often \`git config user.email\`) when the user wants
    only their history.
 3. Explain the honesty boundary before asking for confirmation: the result is
    synthesized from commits, labeled \`[imported]\`, attributed to commit authors,
    and contains no invented acceptance criteria, uncertainty, or tests. Seeded
    artifacts stay local in v1.
-4. Ask the user to confirm the exact import. Do not treat a request to inspect,
-   diagnose, or preview as consent to write.
+4. Ask the user to confirm the exact import and enrichment scope. Offer all
+   bundles, cue-bearing bundles, a user-specified maximum, or skeleton only.
+   A bounded subset may be enriched now; imported skeleton artifacts remain
+   eligible for later enrichment through \`orcaops seed enrich --artifact <id>\`.
+   Clusters excluded from the approved selection remain eligible for a later
+   seed run. Do not treat a request to inspect, diagnose, or preview as consent
+   to write.
 5. After confirmation, optionally enrich the generated bundles. Write each
    cluster's enrichment JSON into the SAME directory the bundles were written
    to — the dry run reports it as \`enrichment.bundle_directory\`, and every
    bundle header names it — then pass exactly that path to
    \`--enrichment-dir\`. Writing beside the bundles is the sanctioned layout;
    a separate directory works only if you pass that directory instead.
-   **Triage before authoring.** A large repo emits far more bundles than one
-   session should author. Enrich the highest-signal bundles first — most
-   recent, then largest by commit count, then those whose header reports the
-   most candidate decision nominations — and stop at roughly 20 bundles per
-   session. Say which bundles you enriched and that the rest ship as skeleton,
-   resumable on a later run; never silently drop them.
+   **Triage before authoring.** Follow the scope the user approved. When they
+   choose a maximum, put cue-bearing bundles first, then rank by absolute
+   candidate-cue count, recency, and commit count. Say which bundles will be
+   enriched and which will be written as skeletons; never silently drop them.
    Evidence-backed
    decisions must remain paraphrases with their citation; never manufacture
    rationale when the evidence bar is not met. Keep \`label\` and every step
@@ -65,8 +74,9 @@ export const orcaopsSeedSkill: SkillTemplate = {
    sitting exactly at a cap or ending mid-word, and a warned field should be
    re-worded, not shipped. Account for every candidate decision nomination a
    bundle lists — the target is zero unaccounted nominations: every nomination
-   gets one \`nomination_dispositions\` entry, either \`"decision"\` paired with
-   a cited entry in \`decisions\`, or \`"skipped"\` with a reason. That array
+   gets one \`nomination_dispositions\` entry keyed by its listed
+   \`nomination_id\`, either \`"decision"\` paired with a cited entry in
+   \`decisions\`, or \`"skipped"\` with a reason. That array
    accounts for the NOMINATIONS, not for your decisions: a decision minted from
    an un-nominated commit of the same cluster is legal and gets no row, and the
    apply report is right not to count it. Let the bundle's
@@ -75,8 +85,8 @@ export const orcaopsSeedSkill: SkillTemplate = {
    and let the evidence size how much you MINT, up to the
    per-bundle effort ceiling the bundle states. Fewer nominations is normal
    rather than a shortfall: mint what the evidence supports and never pad. Past
-   the ceiling, rank the nominations by evidence strength, mint the strongest,
-   and bulk-disposition the remainder as \`"skipped"\` with one honest shared
+   the ceiling, take nominations in their listed order and bulk-disposition the
+   remainder as \`"skipped"\` with one honest shared
    reason. A bundle being large is never a reason to skip it wholesale. Each
    bundle's "Output contract" section states the exact payload schema, the
    decision object shape, and the citation format — follow it literally, since
@@ -99,6 +109,17 @@ export const orcaopsSeedSkill: SkillTemplate = {
 7. Run \`orcaops seed status --json\`. If \`pending_importance\` is true, explain
    the older/high-impact second phase, obtain confirmation for it, then run
    \`orcaops seed --importance --yes --json\` and report final coverage/failures.
+
+To enrich an artifact after import, preview it first:
+
+\`\`\`bash
+orcaops seed enrich --artifact <artifact-id> --dry-run --json
+\`\`\`
+
+Author the generated bundle, preview again to validate it, obtain explicit
+confirmation, then apply with \`--yes\`. Use \`--preserve-decisions\` for a
+prose-only amendment. Never apply a post-import amendment without showing the
+validated preview first.
 
 Do not use \`${skillRef('seed-discovery', prefix)}\` for the initial one-time
 backfill; that skill owns later, scoped gap filling.

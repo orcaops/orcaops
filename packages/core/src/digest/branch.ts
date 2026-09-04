@@ -120,6 +120,9 @@ function decisionIdentity(decision: DigestDecision): string {
       normalized(alternative.option),
       normalized(alternative.rejected_because),
     ]),
+    decision.evidence
+      ? [decision.evidence.kind, decision.evidence.commit_sha, normalized(decision.evidence.quote)]
+      : null,
   ]);
 }
 
@@ -555,6 +558,11 @@ export function renderBranchDigestMarkdown(data: BranchDigestData): string {
       );
       for (const alternative of decision.alternatives_considered ?? []) {
         lines.push(`  - Rejected ${alternative.option}: ${alternative.rejected_because}`);
+      }
+      if (decision.evidence) {
+        lines.push(
+          `  - Evidence: commit ${decision.evidence.commit_sha} — ${decision.evidence.quote}`
+        );
       }
     }
     lines.push('');

@@ -84,6 +84,7 @@ export const EventTypeSchema = z.enum([
   'block_acknowledged',
   'block_dismissed',
   'summary_captured',
+  'git_import_enriched',
   /**
    * Branch lineage append: emitted by `orcaops lineage` after rebase /
    * merge / squash. Payload is a single `BranchLineageEntry`

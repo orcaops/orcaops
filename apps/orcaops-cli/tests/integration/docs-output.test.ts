@@ -139,6 +139,7 @@ describe('documented CLI output', () => {
         type: 'commit',
         label: 'pagination',
         subject: 'feat: paginate the activity feed',
+        body: 'Use cursor pagination rather than offsets.',
         authorDate: '2025-01-02T10:00:00Z',
         committerDate: '2025-01-02T10:00:00Z',
         files: { 'src/activity.ts': 'export const pageSize = 25;\n' },

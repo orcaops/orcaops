@@ -121,6 +121,7 @@ shipping executable evaluator code.
 | `orcaops lineage`                | Refresh captured lineage after a merge, rebase, or amend changes branch ancestry.                                        |
 | `orcaops rebuild`                | Rebuild the disposable SQLite projection from durable local event logs.                                                  |
 | `orcaops seed [--dry-run]`       | Preview or apply the consent-gated one-time git-history backfill.                                                        |
+| `orcaops seed enrich`            | Preview or append an enrichment amendment to one imported artifact.                                                      |
 | `orcaops seed status`            | Show history coverage, failures, progress, and remembered discovery declines.                                            |
 | `orcaops gc`                     | Report stale pins, abandoned summarized artifacts, stale reviews, and nonterminal orphans; `--apply` deletes candidates. |
 | `orcaops archive <verb>`         | Enable, disable, inspect, repair, resolve, or explicitly prune the home-directory archive.                               |

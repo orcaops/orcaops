@@ -80,6 +80,7 @@ import { reviewFeedbackStatusAction } from '../commands/review/status.js';
 import { reviewFeedbackWatchAction } from '../commands/review/watch.js';
 import { reviewAction } from '../commands/review.js';
 import { searchAction } from '../commands/search.js';
+import { seedEnrichAction } from '../commands/seed/enrich.js';
 import { seedAction, seedStatusAction } from '../commands/seed/index.js';
 import {
   sessionHooksInstallAction,
@@ -919,6 +920,17 @@ export function buildProgram(options: BuildProgramOptions): Command {
     )
     .option('--json', 'Emit JSON')
     .action(seedAction);
+  seedCmd
+    .command('enrich')
+    .description('Preview or append an enrichment amendment to an imported artifact')
+    .requiredOption('--artifact <id>', 'Imported artifact ID')
+    .option('--dry-run', 'Generate and validate the enrichment bundle without writing an event')
+    .option('--yes', 'Confirm the amendment event write')
+    .option('--enrichment-dir <path>', 'Directory containing the authored enrichment JSON')
+    .option('--preserve-decisions', 'Keep the current decision set while amending prose')
+    .option('--pr-context', 'Allow consented PR context for label, task, and outcome')
+    .option('--json', 'Emit JSON')
+    .action(seedEnrichAction);
   seedCmd
     .command('status')
     .description('Show seed journal progress and imported line coverage')

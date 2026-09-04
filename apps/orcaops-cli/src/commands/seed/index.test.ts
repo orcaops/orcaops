@@ -362,8 +362,8 @@ describe('renderSeedResult', () => {
         warnings: [],
       },
       truncation: {
-        commit_cap: false,
-        artifact_ceiling: false,
+        recency_commit_cap: false,
+        recency_artifact_ceiling: false,
         importance: false,
         commits_beyond: 0,
         clusters_beyond: 0,
@@ -391,5 +391,17 @@ describe('renderSeedResult', () => {
     const rendered = renderSeedResult(applyResult(0));
     expect(rendered.split('\n')[0]).toBe('Seed complete — origin/main (origin-head)');
     expect(rendered).not.toContain('orcaops rebuild');
+  });
+
+  it('does not present a recovered recency cap as final truncation', () => {
+    const result = applyResult(0);
+    result.truncation = {
+      recency_commit_cap: true,
+      recency_artifact_ceiling: false,
+      importance: false,
+      mass_bearing_commits_beyond: 0,
+      mass_bearing_clusters_beyond: 0,
+    };
+    expect(renderSeedResult(result)).not.toContain('budget-truncated');
   });
 });

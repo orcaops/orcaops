@@ -15,6 +15,7 @@ const basePlan = {
     decision: string;
     reason: string;
     alternatives_considered?: Array<{ option: string; rejected_because: string }>;
+    evidence?: { kind: 'git-commit'; commit_sha: string; quote: string };
   }>,
 };
 
@@ -44,11 +45,17 @@ describe('buildPlanSearchContent', () => {
           alternatives_considered: [
             { option: 'fixedwindow counter', rejected_because: 'allows a boundary burst' },
           ],
+          evidence: {
+            kind: 'git-commit',
+            commit_sha: 'a'.repeat(40),
+            quote: 'switch to a sliding window',
+          },
         },
       ],
     });
     expect(content).toContain('decisions: use a slidingwindow limiter — smooths burst-at-boundary');
     expect(content).toContain('fixedwindow counter: allows a boundary burst');
+    expect(content).toContain(`evidence: commit ${'a'.repeat(40)} — switch to a sliding window`);
   });
 });
 

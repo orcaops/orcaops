@@ -343,6 +343,69 @@ export class StaleSummarySupersedeError extends Error {
   }
 }
 
+export class GitImportEnrichmentInvalidTargetError extends Error {
+  readonly code = 'GIT_IMPORT_ENRICHMENT_INVALID_TARGET' as const;
+
+  constructor(
+    message: string,
+    public readonly artifactId: string
+  ) {
+    super(message);
+    this.name = 'GitImportEnrichmentInvalidTargetError';
+  }
+}
+
+export class GitImportEnrichmentLegacyError extends Error {
+  readonly code = 'GIT_IMPORT_ENRICHMENT_LEGACY' as const;
+
+  constructor(
+    message: string,
+    public readonly artifactId: string
+  ) {
+    super(message);
+    this.name = 'GitImportEnrichmentLegacyError';
+  }
+}
+
+export class GitImportEnrichmentValidationError extends Error {
+  readonly code = 'GIT_IMPORT_ENRICHMENT_INVALID' as const;
+
+  constructor(
+    message: string,
+    public readonly artifactId: string
+  ) {
+    super(message);
+    this.name = 'GitImportEnrichmentValidationError';
+  }
+}
+
+export class StaleGitImportEnrichmentError extends Error {
+  readonly code = 'STALE_GIT_IMPORT_ENRICHMENT' as const;
+
+  constructor(
+    message: string,
+    public readonly artifactId: string,
+    public readonly latestEnrichmentEventId: string | null
+  ) {
+    super(message);
+    this.name = 'StaleGitImportEnrichmentError';
+  }
+}
+
+export class GitImportEnrichmentProjectionError extends Error {
+  readonly code = 'GIT_IMPORT_ENRICHMENT_PROJECTION_INCOMPLETE' as const;
+
+  constructor(
+    message: string,
+    public readonly artifactId: string,
+    public readonly enrichmentEventId: string,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = 'GitImportEnrichmentProjectionError';
+  }
+}
+
 /**
  * Thrown by `ArtifactStore.revisePlan` when the new plan would drop
  * a `step_id` that any **open** cp currently declares. Hard

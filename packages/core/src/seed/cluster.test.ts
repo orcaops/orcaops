@@ -279,6 +279,133 @@ describe('clusterSeedHistory', () => {
     );
   });
 
+  it('does not use a terminal session trailer or closing reference as a merge label', () => {
+    const root = commit('root', 0);
+    const side = commit('side', 1, {
+      parentShas: [root.sha],
+      subject: 'feat: preserve useful labels',
+    });
+    const trailerMerge = commit('trailer-merge', 2, {
+      parentShas: [root.sha, side.sha],
+      subject: "Merge branch 'feature/trailers'",
+      body: 'Claude-Session: https://claude.ai/code/session/example\n',
+    });
+    const closingRoot = commit('closing-root', 3);
+    const closingSide = commit('closing-side', 4, {
+      parentShas: [closingRoot.sha],
+      subject: 'feat: preserve useful labels',
+    });
+    const closingMerge = commit('closing-merge', 5, {
+      parentShas: [closingRoot.sha, closingSide.sha],
+      subject: "Merge branch 'feature/closing-reference'",
+      body: 'Closes #12\n',
+    });
+
+    expect(
+      clusterSeedHistory([trailerMerge, root], [trailerMerge, side, root]).find(
+        (cluster) => cluster.kind === 'merge'
+      )?.label
+    ).toBe('preserve useful labels');
+    expect(
+      clusterSeedHistory(
+        [closingMerge, closingRoot],
+        [closingMerge, closingSide, closingRoot]
+      ).find((cluster) => cluster.headSha === closingMerge.sha)?.label
+    ).toBe('preserve useful labels');
+  });
+
+  it('uses a member subject when the merge body contains only a terminal note trailer', () => {
+    const root = commit('root', 0);
+    const side = commit('side', 1, {
+      parentShas: [root.sha],
+      subject: 'feat: preserve useful labels',
+    });
+    const merge = commit('merge', 2, {
+      parentShas: [root.sha, side.sha],
+      subject: "Merge branch 'feature/trailers'",
+      body: 'Note: fixes the flake\n',
+    });
+
+    expect(
+      clusterSeedHistory([merge, root], [merge, side, root]).find(
+        (cluster) => cluster.kind === 'merge'
+      )?.label
+    ).toBe('preserve useful labels');
+  });
+
+  it('uses a member subject when the merge body contains only a terminal result field', () => {
+    const root = commit('root', 0);
+    const side = commit('side', 1, {
+      parentShas: [root.sha],
+      subject: 'feat: preserve useful labels',
+    });
+    const merge = commit('merge', 2, {
+      parentShas: [root.sha, side.sha],
+      subject: "Merge branch 'feature/trailers'",
+      body: 'Result: users can now inspect imports\n',
+    });
+
+    expect(
+      clusterSeedHistory([merge, root], [merge, side, root]).find(
+        (cluster) => cluster.kind === 'merge'
+      )?.label
+    ).toBe('preserve useful labels');
+  });
+
+  it('strips a folded terminal trailer without losing preceding prose', () => {
+    const root = commit('root', 0);
+    const side = commit('side', 1, { parentShas: [root.sha] });
+    const merge = commit('merge', 2, {
+      parentShas: [root.sha, side.sha],
+      subject: "Merge branch 'feature/trailers'",
+      body:
+        'Improve clustering heuristics\n\n' +
+        'Claude-Session: https://claude.ai/code/session/example\n' +
+        ' continued metadata\n',
+    });
+
+    expect(
+      clusterSeedHistory([merge, root], [merge, side, root]).find(
+        (cluster) => cluster.kind === 'merge'
+      )?.label
+    ).toBe('Improve clustering heuristics');
+  });
+
+  it.each(['fix: guard the expired pin', 'feat: add import repair', 'review: tighten labels'])(
+    'keeps the conventional body title %s eligible as a merge label',
+    (title) => {
+      const root = commit('root', 0);
+      const side = commit('side', 1, { parentShas: [root.sha], subject: 'tweaks' });
+      const merge = commit('merge', 2, {
+        parentShas: [root.sha, side.sha],
+        subject: "Merge branch 'feature/title'",
+        body: `${title}\n`,
+      });
+
+      expect(
+        clusterSeedHistory([merge, root], [merge, side, root]).find(
+          (cluster) => cluster.kind === 'merge'
+        )?.label
+      ).toBe(title.slice(title.indexOf(':') + 2));
+    }
+  );
+
+  it('keeps a non-terminal key-value prose line eligible as a merge label', () => {
+    const root = commit('root', 0);
+    const side = commit('side', 1, { parentShas: [root.sha], subject: 'tweaks' });
+    const merge = commit('merge', 2, {
+      parentShas: [root.sha, side.sha],
+      subject: "Merge branch 'feature/context'",
+      body: 'Context: preserve this explanation\n\nSigned-off-by: Dev <dev@example.com>\n',
+    });
+
+    expect(
+      clusterSeedHistory([merge, root], [merge, side, root]).find(
+        (cluster) => cluster.kind === 'merge'
+      )?.label
+    ).toBe('preserve this explanation');
+  });
+
   it('labels a bare merge subject from the most informative member subject', () => {
     const root = commit('root', 0);
     const tweak = commit('tweak', 1, { parentShas: [root.sha], subject: 'tweaks' });

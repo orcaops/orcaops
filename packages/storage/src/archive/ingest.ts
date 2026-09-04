@@ -1,4 +1,5 @@
 import { type ArchivedArtifactThread } from './read.js';
+import { latestPlanRevisionEventId } from '../events/rebuilders.js';
 import { checkpointToRowForRebuild } from '../store/rebuild.js';
 import { buildPlanSearchContent } from '../store/search-content.js';
 import type { Store } from '../store/sqlite.js';
@@ -35,6 +36,8 @@ export function ingestArtifactThread(
       `Cannot index archive artifact "${plan.artifact_id}": rebuilt plan has no source event id.`
     );
   }
+  const planRevisionSourceEventId =
+    latestPlanRevisionEventId(thread.events) ?? plan.source_event_id;
 
   store.upsertArtifact({
     id: plan.artifact_id,
@@ -62,7 +65,7 @@ export function ingestArtifactThread(
       step_lineage: JSON.stringify(plan.step_lineage),
       criterion_lineage: JSON.stringify(plan.criterion_lineage),
       prior_event_id: plan.prior_plan_event_id,
-      source_event_id: plan.source_event_id,
+      source_event_id: planRevisionSourceEventId,
     },
     steps: plan.plan_steps.map((s, idx) => ({
       step_id: s.step_id,

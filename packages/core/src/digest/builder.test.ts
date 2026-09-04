@@ -327,6 +327,11 @@ describe('buildDigest / writeDigest', () => {
           alternatives_considered: [
             { option: 'event-listener trigger', rejected_because: 'async double-dispatch' },
           ],
+          evidence: {
+            kind: 'git-commit',
+            commit_sha: 'a'.repeat(40),
+            quote: 'use an in-transaction enqueue command',
+          },
         },
       ],
       revision_n: 0,
@@ -377,6 +382,14 @@ describe('buildDigest / writeDigest', () => {
     expect(out.markdown).toContain(
       '_considered_ **event-listener trigger** — rejected because async double-dispatch'
     );
+    expect(out.markdown).toContain(
+      `_evidence_ commit ${'a'.repeat(40)} — use an in-transaction enqueue command`
+    );
+    expect(out.data.decisions[0]?.evidence).toEqual({
+      kind: 'git-commit',
+      commit_sha: 'a'.repeat(40),
+      quote: 'use an in-transaction enqueue command',
+    });
     // out.data.decisions is plan-first, each tagged with its source.
     expect(out.data.decisions.map((d) => [d.source, d.revision_n ?? d.checkpoint])).toEqual([
       ['plan', 0],

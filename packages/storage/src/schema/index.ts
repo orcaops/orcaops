@@ -13,3 +13,4 @@ export * from './pre-pr-checked.js';
 export * from './validation.js';
 export * from './diff-fingerprint.js';
 export * from './origin.js';
+export * from './git-import-enrichment.js';

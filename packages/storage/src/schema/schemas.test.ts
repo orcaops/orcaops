@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { ArtifactJsonSchema } from './artifact-json.js';
+import { CapturePlanInputSchema } from './capture-input.js';
 import { CheckpointDecisionSchema, CheckpointSchema } from './checkpoint.js';
 import { DEFAULT_EVALUATOR_MODEL, getDefaultConfig, resolveConfig } from './config.js';
 import { DecisionBaseSchema, PlanDecisionSchema } from './decision.js';
@@ -15,6 +16,8 @@ import {
   MaterializedEvaluatorDispositionSchema,
   MaterializedEvaluatorRunSchema,
 } from './evaluator-run.js';
+import { GitImportEnrichmentPayloadSchema } from './git-import-enrichment.js';
+import { ArtifactOriginSchema, computeMemberShasHash } from './origin.js';
 import { PlanInputSchema, PlanSchema } from './plan.js';
 import { SummaryInputSchema, SummarySchema } from './summary.js';
 
@@ -119,6 +122,33 @@ describe('PlanInputSchema', () => {
       cluster_key: 'a'.repeat(64),
       member_shas_hash: 'b'.repeat(64),
     });
+  });
+
+  it('keeps legacy origins readable and requires future member sets to be canonical', () => {
+    const legacy = {
+      kind: 'git-import' as const,
+      imported_at: '2026-04-25T13:00:00.000Z',
+      tool_version: '0.0.5',
+      source_range: 'main~10..main',
+      authors: ['dev@example.com'],
+      enriched_at: null,
+      member_shas_hash: 'b'.repeat(64),
+    };
+    expect(ArtifactOriginSchema.safeParse(legacy).success).toBe(true);
+    expect(
+      ArtifactOriginSchema.safeParse({
+        ...legacy,
+        member_shas: ['b'.repeat(40), 'a'.repeat(40), 'a'.repeat(40)],
+      }).success
+    ).toBe(false);
+    const memberShas = ['a'.repeat(40), 'b'.repeat(40)];
+    expect(
+      ArtifactOriginSchema.parse({
+        ...legacy,
+        member_shas: memberShas,
+        member_shas_hash: computeMemberShasHash(memberShas),
+      }).member_shas
+    ).toEqual(memberShas);
   });
 
   it('records the generating seed job when one is supplied', () => {
@@ -619,12 +649,82 @@ describe('Decision schemas (base / plan / checkpoint)', () => {
     expect(() => PlanDecisionSchema.parse({ ...base, revision_n: 1.5 })).toThrow();
   });
 
+  it('stores git evidence only on plan decisions', () => {
+    const evidence = {
+      kind: 'git-commit' as const,
+      commit_sha: 'a'.repeat(40),
+      quote: 'choose X over Y',
+    };
+    expect(PlanDecisionSchema.parse({ ...base, revision_n: 0, evidence }).evidence).toEqual(
+      evidence
+    );
+    expect('evidence' in DecisionBaseSchema.parse({ ...base, evidence })).toBe(false);
+    expect('evidence' in CheckpointDecisionSchema.parse({ ...base, evidence })).toBe(false);
+    const capture = CapturePlanInputSchema.parse({
+      idempotency_key: 'capture-plan-evidence-boundary',
+      task: 'choose a cache',
+      label: 'Choose a cache',
+      plan_steps: [{ text: 'Implement it', label: 'Implement it' }],
+      decisions: [{ ...base, evidence }],
+    });
+    expect(capture.decisions[0]).not.toHaveProperty('evidence');
+    expect(() =>
+      PlanDecisionSchema.parse({
+        ...base,
+        revision_n: 0,
+        evidence: { ...evidence, commit_sha: 'a' },
+      })
+    ).toThrow();
+  });
+
   it('CheckpointDecisionSchema is the shared base shape (rebased onto DecisionBaseSchema)', () => {
     const cp = CheckpointDecisionSchema.parse({
       ...base,
       alternatives_considered: [{ option: 'Z', rejected_because: 'slower' }],
     });
     expect(cp.alternatives_considered).toEqual([{ option: 'Z', rejected_because: 'slower' }]);
+  });
+});
+
+describe('GitImportEnrichmentPayloadSchema', () => {
+  const memberSha = 'a'.repeat(40);
+  const value = {
+    provenance_version: 1,
+    artifact_id: 'artifact',
+    cluster_key: 'b'.repeat(64),
+    member_shas_hash: computeMemberShasHash([memberSha]),
+    enriched_at: '2026-02-01T00:00:00.000Z',
+    prior_enrichment_event_id: null,
+    label: 'Enriched import',
+    task: 'Explain the imported task.',
+    steps: [{ label: 'Enriched step', text: 'Explain the imported step.' }],
+    checkpoint_summaries: [{ n: 1, summary: 'Landed the enriched step.' }],
+    outcome: 'Shipped the enriched import.',
+    decisions: {
+      mode: 'replace',
+      decisions: [
+        {
+          decision: 'Use Redis',
+          reason: 'It survives restarts',
+          revision_n: 0,
+          evidence: { kind: 'git-commit', commit_sha: memberSha, quote: 'Use Redis' },
+        },
+      ],
+    },
+  };
+
+  it('accepts a structured aggregate and rejects unknown fields', () => {
+    expect(GitImportEnrichmentPayloadSchema.parse(value)).toEqual(value);
+    expect(
+      GitImportEnrichmentPayloadSchema.safeParse({ ...value, structural_git_override: true })
+        .success
+    ).toBe(false);
+  });
+
+  it('requires writer-stamped evidence when decisions are replaced', () => {
+    const withoutEvidence = structuredClone(value);
+    delete (withoutEvidence.decisions.decisions[0] as Partial<{ evidence: unknown }>).evidence;
+    expect(GitImportEnrichmentPayloadSchema.safeParse(withoutEvidence).success).toBe(false);
   });
 });
 

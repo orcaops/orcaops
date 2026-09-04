@@ -794,6 +794,45 @@ describe('orcaops seed', () => {
     expect(declinedWhyText).toContain('imports for src were declined');
   });
 
+  it('warns when the selected branch excludes checked-out commits', async () => {
+    const git = gitClient(repo.path);
+    await git.checkoutLocalBranch('feature');
+    await writeFile(path.join(repo.path, 'src/feature.ts'), 'export const feature = true;\n');
+    await git.add('src/feature.ts');
+    await git.commit('feat: add feature-only work');
+
+    const previewResult = await agent.runRaw([
+      'seed',
+      '--since',
+      '2020-01-01T00:00:00.000Z',
+      '--dry-run',
+      '--json',
+    ]);
+    expect(previewResult.exitCode).toBe(0);
+    const preview = JSON.parse(previewResult.stdout) as {
+      branch: { ref: string; sha: string };
+      checked_out: {
+        branch: string;
+        head_sha: string;
+        excluded_from_selected_commit_count: number;
+        fully_represented: boolean;
+      };
+      clusters: Array<{ cluster_key: string }>;
+    };
+    expect(preview.branch.ref).toBe('main');
+    expect(preview.checked_out).toMatchObject({
+      branch: 'feature',
+      excluded_from_selected_commit_count: 1,
+      fully_represented: false,
+    });
+    expect(preview.checked_out.head_sha).not.toBe(preview.branch.sha);
+    expect(preview.clusters.every((cluster) => cluster.cluster_key.length > 0)).toBe(true);
+
+    const human = await agent.runRaw(['seed', '--since', '2020-01-01T00:00:00.000Z', '--dry-run']);
+    expect(human.stdout).toContain('warning: checked-out feature has 1 commit(s)');
+    expect(human.stdout).toContain('orcaops seed --branch feature --dry-run');
+  });
+
   it('excludes imported artifacts from cloud drain and capture-health aggregates', async () => {
     const appliedResult = await agent.runRaw(['seed', '--yes', '--json']);
     expect(appliedResult.exitCode).toBe(0);
@@ -1188,7 +1227,12 @@ describe('orcaops seed', () => {
     expect(recency.exitCode).toBe(0);
     expect(JSON.parse(recency.stdout)).toMatchObject({
       totals: { selected: 1, created: 1 },
-      truncation: { importance: true, commits_beyond: 1, clusters_beyond: 1 },
+      truncation: {
+        recency_commit_cap: false,
+        importance: true,
+        mass_bearing_commits_beyond: 1,
+        mass_bearing_clusters_beyond: 1,
+      },
     });
 
     const truncatedStatus = JSON.parse(
@@ -1217,6 +1261,11 @@ describe('orcaops seed', () => {
     expect(JSON.parse(importance.stdout)).toMatchObject({
       totals: { selected: 2, created: 1, covered: 1, failed: 0 },
       importance: { deferred: false },
+      truncation: {
+        recency_commit_cap: false,
+        mass_bearing_commits_beyond: 0,
+        mass_bearing_clusters_beyond: 0,
+      },
     });
     const status = await agent.runRaw(['seed', 'status', '--json']);
     expect(JSON.parse(status.stdout)).toMatchObject({
@@ -1252,14 +1301,27 @@ describe('orcaops seed', () => {
       '--json',
     ]);
     const preview = JSON.parse(previewResult.stdout) as {
-      enrichment: { bundle_directory: string; bundle_count: number };
+      enrichment: {
+        bundle_directory: string;
+        bundle_count: number;
+        cue_bearing_bundle_count: number;
+        cue_free_bundle_count: number;
+        candidate_cue_count: number;
+        estimated_reading_tasks: number;
+      };
     };
-    expect(preview.enrichment.bundle_count).toBe(1);
+    expect(preview.enrichment).toMatchObject({
+      bundle_count: 1,
+      cue_bearing_bundle_count: 0,
+      cue_free_bundle_count: 1,
+      candidate_cue_count: 0,
+      estimated_reading_tasks: 2,
+    });
     const manifest = JSON.parse(
       await readFile(path.join(preview.enrichment.bundle_directory, 'manifest.json'), 'utf8')
-    ) as { files: string[] };
+    ) as { bundles: Array<{ filename: string }> };
     const bundle = await readFile(
-      path.join(preview.enrichment.bundle_directory, manifest.files[0]!),
+      path.join(preview.enrichment.bundle_directory, manifest.bundles[0]!.filename),
       'utf8'
     );
     const template = JSON.parse(bundle.match(/```json\n([\s\S]+?)\n```/u)![1]!) as {
@@ -1346,8 +1408,7 @@ describe('orcaops seed', () => {
       enrichmentDir,
     ]);
     expect(rerunHuman.stdout).toContain(
-      "enriching existing imports isn't supported yet — enrichment happens at import time " +
-        '(fresh store or before apply)'
+      'generate a fresh amendment bundle with ' + '`orcaops seed enrich --artifact <id> --dry-run`'
     );
   });
 
@@ -1401,9 +1462,9 @@ describe('orcaops seed', () => {
     };
     const manifest = JSON.parse(
       await readFile(path.join(preview.enrichment.bundle_directory, 'manifest.json'), 'utf8')
-    ) as { files: string[] };
+    ) as { bundles: Array<{ filename: string }> };
     const bundle = await readFile(
-      path.join(preview.enrichment.bundle_directory, manifest.files[0]!),
+      path.join(preview.enrichment.bundle_directory, manifest.bundles[0]!.filename),
       'utf8'
     );
     const template = JSON.parse(bundle.match(/```json\n([\s\S]+?)\n```/u)![1]!) as {
@@ -1614,9 +1675,9 @@ describe('orcaops seed', () => {
     };
     const manifest = JSON.parse(
       await readFile(path.join(preview.enrichment.bundle_directory, 'manifest.json'), 'utf8')
-    ) as { files: string[] };
+    ) as { bundles: Array<{ filename: string }> };
     const bundle = await readFile(
-      path.join(preview.enrichment.bundle_directory, manifest.files[0]!),
+      path.join(preview.enrichment.bundle_directory, manifest.bundles[0]!.filename),
       'utf8'
     );
     const template = JSON.parse(bundle.match(/```json\n([\s\S]+?)\n```/u)![1]!) as {
@@ -1704,7 +1765,7 @@ describe('orcaops seed', () => {
     expect(preview.enrichment.bundle_count).toBe(1);
     const manifest = JSON.parse(
       await readFile(path.join(preview.enrichment.bundle_directory, 'manifest.json'), 'utf8')
-    ) as { files: string[]; selection: { since: string } };
+    ) as { bundles: Array<{ filename: string }>; selection: { since: string } };
     expect(manifest.selection.since).toMatch(/T00:00:00\.000Z$/u);
     const enrichmentDir = await enrichFirstBundle(preview.enrichment.bundle_directory, manifest);
 
@@ -1745,7 +1806,7 @@ describe('orcaops seed', () => {
     };
     const manifest = JSON.parse(
       await readFile(path.join(preview.enrichment.bundle_directory, 'manifest.json'), 'utf8')
-    ) as { files: string[]; selection: { since: string } };
+    ) as { bundles: Array<{ filename: string }>; selection: { since: string } };
     const enrichmentDir = await enrichFirstBundle(preview.enrichment.bundle_directory, manifest);
 
     const appliedResult = await agent.runRaw([
@@ -1757,31 +1818,78 @@ describe('orcaops seed', () => {
       enrichmentDir,
       '--json',
     ]);
-    expect(appliedResult.exitCode).toBe(0);
-    const applied = JSON.parse(appliedResult.stdout) as {
-      enrichment: {
-        applied: number;
-        skeleton: number;
-        invalid: Array<{ reason: string }>;
-      };
-    };
-    expect(applied.enrichment.applied).toBe(0);
-    expect(applied.enrichment.skeleton).toBe(1);
-    expect(applied.enrichment.invalid[0]?.reason).toMatch(
-      /options_hash does not match the current seed selection/u
+    expect(appliedResult.exitCode).toBe(1);
+    expect(JSON.parse(appliedResult.stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_INPUT',
+        message: expect.stringMatching(/options_hash does not match the current seed selection/u),
+      },
+    });
+    expect(JSON.parse((await agent.runRaw(['seed', 'status', '--json'])).stdout)).toMatchObject({
+      imported_artifacts: 0,
+    });
+    expect((await gitClient(repo.path).raw(['for-each-ref', 'refs/orcaops/snap/'])).trim()).toBe(
+      ''
     );
   });
 
-  it('lists each rejected and unmatched enrichment file on the text surface', async () => {
+  it('refuses a legacy enrichment file before importing its cluster', async () => {
+    const preview = JSON.parse((await agent.runRaw(['seed', '--dry-run', '--json'])).stdout) as {
+      enrichment: { bundle_directory: string };
+    };
+    const manifest = JSON.parse(
+      await readFile(path.join(preview.enrichment.bundle_directory, 'manifest.json'), 'utf8')
+    ) as { bundles: Array<{ filename: string }> };
+    const bundle = await readFile(
+      path.join(preview.enrichment.bundle_directory, manifest.bundles[0]!.filename),
+      'utf8'
+    );
+    const template = JSON.parse(bundle.match(/```json\n([\s\S]+?)\n```/u)![1]!) as Record<
+      string,
+      unknown
+    >;
+    template.schema_version = 1;
+    const enrichmentDir = path.join(repo.path, 'legacy-enrichment');
+    await mkdir(enrichmentDir);
+    const legacyPath = path.join(enrichmentDir, 'cluster.json');
+    await writeFile(legacyPath, `${JSON.stringify(template, null, 2)}\n`, 'utf8');
+
+    const applied = await agent.runRaw([
+      'seed',
+      '--yes',
+      '--enrichment-dir',
+      enrichmentDir,
+      '--json',
+    ]);
+
+    expect(applied.exitCode).toBe(1);
+    expect(JSON.parse(applied.stdout)).toMatchObject({
+      ok: false,
+      error: {
+        code: 'INVALID_INPUT',
+        message: expect.stringContaining(legacyPath),
+      },
+    });
+    expect(await readFile(legacyPath, 'utf8')).toContain('"schema_version": 1');
+    expect(JSON.parse((await agent.runRaw(['seed', 'status', '--json'])).stdout)).toMatchObject({
+      imported_artifacts: 0,
+    });
+    expect((await gitClient(repo.path).raw(['for-each-ref', 'refs/orcaops/snap/'])).trim()).toBe(
+      ''
+    );
+  });
+
+  it('lists rejected enrichment files and refuses before importing', async () => {
     const previewResult = await agent.runRaw(['seed', '--dry-run', '--json']);
     const preview = JSON.parse(previewResult.stdout) as {
       enrichment: { bundle_directory: string };
     };
     const manifest = JSON.parse(
       await readFile(path.join(preview.enrichment.bundle_directory, 'manifest.json'), 'utf8')
-    ) as { files: string[] };
+    ) as { bundles: Array<{ filename: string }> };
     const bundle = await readFile(
-      path.join(preview.enrichment.bundle_directory, manifest.files[0]!),
+      path.join(preview.enrichment.bundle_directory, manifest.bundles[0]!.filename),
       'utf8'
     );
     const template = JSON.parse(bundle.match(/```json\n([\s\S]+?)\n```/u)![1]!) as {
@@ -1802,22 +1910,27 @@ describe('orcaops seed', () => {
     );
 
     const appliedResult = await agent.runRaw(['seed', '--yes', '--enrichment-dir', enrichmentDir]);
-    expect(appliedResult.exitCode).toBe(0);
-    expect(appliedResult.stdout).toContain('1 invalid enrichment files fell back to skeleton:');
-    expect(appliedResult.stdout).toContain(
-      `  rejected ${path.join(enrichmentDir, 'bad-hash.json')}: ` +
+    expect(appliedResult.exitCode).toBe(1);
+    expect(appliedResult.stderr).toContain(
+      `${path.join(enrichmentDir, 'bad-hash.json')}: ` +
         'options_hash does not match the current seed selection'
     );
-    expect(appliedResult.stdout).toContain(
-      `  unmatched ${path.join(enrichmentDir, 'unmatched.json')}: cluster_key run:gone`
+    expect(appliedResult.stderr).toContain(
+      '1 enrichment file(s) were rejected; no pending clusters were imported'
     );
+    expect(JSON.parse((await agent.runRaw(['seed', 'status', '--json'])).stdout)).toMatchObject({
+      imported_artifacts: 0,
+    });
   });
 
   async function enrichFirstBundle(
     bundleDirectory: string,
-    manifest: { files: string[] }
+    manifest: { bundles: Array<{ filename: string }> }
   ): Promise<string> {
-    const bundle = await readFile(path.join(bundleDirectory, manifest.files[0]!), 'utf8');
+    const bundle = await readFile(
+      path.join(bundleDirectory, manifest.bundles[0]!.filename),
+      'utf8'
+    );
     const template = JSON.parse(bundle.match(/```json\n([\s\S]+?)\n```/u)![1]!) as {
       label: string;
       outcome: string;
@@ -1845,18 +1958,18 @@ describe('orcaops seed', () => {
     };
     const manifest = JSON.parse(
       await readFile(path.join(preview.enrichment.bundle_directory, 'manifest.json'), 'utf8')
-    ) as { files: string[] };
+    ) as { bundles: Array<{ filename: string }> };
     const bundle = await readFile(
-      path.join(preview.enrichment.bundle_directory, manifest.files[0]!),
+      path.join(preview.enrichment.bundle_directory, manifest.bundles[0]!.filename),
       'utf8'
     );
     const template = JSON.parse(bundle.match(/```json\n([\s\S]+?)\n```/u)![1]!) as {
       nomination_dispositions: Array<Record<string, string>>;
     };
     template.nomination_dispositions = [
-      { nomination: 'abc1234 — establish the service.', disposition: 'decision' },
+      { nomination_id: 'a'.repeat(64), disposition: 'decision' },
       {
-        nomination: 'abc1234 — stabilize the service.',
+        nomination_id: 'b'.repeat(64),
         disposition: 'skipped',
         reason: 'tactical wording, no recorded alternative',
       },
@@ -1965,7 +2078,7 @@ describe('orcaops seed', () => {
       expect(preview.exitCode).toBe(0);
       const { notes } = JSON.parse(preview.stdout) as { notes: string[] };
       expect(notes.join('\n')).toContain('already covered by an imported or captured artifact');
-      expect(notes.join('\n')).toContain("enriching existing imports isn't supported yet");
+      expect(notes.join('\n')).toContain('orcaops seed enrich --artifact <id> --dry-run');
       expect(notes.join('\n')).not.toContain('not part of any seedable cluster');
     });
 

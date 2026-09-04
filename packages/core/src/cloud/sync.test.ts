@@ -2945,6 +2945,29 @@ describe('pushArtifact — source plan', () => {
     );
   }
 
+  async function revisePinnedLabel(
+    id: string,
+    label: string,
+    idempotencyKey: string
+  ): Promise<void> {
+    await store.revisePlan(
+      {
+        idempotency_key: idempotencyKey,
+        artifact_id: id,
+        label,
+        plan_steps: PLAN.plan_steps,
+        touched_scope: [],
+        non_goals: [],
+        decisions: [],
+        rationale: 'clarify the current thread label',
+        prior_plan_event_id: null,
+        acknowledge_drops_completed_steps: [],
+        acknowledge_criteria_changes: [],
+      },
+      { idempotencyKey }
+    );
+  }
+
   const PING_HANDSHAKE = {
     server_version: '1.4.0',
     protocol_version: '0.0.21',
@@ -2972,7 +2995,11 @@ describe('pushArtifact — source plan', () => {
         userId: USER_ID,
         handshake: PING_HANDSHAKE,
       });
-    const get = over.get ?? vi.fn();
+    const get =
+      over.get ??
+      vi
+        .fn()
+        .mockRejectedValue(new TrpcRequestError('missing', { code: 'NOT_FOUND', httpStatus: 404 }));
     const attachPin = over.attachPin ?? vi.fn().mockResolvedValue({ id: 'pin-row' });
     const client = { ...base.client, cli: { ping }, sourcePlan: { get, attachPin } };
     vi.spyOn(clientModule, 'createCloudClient').mockResolvedValue({
@@ -3083,12 +3110,12 @@ describe('pushArtifact — source plan', () => {
     expect(m.attachPin).toHaveBeenCalledTimes(2);
   });
 
-  it('Branch-B sends version_number 1 with the born id and runs NO preflight', async () => {
+  it('Branch-B resolves and attaches version 1 under the deterministic born id', async () => {
     await seedPinned('b-born', localPin());
     const m = mockClient();
     const result = await push('b-born');
     expect(result.source_plan_pinned).toBe('B');
-    expect(m.get).not.toHaveBeenCalled(); // local pins skip the preflight
+    expect(m.get).toHaveBeenCalledWith({ slugOrExternalId: bornPinExternalId('b-born') });
     expect(m.attachPin).toHaveBeenCalledTimes(1);
     expect(m.attachPin.mock.calls[0][0]).toMatchObject({
       external_id: bornPinExternalId('b-born'),
@@ -3098,6 +3125,70 @@ describe('pushArtifact — source plan', () => {
       // frozen authoring baseline.
       baseline: LOCAL_BASELINE,
     });
+  });
+
+  it('Branch-B preserves the title accepted by a first push after revision', async () => {
+    await seedPinned('b-born-revised', localPin());
+    await revisePinnedLabel('b-born-revised', 'first pushed label', 'born-label-rev-1');
+    const get = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new TrpcRequestError('missing', { code: 'NOT_FOUND', httpStatus: 404 })
+      )
+      .mockResolvedValue({
+        externalId: bornPinExternalId('b-born-revised'),
+        slug: 'first-pushed-label',
+        title: 'first pushed label',
+        status: 'PINNED',
+        approvedVersionNumber: null,
+        webUrl: 'https://cloud.example/plans/first-pushed-label',
+        captureThread: {
+          externalId: 'b-born-revised',
+          label: 'first pushed label',
+          taskNumber: null,
+        },
+      });
+    const m = mockClient({ get });
+
+    await push('b-born-revised');
+    await revisePinnedLabel('b-born-revised', 'later thread label', 'born-label-rev-2');
+    await push('b-born-revised');
+
+    expect(m.start).toHaveBeenLastCalledWith(
+      expect.objectContaining({ label: 'later thread label' })
+    );
+    expect(m.attachPin.mock.calls.map(([payload]) => payload.title)).toEqual([
+      'first pushed label',
+      'first pushed label',
+    ]);
+  });
+
+  it('an unchanged Branch-B push does not look up or reattach its born pin', async () => {
+    await seedPinned('b-born-unchanged', localPin());
+    const m = mockClient();
+    await push('b-born-unchanged');
+    m.get.mockClear();
+    m.attachPin.mockClear();
+
+    const result = await push('b-born-unchanged');
+
+    expect(result).toMatchObject({ skipped: true, reason: 'unchanged' });
+    expect(m.get).not.toHaveBeenCalled();
+    expect(m.attachPin).not.toHaveBeenCalled();
+  });
+
+  it('Branch-A keeps its cloud-locator preflight and latest thread label', async () => {
+    await seedPinned('a-revised-label', cloudPin({ version: '3' }));
+    await revisePinnedLabel('a-revised-label', 'latest thread label', 'cloud-label-rev-1');
+    const m = mockClient({ get: vi.fn().mockResolvedValue(approved(3)) });
+
+    await push('a-revised-label');
+
+    expect(m.get).toHaveBeenCalledWith({ slugOrExternalId: 'ext-1' });
+    expect(m.start).toHaveBeenCalledWith(expect.objectContaining({ label: 'latest thread label' }));
+    expect(m.attachPin).toHaveBeenCalledWith(
+      expect.objectContaining({ external_id: 'ext-1', title: 'latest thread label' })
+    );
   });
 
   describe('a pinned push requires the ownership capability', () => {

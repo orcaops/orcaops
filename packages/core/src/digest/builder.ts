@@ -67,6 +67,7 @@ export interface DigestDecision {
    * record any.
    */
   alternatives_considered?: Array<{ option: string; rejected_because: string }>;
+  evidence?: { kind: 'git-commit'; commit_sha: string; quote: string };
 }
 
 /**
@@ -820,6 +821,7 @@ function composeDigestData(o: ComposeOpts): DigestData {
       ...(d.alternatives_considered && d.alternatives_considered.length > 0
         ? { alternatives_considered: d.alternatives_considered }
         : {}),
+      ...(d.evidence ? { evidence: d.evidence } : {}),
     });
   }
   for (const cp of sorted) {
@@ -1569,6 +1571,9 @@ function renderDigestMarkdown(d: DigestData): string {
         dec.source === 'plan' ? `plan rev ${dec.revision_n}` : `cp ${dec.checkpoint}`;
       lines.push(`- **${dec.decision}** _(${provenance})_`);
       lines.push(`  - ${dec.reason}`);
+      if (dec.evidence) {
+        lines.push(`  - _evidence_ commit ${dec.evidence.commit_sha} — ${dec.evidence.quote}`);
+      }
       if (dec.alternatives_considered && dec.alternatives_considered.length > 0) {
         for (const alt of dec.alternatives_considered) {
           lines.push(

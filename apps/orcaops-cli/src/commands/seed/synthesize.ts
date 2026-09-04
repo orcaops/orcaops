@@ -7,7 +7,12 @@ import {
   wordBoundaryPrefix,
 } from '@orcaops/core';
 import type { ArtifactOriginJob, PlanInput, SummaryInput } from '@orcaops/storage';
-import { ARTIFACT_LABEL_MAX, uuidv7 } from '@orcaops/storage';
+import {
+  ARTIFACT_LABEL_MAX,
+  canonicalMemberShas,
+  computeMemberShasHash,
+  uuidv7,
+} from '@orcaops/storage';
 
 export interface SeedCheckpointSynthesis {
   n: number;
@@ -68,13 +73,6 @@ function seedKey(opts: SynthesizeSeedClusterOptions, suffix: string): string {
 
 function reconciliationClusterKey(opts: SynthesizeSeedClusterOptions): string {
   return deterministicBytes(`orcaops-seed:v1:${opts.rootSha}:${opts.cluster.key}`).toString('hex');
-}
-
-function memberShasHash(cluster: SeedCluster): string {
-  const canonicalShas = [
-    ...new Set(cluster.commits.map((commit) => commit.sha.toLowerCase())),
-  ].sort();
-  return deterministicBytes(JSON.stringify(canonicalShas)).toString('hex');
 }
 
 function oneLine(value: string): string {
@@ -174,7 +172,8 @@ export function synthesizeSeedCluster(opts: SynthesizeSeedClusterOptions): SeedC
       authors: cluster.authors,
       enriched_at: null,
       cluster_key: reconciliationClusterKey(opts),
-      member_shas_hash: memberShasHash(cluster),
+      member_shas: canonicalMemberShas(cluster.commits.map((commit) => commit.sha)),
+      member_shas_hash: computeMemberShasHash(cluster.commits.map((commit) => commit.sha)),
       ...(opts.job ? { job: opts.job } : {}),
     },
     started_at: protocolTimestamp(cluster.commits[0]!.committerDateIso),

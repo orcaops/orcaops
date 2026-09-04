@@ -7,8 +7,9 @@ may change behaviour. Anything needing action on upgrade is called out.
 
 ## [0.2.0] - 2026-09-04
 
-Three things to check on upgrade: move to Node 22.14.0 or newer, uninstall
-`@orcaops/watch`, and on Windows use WSL2 if you open the Task Review UI.
+Four things to check on upgrade: move to Node 22.14.0 or newer, uninstall
+`@orcaops/watch`, use WSL2 on Windows if you open the Task Review UI, and
+regenerate any unapplied enrichment bundles produced by `0.2.0-rc.1`.
 
 ### Breaking changes
 
@@ -26,11 +27,17 @@ Three things to check on upgrade: move to Node 22.14.0 or newer, uninstall
 - That prebuilt UI covers macOS and Linux on x64 and arm64. On Windows it runs
   under WSL2. The rest of the CLI is unaffected, and anywhere without a build
   `orcaops watch` lists the platforms it supports and exits.
+- Regenerate any enrichment bundles produced by `0.2.0-rc.1` before applying
+  them with this release.
 
 ### Added
 
 - `orcaops doctor` names the Task Review build it found, or tells you your
   platform has none.
+- Imported decisions now carry structured evidence linking each decision to its
+  supporting commit and exact commit-message quote.
+- `orcaops seed enrich` can add evidence-bound detail to an existing imported
+  artifact without deleting or re-importing it.
 
 ### Changed
 
@@ -43,6 +50,9 @@ Three things to check on upgrade: move to Node 22.14.0 or newer, uninstall
 - `orcaops init` registers Codex hooks in `hooks.json`. An existing orcaops
   block in your Codex `config.toml` moves there for you and keeps the approval
   Codex already holds, so you are not asked to approve the hook again.
+- Seed previews disclose checked-out commits omitted from the selected history,
+  the evidence available for proposed decisions, and the enrichment scope
+  before you approve an import.
 
 ### Fixed
 
@@ -53,6 +63,13 @@ Three things to check on upgrade: move to Node 22.14.0 or newer, uninstall
   is being updated.
 - When the capture store cannot be opened, the error shows the command that
   fixes it; previously the message was cut off before it.
+- Enriched imports retain their labels, summaries, outcomes, and decisions
+  after cache and archive rebuilds.
+- Commit-message metadata no longer becomes an imported artifact's label.
+- Invalid enrichment files are rejected before import instead of silently
+  producing skeleton artifacts.
+- Renaming a locally captured plan after its first cloud sync no longer leaves
+  later syncs permanently stale.
 
 ## [0.1.1] - 2026-09-03
 

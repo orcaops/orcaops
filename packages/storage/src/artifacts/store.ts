@@ -19,11 +19,16 @@ import {
   DeclaredStepsInvalidError,
   DoneCriteriaInvalidError,
   EventLogAppendRefusedError,
+  GitImportEnrichmentInvalidTargetError,
+  GitImportEnrichmentLegacyError,
+  GitImportEnrichmentProjectionError,
+  GitImportEnrichmentValidationError,
   OpenCheckpointOverlapError,
   OpenCheckpointsPendingError,
   PlanRevisionInputInvalidError,
   PlanRevisionOpenCpConflictError,
   RecoveryRefusedError,
+  StaleGitImportEnrichmentError,
   StalePlanRevisionError,
   StaleSummarySupersedeError,
   SummaryAlreadyCapturedError,
@@ -63,6 +68,7 @@ import {
 } from '../events/overlap-adjudication.js';
 import {
   type EventWithPayload,
+  latestPlanRevisionEventId,
   loadEventsWithPayloads,
   rebuildArtifactJsonFromEvents,
   rebuildCheckpointFromEvents,
@@ -124,6 +130,11 @@ import {
   type EvaluatorRunPayload,
   EvaluatorRunPayloadSchema,
 } from '../schema/evaluator-run.js';
+import {
+  type GitImportEnrichmentPayload,
+  GitImportEnrichmentPayloadSchema,
+} from '../schema/git-import-enrichment.js';
+import { computeMemberShasHash } from '../schema/origin.js';
 import {
   type AcceptanceCriterion,
   type CriterionLineage,
@@ -592,6 +603,11 @@ export interface SummaryWriteResult {
   /** The summary_captured event id on the created path — the supersede token. */
   event_id?: string;
 }
+
+export type GitImportEnrichmentWriteResult =
+  | { outcome: 'created'; event_id: string; enrichment: GitImportEnrichmentPayload }
+  | { outcome: 'replay'; priorEventId: string; enrichment: GitImportEnrichmentPayload }
+  | { outcome: 'conflict'; priorEventId: string };
 
 /**
  * Result of writing an evaluator run or disposition event. Returns
@@ -3429,6 +3445,278 @@ export class ArtifactStore {
     });
   }
 
+  private async projectGitImportEnrichment(
+    paths: ArtifactPaths,
+    events: EventWithPayload[],
+    eventId: string
+  ): Promise<void> {
+    const rebuiltPlan = rebuildPlanFromEvents(events);
+    const rebuiltSummary = rebuildSummaryFromEvents(events);
+    const rebuiltArtifact = rebuildArtifactJsonFromEvents(events);
+    if (!rebuiltPlan || !rebuiltSummary || !rebuiltArtifact) {
+      throw new Error(
+        `event-first writeGitImportEnrichment invariant: aggregate rebuild failed after ` +
+          `event ${eventId}`
+      );
+    }
+    const rebuiltCheckpoints = rebuiltPlan.plan.plan_steps.map((_, index) => {
+      const checkpoint = rebuildCheckpointFromEvents(events, index + 1);
+      if (!checkpoint || checkpoint.checkpoint.status !== 'closed') {
+        throw new Error(
+          `event-first writeGitImportEnrichment invariant: checkpoint ${index + 1} did not ` +
+            `rebuild as closed after event ${eventId}`
+        );
+      }
+      return checkpoint.checkpoint;
+    });
+
+    await atomicWriteFile(
+      paths.planJson,
+      JSON.stringify(rebuiltPlan.plan, null, 2) + '\n',
+      this.repoRoot
+    );
+    await atomicWriteFile(paths.planMd, planMarkdown(rebuiltPlan.plan), this.repoRoot);
+    for (const checkpoint of rebuiltCheckpoints) {
+      await atomicWriteFile(
+        paths.checkpointJson(checkpoint.n),
+        JSON.stringify(checkpoint, null, 2) + '\n',
+        this.repoRoot
+      );
+      await atomicWriteFile(
+        paths.checkpointMd(checkpoint.n),
+        checkpointMarkdown(checkpoint),
+        this.repoRoot
+      );
+    }
+    await atomicWriteFile(
+      paths.summaryJson,
+      JSON.stringify(rebuiltSummary.summary, null, 2) + '\n',
+      this.repoRoot
+    );
+    await atomicWriteFile(paths.summaryMd, summaryMarkdown(rebuiltSummary.summary), this.repoRoot);
+    await writeArtifactJson(paths.artifactJson, rebuiltArtifact.json, this.repoRoot);
+
+    this.projectPlanIntoCache(
+      rebuiltPlan.plan,
+      latestPlanRevisionEventId(events) ?? rebuiltPlan.sourceEventId,
+      rebuiltArtifact.json.branch_lineage
+    );
+    for (const checkpoint of rebuiltCheckpoints) {
+      this.store.upsertCheckpoint(checkpointToRow(checkpoint));
+      this.store.replaceSearchEntry({
+        artifact_id: checkpoint.artifact_id,
+        source: `checkpoint:${checkpoint.n}`,
+        branch: rebuiltPlan.plan.branch,
+        ts: checkpoint.closed_at,
+        content: `${checkpoint.summary} · ${checkpoint.uncertainty.join(' · ')}`,
+      });
+    }
+    const artifact = this.store.getArtifact(rebuiltPlan.plan.artifact_id);
+    if (!artifact) {
+      throw new Error(
+        `event-first writeGitImportEnrichment invariant: artifact cache row is missing after ` +
+          `event ${eventId}`
+      );
+    }
+    this.projectSummaryIntoCache(rebuiltSummary.summary, artifact);
+  }
+
+  async readLatestGitImportEnrichmentEventId(artifactId: string): Promise<string | null> {
+    const paths = artifactPathsFor(this.repoRoot, this.config, artifactId);
+    const events = await this.loadAllEvents(
+      paths.eventsNdjson,
+      paths.sidecarsDir,
+      paths.artifactId
+    );
+    return (
+      events.filter((event) => event.record.type === 'git_import_enriched').at(-1)?.record
+        .event_id ?? null
+    );
+  }
+
+  async writeGitImportEnrichment(
+    input: GitImportEnrichmentPayload,
+    opts: { idempotencyKey: string }
+  ): Promise<GitImportEnrichmentWriteResult> {
+    const enrichment = GitImportEnrichmentPayloadSchema.parse(input);
+    const paths = artifactPathsFor(this.repoRoot, this.config, enrichment.artifact_id);
+
+    return this.withWriteLock(enrichment.artifact_id, async () => {
+      const events = await this.loadAllEvents(
+        paths.eventsNdjson,
+        paths.sidecarsDir,
+        paths.artifactId
+      );
+      const rebuilt = rebuildPlanFromEvents(events);
+      if (!rebuilt) {
+        throw new GitImportEnrichmentInvalidTargetError(
+          `Cannot enrich unknown artifact "${enrichment.artifact_id}".`,
+          enrichment.artifact_id
+        );
+      }
+      const origin = rebuilt.plan.origin;
+      if (origin?.kind !== 'git-import') {
+        throw new GitImportEnrichmentInvalidTargetError(
+          `Artifact "${enrichment.artifact_id}" is not a git import.`,
+          enrichment.artifact_id
+        );
+      }
+      if (!origin.cluster_key || !origin.member_shas || !origin.member_shas_hash) {
+        throw new GitImportEnrichmentLegacyError(
+          `Artifact "${enrichment.artifact_id}" predates exact seed membership. ` +
+            'Re-seed it with a current Orcaops build before enriching it.',
+          enrichment.artifact_id
+        );
+      }
+      if (
+        enrichment.cluster_key !== origin.cluster_key ||
+        enrichment.member_shas_hash !== origin.member_shas_hash ||
+        computeMemberShasHash(origin.member_shas) !== origin.member_shas_hash
+      ) {
+        throw new GitImportEnrichmentValidationError(
+          `Artifact "${enrichment.artifact_id}" enrichment does not match its immutable ` +
+            'cluster identity and member hash.',
+          enrichment.artifact_id
+        );
+      }
+      const memberShas = new Set(origin.member_shas);
+      if (enrichment.decisions.mode === 'replace') {
+        const outside = enrichment.decisions.decisions.find(
+          (decision) => !memberShas.has(decision.evidence.commit_sha)
+        );
+        if (outside) {
+          throw new GitImportEnrichmentValidationError(
+            `Decision evidence commit ${outside.evidence.commit_sha} is not a member of ` +
+              `artifact "${enrichment.artifact_id}".`,
+            enrichment.artifact_id
+          );
+        }
+      }
+      const expectedCheckpointNumbers = rebuilt.plan.plan_steps.map((_, index) => index + 1);
+      const receivedCheckpointNumbers = enrichment.checkpoint_summaries.map((entry) => entry.n);
+      const hasCompleteImportedThread =
+        rebuildSummaryFromEvents(events) !== null &&
+        expectedCheckpointNumbers.every(
+          (n) => rebuildCheckpointFromEvents(events, n)?.checkpoint.status === 'closed'
+        );
+      if (!hasCompleteImportedThread) {
+        throw new GitImportEnrichmentInvalidTargetError(
+          `Artifact "${enrichment.artifact_id}" is not a complete imported thread.`,
+          enrichment.artifact_id
+        );
+      }
+      if (
+        enrichment.steps.length !== rebuilt.plan.plan_steps.length ||
+        JSON.stringify(receivedCheckpointNumbers) !== JSON.stringify(expectedCheckpointNumbers)
+      ) {
+        throw new GitImportEnrichmentValidationError(
+          `Artifact "${enrichment.artifact_id}" enrichment must carry exactly ` +
+            `${rebuilt.plan.plan_steps.length} ordered step and checkpoint entries.`,
+          enrichment.artifact_id
+        );
+      }
+      const candidatePlan = PlanInputSchema.safeParse({
+        ...rebuilt.plan,
+        label: enrichment.label,
+        task: enrichment.task,
+        plan_steps: rebuilt.plan.plan_steps.map((step, index) => ({
+          ...step,
+          ...enrichment.steps[index],
+        })),
+        decisions:
+          enrichment.decisions.mode === 'replace'
+            ? enrichment.decisions.decisions
+            : rebuilt.plan.decisions,
+      });
+      if (!candidatePlan.success) {
+        throw new GitImportEnrichmentValidationError(
+          `Artifact "${enrichment.artifact_id}" enrichment does not satisfy the plan schema: ` +
+            candidatePlan.error.issues
+              .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+              .join('; '),
+          enrichment.artifact_id
+        );
+      }
+
+      const replayShape = (value: GitImportEnrichmentPayload) => {
+        const { enriched_at: _enrichedAt, ...content } = value;
+        return content;
+      };
+      const replay = await findArtifactScopedReplay({
+        events: events.map((event) => event.record),
+        type: 'git_import_enriched',
+        idempotencyKey: opts.idempotencyKey,
+        payload: replayShape(enrichment),
+        loadPriorPayload: (record) => {
+          const prior = events.find((event) => event.record.event_id === record.event_id);
+          return replayShape(GitImportEnrichmentPayloadSchema.parse(prior?.payload));
+        },
+      });
+      const priorEvents = events.filter((event) => event.record.type === 'git_import_enriched');
+      const latestEventId = priorEvents.at(-1)?.record.event_id ?? null;
+      if (replay.kind === 'replay') {
+        if (replay.priorEventId !== latestEventId) {
+          throw new StaleGitImportEnrichmentError(
+            `Enrichment event ${replay.priorEventId} for artifact ` +
+              `"${enrichment.artifact_id}" has been superseded by ${latestEventId}. ` +
+              'Re-read the artifact and create a new preview.',
+            enrichment.artifact_id,
+            latestEventId
+          );
+        }
+        const prior = events.find((event) => event.record.event_id === replay.priorEventId)!;
+        await this.projectGitImportEnrichment(paths, events, replay.priorEventId);
+        return {
+          outcome: 'replay',
+          priorEventId: replay.priorEventId,
+          enrichment: GitImportEnrichmentPayloadSchema.parse(prior.payload),
+        };
+      }
+      if (replay.kind === 'conflict') {
+        return { outcome: 'conflict', priorEventId: replay.priorEventId };
+      }
+
+      if (enrichment.prior_enrichment_event_id !== latestEventId) {
+        throw new StaleGitImportEnrichmentError(
+          `Stale prior_enrichment_event_id for artifact "${enrichment.artifact_id}": ` +
+            `you passed ${JSON.stringify(enrichment.prior_enrichment_event_id)} but the latest ` +
+            `enrichment event is ${JSON.stringify(latestEventId)}. Re-read the artifact and retry.`,
+          enrichment.artifact_id,
+          latestEventId
+        );
+      }
+
+      const event = await this.appendAndMirror(
+        {
+          type: 'git_import_enriched',
+          ts: enrichment.enriched_at,
+          idempotency_key: opts.idempotencyKey,
+          payload: enrichment,
+        },
+        paths
+      );
+
+      try {
+        const updatedEvents = await this.loadAllEvents(
+          paths.eventsNdjson,
+          paths.sidecarsDir,
+          paths.artifactId
+        );
+        await this.projectGitImportEnrichment(paths, updatedEvents, event.event_id);
+      } catch (error) {
+        throw new GitImportEnrichmentProjectionError(
+          `Enrichment event ${event.event_id} was committed for artifact ` +
+            `"${enrichment.artifact_id}", but its projections were not fully refreshed. ` +
+            'Run `orcaops rebuild`, then retry to confirm the amendment.',
+          enrichment.artifact_id,
+          event.event_id,
+          { cause: error }
+        );
+      }
+      return { outcome: 'created', event_id: event.event_id, enrichment };
+    });
+  }
+
   // ────────────────────────────────────────
   // Evaluator runs (protocol-aligned)
   // ────────────────────────────────────────
@@ -3708,7 +3996,7 @@ export class ArtifactStore {
       events: events.map((e) => e.record),
       lossyCorrupt,
       lineByEventId,
-      relevantTypes: new Set<EventType>(['plan_captured', 'plan_revised']),
+      relevantTypes: new Set<EventType>(['plan_captured', 'plan_revised', 'git_import_enriched']),
       rebuild: () => {
         const r = rebuildPlanFromEvents(events);
         if (!r)
@@ -4004,10 +4292,11 @@ export class ArtifactStore {
       const projection = projections.get(n) ?? null;
       const cpEvents = events.filter(
         (e) =>
-          (e.record.type === 'checkpoint_opened' ||
+          e.record.type === 'git_import_enriched' ||
+          ((e.record.type === 'checkpoint_opened' ||
             e.record.type === 'checkpoint_closed' ||
             e.record.type === 'checkpoint_abandoned') &&
-          (e.payload as { n?: unknown }).n === n
+            (e.payload as { n?: unknown }).n === n)
       );
       const recovery = recoverProjection<Checkpoint>({
         projection,
@@ -4018,9 +4307,10 @@ export class ArtifactStore {
           'checkpoint_opened',
           'checkpoint_closed',
           'checkpoint_abandoned',
+          'git_import_enriched',
         ]),
         rebuild: () => {
-          const r = rebuildCheckpointFromEvents(cpEvents, n);
+          const r = rebuildCheckpointFromEvents(events, n);
           if (!r)
             throw new Error(
               `recoverProjection asked for a rebuild but rebuildCheckpointFromEvents(n=${n}) ` +
@@ -4117,7 +4407,7 @@ export class ArtifactStore {
       events: events.map((e) => e.record),
       lossyCorrupt,
       lineByEventId,
-      relevantTypes: new Set<EventType>(['summary_captured']),
+      relevantTypes: new Set<EventType>(['summary_captured', 'git_import_enriched']),
       rebuild: () => {
         const r = rebuildSummaryFromEvents(events);
         if (!r)
@@ -4196,6 +4486,7 @@ export class ArtifactStore {
     const relevantTypes = new Set<EventType>([
       'plan_captured',
       'plan_revised',
+      'git_import_enriched',
       'checkpoint_opened',
       'checkpoint_closed',
       'checkpoint_abandoned',

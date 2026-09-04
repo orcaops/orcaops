@@ -12,6 +12,7 @@ import { ArtifactStore, withReconciledArtifactDeletionStaging } from '../artifac
 import { type EventType, readEventLog } from '../events/event-log.js';
 import {
   type EventWithPayload,
+  latestPlanRevisionEventId,
   loadEventsWithPayloads,
   rebuildPlanFromEvents,
 } from '../events/rebuilders.js';
@@ -202,6 +203,7 @@ async function rebuildCacheLocked(opts: RebuildOptions): Promise<RebuildResult> 
 
     let plan: Plan | null = null;
     let planSourceEventId: string | null = null;
+    let planRevisionSourceEventId: string | null = null;
     let eventHistoryUnreadable = false;
     if (files.includes('events.ndjson')) {
       try {
@@ -225,7 +227,11 @@ async function rebuildCacheLocked(opts: RebuildOptions): Promise<RebuildResult> 
             lineByEventId: new Map(
               events.map((event, index) => [event.record.event_id, index + 1] as const)
             ),
-            relevantTypes: new Set<EventType>(['plan_captured', 'plan_revised']),
+            relevantTypes: new Set<EventType>([
+              'plan_captured',
+              'plan_revised',
+              'git_import_enriched',
+            ]),
             rebuild: () => {
               const rebuilt = rebuildPlanFromEvents(events);
               if (!rebuilt) throw new Error(`artifact ${artifactId} has no plan event`);
@@ -235,6 +241,7 @@ async function rebuildCacheLocked(opts: RebuildOptions): Promise<RebuildResult> 
           if (recovery.status === 'current' || recovery.status === 'rebuilt') {
             plan = recovery.projection;
             planSourceEventId = recovery.sourceEventId;
+            planRevisionSourceEventId = latestPlanRevisionEventId(events);
           }
         }
       } catch {
@@ -243,7 +250,7 @@ async function rebuildCacheLocked(opts: RebuildOptions): Promise<RebuildResult> 
       }
     }
     if (eventHistoryUnreadable) skippedArtifactIds.add(artifactId);
-    if (plan === null || planSourceEventId === null) {
+    if (plan === null || planSourceEventId === null || planRevisionSourceEventId === null) {
       skippedArtifactIds.add(artifactId);
       continue;
     }
@@ -288,7 +295,7 @@ async function rebuildCacheLocked(opts: RebuildOptions): Promise<RebuildResult> 
           step_lineage: JSON.stringify(plan.step_lineage),
           criterion_lineage: JSON.stringify(plan.criterion_lineage),
           prior_event_id: plan.prior_plan_event_id,
-          source_event_id: planSourceEventId,
+          source_event_id: planRevisionSourceEventId,
         },
         steps: plan.plan_steps.map((s, idx) => ({
           step_id: s.step_id,

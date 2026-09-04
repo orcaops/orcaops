@@ -12,11 +12,13 @@ export const DEFAULT_FOLD_THRESHOLD = 50;
 const BOT_PATTERN = /\[bot\]|dependabot|renovate|github-actions/iu;
 const BOT_BRANCH_PATTERN = /from \S*\/(?:renovate|dependabot)\//iu;
 const RELEASE_PATTERN = /^(?:release|chore\(release\)|publish)[:\s]|^v?\d+\.\d+\.\d+(?:-\S+)?$/iu;
-// Merge-body lines that carry no task intent: the `# Conflicts:` block
-// (including its indented `#\t<file>` list) and git trailers
-// (Signed-off-by:, Co-authored-by:, Reviewed-by:, Fixes:, …).
 const MERGE_BODY_NOISE_PATTERN =
-  /^#|^(?:[a-z]+(?:-[a-z]+)*-by|signed-off-by|co-authored-by|change-id|fixes|closes|resolves|refs?|see-also|cc|link|bug|issue):\s/iu;
+  /^#|^(?:[a-z]+(?:-[a-z]+)*-by|change-id|fixes|closes|resolves|refs?|see-also|cc|link|bug|issue):\s/iu;
+const TRAILER_LINE_PATTERN = /^[a-z][a-z0-9-]*:\s+\S/iu;
+const CONVENTIONAL_BODY_TITLE_PATTERN =
+  /^(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|review|style|test)(?:\([^)]+\))?!?:\s+\S/iu;
+const CLOSING_REFERENCE_PATTERN =
+  /^(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#\d+(?:\s*(?:,|and)\s*#\d+)*[.!]?$/iu;
 // A merge subject that names only the mechanics ("Merge branch 'x'",
 // "Merge tag '4.11.1'", "Merge pull request #1 from y", "Merge x into y")
 // carries no PR title.
@@ -323,6 +325,29 @@ function isCeremonialMergeSubject(subject: string): boolean {
   return BARE_MERGE_SUBJECT_PATTERN.test(trimmed) || RELEASE_PATTERN.test(trimmed);
 }
 
+function terminalMergeNoiseStart(lines: readonly string[]): number | null {
+  let index = lines.length - 1;
+  while (index >= 0 && lines[index]!.trim().length === 0) index -= 1;
+  let start = index + 1;
+  let found = false;
+  while (index >= 0) {
+    let recordStart = index;
+    while (recordStart >= 0 && /^\s/u.test(lines[recordStart]!)) recordStart -= 1;
+    if (recordStart < 0) break;
+    const trimmed = lines[recordStart]!.trim();
+    const trailer =
+      TRAILER_LINE_PATTERN.test(trimmed) && !CONVENTIONAL_BODY_TITLE_PATTERN.test(trimmed);
+    if (trailer || CLOSING_REFERENCE_PATTERN.test(trimmed)) {
+      found = true;
+      start = recordStart;
+      index = recordStart - 1;
+      continue;
+    }
+    break;
+  }
+  return found ? start : null;
+}
+
 /**
  * `fromMember` marks a label taken from ONE member rather than the branch's own
  * title, which is what entitles the caller to qualify it with a task count.
@@ -331,8 +356,10 @@ function mergeLabelSubject(
   merge: DetailedCommit,
   members: readonly DetailedCommit[]
 ): { subject: string; fromMember: boolean } {
-  const bodyLabel = merge.body
-    .split(/\r?\n/u)
+  const bodyLines = merge.body.split(/\r?\n/u);
+  const terminalNoiseStart = terminalMergeNoiseStart(bodyLines);
+  const bodyLabel = bodyLines
+    .slice(0, terminalNoiseStart ?? bodyLines.length)
     .map((line) => line.trim())
     .find(
       (line) =>

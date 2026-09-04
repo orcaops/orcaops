@@ -58,7 +58,19 @@ describe('buildBranchDigestData', () => {
           verification: [{ command: 'pnpm test', exit_code: 0, output_digest: '10 passed' }],
         },
       ],
-      decisions: [{ decision: 'Use polling', reason: 'Simple', source: 'plan', revision_n: 0 }],
+      decisions: [
+        {
+          decision: 'Use polling',
+          reason: 'Simple',
+          source: 'plan',
+          revision_n: 0,
+          evidence: {
+            kind: 'git-commit',
+            commit_sha: 'a'.repeat(40),
+            quote: 'use polling for simplicity',
+          },
+        },
+      ],
       open_items: ['Document rollout'],
       tests_run: ['pnpm test'],
       usage: {
@@ -146,6 +158,9 @@ describe('buildBranchDigestData', () => {
     expect(data.decisions).toHaveLength(2);
     expect(data.decisions.map((decision) => decision.reason)).toEqual(['Simple', 'Still simplest']);
     expect(data.decisions.every((decision) => decision.sources.length === 1)).toBe(true);
+    expect(renderBranchDigestMarkdown(data)).toContain(
+      `Evidence: commit ${'a'.repeat(40)} — use polling for simplicity`
+    );
     expect(data.open_items).toEqual([
       {
         text: 'Document rollout',

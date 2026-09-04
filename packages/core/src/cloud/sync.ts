@@ -62,6 +62,7 @@ import { markAcked, syncToGit } from './session-branch-state.js';
 import {
   attachSourcePlanPin,
   preflightSourcePlan,
+  resolveBranchBPinTitle,
   type SourcePlanPinBranch,
 } from './source-plan-pin.js';
 import type { Repo } from '../git/repo.js';
@@ -324,6 +325,14 @@ export async function pushArtifact(opts: PushArtifactOptions): Promise<PushArtif
     return finalized;
   }
 
+  const sourcePlanLabel =
+    snapshot.source_plan?.source_ref.kind === 'local'
+      ? await resolveBranchBPinTitle(client, {
+          artifactId,
+          planLabel: snapshot.plan.label,
+        })
+      : snapshot.plan.label;
+
   // Branch-A read-only preflight — runs BEFORE captureThread.start publishes the
   // artifact (a wrong-origin / missing / stale / not-approved cloud pin must
   // abort with zero captureThread writes, else a COMPLETE orphan lands in the
@@ -519,7 +528,7 @@ export async function pushArtifact(opts: PushArtifactOptions): Promise<PushArtif
     sourcePlanPinned = await attachSourcePlanPin(client, {
       artifactId,
       sourcePlan: snapshot.source_plan,
-      planLabel: snapshot.plan.label,
+      planLabel: sourcePlanLabel,
       baseUrl,
       currentOrgId,
       ...(opts.repoRoot ? { repoRoot: opts.repoRoot } : {}),
