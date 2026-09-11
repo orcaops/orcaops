@@ -162,6 +162,7 @@ import {
   loadReview,
   readReviewGenerations,
   type ReviewData,
+  ReviewDataError,
   type ReviewGenerations,
   ReviewPaneError,
 } from '../../data/reviewSource';
@@ -263,6 +264,7 @@ function conciseReviewLoadError(cause: unknown): string {
 }
 
 interface ReviewLoadFailure {
+  paneCode: string | null;
   detail: string;
 }
 
@@ -275,8 +277,10 @@ function reviewHistoryFormatFailureDetail(): string {
 
 function reviewLoadFailure(cause: unknown): ReviewLoadFailure {
   return {
+    paneCode: cause instanceof ReviewPaneError ? cause.code : null,
     detail:
-      cause instanceof ReviewPaneError && cause.code === 'HISTORY_FORMAT_UNSUPPORTED'
+      (cause instanceof ReviewPaneError || cause instanceof ReviewDataError) &&
+      cause.code === 'HISTORY_FORMAT_UNSUPPORTED'
         ? reviewHistoryFormatFailureDetail()
         : conciseReviewLoadError(cause),
   };
@@ -4773,7 +4777,7 @@ export function ReviewApp({
       </CockpitThemeContext.Provider>
     );
   }
-  if (error !== null) {
+  if (error !== null && error.paneCode !== 'REVIEW_NOT_FOUND') {
     return (
       <CockpitThemeContext.Provider value={cockpit}>
         <box
@@ -4794,7 +4798,7 @@ export function ReviewApp({
       </CockpitThemeContext.Provider>
     );
   }
-  if (loaded === null) {
+  if (loaded === null || error?.paneCode === 'REVIEW_NOT_FOUND') {
     return (
       <CockpitThemeContext.Provider value={cockpit}>
         <box
@@ -4807,8 +4811,8 @@ export function ReviewApp({
             id="review-empty-floor"
             variant="screen"
             title="No deterministic review floor"
-            message={`No captured review floor was produced for ${branch}.`}
-            detail="Capture and close implementation checkpoints, then reopen Review."
+            message={`No retained review floor is available for ${branch}.`}
+            detail="Reopen Review to retry."
           />
           {helpDialog}
         </box>

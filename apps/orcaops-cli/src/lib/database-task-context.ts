@@ -20,6 +20,7 @@ import { aggregateCanonicalUsage } from '@orcaops/storage/history/usage-accounti
 
 import type { DatabaseListContext } from './database-list.js';
 import { renderNextActions } from './next-actions-render.js';
+import type { StatusAuthKind } from './status-auth.js';
 import { deriveThreadStatus } from './thread-status.js';
 
 export interface DatabaseTaskOptions {
@@ -183,8 +184,9 @@ export function inspectDatabaseTasks(scope: DatabaseHistoryScope, env: NodeJS.Pr
   };
 }
 
-function cloudStatus(scope: DatabaseHistoryScope, now: number) {
+function cloudStatus(scope: DatabaseHistoryScope, now: number, authKind: StatusAuthKind) {
   const unavailable = { state: 'unavailable' as const, pending_count: null, stuck_count: null };
+  if (authKind === 'not_connected') return { ...unavailable, reason: authKind };
   if (!scope.completeness.complete) return unavailable;
   try {
     const rows = scope.projects.flatMap((project) => {
@@ -237,6 +239,7 @@ function cloudStatus(scope: DatabaseHistoryScope, now: number) {
 export function readDatabaseStatus(
   context: DatabaseListContext,
   env: NodeJS.ProcessEnv,
+  authKind: StatusAuthKind,
   now = Date.now(),
   acknowledgeByRef?: (ref: string) => boolean
 ) {
@@ -365,7 +368,7 @@ export function readDatabaseStatus(
       project_id: project.project_id,
       accounting: project.snapshot ? aggregateCanonicalUsage([project.snapshot.usage]) : null,
     })),
-    cloud_sync: cloudStatus(context.scope, now),
+    cloud_sync: cloudStatus(context.scope, now, authKind),
   };
   return context.config.digest.redact_secrets ? redactSecretsInObject(output) : output;
 }

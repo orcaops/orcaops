@@ -17,6 +17,7 @@ import {
 import { resolveShellKey } from '@orcaops/storage/history/execution-focus';
 
 import { resolveDatabaseHistoryCommandContext } from './database-history-context.js';
+import { registerMissingDatabaseWorktree } from './database-worktree-registration.js';
 import { closeFailedHistoryRead } from './history-reader-close.js';
 import { getInvocationEnv } from './invocation-context.js';
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
@@ -95,6 +96,18 @@ export async function prepareDatabaseCheckoutCommand(
         'IDENTITY_RECOVERY_REQUIRED',
         'Checkout requires its original registered worktree context'
       );
+    if (scope.gitContext.worktreeId === null) {
+      await registerMissingDatabaseWorktree(
+        {
+          cwd: scope.gitContext.worktreeRoot,
+          root: scope.root.resolvedRoot,
+          projectId: project.projectId,
+          expectedAuthority: project.authority,
+          secretAllow: context.config.redact.allow,
+        },
+        operationOptions
+      );
+    }
     const registered = await requireDatabaseExecutionContext(
       {
         cwd: scope.gitContext.worktreeRoot,
@@ -108,7 +121,8 @@ export async function prepareDatabaseCheckoutCommand(
       !isDeepStrictEqual(project.database.authority, project.authority) ||
       registered.authority.rootKey !== scope.root.rootKey ||
       registered.authority.resolvedRoot !== scope.root.resolvedRoot ||
-      registered.git.worktreeId !== scope.gitContext.worktreeId ||
+      (scope.gitContext.worktreeId !== null &&
+        registered.git.worktreeId !== scope.gitContext.worktreeId) ||
       registered.git.repositoryInstanceId !== scope.gitContext.repositoryInstanceId ||
       (
         [

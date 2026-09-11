@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -43,6 +45,197 @@ describe('orcaops update --scope global', () => {
     JSON.parse(
       await readFile(path.join(globalRoot, 'install.local.json'), 'utf8')
     ) as GlobalManifest;
+
+  it.each(['personal', 'global'] as const)(
+    'reports actual global changes and no-ops under %s scope',
+    async (scope) => {
+      const repo = await createTempRepo({ initialBranch: 'main' });
+      const agent = agentFor(repo);
+      try {
+        expect(
+          (
+            await agent.runRaw([
+              'init',
+              '--scope',
+              scope,
+              '--agents',
+              'claude-code',
+              '--no-llm',
+              '--json',
+            ])
+          ).exitCode
+        ).toBe(0);
+        for (const flags of [[], ['--force'], ['--dry-run'], ['--dry-run', '--force']]) {
+          const result = await agent.runRaw(['update', ...flags]);
+          expect(result.exitCode).toBe(0);
+          expect(result.stdout).toContain('Everything is already up to date');
+          expect(result.stdout).toContain(
+            `0 file(s) ${flags.includes('--dry-run') ? 'would change' : 'changed'}`
+          );
+        }
+        const manifest = await globalManifest();
+        const entry = manifest.entries.find((e) => e.surface === 'skill')!;
+        const bytes = await readFile(entry.path, 'utf8');
+        await rm(entry.path);
+        const preview = await agent.runRaw(['update', '--dry-run']);
+        expect(preview.stdout).toContain('1 file(s) would change');
+        expect(preview.stdout).not.toContain('Everything is already up to date');
+        expect(await exists(entry.path)).toBe(false);
+        const applied = await agent.runRaw(['update']);
+        expect(applied.stdout).toContain('1 file(s) changed');
+        expect(applied.stdout).not.toContain('Everything is already up to date');
+        expect(await readFile(entry.path, 'utf8')).toBe(bytes);
+      } finally {
+        await repo.cleanup();
+      }
+    }
+  );
+
+  it.each(['personal', 'global'] as const)(
+    'preserves held cloud skills while reporting a %s no-op',
+    async (scope) => {
+      const repo = await createTempRepo({ initialBranch: 'main' });
+      const configHome = await mkdtemp(path.join(tmpdir(), 'orcaops-held-'));
+      const agent = makeAgent({
+        cwd: repo.path,
+        env: { ORCAOPS_GLOBAL_ROOT: globalRoot, ORCAOPS_CONFIG_HOME: configHome },
+      });
+      try {
+        const credentials = seedCreds(configHome);
+        expect(
+          (
+            await agent.runRaw([
+              'init',
+              '--scope',
+              scope,
+              '--agents',
+              'claude-code',
+              '--no-llm',
+              '--json',
+            ])
+          ).exitCode
+        ).toBe(0);
+        const manifestPath = path.join(globalRoot, 'install.local.json');
+        const manifestBytes = await readFile(manifestPath, 'utf8');
+        const cloudPath = path.join(
+          globalRoot,
+          'claude-code/skills/orcaops-plan-approval/SKILL.md'
+        );
+        const cloudBytes = await readFile(cloudPath, 'utf8');
+        await rm(credentials);
+        for (const flags of [['--dry-run'], []]) {
+          const result = await agent.runRaw(['update', ...flags]);
+          expect(result.exitCode).toBe(0);
+          expect(result.stdout).toContain('Everything is already up to date');
+          expect(result.stdout).toContain('cloud-gated skill(s) preserved');
+          expect(await readFile(cloudPath, 'utf8')).toBe(cloudBytes);
+          expect(await readFile(manifestPath, 'utf8')).toBe(manifestBytes);
+        }
+      } finally {
+        await repo.cleanup();
+        await rm(configHome, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it.each(['personal', 'global'] as const)(
+    'discloses omitted global planning without minting identity under %s scope',
+    async (scope) => {
+      const repo = await createTempRepo({ initialBranch: 'main' });
+      const agent = agentFor(repo);
+      try {
+        expect(
+          (
+            await agent.runRaw([
+              'init',
+              '--scope',
+              scope,
+              '--agents',
+              'claude-code',
+              '--no-llm',
+              '--json',
+            ])
+          ).exitCode
+        ).toBe(0);
+        execFileSync('git', ['config', '--local', '--unset', 'orcaops.projectid'], {
+          cwd: repo.path,
+        });
+        const gitConfig = path.join(repo.path, '.git', 'config');
+        const before = await readFile(gitConfig, 'utf8');
+        const manifestPath = path.join(globalRoot, 'install.local.json');
+        const manifest = await readFile(manifestPath, 'utf8');
+        const result = await agent.runRaw(['update', '--dry-run']);
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('Global planning skipped');
+        expect(result.stdout).not.toContain('Everything is already up to date');
+        expect(await readFile(gitConfig, 'utf8')).toBe(before);
+        expect(await readFile(manifestPath, 'utf8')).toBe(manifest);
+        const applied = await agent.runRaw(['update', '--json']);
+        expect(applied.exitCode).toBe(0);
+        expect(JSON.parse(applied.stdout).scope).toBe(scope);
+        expect(JSON.parse(applied.stdout).global).not.toHaveProperty('changed');
+        expect(JSON.parse(applied.stdout).global).not.toHaveProperty('ownershipChanged');
+        expect(await readFile(gitConfig, 'utf8')).toContain('projectid');
+      } finally {
+        await repo.cleanup();
+      }
+    }
+  );
+
+  it('reports global-only upgrades and removals in preview and apply', async () => {
+    const repo = await createTempRepo({ initialBranch: 'main' });
+    const agent = agentFor(repo);
+    try {
+      expect(
+        (
+          await agent.runRaw([
+            'init',
+            '--personal',
+            '--agents',
+            'claude-code',
+            '--no-llm',
+            '--json',
+          ])
+        ).exitCode
+      ).toBe(0);
+      const manifestPath = path.join(globalRoot, 'install.local.json');
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+      const entry = manifest.entries.find((e: { surface: string }) => e.surface === 'skill');
+      const currentBytes = await readFile(entry.path, 'utf8');
+      const oldBytes = currentBytes.replace(/orcaops@[^"\s]+/, 'orcaops@0.0.1');
+      expect(oldBytes).not.toBe(currentBytes);
+      await writeFile(entry.path, oldBytes);
+      entry.expectedHash = createHash('sha256').update(oldBytes).digest('hex');
+      manifest.materialized_by = '0.0.1';
+      const obsoletePath = path.join(
+        path.dirname(path.dirname(entry.path)),
+        path.basename(path.dirname(entry.path)).replace('orcaops-', 'obsolete-'),
+        path.basename(entry.path)
+      );
+      await mkdir(path.dirname(obsoletePath), { recursive: true });
+      await writeFile(obsoletePath, oldBytes);
+      manifest.entries.push({ ...entry, prefix: 'obsolete', path: obsoletePath });
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+      const warning = await agent.runRaw(['update']);
+      expect(warning.stdout).toContain('SKIPPED');
+      expect(warning.stdout).not.toContain('Everything is already up to date');
+      const before = await readFile(manifestPath, 'utf8');
+      const preview = await agent.runRaw(['update', '--force', '--dry-run']);
+      expect(preview.exitCode).toBe(0);
+      expect(preview.stdout).toContain('1 file(s) would change, 1 would be removed');
+      expect(preview.stdout).not.toContain('Everything is already up to date');
+      expect(await readFile(manifestPath, 'utf8')).toBe(before);
+      expect(await readFile(entry.path, 'utf8')).toBe(oldBytes);
+      const applied = await agent.runRaw(['update', '--force']);
+      expect(applied.exitCode).toBe(0);
+      expect(applied.stdout).toContain('1 file(s) changed, 1 removed');
+      expect(applied.stdout).not.toContain('Everything is already up to date');
+      expect(await readFile(entry.path, 'utf8')).toBe(currentBytes);
+      expect(await exists(obsoletePath)).toBe(false);
+    } finally {
+      await repo.cleanup();
+    }
+  });
 
   /** Seed a credential file into a caller-owned config home; returns its path. */
   function seedCreds(configHome: string): string {

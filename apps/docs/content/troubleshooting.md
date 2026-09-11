@@ -32,7 +32,7 @@ next action. For example:
 orcaops doctor — v<version>
   repo: <repo>
 
-✓ repository           7 checks passed
+✓ repository           8 checks passed
 ✓ install surfaces     9 checks passed
 ✓ artifact state       18/19 checks passed
 ⚠ seed                 Git history exists but the project database has no seed state

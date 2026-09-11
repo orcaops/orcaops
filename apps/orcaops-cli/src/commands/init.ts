@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { getAgentOverlay, type ToolId } from '@orcaops/adapters';
-import { configLocationForScope, Repo, resolveConfigSource } from '@orcaops/core';
+import { configLocationForScope, loadConfig, Repo, resolveConfigSource } from '@orcaops/core';
 import {
   type DatabaseSetupWait,
   inspectDatabaseSetup,
@@ -40,6 +40,7 @@ import {
   resolvePersonalConfigForAdoption,
   trackedProjectInstallPaths,
 } from '../lib/config-file.js';
+import { registerMissingDatabaseWorktree } from '../lib/database-worktree-registration.js';
 import { ORCAOPS_BASE_GITIGNORE, reconcileGitignore } from '../lib/gitignore.js';
 import {
   type GlobalInstallLockScope,
@@ -281,6 +282,15 @@ interface GitHookResult {
   action: GitHookAction;
 }
 
+interface WorktreeInitResult {
+  registration_only: true;
+  repo_root: string;
+  project_id: string;
+  project_id_minted: false;
+  dry_run: boolean;
+  warnings: string[];
+}
+
 interface InitResult {
   repo_root: string;
   created: string[];
@@ -349,7 +359,7 @@ interface InitResult {
 async function runInit(
   opts: InitOptions,
   operation: { signal: AbortSignal; onWait: (wait: DatabaseSetupWait) => void }
-): Promise<InitResult> {
+): Promise<InitResult | WorktreeInitResult> {
   const cwd = path.resolve(opts.cwd ?? getInvocationCwd());
 
   // init is bespoke: it must distinguish "cwd IS the worktree root" from
@@ -429,11 +439,56 @@ async function runInit(
   const alreadyInitialized =
     existingSource.kind === 'worktree' ||
     (existingSource.kind === 'common' && !explicitWorktreeScope);
+  const registrationOnly = Object.entries(opts).every(
+    ([key, value]) =>
+      value === undefined ||
+      (key === 'installAgent' && Array.isArray(value) && value.length === 0) ||
+      (value === false &&
+        ['force', 'resetConfig', 'noLlm', 'personal', 'withHooks'].includes(key)) ||
+      ['cwd', 'root', 'here', 'yes', 'json', 'dryRun'].includes(key)
+  );
+  if (registrationOnly) {
+    const historyRoot = await normalizeHistoryRoot({ env: getInvocationEnv(), cwd: repoRoot });
+    const registrationConfig = await loadConfig(repoRoot, { allowMissing: true });
+    const repair = await registerMissingDatabaseWorktree(
+      {
+        cwd: repoRoot,
+        root: historyRoot.resolvedRoot,
+        secretAllow: registrationConfig.redact.allow,
+      },
+      { dryRun: opts.dryRun, signal: operation.signal }
+    );
+    if (repair)
+      return {
+        registration_only: true,
+        repo_root: repoRoot,
+        project_id: repair.projectId,
+        project_id_minted: false,
+        dry_run: !!opts.dryRun,
+        warnings: [],
+      };
+  }
   if (alreadyInitialized && !opts.force) {
+    let registrationAdvice = '';
+    if (!registrationOnly) {
+      try {
+        const root = await normalizeHistoryRoot({ env: getInvocationEnv(), cwd: repoRoot });
+        const missing = await registerMissingDatabaseWorktree(
+          { cwd: repoRoot, root: root.resolvedRoot, secretAllow: [] },
+          { dryRun: true, signal: operation.signal }
+        );
+        if (missing)
+          registrationAdvice =
+            ' This worktree has no execution registration. Run `orcaops init` without installation flags to register it, or run `orcaops doctor --fix`.';
+      } catch {
+        // Optional registration advice must not replace the existing init refusal.
+      }
+    }
     throw new OrcaopsError(
       ErrorCodes.ALREADY_INITIALIZED,
       `${displayConfigPath(existingSource, repoRoot)} already exists. Run ` +
-        '`orcaops configure` to change settings, or pass --force to re-initialize.'
+        '`orcaops configure` to change settings, or pass --force to re-initialize.' +
+        registrationAdvice
     );
   }
 
@@ -1252,7 +1307,10 @@ function countByRoot(paths: string[], levelsUp: number): Array<[string, number]>
   return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b));
 }
 
-function formatHumanInitResult(r: InitResult): string {
+function formatHumanInitResult(r: InitResult | WorktreeInitResult): string {
+  if ('registration_only' in r) {
+    return `${r.dry_run ? 'Would register' : 'Registered'} this worktree with existing project ${r.project_id}.\n`;
+  }
   const lines: string[] = [];
   if (r.dry_run) {
     lines.push('DRY RUN — what `orcaops init` would do; nothing was written.');

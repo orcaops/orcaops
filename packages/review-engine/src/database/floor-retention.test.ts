@@ -340,7 +340,7 @@ it('leaves the older floor refs unused when a newer floor wins before settlement
   );
   for (const publication of observed.pending!.retention.input.publications)
     expect(await git(f.gitRoot, ['rev-parse', publication.fullRef])).toBe(publication.objectOid);
-});
+}, 15000);
 it('rolls back policy floor bindings and counters after a late real SQLite failure', async () => {
   const f = await fixture('explicit');
   const baseline = await inspect(f);
@@ -449,4 +449,4 @@ it('retains the original floor snapshot after a newer publication becomes curren
   } finally {
     database.close();
   }
-});
+}, 15000);

@@ -53,7 +53,7 @@ describe('personal scope across git worktrees', () => {
       })
     );
 
-  it('one init enables sibling reads while each writing worktree completes first-use setup', async () => {
+  it('one init enables sibling reads while a writing worktree registers itself', async () => {
     const init = await agentIn(main.path).runRaw(['init', '--personal', '--no-llm', '--json']);
     expect(init.exitCode).toBe(0);
     const after = await createLinkedWorktree(main.path, { branch: 'created-after-init' });
@@ -67,25 +67,8 @@ describe('personal scope across git worktrees', () => {
         expect(gitStatus(wt), wt).toBe('');
       }
 
-      const refused = await agentIn(after.path).runRaw([
-        'capture',
-        'plan',
-        '--no-llm',
-        '--input',
-        planFor('refused before first-use setup'),
-      ]);
-      expect(JSON.parse(refused.stdout)).toMatchObject({
-        error: { code: 'IDENTITY_RECOVERY_REQUIRED' },
-      });
-
-      const setup = await agentIn(after.path).runRaw([
-        'init',
-        '--personal',
-        '--force',
-        '--no-llm',
-        '--json',
-      ]);
-      expect(setup.exitCode, `${setup.stdout}\n${setup.stderr}`).toBe(0);
+      // A worktree created after init carries no execution registration; the
+      // first capture registers it rather than refusing.
       const plan = await agentIn(after.path).runRaw([
         'capture',
         'plan',

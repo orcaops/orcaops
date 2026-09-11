@@ -220,7 +220,16 @@ export async function applyHistoryConversion(
   if (!existing && !preview.contentComplete)
     refuse(
       'INVALID_INPUT',
-      'The legacy sources are not completely classified; resolve every issue before converting'
+      [
+        'The legacy sources are not completely classified.',
+        `Inventory: ${preview.inventoryComplete ? 'complete' : 'incomplete'}.`,
+        `Issues (${preview.issues.length}): ${preview.issues.map((issue) => `${issue.location} (${issue.code})`).join(', ') || 'none'}.`,
+        `Unclassified sources (${preview.unclassified.length}): ${preview.unclassified.map((entry) => entry.location).join(', ') || 'none'}.`,
+        'Inspect `orcaops history convert --json` before retrying.',
+        ...(preview.unclassified.length
+          ? ['Inspect the unclassified paths and report unrecognized Orcaops-owned state.']
+          : []),
+      ].join(' ')
     );
   const prepared = existing ? null : await prepareLegacySources(preview, options.signal);
   const operationId =

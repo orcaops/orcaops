@@ -23,6 +23,7 @@ import {
 import { closeFailedHistoryRead } from '../lib/history-reader-close.js';
 import { formatDriftNudge } from '../lib/install-drift.js';
 import { getInvocationEnv } from '../lib/invocation-context.js';
+import { readStatusAuthKind } from '../lib/status-auth.js';
 
 type DatabaseTaskCommandContext = { scope: DatabaseHistoryScope; config: Config };
 
@@ -38,6 +39,7 @@ export function createDatabaseStatusAction(dependencies: {
     try {
       const { selector } = validateDatabaseTaskOptions(input);
       const env = { ...getInvocationEnv() };
+      const authKind = await readStatusAuthKind();
       let context: DatabaseTaskCommandContext;
       try {
         context = await dependencies.openContext(selector, env);
@@ -66,7 +68,12 @@ export function createDatabaseStatusAction(dependencies: {
           artifacts: [],
           imported_artifacts: { count: null, known_count: 0, artifacts: [] },
           coding_sessions: [],
-          cloud_sync: { state: 'unavailable', pending_count: null, stuck_count: null },
+          cloud_sync: {
+            state: 'unavailable',
+            pending_count: null,
+            stuck_count: null,
+            ...(authKind === 'not_connected' ? { reason: authKind } : {}),
+          },
         };
         if (json) emitOk(output);
         else
@@ -79,7 +86,13 @@ export function createDatabaseStatusAction(dependencies: {
       let advisories: Awaited<ReturnType<typeof readTaskAdvisories>>;
       try {
         advisories = await readTaskAdvisories(context, env);
-        result = readDatabaseStatus(context, env, Date.now(), advisories.acknowledgeByRef);
+        result = readDatabaseStatus(
+          context,
+          env,
+          authKind,
+          Date.now(),
+          advisories.acknowledgeByRef
+        );
       } catch (cause) {
         closeFailedHistoryRead(context.scope);
         throw cause;

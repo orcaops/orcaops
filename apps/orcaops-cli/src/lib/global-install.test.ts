@@ -56,6 +56,89 @@ describe('global install', () => {
   };
   const skillsDir = (): string => resolveGlobalSkillsDir('claude-code')!;
 
+  it.each(['copy', 'symlink'] as const)(
+    'reports %s no-ops separately from reference changes',
+    async (link) => {
+      const input = { ...base, repoId: 'repoA', link };
+      const first = await planGlobalInstall(input, 'apply');
+      expect(first.changed).toEqual(first.materialized);
+      for (const mode of ['preview', 'apply'] as const) {
+        const same = await planGlobalInstall({ ...input, force: true }, mode);
+        expect(same.materialized.length).toBeGreaterThan(0);
+        expect(same.changed).toEqual([]);
+        expect(same.ownershipChanged).toBe(false);
+      }
+      const joined = await planGlobalInstall({ ...input, repoId: 'repoB' }, 'apply');
+      expect(joined.changed).toEqual([]);
+      expect(joined.ownershipChanged).toBe(true);
+      const released = await releaseGlobalRefs(
+        { repoId: 'repoB', cliVersion: base.cliVersion },
+        'apply'
+      );
+      expect(released?.changed).toEqual([]);
+      expect(released?.removed).toEqual([]);
+      expect(released?.ownershipChanged).toBe(true);
+    }
+  );
+
+  it.each(['copy', 'symlink'] as const)(
+    'keeps %s ownership unchanged when manifest properties are reordered',
+    async (link) => {
+      const input = { ...base, repoId: 'repoA', link };
+      const first = await planGlobalInstall(input, 'apply');
+      const reordered = {
+        ...first.manifest,
+        entries: first.manifest.entries.map(
+          (entry) => Object.fromEntries(Object.entries(entry).reverse()) as typeof entry
+        ),
+      };
+      expect(JSON.stringify(reordered.entries)).not.toBe(JSON.stringify(first.manifest.entries));
+      const result = await planGlobalInstall(input, 'preview', reordered);
+      expect(result.ownershipChanged).toBe(false);
+      expect(result.changed).toEqual([]);
+      expect(result.removed).toEqual([]);
+    }
+  );
+
+  it.each([
+    'missing copy',
+    'modified copy',
+    'missing symlink',
+    'wrong symlink',
+    'missing store',
+    'modified store',
+    'copy to symlink',
+    'symlink to copy',
+  ] as const)('reports and repairs %s from observed state', async (damage) => {
+    const link = damage.includes('copy') && damage !== 'symlink to copy' ? 'copy' : 'symlink';
+    const input = { ...base, repoId: 'repoA', link } as const;
+    const first = await planGlobalInstall(input, 'apply');
+    const entry = first.manifest.entries.find((e) => e.surface === 'skill')!;
+    const store =
+      entry.symlinkTarget == null
+        ? null
+        : path.resolve(path.dirname(entry.path), entry.symlinkTarget);
+    if (damage.startsWith('missing')) await rm(damage.endsWith('store') ? store! : entry.path);
+    if (damage.startsWith('modified'))
+      await writeFile(damage.endsWith('store') ? store! : entry.path, 'modified');
+    if (damage === 'wrong symlink') {
+      await rm(entry.path);
+      await symlink(path.join(root, 'absent'), entry.path);
+    }
+    const desiredLink =
+      damage === 'copy to symlink' ? 'symlink' : damage === 'symlink to copy' ? 'copy' : link;
+    const repair = { ...input, link: desiredLink, force: true } as const;
+    const before = await readFile(path.join(root, 'install.local.json'), 'utf8');
+    const preview = await planGlobalInstall(repair, 'preview');
+    expect(preview.changed).toContain(entry.path);
+    expect(await readFile(path.join(root, 'install.local.json'), 'utf8')).toBe(before);
+    const applied = await planGlobalInstall(repair, 'apply');
+    expect(applied.changed).toEqual(preview.changed);
+    expect((await lstat(entry.path)).isSymbolicLink()).toBe(desiredLink === 'symlink');
+    expect(await readFile(entry.path, 'utf8')).toContain('orcaops');
+    expect((await planGlobalInstall(repair, 'preview')).changed).toEqual([]);
+  });
+
   it('creates and locks an absent global root on first materialization', async () => {
     const absentRoot = path.join(root, 'absent', 'global');
     process.env.ORCAOPS_GLOBAL_ROOT = absentRoot;
@@ -117,6 +200,8 @@ describe('global install', () => {
         expect(res.removed.some((p) => p.includes(`orcaops-${t.id}`))).toBe(false);
         expect(res.held.some((p) => p.includes(`orcaops-${t.id}`))).toBe(true);
       }
+      expect(res.changed).toEqual([]);
+      expect(res.ownershipChanged).toBe(false);
       const m = await readGlobalManifest();
       for (const t of CLOUD) {
         const entry = m!.entries.find((e) => e.path.includes(`orcaops-${t.id}`));

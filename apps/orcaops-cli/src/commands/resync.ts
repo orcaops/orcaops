@@ -50,6 +50,7 @@ export async function resyncAction(opts: ResyncOptions = {}, deps: ResyncDeps = 
       ? await deps.openSession({ baseUrl: opts.baseUrl, signal: controller.signal, onWait })
       : await openDatabaseCloudSession(
           {
+            registerWorktree: true,
             selection: { kind: 'resync' },
             baseUrl: opts.baseUrl,
             signal: controller.signal,

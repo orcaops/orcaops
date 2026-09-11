@@ -99,6 +99,7 @@ export async function withReviewCloud<T>(
     requires: readonly OrcaopsCapability[];
     /** Verb name for the refusal message, e.g. `plan review push`. */
     operation: string;
+    registerWorktree?: boolean;
   },
   fn: (ctx: ReviewCloudContext) => Promise<T>
 ): Promise<T> {
@@ -108,7 +109,10 @@ export async function withReviewCloud<T>(
   let context: Awaited<ReturnType<typeof resolveDatabaseCaptureContext>> | undefined;
   try {
     const baseUrl = resolveCloudTarget(opts.baseUrl);
-    context = await resolveDatabaseCaptureContext({ signal: controller.signal });
+    context = await resolveDatabaseCaptureContext({
+      registerWorktree: opts.registerWorktree,
+      signal: controller.signal,
+    });
     const credentialStore = resolveCredentialStore();
     const connected = await createCanonicalCloudClient({
       baseUrl,

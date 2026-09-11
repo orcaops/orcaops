@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { mountReviewApp } from '../../../tests/review/mountReviewApp';
-import { ReviewPaneError } from '../../data/reviewSource';
+import { ReviewDataError, ReviewPaneError } from '../../data/reviewSource';
 
 describe('persistent App shell → Review bridge', () => {
   test('the Help menu opens the same review overlay as the keyboard command', async () => {
@@ -94,35 +94,95 @@ describe('persistent App shell → Review bridge', () => {
     app.unmount();
   });
 
-  test('an unsupported history format renders read-only Doctor guidance without retrying', async () => {
-    let calls = 0;
+  test('a missing pane renders neutral empty guidance with working Help and exit', async () => {
     const app = await mountReviewApp({
       scenario: 'no-narrative',
       autoLoad: true,
       startWithoutReview: true,
-      width: 140,
       reviewLoader: async () => {
-        calls += 1;
-        throw new ReviewPaneError(
-          'HISTORY_FORMAT_UNSUPPORTED',
-          'This database needs an explicitly supported schema upgrade or repair'
+        throw new ReviewPaneError('REVIEW_NOT_FOUND', 'review pane: REVIEW_NOT_FOUND');
+      },
+    });
+    try {
+      await app.settleUntil((frame) => frame.includes('No deterministic review floor'));
+      expect(app.frame()).toContain('No retained review floor is available for probe.');
+      expect(app.frame()).toContain('Reopen Review to retry.');
+      expect(app.frame()).not.toContain('Review unavailable');
+      expect(app.frame()).not.toContain('REVIEW_NOT_FOUND');
+      expect(app.frame()).not.toContain('Capture and close');
+      await app.requestShell('help');
+      expect(app.frame()).toContain('Review controls');
+      await app.press('q');
+      expect(app.frame()).not.toContain('Review controls');
+      expect(app.exits()).toBe(0);
+      expect(app.frame()).toContain('No deterministic review floor');
+      await app.press('q');
+      expect(app.exits()).toBe(1);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  test('a producer missing-review failure remains an error with its operation diagnostic', async () => {
+    const app = await mountReviewApp({
+      scenario: 'no-narrative',
+      autoLoad: true,
+      startWithoutReview: true,
+      width: 160,
+      reviewLoader: async () => {
+        throw new ReviewDataError(
+          1,
+          'review data (operation retained-operation): REVIEW_NOT_FOUND: publication refused'
         );
       },
     });
-
-    await app.settleUntil((frame) => frame.includes('Review unavailable for probe'));
-    expect(app.frame()).toContain('canonical history database format is unsupported');
-    expect(app.frame()).toContain('Watch did not modify the database.');
-    expect(app.frame().replace(/\s+/gu, ' ')).toContain('orcaops doctor');
-    expect(app.frame()).not.toContain('Rebuild');
-
-    await app.press('r');
-    await app.press('y');
-    await app.settle();
-    expect(calls).toBe(1);
-    expect(app.frame()).toContain('Review unavailable for probe');
-    app.unmount();
+    try {
+      await app.settleUntil((frame) => frame.includes('Review unavailable for probe'));
+      expect(app.frame()).toContain('retained-operation');
+      expect(app.frame()).toContain('REVIEW_NOT_FOUND: publication refused');
+      expect(app.frame()).not.toContain('No deterministic review floor');
+    } finally {
+      app.unmount();
+    }
   });
+
+  test.each(['pane', 'data'])(
+    'an unsupported history format from %s renders Doctor guidance without retrying',
+    async (verb) => {
+      let calls = 0;
+      const app = await mountReviewApp({
+        scenario: 'no-narrative',
+        autoLoad: true,
+        startWithoutReview: true,
+        width: 140,
+        reviewLoader: async () => {
+          calls += 1;
+          if (verb === 'data')
+            throw new ReviewDataError(
+              1,
+              'review data (operation retained-operation): HISTORY_FORMAT_UNSUPPORTED: Unsupported history format'
+            );
+          throw new ReviewPaneError(
+            'HISTORY_FORMAT_UNSUPPORTED',
+            'This database needs an explicitly supported schema upgrade or repair'
+          );
+        },
+      });
+
+      await app.settleUntil((frame) => frame.includes('Review unavailable for probe'));
+      expect(app.frame()).toContain('canonical history database format is unsupported');
+      expect(app.frame()).toContain('Watch did not modify the database.');
+      expect(app.frame().replace(/\s+/gu, ' ')).toContain('orcaops doctor');
+      expect(app.frame()).not.toContain('Rebuild');
+
+      await app.press('r');
+      await app.press('y');
+      await app.settle();
+      expect(calls).toBe(1);
+      expect(app.frame()).toContain('Review unavailable for probe');
+      app.unmount();
+    }
+  );
 
   test('a pointer/menu pane request uses the same controller transition as Tab', async () => {
     const effectStates: string[] = [];

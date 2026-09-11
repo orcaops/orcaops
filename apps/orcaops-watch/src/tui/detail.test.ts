@@ -25,7 +25,7 @@ function checkpoint(overrides: Partial<WatchCheckpoint> = {}): WatchCheckpoint {
         alternatives: [{ option: 'Array indexes', reason: 'They silently retarget selection.' }],
       },
     ],
-    steps: [{ idx: 0, label: 'Redesign the artifact detail' }],
+    steps: [{ idx: 1, label: 'Redesign the artifact detail' }],
     linesAdded: 128,
     linesRemoved: 21,
     filesChanged: 4,
@@ -52,14 +52,14 @@ function thread(id: string, overrides: Partial<WatchThread> = {}): WatchThread {
     sparkline: [0, 1, 3],
     planSteps: [
       {
-        idx: 0,
+        idx: 1,
         text: 'Redesign the artifact detail without changing captured semantics',
         label: 'Redesign artifact detail',
         done: true,
         current: false,
       },
       {
-        idx: 1,
+        idx: 2,
         text: 'Make task member navigation retain its exact place',
         label: 'Retain task navigation',
         done: false,
@@ -109,6 +109,14 @@ describe('artifact detail presentation', () => {
     expect(copy).toContain('Do not replace capture');
     expect(copy).toContain('· plan');
     expect(copy).toContain('Replace the snapshot');
+  });
+
+  it('numbers plan steps from the captured step index', () => {
+    const copy = buildDetail(thread('artifact-a'), new Set(), 96)
+      .lines.map((line) => line.text)
+      .join('\n');
+    expect(copy).toContain('✓ 1. Redesign artifact detail');
+    expect(copy).toContain('▸ 2. Retain task navigation');
   });
 
   it('keeps selection ids stable when a sibling step is inserted', () => {

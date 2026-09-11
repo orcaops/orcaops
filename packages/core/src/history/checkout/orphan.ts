@@ -16,13 +16,19 @@ export async function observeCheckoutOwnerAbsence(
   signal?: AbortSignal
 ) {
   const inventory = await enumerateDatabaseGitContexts(context.git, signal);
-  const refuse = (): never => {
+  const refuse = (details?: string): never => {
     throw new ProjectDatabaseError(
       'EXECUTION_RECOVERY_REQUIRED',
-      'Original execution ownership is not proven absent in the complete registered Git inventory; preserve the binding and resolve worktree registration or choose explicit handoff'
+      'Original execution ownership is not proven absent in the complete registered Git inventory; preserve the binding and resolve worktree registration or choose explicit handoff' +
+        (details ? `: ${details}` : '')
     );
   };
-  if (inventory.unresolved.length) refuse();
+  if (inventory.unresolved.length)
+    refuse(
+      inventory.unresolved
+        .map((entry) => `${entry.worktreeRoot || '(unknown worktree)'}: ${entry.reason}`)
+        .join('; ')
+    );
   const observations = [];
   const identities = new Set<string>();
   for (const git of inventory.contexts) {
@@ -33,7 +39,10 @@ export async function observeCheckoutOwnerAbsence(
       context.authority,
       context.authority.projectId
     );
-    if (!registered?.registration || !registered.worktree) return refuse();
+    if (!registered?.registration || !registered.worktree)
+      return refuse(
+        `${git.worktreeRoot} (${git.gitDir}): missing registration; run orcaops doctor --fix in that worktree`
+      );
     const { registration, worktree } = registered;
     const authority = {
       resolvedRoot: registration.authority.resolved_root,

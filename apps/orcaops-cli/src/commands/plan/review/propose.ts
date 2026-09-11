@@ -226,6 +226,7 @@ export async function reviewProposeAction(
         baseUrl: opts.baseUrl,
         requires: [ORCAOPS_CAPABILITIES.SOURCE_PLAN_REVIEW],
         operation: 'plan review propose',
+        registerWorktree: true,
       },
       async (ctx) => {
         const pulledAt = new Date().toISOString();

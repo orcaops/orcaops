@@ -7,7 +7,11 @@ import { promisify } from 'node:util';
 import { afterEach, expect, it, vi } from 'vitest';
 
 import * as durability from './durability.js';
-import { prepareDatabaseGitClosure, requireOwnedDatabaseGitObjects } from './object-closure.js';
+import {
+  prepareDatabaseGitClosure,
+  requireOwnedDatabaseGitObjects,
+  unpairedPackFiles,
+} from './object-closure.js';
 import { requireDatabaseExecutionContext } from '../context/execution.js';
 import { setupProjectDatabase } from '../setup/setup.js';
 
@@ -103,21 +107,66 @@ it('synchronizes the exact original commit, its ancestor, tree and blob closure 
     expect(synced).toContain(path.join(f.cwd, '.git', 'objects', id.slice(0, 2), id.slice(2)));
   expect(await git(f.cwd, 'for-each-ref', '--format=%(refname)', 'refs/orcaops')).toBe('');
 });
-it('synchronizes primary packed representations without rewriting or unpacking them', async () => {
+it.each([
+  'pack-' + 'a'.repeat(40),
+  'loose-' + 'b'.repeat(40),
+  'pack-' + 'a'.repeat(64),
+  'custom',
+  'some pack.name',
+])('accepts paired files with stem %s', (stem) =>
+  expect(unpairedPackFiles([`${stem}.pack`, `${stem}.idx`])).toEqual([])
+);
+it('reports both orphan directions in sorted order and ignores unrelated entries', () => {
+  expect(unpairedPackFiles(['z.pack', 'a.idx', 'z.rev', 'a.keep', 'multi-pack-index'])).toEqual([
+    'a.idx',
+    'z.pack',
+  ]);
+  expect(unpairedPackFiles([])).toEqual([]);
+});
+it.each(['original', 'loose', 'custom'])(
+  'synchronizes %s packed representations without rewriting or unpacking them',
+  async (stem) => {
+    const f = await withBlob();
+    await git(f.cwd, 'repack', '-ad');
+    const directory = path.join(f.cwd, '.git', 'objects', 'pack');
+    const originalNames = (await filesystem.readdir(directory)).filter((name) =>
+      /\.(pack|idx)$/.test(name)
+    );
+    const names = originalNames.map((name) =>
+      stem === 'original'
+        ? name
+        : stem === 'loose'
+          ? name.replace(/^pack-/, 'loose-')
+          : `custom${path.extname(name)}`
+    );
+    for (let i = 0; i < names.length; i++) {
+      if (names[i] !== originalNames[i])
+        await filesystem.rename(
+          path.join(directory, originalNames[i]!),
+          path.join(directory, names[i]!)
+        );
+    }
+    const before = await Promise.all(names.map((name) => readFile(path.join(directory, name))));
+    const synced = recordSyncs();
+    expect(await prepareDatabaseGitClosure(f.context, f.objectOid)).toMatchObject({
+      objectOid: f.objectOid,
+    });
+    for (const name of names) expect(synced).toContain(path.join(directory, name));
+    expect(await Promise.all(names.map((name) => readFile(path.join(directory, name))))).toEqual(
+      before
+    );
+    await expect(readFile(f.blobFile)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await git(f.cwd, 'cat-file', '-p', f.blobOid)).toBe('Exact retained historical blob');
+  }
+);
+it.each(['pack', 'idx'])('refuses an orphan .%s with filename detail', async (extension) => {
   const f = await withBlob();
-  await git(f.cwd, 'repack', '-ad');
   const directory = path.join(f.cwd, '.git', 'objects', 'pack');
-  const names = (await filesystem.readdir(directory)).filter((name) => /\.(pack|idx)$/.test(name));
-  const before = await Promise.all(names.map((name) => readFile(path.join(directory, name))));
-  const synced = recordSyncs();
-  expect(await prepareDatabaseGitClosure(f.context, f.objectOid)).toMatchObject({
-    objectOid: f.objectOid,
+  await writeFile(path.join(directory, `orphan.${extension}`), '');
+  await expect(requireOwnedDatabaseGitObjects(f.context)).rejects.toMatchObject({
+    code: 'HISTORY_INACCESSIBLE',
+    message: expect.stringContaining(`orphan.${extension}`),
   });
-  for (const name of names) expect(synced).toContain(path.join(directory, name));
-  expect(await Promise.all(names.map((name) => readFile(path.join(directory, name))))).toEqual(
-    before
-  );
-  await expect(readFile(f.blobFile)).rejects.toMatchObject({ code: 'ENOENT' });
 });
 it.each(['objects/info/alternates', 'shallow', 'info/grafts'])(
   'refuses incomplete or borrowed ancestry metadata %s without writing an acknowledgement',

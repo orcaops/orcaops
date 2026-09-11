@@ -238,7 +238,7 @@ export function buildDetail(
         : step.current
           ? 'step-current'
           : 'step-todo';
-      push(fitRow(`  ${glyph} ${step.idx + 1}. `, step.label, '', safeWidth), tone, id, action);
+      push(fitRow(`  ${glyph} ${step.idx}. `, step.label, '', safeWidth), tone, id, action);
       if (expanded.has(id)) {
         pushWrapped(step.text, 'detail', id, '      ', '      ');
         const cpN = cpByStep.get(step.idx);

@@ -58,14 +58,14 @@ function richThread(index: number): WatchThread {
       index === 0
         ? [
             {
-              idx: 0,
+              idx: 1,
               text: 'Preserve every captured artifact semantic while refining presentation',
               label: 'Preserve captured semantics',
               done: true,
               current: false,
             },
             {
-              idx: 1,
+              idx: 2,
               text: 'Make the task member journey predictable for keyboard and pointer users',
               label: 'Refine task member journey',
               done: false,
@@ -92,7 +92,7 @@ function richThread(index: number): WatchThread {
                   ],
                 },
               ],
-              steps: [{ idx: 0, label: 'Preserve captured semantics' }],
+              steps: [{ idx: 1, label: 'Preserve captured semantics' }],
               linesAdded: 0,
               linesRemoved: 0,
               filesChanged: 0,
@@ -558,7 +558,7 @@ for (const width of [80, 110, 160, 220]) {
           summary: null,
           uncertainties: [],
           decisions: [],
-          steps: [{ idx: 1, label: 'Refine task member journey' }],
+          steps: [{ idx: 2, label: 'Refine task member journey' }],
           linesAdded: null,
           linesRemoved: null,
           filesChanged: null,

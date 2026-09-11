@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -392,58 +392,96 @@ describe('checkpoint snapshot + fingerprint capture', () => {
     ]);
   }
 
-  it('open → modify → close: manifest produced with expected hunks', async () => {
-    const plan = await capturePlan(['step a']);
-    const o1 = parseOk<OkEnvelope & { n: number }>(
+  it.each(['ordinary', 'loose'])(
+    'captures tracked edits and fingerprints with %s packs',
+    async (packKind) => {
+      await commitFile(repo.path, 'src/foo.ts', 'export const x = 0;\n', 'add tracked source');
+      if (packKind === 'loose') {
+        execFileSync('git', ['repack', '-ad'], { cwd: repo.path });
+        const directory = path.join(repo.path, '.git', 'objects', 'pack');
+        const names = (await readdir(directory)).filter((name) => /\.(?:pack|idx)$/.test(name));
+        expect(names.length).toBeGreaterThan(0);
+        for (const name of names)
+          await rename(
+            path.join(directory, name),
+            path.join(directory, name.replace(/^pack-/, 'loose-'))
+          );
+      }
+      const plan = await capturePlan(['step a']);
+      const o1 = parseOk<OkEnvelope & { n: number }>(
+        await openCp({ artifact_id: plan.artifact_id, declared_step_ids: [plan.step_ids[0]] })
+      );
+      expect(o1.n).toBe(1);
+
+      // Modify a file AND commit so the close snapshot's tree diverges from
+      // the open snapshot's tree. (Capture includes uncommitted changes too,
+      // but staging-then-committing keeps the fixture deterministic across
+      // git versions and gives us a clean diff for the manifest.)
+      await commitFile(
+        repo.path,
+        'src/foo.ts',
+        'export const x = 1;\nexport const y = 2;\n',
+        'add foo'
+      );
+
+      parseOk(
+        await closeCp({
+          artifact_id: plan.artifact_id,
+          n: 1,
+          summary: 'cp1 added foo',
+          files_changed: ['src/foo.ts'],
+          completed_step_ids: [plan.step_ids[0]],
+        })
+      );
+
+      const proj = await readCheckpointProjection<ClosedCheckpointProjection>(
+        repo.path,
+        plan.artifact_id,
+        1
+      );
+      expect(proj.status).toBe('closed');
+      expect(proj.open_snapshot.tree_sha).not.toBeNull();
+      expect(proj.close_snapshot.tree_sha).not.toBeNull();
+      expect(proj.open_snapshot.snapshot_error_reason).toBeNull();
+      expect(proj.close_snapshot.snapshot_error_reason).toBeNull();
+      expect(proj.open_snapshot.tree_sha).not.toEqual(proj.close_snapshot.tree_sha);
+
+      expect(proj.diff_fingerprint_summary.status).toBe('captured');
+      expect(proj.diff_fingerprint_summary.hunk_count).toBeGreaterThan(0);
+      expect(proj.diff_fingerprint_summary.captured_hunk_count).toEqual(
+        proj.diff_fingerprint_summary.hunk_count
+      );
+      expect(proj.diff_fingerprint_summary.error_reason).toBeNull();
+      // base64url-nopad 256-bit hash: 43 chars from [A-Za-z0-9_-].
+      expect(proj.diff_fingerprint_summary.manifest_hash).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+      const payload = await readLatestCheckpointClosedPayload(repo.path, plan.artifact_id, 1);
+      expect(payload.diff_fingerprint_manifest).toBeDefined();
+      expect(payload.diff_fingerprint_manifest!.hunks.length).toEqual(
+        proj.diff_fingerprint_summary.hunk_count
+      );
+      expect(payload.diff_fingerprint_manifest!.hunks).toEqual(
+        expect.arrayContaining([expect.objectContaining({ file_after: 'src/foo.ts' })])
+      );
+    }
+  );
+
+  it('names an unpaired pack in the capture warning while preserving the checkpoint record', async () => {
+    const plan = await capturePlan(['inspect storage']);
+    await writeFile(path.join(repo.path, '.git', 'objects', 'pack', 'orphan.pack'), '');
+    const opened = parseOk<OkEnvelope & { warnings?: WarningEntry[] }>(
       await openCp({ artifact_id: plan.artifact_id, declared_step_ids: [plan.step_ids[0]] })
     );
-    expect(o1.n).toBe(1);
-
-    // Modify a file AND commit so the close snapshot's tree diverges from
-    // the open snapshot's tree. (Capture includes uncommitted changes too,
-    // but staging-then-committing keeps the fixture deterministic across
-    // git versions and gives us a clean diff for the manifest.)
-    await commitFile(
-      repo.path,
-      'src/foo.ts',
-      'export const x = 1;\nexport const y = 2;\n',
-      'add foo'
-    );
-
-    parseOk(
-      await closeCp({
-        artifact_id: plan.artifact_id,
-        n: 1,
-        summary: 'cp1 added foo',
-        files_changed: ['src/foo.ts'],
-        completed_step_ids: [plan.step_ids[0]],
-      })
-    );
-
-    const proj = await readCheckpointProjection<ClosedCheckpointProjection>(
+    const warning = findWarning(opened.warnings, 'snapshot-capture-failed');
+    expect(warning?.message).toContain('orphan.pack');
+    expect(warning?.message).toContain('self-contained');
+    const projection = await readCheckpointProjection<OpenCheckpointProjection>(
       repo.path,
       plan.artifact_id,
       1
     );
-    expect(proj.status).toBe('closed');
-    expect(proj.open_snapshot.tree_sha).not.toBeNull();
-    expect(proj.close_snapshot.tree_sha).not.toBeNull();
-    expect(proj.open_snapshot.tree_sha).not.toEqual(proj.close_snapshot.tree_sha);
-
-    expect(proj.diff_fingerprint_summary.status).toBe('captured');
-    expect(proj.diff_fingerprint_summary.hunk_count).toBeGreaterThan(0);
-    expect(proj.diff_fingerprint_summary.captured_hunk_count).toEqual(
-      proj.diff_fingerprint_summary.hunk_count
-    );
-    expect(proj.diff_fingerprint_summary.error_reason).toBeNull();
-    // base64url-nopad 256-bit hash: 43 chars from [A-Za-z0-9_-].
-    expect(proj.diff_fingerprint_summary.manifest_hash).toMatch(/^[A-Za-z0-9_-]{43}$/);
-
-    const payload = await readLatestCheckpointClosedPayload(repo.path, plan.artifact_id, 1);
-    expect(payload.diff_fingerprint_manifest).toBeDefined();
-    expect(payload.diff_fingerprint_manifest!.hunks.length).toEqual(
-      proj.diff_fingerprint_summary.hunk_count
-    );
+    expect(projection.status).toBe('open');
+    expect(projection.open_snapshot.tree_sha).toBeNull();
   });
 
   it('open → modify → close in a repo that gitignores .orcaops/tmp/: boundaries still captured', async () => {

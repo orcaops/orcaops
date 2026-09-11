@@ -25,6 +25,7 @@ import type { ExecutionBinding } from '@orcaops/storage/history/execution';
 import { resolveShellKey, type ShellKey } from '@orcaops/storage/history/execution-focus';
 
 import { resolveDatabaseHistoryCommandContext } from './database-history-context.js';
+import { registerMissingDatabaseWorktree } from './database-worktree-registration.js';
 import { closeFailedHistoryRead } from './history-reader-close.js';
 import { getInvocationEnv, getInvocationInvokedByAgent } from './invocation-context.js';
 import { type InvokingAgentResolution, resolveInvokingAgent } from './invoking-agent.js';
@@ -56,6 +57,7 @@ export interface FreshCaptureRepository {
   readonly root: string;
 }
 export interface ResolveDatabaseCaptureContext {
+  registerWorktree?: boolean | ((config: Config) => void);
   project?: string;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
@@ -118,6 +120,19 @@ export async function resolveDatabaseCaptureContext(
         'IDENTITY_RECOVERY_REQUIRED',
         'Capture requires its original registered worktree context'
       );
+    if (scope.gitContext.worktreeId === null && options.registerWorktree) {
+      if (typeof options.registerWorktree === 'function') options.registerWorktree(context.config);
+      await registerMissingDatabaseWorktree(
+        {
+          cwd: scope.gitContext.worktreeRoot,
+          root: scope.root.resolvedRoot,
+          projectId: selected.projectId,
+          expectedAuthority: selected.authority,
+          secretAllow: context.config.redact.allow,
+        },
+        { signal: options.signal }
+      );
+    }
     const registered = await requireDatabaseExecutionContext(
       {
         cwd: scope.gitContext.worktreeRoot,
@@ -131,7 +146,8 @@ export async function resolveDatabaseCaptureContext(
       !isDeepStrictEqual(selected.database.authority, selected.authority) ||
       registered.authority.rootKey !== scope.root.rootKey ||
       registered.authority.resolvedRoot !== scope.root.resolvedRoot ||
-      registered.git.worktreeId !== scope.gitContext.worktreeId ||
+      (scope.gitContext.worktreeId !== null &&
+        registered.git.worktreeId !== scope.gitContext.worktreeId) ||
       registered.git.repositoryInstanceId !== scope.gitContext.repositoryInstanceId ||
       (
         [
@@ -223,6 +239,9 @@ export async function prepareDatabaseCapture<TRaw, TInput = TRaw>(input: {
   const raw = structuredClone(await input.parse());
   const initialize = input.initialize;
   const context = await resolveDatabaseCaptureContext({
+    registerWorktree: (config) => {
+      refuseCaptureInput(raw, config.redact.allow);
+    },
     project: input.project,
     env: input.env,
     signal: input.signal,

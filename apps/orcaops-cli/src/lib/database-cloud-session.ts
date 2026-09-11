@@ -66,7 +66,7 @@ export interface ConnectDatabaseCloudSessionInput {
 export type OpenDatabaseCloudSessionInput = Omit<
   ConnectDatabaseCloudSessionInput,
   'context' | 'handle'
->;
+> & { readonly registerWorktree?: boolean };
 
 export interface DatabaseCloudSessionDependencies {
   readonly resolveCredentials?: typeof resolveCredentialStore;
@@ -228,7 +228,10 @@ export async function openDatabaseCloudSession(
   input: OpenDatabaseCloudSessionInput,
   dependencies: DatabaseCloudSessionDependencies = {}
 ): Promise<DatabaseCloudSession> {
-  const context = await resolveDatabaseCaptureContext({ signal: input.signal });
+  const context = await resolveDatabaseCaptureContext({
+    registerWorktree: input.registerWorktree,
+    signal: input.signal,
+  });
   let handle: ProjectDatabase | null = null;
   try {
     const connection = await prepareDatabaseCloudConnection(

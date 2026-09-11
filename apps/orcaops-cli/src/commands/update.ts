@@ -546,7 +546,13 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
 
       const result = plan.generate;
       const agentsMd = plan.agentsMd;
+      const globalPlanningSkipped = repoId === null && needsGlobalWrite;
       const warnings = [...personalWarnings, ...plan.warnings, ...(global?.warnings ?? [])];
+      if (globalPlanningSkipped) {
+        warnings.push(
+          'Global planning skipped: this repository has no project identity. Run update without --dry-run to initialize it and reconcile global state.'
+        );
+      }
 
       if (opts.json) {
         emitOk({
@@ -597,15 +603,22 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
         if (global.skippedVersionMismatch) {
           lines.push(
             `Global scope: SKIPPED filesystem changes (CLI v${CLI_VERSION} vs ` +
-              `manifest v${global.manifest.materialized_by}); refs updated.`
+              `manifest v${global.manifest.materialized_by}); references unchanged.`
           );
         } else {
           lines.push(
-            `Global scope (${resolveGlobalRoot()}): ${global.materialized.length} materialized` +
-              (global.removed.length > 0 ? `, ${global.removed.length} removed` : '') +
-              (global.copyFallbacks.length > 0
-                ? `, ${global.copyFallbacks.length} copied (foreign dir)`
+            `Global scope (${resolveGlobalRoot()}): ${global.changed.length} file(s) ${opts.dryRun ? 'would change' : 'changed'}` +
+              (global.removed.length > 0
+                ? `, ${global.removed.length} ${opts.dryRun ? 'would be removed' : 'removed'}`
+                : '') +
+              (global.ownershipChanged
+                ? `; ownership/references ${opts.dryRun ? 'would be updated' : 'updated'}`
                 : '')
+          );
+        }
+        if (global.held.length > 0) {
+          lines.push(
+            `${global.held.length} cloud-gated skill(s) preserved; unavailable templates were not checked.`
           );
         }
         lines.push('');
@@ -684,7 +697,14 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
           lines.push(
             `${aheadCount} file(s) preserved — stamped newer than this CLI. Upgrade orcaops.`
           );
-        } else if (!global?.skippedVersionMismatch) {
+        } else if (
+          !global?.skippedVersionMismatch &&
+          !globalPlanningSkipped &&
+          (global?.changed.length ?? 0) === 0 &&
+          (global?.removed.length ?? 0) === 0 &&
+          !global?.ownershipChanged &&
+          !removeInstallManifest
+        ) {
           // A skipped global rewrite is NOT up to date — the SKIPPED line
           // above already named the directional remedy.
           lines.push('Everything is already up to date for this version.');

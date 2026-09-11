@@ -66,6 +66,7 @@ export async function pushAction(
         })
       : await openDatabaseCloudSession(
           {
+            registerWorktree: true,
             selection: { kind: 'artifact', artifactId },
             baseUrl: opts.baseUrl,
             signal: controller.signal,

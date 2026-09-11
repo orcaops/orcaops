@@ -29,7 +29,10 @@ import {
   scrubAndBound,
   worktreeState,
 } from '@orcaops/core';
-import { requireDatabaseExecutionContext } from '@orcaops/core/history/database-retention';
+import {
+  requireDatabaseExecutionContext,
+  unpairedPackFiles,
+} from '@orcaops/core/history/database-retention';
 import { runBoundedSubprocess } from '@orcaops/evaluator-protocol/subprocess';
 import {
   computeEvaluatorFingerprint,
@@ -61,6 +64,7 @@ import {
 import { normalizeHistoryRoot } from '@orcaops/storage/history/authority';
 import { openProjectDatabase, ProjectDatabaseError } from '@orcaops/storage/history/database';
 
+import { registerMissingDatabaseWorktree } from '../lib/database-worktree-registration.js';
 import { inspectSeedClone, repairSeed } from './seed/index.js';
 import { CliExit } from '../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../io/output.js';
@@ -211,6 +215,7 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
 
   checks.push(await checkGitRepo(repoRoot));
   checks.push(await checkIndexConflicts(repoRoot));
+  checks.push(await guardRepositoryCheck('git-pack-pairing', () => checkGitPackPairing(repoRoot)));
   checks.push(await checkInit(repoRoot));
   checks.push(await guardRepositoryCheck('personal-scope', () => checkPersonalScope(repoRoot)));
 
@@ -246,6 +251,36 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
   let databaseHistory: DatabaseDoctorResult | null = null;
   const appendDatabaseHistory = async (dispositionTtlDays: number) => {
     try {
+      const root = await normalizeHistoryRoot({ env: getInvocationEnv(), cwd: repoRoot });
+      const registration = await registerMissingDatabaseWorktree(
+        {
+          cwd: repoRoot,
+          root: root.resolvedRoot,
+          secretAllow: config?.redact.allow ?? [],
+        },
+        { dryRun: !opts.fix || opts.dryRun }
+      );
+      if (registration) {
+        const preview = !opts.fix || opts.dryRun;
+        checks.push({
+          name: 'worktree-registration',
+          status: preview ? 'fail' : 'pass',
+          summary: preview
+            ? 'This worktree has no execution registration'
+            : 'Registered this worktree with existing project history',
+          details: [
+            preview
+              ? 'Run `orcaops doctor --fix` in this worktree to register it.'
+              : `Project ${registration.projectId}`,
+            ...(preview
+              ? [
+                  'Project identity was validated; further history checks are skipped until this worktree is registered.',
+                ]
+              : []),
+          ],
+        });
+        if (preview) return;
+      }
       databaseHistory = await readCanonicalDoctorHistory(repoRoot, dispositionTtlDays);
       checks.push(...databaseHistory.checks);
     } catch (error) {
@@ -2206,6 +2241,25 @@ async function globalCloudResidue(config: Config, gates: SkillGates): Promise<st
   return lines;
 }
 
+async function checkGitPackPairing(repoRoot: string): Promise<DoctorCheck> {
+  const name = 'git-pack-pairing';
+  const commonDir = await new Repo(repoRoot).getCommonDirAbsolute();
+  const unpaired = unpairedPackFiles(await readdir(path.join(commonDir, 'objects', 'pack')));
+  if (unpaired.length === 0)
+    return { name, status: 'pass', summary: 'no unpaired Git pack/index files' };
+  return {
+    name,
+    status: 'warn',
+    summary: `${unpaired.length} unpaired Git pack/index file(s)`,
+    details: [
+      ...unpaired.map((file) => `  - ${JSON.stringify(file)}`),
+      'Orcaops cannot establish complete owned object storage; snapshot capture and per-line attribution are unavailable.',
+      'If Git maintenance is running, retry after it finishes. Otherwise inspect the listed files and restore the missing index or pack.',
+      'A missing index may require git index-pack; this cannot recover a missing pack. An unpaired file alone does not prove repository damage.',
+    ],
+  };
+}
+
 async function checkIndexConflicts(repoRoot: string): Promise<DoctorCheck> {
   const name = 'index-conflicts';
   try {
@@ -2353,6 +2407,7 @@ const DOCTOR_SECTIONS = [
     checks: new Set([
       'git-repo',
       'index-conflicts',
+      'git-pack-pairing',
       'init',
       'personal-scope',
       'config',

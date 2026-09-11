@@ -301,7 +301,10 @@ export async function planPullAction(idOrSlug: string, opts: PlanPullOptions = {
     assertNoSecretsOutbound('plan-pull', [['out_realpath', outPath]], secretAllow);
     const baseUrl = resolveCloudTarget(opts.baseUrl);
 
-    const context = await resolveDatabaseCaptureContext({ signal: controller.signal });
+    const context = await resolveDatabaseCaptureContext({
+      registerWorktree: true,
+      signal: controller.signal,
+    });
     let result: PlanPullResult;
     try {
       const credentialStore = resolveCredentialStore();

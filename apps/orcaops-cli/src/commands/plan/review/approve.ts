@@ -173,6 +173,7 @@ export async function reviewApproveAction(
         baseUrl: opts.baseUrl,
         requires: [],
         operation: 'plan review approve',
+        registerWorktree: true,
       },
       (ctx) =>
         runReviewApprove({

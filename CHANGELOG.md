@@ -5,6 +5,46 @@ Notable changes to the Orcaops CLI. Format follows
 [SemVer](https://semver.org/spec/v2.0.0.html). Below 1.0.0, minor releases
 may change behaviour. Anything needing action on upgrade is called out.
 
+## [0.2.1] - 2026-09-11
+
+### Breaking changes
+
+- Logged-out `push-status --json` returns `pending: null`, with
+  `state: "unavailable"`, `reason: "not_connected"` and exit code 0. Handle the
+  null before reading `pending.length`.
+- Logged-out `status --json` reports cloud sync as unavailable, with null counts
+  and `reason: "not_connected"`.
+
+### Added
+
+- `init --json` marks a registration-only run with `registration_only: true`,
+  alongside `repo_root`, `project_id`, `project_id_minted: false`, `dry_run` and
+  `warnings`. Branch on that flag before reading installer fields such as
+  `created`, `config_path` and `git_hooks`, which the run does not produce.
+
+### Fixed
+
+- Snapshot capture accepts Git maintenance packs and other same-stem pack/index pairs
+  without requiring a filename prefix or hash. Doctor reports unpaired pack/index files
+  with recovery guidance and surfaces pack-directory inspection failures.
+- Credential-store lookup failures no longer break local status or push-status;
+  unknown authentication state preserves backlog reporting without a network probe.
+- Doctor explains which checks wait for worktree registration, and init refusals
+  identify the registration-only remedy when installation flags were supplied.
+- Personal-scope legacy conversion retains the shared ownership manifest and
+  evaluator registration. Conversion refusals identify unresolved source paths
+  and issues. Already-converted installations, including those that used a
+  move-aside workaround, need no reconversion.
+- Update reports global skill changes, repairs, and reference changes accurately,
+  while preserving the up-to-date confirmation for genuine no-ops.
+- New linked worktrees register automatically for execution against existing
+  history. Ordinary init and `doctor --fix` can register a missing worktree
+  binding without forced reinitialization. Artifact ownership still requires
+  explicit handoff; orphan-recovery diagnostics identify blocked worktrees.
+- Status and push-status omit cloud backlog details when local authentication is
+  `not_connected`. Expired credentials retain backlog visibility without a
+  network check. Connected output and retained sync records are unchanged.
+
 ## [0.2.0] - 2026-09-10
 
 Five things to check on upgrade: move to Node 22.14.0 or newer, uninstall

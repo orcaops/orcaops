@@ -794,3 +794,41 @@ describe('retained repository preview', { timeout: 30_000 }, () => {
     await expect(prepareLegacySources(preview)).rejects.toMatchObject({ code: 'SOURCE_CHANGED' });
   });
 });
+
+it('retains only exact shared installation files across linked worktrees', async () => {
+  const f = await fixture();
+  const shared = ['personal-manifest.json', 'evaluators.yaml'];
+  for (const name of shared) await f.write(`.git/orcaops/${name}`, encode({ retained: name }));
+  await fs.mkdir(path.join(f.options.cwd, '.git/orcaops/locks'));
+  const linked = path.join(f.directory, 'linked');
+  await exec('git', ['-C', f.options.cwd, 'worktree', 'add', '-qb', 'linked', linked], {
+    env: f.options.env,
+  });
+  for (const cwd of [f.options.cwd, linked]) {
+    const preview = await previewLegacyRepository({ ...f.options, cwd });
+    expect(preview.contentComplete).toBe(true);
+    expect(preview.retained).toEqual(
+      shared.sort().map((name) => ({
+        location: path.join(f.options.cwd, '.git/orcaops', name),
+        family: name === 'evaluators.yaml' ? 'evaluator-config' : 'installer',
+        sha256: hash(encode({ retained: name })),
+      }))
+    );
+  }
+  const unknown = [
+    '.git/orcaops/unknown.json',
+    '.git/orcaops/nested/personal-manifest.json',
+    '.git/orcaops/locks/install-state.lock',
+    '.git/worktrees/linked/orcaops/personal-manifest.json',
+    '.git/worktrees/linked/orcaops/evaluators.yaml',
+  ];
+  for (const name of unknown)
+    await f.write(name, encode({ private: 'contents must not be displayed' }));
+  const preview = await previewLegacyRepository({ ...f.options, cwd: linked });
+  expect(preview.issues).toEqual([]);
+  expect(preview.contentComplete).toBe(false);
+  expect(preview.unclassified.map((entry) => entry.location).sort()).toEqual(
+    unknown.map((name) => path.join(f.options.cwd, name)).sort()
+  );
+  await expect(prepareLegacySources(preview)).rejects.toMatchObject({ code: 'SOURCE_UNAVAILABLE' });
+});

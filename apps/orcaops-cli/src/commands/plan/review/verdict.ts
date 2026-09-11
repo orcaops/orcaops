@@ -154,6 +154,7 @@ export async function reviewVerdictAction(
         baseUrl: opts.baseUrl,
         requires: [ORCAOPS_CAPABILITIES.SOURCE_PLAN_REVIEW],
         operation: 'plan review verdict',
+        registerWorktree: true,
       },
       async (ctx) => {
         const mutation = createReviewMutation(ctx, {

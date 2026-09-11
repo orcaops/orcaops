@@ -184,7 +184,10 @@ export async function planUploadAction(file: string, opts: PlanUploadOptions = {
       ],
       await loadSecretAllowlist()
     );
-    const context = await resolveDatabaseCaptureContext({ signal: controller.signal });
+    const context = await resolveDatabaseCaptureContext({
+      registerWorktree: true,
+      signal: controller.signal,
+    });
     const credentialStore = resolveCredentialStore();
     const baseUrl = resolveCloudTarget(opts.baseUrl);
     let result: WithSecretWarnings<PlanUploadResult>;

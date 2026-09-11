@@ -256,6 +256,13 @@ it('requires complete registered inventory and observes original owner absence b
     code: 'EXECUTION_RECOVERY_REQUIRED',
   });
   expect(saved(f.handle)).toEqual(before);
+  await expect(prepareDatabaseCheckout(f.handle, f.main, input())).rejects.toThrow(unregistered);
+  const prunable = path.join(f.directory, 'prunable');
+  await git(f.cwd, 'worktree', 'add', '-qb', 'prunable', prunable);
+  await rm(prunable, { recursive: true, force: true });
+  await expect(prepareDatabaseCheckout(f.handle, f.main, input())).rejects.toThrow(prunable);
+  await expect(prepareDatabaseCheckout(f.handle, f.main, input())).rejects.toThrow('prunable');
+  await git(f.cwd, 'worktree', 'prune');
   await register(unregistered, f.root);
   const result = await publishDatabaseCheckout(
     f.handle,

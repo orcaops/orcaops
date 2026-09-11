@@ -7,6 +7,7 @@ import { toCloudErrorEnvelope } from '../io/cloud-error-envelope.js';
 import { CliExit } from '../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../io/output.js';
 import { resolveDatabaseHistoryCommandContext } from '../lib/database-history-context.js';
+import { readStatusAuthKind } from '../lib/status-auth.js';
 
 export interface PushStatusOptions {
   json?: boolean;
@@ -41,6 +42,15 @@ interface PendingRow {
  */
 export async function pushStatusAction(opts: PushStatusOptions = {}): Promise<void> {
   try {
+    const authKind = await readStatusAuthKind();
+    if (authKind === 'not_connected') {
+      if (opts.json) emitOk({ state: 'unavailable', reason: authKind, pending: null });
+      else
+        writeTerminalSafeStdout(
+          'Login is required to view cloud sync status. Run `orcaops login`.\n'
+        );
+      return;
+    }
     const ctx = await resolveDatabaseHistoryCommandContext({ profile: 'collection' });
     try {
       if (!ctx.scope.completeness.complete) {

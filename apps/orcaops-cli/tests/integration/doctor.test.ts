@@ -82,6 +82,56 @@ describe('orcaops doctor', () => {
     await repo.cleanup();
   });
 
+  it('accepts arbitrary paired pack names and groups the check under repository', async () => {
+    const init = await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
+    expect(init.exitCode).toBe(0);
+    const directory = path.join(repo.path, '.git', 'objects', 'pack');
+    await writeFile(path.join(directory, 'custom.pack'), '');
+    await writeFile(path.join(directory, 'custom.idx'), '');
+    const report = JSON.parse((await agent.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+    expect(findCheck(report, 'git-pack-pairing')).toMatchObject({
+      status: 'pass',
+      summary: 'no unpaired Git pack/index files',
+    });
+    await rm(path.join(directory, 'custom.idx'));
+    const human = await agent.runRaw(['doctor']);
+    const repository = human.stdout.indexOf('✓ repository');
+    const warning = human.stdout.indexOf('⚠ git-pack-pairing');
+    const nextSection = human.stdout.indexOf('✓ install surfaces');
+    expect(repository).toBeGreaterThanOrEqual(0);
+    expect(warning).toBeGreaterThan(repository);
+    expect(nextSection).toBeGreaterThan(warning);
+  });
+
+  it.each(['pack', 'idx'])(
+    'warns about an orphan .%s without declaring repository damage',
+    async (extension) => {
+      await writeFile(path.join(repo.path, '.git', 'objects', 'pack', `orphan.${extension}`), '');
+      const report = JSON.parse((await agent.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+      const check = findCheck(report, 'git-pack-pairing');
+      expect(check.status).toBe('warn');
+      expect(check.details?.join('\n')).toContain(`orphan.${extension}`);
+      expect(check.details?.join('\n')).toContain('retry after it finishes');
+      expect(check.details?.join('\n')).toContain('restore the missing index or pack');
+      expect(check.details?.join('\n')).not.toContain('git repack');
+      expect(findCheck(report, 'git-repo').status).toBe('pass');
+    }
+  );
+
+  it('reports pack directory inspection failure in the normal report and exits one', async () => {
+    const directory = path.join(repo.path, '.git', 'objects', 'pack');
+    await rename(directory, `${directory}.saved`);
+    await writeFile(directory, 'not a directory');
+    const result = await agent.runRaw(['doctor', '--json']);
+    expect(result.exitCode).toBe(1);
+    const report = JSON.parse(result.stdout) as DoctorReport;
+    expect(report.ok).toBe(true);
+    expect(findCheck(report, 'git-pack-pairing')).toMatchObject({
+      status: 'fail',
+      details: [expect.stringContaining('ENOTDIR')],
+    });
+  });
+
   it('on uninitialized repo: git-repo passes; init + config fail; overall=fail; exit=1', async () => {
     const res = await agent.runRaw(['doctor', '--json']);
     expect(res.exitCode).toBe(1);

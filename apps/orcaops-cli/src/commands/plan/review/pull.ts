@@ -230,6 +230,7 @@ export async function reviewPullAction(ref: string, opts: ReviewPullOptions = {}
             ? [ORCAOPS_CAPABILITIES.SOURCE_PLAN_REVIEW, ORCAOPS_CAPABILITIES.REVIEW_VERSION_PULL]
             : [ORCAOPS_CAPABILITIES.SOURCE_PLAN_REVIEW],
         operation: 'plan review pull',
+        registerWorktree: true,
       },
       async (ctx) => {
         const persistence = createDatabasePlanReviewPersistence({

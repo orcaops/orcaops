@@ -31,10 +31,17 @@ it('retains copied selectors and JSON preference while context resolution is pen
   const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
   vi.spyOn(process.stderr, 'write').mockReturnValue(true);
   let reject!: (error: Error) => void;
+  let opened!: () => void;
+  // The action awaits the credential-store probe before resolving context, so
+  // the selector copy can only be observed once openContext has been entered.
+  const openContextEntered = new Promise<void>((resolve) => {
+    opened = resolve;
+  });
   const openContext = vi.fn(
     (_selector: HistorySelector, _env: NodeJS.ProcessEnv) =>
       new Promise<never>((_resolve, fail) => {
         reject = fail;
+        opened();
       })
   );
   const action = createDatabaseStatusAction({ openContext });
@@ -44,6 +51,7 @@ it('retains copied selectors and JSON preference while context resolution is pen
   options.project = uuidv7();
   options.branch = 'later';
   options.json = false;
+  await openContextEntered;
   reject(new HistoryScopeError('PROJECT_REQUIRED', 'Original target unavailable'));
   await expect(pending).rejects.toMatchObject({ code: 1 });
   expect(openContext.mock.calls[0][0]).toEqual({

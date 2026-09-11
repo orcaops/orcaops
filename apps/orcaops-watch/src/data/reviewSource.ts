@@ -1,7 +1,7 @@
-// UI-side review-data loader. Spawn the app's own Node sidecar once
-// (`review pane --branch <b> --json`) so the sqlite read stays off the Bun UI,
-// then build the deterministic projections here. The pane is retained store
-// data: the floor and its diff are retained evidence, and the routine Story is
+// UI-side review-data loader. Active loads produce through `review data`;
+// passive loads only read `review pane`. Both use the app's Node sidecar so
+// SQLite stays off the Bun UI, then build deterministic projections here.
+// The floor and its diff are retained evidence, and the routine Story is
 // the sealed run's retained publication, so nothing here reads a review
 // directory file. Renderer-free (the src/data rule).
 
@@ -55,6 +55,15 @@ function spawnReviewSidecar(
   options: { env: NodeJS.ProcessEnv; signal?: AbortSignal }
 ): Promise<SidecarResult> {
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(
+        Object.assign(new Error('The operation was aborted'), {
+          name: 'AbortError',
+          code: 'ABORT_ERR',
+        })
+      );
+      return;
+    }
     const detached = process.platform !== 'win32';
     const child = spawn(node, [...argv], {
       env: options.env,
@@ -357,18 +366,48 @@ export class ReviewPaneError extends Error {
   }
 }
 
-/** Spawn the sidecar review verb and return its parsed JSON envelope. */
-async function runPaneVerb(
+export class ReviewDataError extends Error {
+  readonly code: string | null;
+
+  constructor(exitCode: number, stderr: string) {
+    super(`review data sidecar exited ${exitCode}${stderr.length > 0 ? `: ${stderr}` : ''}`);
+    this.name = 'ReviewDataError';
+    this.code = /^review data \(operation [^)]+\): ([A-Z_]+): /mu.exec(stderr)?.[1] ?? null;
+  }
+}
+
+async function runReviewVerb(
   opts: LoadReviewOptions,
+  verb: 'data' | 'pane',
   extraArgs: readonly string[]
-): Promise<{ root: string; payload: Record<string, unknown> }> {
+): Promise<{ root: string; result: SidecarResult }> {
   const sidecar = opts.sidecarPath ?? resolveSidecar();
   if (sidecar === null) throw sidecarMissingError();
   const root = await resolveRoot(opts.root);
   const env: NodeJS.ProcessEnv = { ...(opts.env ?? process.env), ORCAOPS_ROOT: root };
   const node = opts.nodeBin ?? env.ORCAOPS_WATCH_NODE ?? 'node';
-  const argv = [sidecar, 'review', 'pane', '--branch', opts.branch, '--json', ...extraArgs];
+  const argv = [sidecar, 'review', verb, '--branch', opts.branch, ...extraArgs];
   const result = await spawnReviewSidecar(node, argv, { env, signal: opts.signal });
+  return { root, result };
+}
+
+async function runDataVerb(opts: LoadReviewOptions): Promise<void> {
+  // JSON success prints the entire floor; only the bounded summary is needed here.
+  const { result } = await runReviewVerb(
+    opts,
+    'data',
+    opts.base === undefined ? [] : ['--base', opts.base]
+  );
+  if (result.code !== 0) {
+    throw new ReviewDataError(result.code, result.stderr);
+  }
+}
+
+async function runPaneVerb(
+  opts: LoadReviewOptions,
+  extraArgs: readonly string[]
+): Promise<{ root: string; payload: Record<string, unknown> }> {
+  const { root, result } = await runReviewVerb(opts, 'pane', ['--json', ...extraArgs]);
   if (result.code !== 0) {
     const envelope = safeEnvelope(result.stdout);
     if (envelope !== null && envelope.ok === false) {
@@ -394,12 +433,14 @@ function safeEnvelope(text: string): PaneEnvelope | null {
   }
 }
 
-/**
- * Assemble a branch's review: the retained floor + diff and the routine Story
- * overlay (both from the store, via the sidecar), then the deterministic
- * projections built here.
- */
+/** Explicit loads refresh evidence; the producer retains an unchanged floor. */
 export async function loadReview(opts: LoadReviewOptions): Promise<ReviewData> {
+  await runDataVerb(opts);
+  return loadInstalledReview(opts);
+}
+
+/** Read and project retained evidence without publishing during passive refresh. */
+export async function loadInstalledReview(opts: LoadReviewOptions): Promise<ReviewData> {
   const { root, payload } = await runPaneVerb(opts, []);
   const pane = payload as unknown as DatabaseReviewPane & { ok: true };
   const floor = parseFloor(pane.floor);
@@ -417,15 +458,6 @@ export async function loadReview(opts: LoadReviewOptions): Promise<ReviewData> {
     worktreeHeadSha: probe.headSha,
     routineStory,
   };
-}
-
-/**
- * Read the currently retained review without republishing. A passive refresh is
- * the same store read as an active load: the store is the source of truth and a
- * read never advances it, so there is no separate installed-file path.
- */
-export function loadInstalledReview(opts: LoadReviewOptions): Promise<ReviewData> {
-  return loadReview(opts);
 }
 
 /** Cheap, read-only invalidation probe used by an already-open review. */

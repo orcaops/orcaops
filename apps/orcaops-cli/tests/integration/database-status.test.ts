@@ -119,6 +119,12 @@ describe('registered passive task status', { timeout: 30_000 }, () => {
     const result = await status({ main: f.temporary, root: f.root });
     expect(result.history.complete).toBe(false);
     expect(result.context.git).toBeNull();
+    expect(result.cloud_sync).toEqual({
+      state: 'unavailable',
+      pending_count: null,
+      stuck_count: null,
+      reason: 'not_connected',
+    });
     expect(result.focus).toEqual([]);
     expect(result.eligible_tasks).toEqual([]);
     expect(await inventory(f.temporary)).toEqual(before);

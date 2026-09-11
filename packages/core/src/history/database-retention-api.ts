@@ -4,7 +4,7 @@ export {
   revalidateDatabaseExecutionContext,
   type RegisteredDatabaseContext,
 } from './context/execution.js';
-export { prepareDatabaseGitClosure } from './retention/object-closure.js';
+export { prepareDatabaseGitClosure, unpairedPackFiles } from './retention/object-closure.js';
 export { publishDatabaseGitRef, type DatabaseGitPublication } from './retention/publication.js';
 export {
   applyDatabaseGitReclamation,

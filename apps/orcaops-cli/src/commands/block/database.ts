@@ -110,7 +110,10 @@ export async function recordDatabaseBlockDisposition(
   let context: Awaited<ReturnType<typeof resolveDatabaseCaptureContext>> | undefined;
   let writer: Awaited<ReturnType<typeof openProjectDatabase>> | undefined;
   try {
-    context = await resolveDatabaseCaptureContext({ signal: controller.signal });
+    context = await resolveDatabaseCaptureContext({
+      registerWorktree: true,
+      signal: controller.signal,
+    });
     const retained = readProjectArtifact(context.project.database, input.artifact);
     if (!retained)
       throw new OrcaopsError(

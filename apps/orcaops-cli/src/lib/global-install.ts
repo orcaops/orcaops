@@ -13,6 +13,7 @@ import {
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 
 import {
@@ -768,6 +769,9 @@ export interface PlanGlobalInstallInput {
 export interface GlobalInstallResult {
   /** Keys materialized/refreshed for this repo (paths). */
   materialized: string[];
+  /** Observed file differences; identical-byte rewrites are not changes. */
+  changed: string[];
+  ownershipChanged: boolean;
   /** Keys whose ref dropped to zero and were removed (paths). */
   removed: string[];
   /** Keys whose decrement was suppressed because the gate withholds them (paths). */
@@ -821,6 +825,8 @@ export async function planGlobalInstall(
 
   const refuseUntouched = (ahead: boolean): GlobalInstallResult => ({
     materialized: [],
+    changed: [],
+    ownershipChanged: false,
     removed: [],
     held: [],
     copyFallbacks: [],
@@ -1062,6 +1068,7 @@ export async function planGlobalInstall(
 
   const desiredKeys = new Set<string>();
   const materialized: string[] = [];
+  const changed: string[] = [];
   const copyFallbacks: string[] = [];
 
   // Keys the gate withholds: derived exactly like the desired keys, but never
@@ -1138,6 +1145,15 @@ export async function planGlobalInstall(
     let symlinkTarget: string | null = null;
     if (materialization === 'symlink' && safeStore !== null) {
       symlinkTarget = path.relative(path.dirname(safeFilePath), safeStore);
+    }
+
+    const current = await lstatOrNull(safeFilePath, 'global artifact');
+    const desiredType = materialization === 'copy' ? current?.isFile() : current?.isSymbolicLink();
+    if (
+      !desiredType ||
+      !(await matchesDesiredArtifact(a, safeFilePath, current!, planned.ownershipStore))
+    ) {
+      changed.push(a.filePath);
     }
 
     if (mode === 'apply') {
@@ -1286,6 +1302,15 @@ export async function planGlobalInstall(
     entries: [...byKey.values(), ...carriedInert].sort((a, b) => keyOf(a).localeCompare(keyOf(b))),
   };
 
+  const ownershipChanged =
+    (prev?.repaired_targets ?? 0) > 0 ||
+    prev === null ||
+    prev.materialized_by !== manifest.materialized_by ||
+    !isDeepStrictEqual(
+      [...prev.entries].sort((a, b) => keyOf(a).localeCompare(keyOf(b))),
+      manifest.entries
+    );
+
   if (mode === 'apply') {
     await lockScope?.assert();
     await mkdir(resolveGlobalRoot(), { recursive: true });
@@ -1299,6 +1324,8 @@ export async function planGlobalInstall(
 
   return {
     materialized,
+    changed,
+    ownershipChanged,
     removed,
     held,
     copyFallbacks,

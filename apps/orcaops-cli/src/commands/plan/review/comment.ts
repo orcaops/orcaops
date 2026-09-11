@@ -316,6 +316,7 @@ export async function reviewCommentAction(
         baseUrl: opts.baseUrl,
         requires: [ORCAOPS_CAPABILITIES.SOURCE_PLAN_REVIEW],
         operation: 'plan review comment',
+        registerWorktree: true,
       },
       async (ctx) => {
         const mutation = createReviewMutation(ctx, {

@@ -248,10 +248,7 @@ function CheckpointCard({ cp, width }: { cp: WatchCheckpoint; width: number }) {
           </text>
           {cp.steps.map((step) => (
             <text key={`step:${step.idx}`} fg={cp.status === 'open' ? AMBER : DIM}>
-              {truncate(
-                `  ${cp.status === 'open' ? '▸' : '✓'} ${step.idx + 1}. ${step.label}`,
-                width
-              )}
+              {truncate(`  ${cp.status === 'open' ? '▸' : '✓'} ${step.idx}. ${step.label}`, width)}
             </text>
           ))}
         </box>

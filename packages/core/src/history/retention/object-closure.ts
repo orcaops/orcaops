@@ -14,10 +14,11 @@ import {
 } from '../context/execution.js';
 import { inspectDatabaseFilesystem } from '../context/filesystem.js';
 
-function unavailable(cause?: unknown): never {
+function unavailable(cause?: unknown, detail?: string): never {
   throw new ProjectDatabaseError(
     'HISTORY_INACCESSIBLE',
-    'Snapshot evidence is unavailable because its complete owned Git object closure could not be established; use a self-contained complete repository and inspect storage access before explicitly retrying',
+    'Snapshot evidence is unavailable because its complete owned Git object closure could not be established; use a self-contained complete repository and inspect storage access before explicitly retrying' +
+      (detail ? `; ${detail}` : ''),
     { cause }
   );
 }
@@ -58,6 +59,14 @@ async function requireEmpty(file: string, device: bigint) {
   if (!sameFile(before, after) || before.size !== after.size || before.mtimeNs !== after.mtimeNs)
     unavailable(new Error('Git object ownership metadata changed during observation'));
 }
+export function unpairedPackFiles(names: readonly string[]): string[] {
+  const selected = names.filter((name) => /\.(?:pack|idx)$/.test(name)).sort();
+  const known = new Set(selected);
+  // Git accepts arbitrary pack stems; filename hashes do not establish ownership.
+  return selected.filter(
+    (name) => !known.has(name.replace(/\.(?:pack|idx)$/, name.endsWith('.pack') ? '.idx' : '.pack'))
+  );
+}
 async function packs(objects: string, device: bigint) {
   const directory = path.join(objects, 'pack');
   const info = await lstat(directory, { bigint: true });
@@ -67,14 +76,15 @@ async function packs(objects: string, device: bigint) {
   if (names.some((name) => name.endsWith('.promisor')))
     unavailable(new Error('Git has promisor pack storage'));
   const selected = names.filter((name) => /\.(?:pack|idx)$/.test(name)).sort();
-  const known = new Set(selected);
-  for (const name of selected) {
-    if (
-      !/^pack-(?:[a-f0-9]{40}|[a-f0-9]{64})\.(?:pack|idx)$/.test(name) ||
-      !known.has(name.replace(/\.(?:pack|idx)$/, name.endsWith('.pack') ? '.idx' : '.pack'))
-    )
-      unavailable(new Error('Git pack/index ownership is incomplete or unsupported'));
-  }
+  const unpaired = unpairedPackFiles(selected);
+  if (unpaired.length)
+    unavailable(
+      new Error('Git pack/index ownership is incomplete or unsupported'),
+      `Unpaired Git pack/index files (${unpaired.length}): ${unpaired
+        .slice(0, 3)
+        .map((name) => JSON.stringify(name))
+        .join(', ')}${unpaired.length > 3 ? ` and ${unpaired.length - 3} more` : ''}`
+    );
   return { directory, info, names: selected };
 }
 export async function requireOwnedDatabaseGitObjects(

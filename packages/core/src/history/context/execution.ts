@@ -93,7 +93,7 @@ export async function requireDatabaseExecutionContext(
   if (!current.binding)
     throw new ProjectDatabaseError(
       'IDENTITY_RECOVERY_REQUIRED',
-      'This worktree has no original registration; complete authorized first-use setup before execution'
+      'This worktree has no execution registration; run `orcaops doctor --fix` in this worktree. Existing artifact ownership still requires explicit checkout handoff.'
     );
   return { ...current, binding: current.binding };
 }

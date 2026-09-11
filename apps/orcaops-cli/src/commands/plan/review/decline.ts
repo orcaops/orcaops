@@ -117,6 +117,7 @@ export async function reviewDeclineAction(ref: string, opts: ReviewDeclineOption
         baseUrl: opts.baseUrl,
         requires: [ORCAOPS_CAPABILITIES.SOURCE_PLAN_REVIEW],
         operation: 'plan review decline',
+        registerWorktree: true,
       },
       async (ctx) => {
         const mutation = createReviewMutation(ctx, {

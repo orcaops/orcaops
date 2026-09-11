@@ -799,14 +799,16 @@ try {
         touched_scope: [],
       })
     );
+    // A sibling created after init carries no execution registration of its own.
+    // The first capture registers it against the existing history rather than
+    // refusing; ownership of existing artifacts still needs an explicit handoff.
     const unregisteredPlan = orcaops(bin, ['capture', 'plan', '--no-llm', '--input', planFile], {
       cwd: matrixSibling,
       home,
     });
     assert(
-      unregisteredPlan.status !== 0 &&
-        unregisteredPlan.json?.error?.code === 'IDENTITY_RECOVERY_REQUIRED',
-      'matrix: capture requires explicit registration of a new sibling'
+      unregisteredPlan.status === 0,
+      'matrix: capture registers a new sibling instead of refusing'
     );
     const sInit = orcaops(bin, ['init', '--force', '--yes', '--json'], {
       cwd: matrixSibling,

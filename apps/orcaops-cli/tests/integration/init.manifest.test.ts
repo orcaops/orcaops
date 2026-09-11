@@ -97,7 +97,7 @@ describe('orcaops init writes the install manifest', () => {
     const refused = await agent.runRaw(['init', '--json']);
     expect(refused.exitCode).toBe(1);
     expect(JSON.parse(refused.stdout)).toMatchObject({
-      error: { code: 'ALREADY_INITIALIZED' },
+      error: { code: 'CONVERSION_REQUIRED' },
     });
 
     const retried = await agent.runRaw(['init', '--force', '--json']);

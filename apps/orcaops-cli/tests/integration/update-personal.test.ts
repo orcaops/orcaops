@@ -68,6 +68,28 @@ describe('orcaops update/doctor — personal scope', () => {
       })
       .sort();
 
+  it('keeps local-only no-op reporting unchanged', async () => {
+    expect(
+      (
+        await agent.runRaw([
+          'init',
+          '--scope',
+          'project',
+          '--agents',
+          'claude-code',
+          '--no-llm',
+          '--json',
+        ])
+      ).exitCode
+    ).toBe(0);
+    for (const flags of [[], ['--dry-run']]) {
+      const result = await agent.runRaw(['update', ...flags]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('Everything is already up to date');
+      expect(result.stdout).not.toContain('Global scope');
+    }
+  });
+
   it('update --personal with a non-claude-code install set succeeds', async () => {
     // Personal supports every agent: skills go global and no instruction
     // file is involved, so there is nothing agent-specific to warn about.

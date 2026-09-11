@@ -380,6 +380,17 @@ export async function previewLegacyRepository(
       retained.push({ location: absolute, family, sha256: member.file.sha256 });
     }
   }
+  const commonInstallationRoot = path.join(inventory.current.commonDir, 'orcaops');
+  for (const [relative, family] of [
+    ['personal-manifest.json', 'installer'],
+    ['evaluators.yaml', 'evaluator-config'],
+  ] as const) {
+    const location = path.join(commonInstallationRoot, relative);
+    const member = members.get(location);
+    if (!member || used.has(location)) continue;
+    used.add(location);
+    retained.push({ location, family, sha256: member.file.sha256 });
+  }
   retained.sort((a, b) => a.location.localeCompare(b.location));
   const selections = new Map<string, LegacyLogSelection>();
   const representations: LegacyPreview['representations'][number][] = [];
