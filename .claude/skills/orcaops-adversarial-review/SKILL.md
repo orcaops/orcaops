@@ -2,8 +2,8 @@
 name: "Orcaops: adversarial review"
 description: "Red-team completed work and its evidence. Use for \"poke holes in this\", \"verify the done criteria\", or \"review the agent's code\"."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "5da3b59debe3"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "44676808bd8f"
 tags: ["orcaops", "review"]
 ---
 

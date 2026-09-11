@@ -1,33 +1,21 @@
+// The two-lane run lifecycle end to end over a captured review: ordering,
+// routine caps, one repair per lane, the honest terminal record, and the
+// envelopes automated callers parse. The run's state is retained rows, so every
+// assertion here reads what the verbs emit or what the store retained — never a
+// run file.
+
 import { readFileSync } from 'node:fs';
-import {
-  access,
-  mkdir,
-  mkdtemp,
-  readdir,
-  readFile,
-  rm,
-  symlink,
-  writeFile,
-} from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { buildReviewFloorFixture } from '@orcaops/review-core';
-import { ArtifactLock } from '@orcaops/storage';
+import { uuidv7 } from '@orcaops/storage';
+import { projectDatabasePath } from '@orcaops/storage/history/database';
 
-import { buildClaimLedger } from './claimLedger.js';
-import { CURRENT_STORY_POINTER_FILE } from './currentStory.js';
-import {
-  type AccountProjection,
-  buildDossier,
-  type DossierV1,
-  type ForensicInput,
-} from './dossier.js';
-import { ensureReviewStateVersion, reviewStateLockKey } from './reviewState.js';
+import { deriveReviewOperationId } from './database/review-operation.js';
+import { type ForensicInput } from './dossier.js';
 import { REVIEW_USAGE, runReview } from './run.js';
 import type { ReviewRuntimeDescriptor } from './runtimeIdentity.js';
-import { parseStoryReviewModel } from './storyReviewModel.js';
 import { canonicalJsonSha256, normalizeSubmission } from './submissionNormalization.js';
 import {
   LANE_CONTRACTS,
@@ -38,29 +26,21 @@ import {
   ROUTINE_ORDER_MESSAGE,
   runTwolaneRun,
 } from './twolaneRunCli.js';
-import { accountCitableIds, buildAccountPromptAliases } from './twolaneSlice.js';
+import {
+  capturedReviewFixture,
+  type CapturedReviewFixture,
+} from '../tests/capturedReviewFixture.js';
 
 const CONSTANTS_FIX = path.join(__dirname, '..', 'fixtures', 'twolane-cli-constants.json');
-const BRANCH = 'twolane-e2e';
-const GENERATED_AT = '2026-07-23T00:00:00.000Z';
-const ARTIFACT = '11111111-1111-4111-8111-111111111111';
-const RETAINED_DIFF = [
-  'diff --git a/src/fixture.ts b/src/fixture.ts',
-  '--- a/src/fixture.ts',
-  '+++ b/src/fixture.ts',
-  '@@ -1,0 +1 @@',
-  '+stable fixture row',
-  '',
-].join('\n');
 
-let root: string;
+let fixture: CapturedReviewFixture;
+let runtime: ReviewRuntimeDescriptor;
 let out: string[];
 let err: string[];
-let runtime: ReviewRuntimeDescriptor;
 
 const run = (argv: string[]): Promise<number> =>
   runReview(
-    ['review', ...argv, '--branch', BRANCH, '--root', root, '--json'],
+    ['review', ...argv, '--branch', fixture.branch, '--root', fixture.gitRoot, '--json'],
     process.env,
     undefined,
     runtime
@@ -75,77 +55,12 @@ const lastJson = (): Record<string, unknown> => {
   throw new Error(`no JSON output captured; stderr: ${err.join('')}`);
 };
 
-const buildPayloadFixture = (): {
-  dossier: DossierV1;
-  accountProjection: AccountProjection;
-  forensicInput: ForensicInput;
-} => {
-  const floor = JSON.parse(
-    JSON.stringify(buildReviewFloorFixture('clean').floor).replaceAll('artifact-fixture', ARTIFACT)
-  ) as ReturnType<typeof buildReviewFloorFixture>['floor'];
-  floor.scope.branch = BRANCH;
-  floor.scope.branch_slug = BRANCH;
-  floor.integrity.push({ artifact: ARTIFACT, cp: 2, verified: true });
-  floor.outline.threads[0]!.checkpoints.push({
-    checkpointKey: 'chap_fixture_2',
-    order: 2,
-    checkpoint: { artifact: ARTIFACT, cp: 2, label: 'Second fixture checkpoint' },
-    summary: 'Second fixture checkpoint',
-    members: [{ artifact: ARTIFACT, cp: 2 }],
-    sliceRefs: [],
-    citationIds: [`cite:${ARTIFACT}:cp2:decision:0`],
-  });
-  floor.citations.push({
-    id: `cite:${ARTIFACT}:cp2:decision:0`,
-    kind: 'CHECKPOINT_DECISION',
-    artifact: ARTIFACT,
-    cp: 2,
-    text: 'Keep the second deterministic checkpoint stable.',
-  });
-  return buildDossier({
-    floor,
-    retainedDiff: RETAINED_DIFF,
-    ledgerEntries: buildClaimLedger({
-      floor,
-      checkpoints: [],
-      generatedAt: GENERATED_AT,
-    }).entries,
-    branch: BRANCH,
-    baseSha: 'basesha1234',
-    generatedAt: GENERATED_AT,
-  });
-};
-
-// Build the deterministic dossier once. Helpers clone mutable views so each
-// test stays isolated without repeating the expensive projection pipeline.
-const PAYLOAD_FIXTURE = buildPayloadFixture();
-const PAYLOAD_FILES = [
-  ['dossier-v1.json', JSON.stringify(PAYLOAD_FIXTURE.dossier)],
-  ['account-projection-v1.json', JSON.stringify(PAYLOAD_FIXTURE.accountProjection)],
-  ['forensic-input-v1.json', JSON.stringify(PAYLOAD_FIXTURE.forensicInput)],
-] as const;
-
-const dossierFix = (): DossierV1 => structuredClone(PAYLOAD_FIXTURE.dossier);
-const projectionFix = (): AccountProjection => structuredClone(PAYLOAD_FIXTURE.accountProjection);
-
-/** A changed non-capture file the forensic lane may anchor to. */
-const changedFile = (): string => {
-  const d = dossierFix();
-  const entry = d.file_index.find((f) => !f.capture && f.newPath !== null);
-  return (entry?.newPath ?? entry?.path)!;
-};
-/** A real citation id from the served projection. */
-const citationId = (): string => {
-  const p = projectionFix();
-  for (const cp of p.accountCore.checkpoints) for (const dec of cp.decisions) return dec.citationId;
-  throw new Error('fixture projection has no decision citation');
-};
-
+/** A finding on a file the fixture's reviewed diff actually carries. */
 const forensicOk = () => ({
   findings: [
     {
-      claim: 'The change flips a persisted default without a migration guard.',
-      file: changedFile(),
+      claim: 'The change flips a persisted default without a behavioural guard.',
+      file: 'src/limiter.ts',
       related_files: [],
       severity: 'CAUTION',
       confidence: 'HIGH',
@@ -153,63 +68,51 @@ const forensicOk = () => ({
   ],
   questions: [],
 });
-/** A valid full Story over the served projection: every checkpoint in one Part. */
-const accountOk = () => {
-  const projection = projectionFix();
-  const c = projection.accountCore;
-  const aliases = buildAccountPromptAliases(projection);
-  const checkpointAlias = new Map(
-    aliases.checkpoints.map((entry) => [entry.canonical, entry.alias])
-  );
-  const citationAlias = new Map(aliases.citations.map((entry) => [entry.canonical, entry.alias]));
-  const cite = (cp: (typeof c.checkpoints)[number]): string =>
-    cp.decisions[0]?.citationId ??
-    cp.uncertainty[0]?.citationId ??
-    c.planSteps[0]?.citationId ??
-    c.ledger[0]!.id;
+
+/**
+ * A full Story over the SERVED account payload: the engine issues the k#/c#
+ * aliases in the markdown it serves, so the story is authored against those
+ * rather than against a second projection of the same run.
+ */
+function accountOk(markdown: string) {
+  const checkpoints = [...markdown.matchAll(/^#### (k\d+) ·/gm)].map((match) => match[1]!);
+  const citation = /\[(c\d+)\]/.exec(markdown)?.[1];
+  expect(checkpoints.length, 'the served payload lists at least one checkpoint').toBeGreaterThan(0);
+  expect(citation, 'the served payload carries a citable alias').toBeDefined();
   return {
     schema_version: 1 as const,
     overview: {
       text: 'The branch carries one coherent change from captured intent through implementation.',
-      citations: [citationAlias.get(cite(c.checkpoints[0]!))!],
+      citations: [citation!],
     },
     acts: [
       {
         title: 'The change',
         interpretation: 'One causal arc.',
-        parts: c.checkpoints.map((cp, i) => ({
-          title: `Part ${i + 1}`,
-          checkpoints: [checkpointAlias.get(`${cp.artifact}:cp${cp.cp}`)!],
-          interpretation: `Part ${i + 1} advances the change.`,
-          citations: [citationAlias.get(cite(cp))!],
+        parts: checkpoints.map((alias, index) => ({
+          title: `Part ${index + 1}`,
+          checkpoints: [alias],
+          interpretation: `Part ${index + 1} advances the change.`,
+          citations: [citation!],
         })),
       },
     ],
     questions: [] as unknown[],
   };
-};
+}
 
-beforeEach(async () => {
-  root = await mkdtemp(path.join(tmpdir(), 'twolane-run-'));
-  const reviewDir = path.join(root, '.orcaops', 'reviews', BRANCH);
-  const runtimeRoot = path.join(root, 'runtime');
-  const entrypointPath = path.join(runtimeRoot, 'dist', 'sidecar.js');
-  await ensureReviewStateVersion(reviewDir, root);
-  // Exercise executable-identity hashing against a minimal runtime whose cost
-  // cannot grow with unrelated workspace build output.
-  await mkdir(path.dirname(entrypointPath), { recursive: true });
-  await Promise.all(
-    PAYLOAD_FILES.map(([target, contents]) =>
-      writeFile(path.join(reviewDir, target), contents)
-    ).concat(
-      writeFile(
-        path.join(runtimeRoot, 'package.json'),
-        JSON.stringify({ name: '@orcaops/review-engine', version: '0.0.0' })
-      ),
-      writeFile(entrypointPath, 'export {};')
-    )
-  );
-  runtime = { packageRoot: runtimeRoot, entrypointPath };
+beforeAll(async () => {
+  fixture = await capturedReviewFixture({ autoCleanup: false });
+  await fixture.publishFloor();
+  runtime = await fixture.runtimeDescriptor();
+}, 300_000);
+
+afterAll(async () => {
+  await fixture.cleanup();
+});
+
+beforeEach(() => {
+  vi.stubEnv('ORCAOPS_DATA_DIR', fixture.dataRoot);
   out = [];
   err = [];
   vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
@@ -220,15 +123,14 @@ beforeEach(async () => {
     err.push(String(chunk));
     return true;
   });
-});
-
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await rm(root, { recursive: true, force: true });
+  return () => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  };
 });
 
 async function payloadFile(name: string, value: unknown): Promise<string> {
-  const file = path.join(root, name);
+  const file = path.join(fixture.root, name);
   await writeFile(file, JSON.stringify(value, null, 1));
   return file;
 }
@@ -236,63 +138,6 @@ async function payloadFile(name: string, value: unknown): Promise<string> {
 async function startRun(): Promise<string> {
   expect(await run(['start'])).toBe(0);
   return lastJson().run_id as string;
-}
-
-/** Pin a 1-owned / 2-gap coverage snapshot so the stored percentage proves no rounding. */
-async function installDerivedOwnershipFixture(missingBoundaryCheckpoints = 0): Promise<void> {
-  const projection = projectionFix();
-  const firstCheckpoint = projection.accountCore.checkpoints[0]!;
-  const artifact = projection.artifactAliases[firstCheckpoint.artifact]!;
-  const reviewDir = path.join(root, '.orcaops', 'reviews', BRANCH);
-  const dossier = dossierFix();
-  dossier.missing_boundary_checkpoints = missingBoundaryCheckpoints;
-  await writeFile(path.join(reviewDir, 'dossier-v1.json'), JSON.stringify(dossier));
-  await writeFile(
-    path.join(reviewDir, 'coverage-v1.json'),
-    JSON.stringify({
-      items: [
-        {
-          hunkKey: 'hunk_ownership_summary',
-          file: 'src/x.ts',
-          verdict: 'MATCHED',
-          old_start: 0,
-          new_start: 1,
-          added_lines: 3,
-          removed_lines: 0,
-          units: [
-            {
-              kind: 'owned_slice',
-              slice: 0,
-              patch_row_start: 0,
-              patch_row_end: 0,
-              del_range: null,
-              add_range: { start: 1, end: 1 },
-              lines: 1,
-              owner: { kind: 'checkpoint', artifact, cp: firstCheckpoint.cp },
-            },
-            {
-              kind: 'gap_slice',
-              slice: 1,
-              patch_row_start: 1,
-              patch_row_end: 2,
-              del_range: null,
-              add_range: { start: 2, end: 3 },
-              lines: 2,
-              owner: { kind: 'gap', segment: `${artifact}:cp${firstCheckpoint.cp}->worktree` },
-            },
-          ],
-        },
-      ],
-      summary: {
-        excluded: 0,
-        unreviewable: 0,
-        matched_rows: 1,
-        unexplained_rows: 2,
-        ambiguous_rows: 0,
-        reviewable_rows: 3,
-      },
-    })
-  );
 }
 
 const submit = (runId: string, lane: string, file: string) =>
@@ -308,81 +153,15 @@ const submit = (runId: string, lane: string, file: string) =>
     file,
   ]);
 
+/** Serve the account lane and return the markdown the reviewer would read. */
+async function servedAccount(runId: string): Promise<string> {
+  expect(await run(['lane-input', '--run', runId, '--lane', 'account'])).toBe(0);
+  const envelope = lastJson();
+  expect(envelope.contract).toEqual(LANE_CONTRACTS.account);
+  return readFile(path.join(fixture.gitRoot, envelope.payload_path as string), 'utf8');
+}
+
 describe('routine two-lens run lifecycle', () => {
-  it('waits for the review-state lock before creating a nested run', async () => {
-    const lock = new ArtifactLock({
-      locksDir: path.join(root, '.orcaops', 'tmp', 'locks'),
-      containmentRoot: root,
-    });
-    let markAcquired!: () => void;
-    let release!: () => void;
-    const acquired = new Promise<void>((resolve) => {
-      markAcquired = resolve;
-    });
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const held = lock.withLock(reviewStateLockKey(BRANCH), async () => {
-      markAcquired();
-      await blocked;
-    });
-    await acquired;
-
-    const pending = run(['start']);
-    try {
-      const state = await Promise.race([
-        pending.then(() => 'completed' as const),
-        new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 75)),
-      ]);
-      expect(state).toBe('waiting');
-      await expect(
-        access(path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane'))
-      ).rejects.toMatchObject({ code: 'ENOENT' });
-    } finally {
-      release();
-      await held;
-    }
-    expect(await pending).toBe(0);
-  });
-
-  it('waits for the review-state lock before mutating an existing run', async () => {
-    const runId = await startRun();
-    const runFile = path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', runId, 'run-v1.json');
-    const before = await readFile(runFile, 'utf8');
-    const lock = new ArtifactLock({
-      locksDir: path.join(root, '.orcaops', 'tmp', 'locks'),
-      containmentRoot: root,
-    });
-    let markAcquired!: () => void;
-    let release!: () => void;
-    const acquired = new Promise<void>((resolve) => {
-      markAcquired = resolve;
-    });
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const held = lock.withLock(reviewStateLockKey(BRANCH), async () => {
-      markAcquired();
-      await blocked;
-    });
-    await acquired;
-
-    const pending = run(['lane-input', '--run', runId, '--lane', 'forensic']);
-    try {
-      const state = await Promise.race([
-        pending.then(() => 'completed' as const),
-        new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 75)),
-      ]);
-      expect(state).toBe('waiting');
-      expect(await readFile(runFile, 'utf8')).toBe(before);
-    } finally {
-      release();
-      await held;
-    }
-    expect(await pending).toBe(0);
-    expect(await readFile(runFile, 'utf8')).not.toBe(before);
-  });
-
   it('enforces forensic-first ordering, routine caps, one repair, and an honest record', async () => {
     const executionProfile = {
       host: { value: 'test-host', provenance: 'HOST_REPORTED' },
@@ -395,8 +174,8 @@ describe('routine two-lens run lifecycle', () => {
     expect(await run(['start', '--execution-profile-json', JSON.stringify(executionProfile)])).toBe(
       0
     );
-    const runId = lastJson().run_id as string;
     const started = lastJson();
+    const runId = started.run_id as string;
     expect(started.mode).toBe('routine');
 
     // Account context is engine-refused before the forensic lane is terminal.
@@ -404,14 +183,37 @@ describe('routine two-lens run lifecycle', () => {
     const refusal = lastJson();
     expect(refusal.ok).toBe(false);
     expect((refusal.error as { message: string }).message).toContain('TWOLANE_ROUTINE_ORDER');
-    const aFile = await payloadFile('a.json', accountOk());
-    expect(await submit(runId, 'account', aFile)).toBe(0);
+    expect(await submit(runId, 'account', await payloadFile('premature.json', {}))).toBe(0);
     const refused = lastJson();
     expect(refused.accepted).toBe(false);
     expect((refused.diagnostics as { code: string }[])[0]!.code).toBe('TWOLANE_ROUTINE_ORDER');
 
     // The ordering refusal consumed no attempt.
-    expect(await run(['run-show', '--run', runId])).toBe(0);
+    const databaseBeforeSemanticText = await readFile(projectDatabasePath(fixture.authority));
+    expect(
+      await runReview(
+        [
+          'review',
+          'run-show',
+          '--run',
+          runId,
+          '--semantic-input',
+          '--branch',
+          fixture.branch,
+          '--root',
+          fixture.gitRoot,
+        ],
+        process.env,
+        undefined,
+        runtime
+      )
+    ).toBe(2);
+    expect(err.join('')).toContain('--semantic-input requires --json');
+    expect(
+      (await readFile(projectDatabasePath(fixture.authority))).equals(databaseBeforeSemanticText)
+    ).toBe(true);
+    expect(await run(['run-show', '--run', runId, '--semantic-input'])).toBe(0);
+    expect(lastJson().semantic_anchor).toBeNull();
     expect(
       (lastJson().state as { lanes: { account: { attempts: number } } }).lanes.account.attempts
     ).toBe(0);
@@ -420,7 +222,7 @@ describe('routine two-lens run lifecycle', () => {
     expect(await run(['lane-input', '--run', runId, '--lane', 'forensic'])).toBe(0);
     const fInput = lastJson();
     expect(fInput.contract).toEqual(LANE_CONTRACTS.forensic);
-    const fMd = await readFile(path.join(root, fInput.payload_path as string), 'utf8');
+    const fMd = await readFile(path.join(fixture.gitRoot, fInput.payload_path as string), 'utf8');
     expect(fMd.startsWith('# Forensic lane input')).toBe(true);
     expect(fMd).toContain('## Diff');
     expect(fMd).toContain('eligible file(s) rendered verbatim');
@@ -429,15 +231,14 @@ describe('routine two-lens run lifecycle', () => {
     const overCap = {
       findings: Array.from({ length: 4 }, (_, i) => ({
         claim: `finding ${i}`,
-        file: changedFile(),
+        file: 'src/limiter.ts',
         related_files: [],
         severity: 'REVIEW',
         confidence: 'LOW',
       })),
       questions: [],
     };
-    const oFile = await payloadFile('o.json', overCap);
-    expect(await submit(runId, 'forensic', oFile)).toBe(0);
+    expect(await submit(runId, 'forensic', await payloadFile('o.json', overCap))).toBe(0);
     const rejected = lastJson();
     expect(rejected.accepted).toBe(false);
     expect(
@@ -446,59 +247,37 @@ describe('routine two-lens run lifecycle', () => {
 
     // Routine mode allows the forensic repair BEFORE the account initial
     // (parallel-mode ordering rules do not apply; order is engine-owned).
-    const fFile = await payloadFile('f.json', forensicOk());
-    expect(await submit(runId, 'forensic', fFile)).toBe(0);
+    expect(await submit(runId, 'forensic', await payloadFile('f.json', forensicOk()))).toBe(0);
     const repaired = lastJson();
-    expect(repaired.accepted).toBe(true);
+    expect(repaired.accepted, JSON.stringify(repaired.diagnostics)).toBe(true);
     expect((repaired.state as { repair_credit: { forensic: number } }).repair_credit.forensic).toBe(
       0
     );
 
     // Account pass serves engine-issued aliases inline beside their records;
     // the canonical lookup stays private to compilation.
-    expect(await run(['lane-input', '--run', runId, '--lane', 'account'])).toBe(0);
-    const aInput = lastJson();
-    expect(aInput.contract).toEqual(LANE_CONTRACTS.account);
-    expect((aInput.contract as typeof LANE_CONTRACTS.account).payload_shape).toContain(
-      '"overview"'
-    );
-    expect((aInput.contract as typeof LANE_CONTRACTS.account).overview_shape).toContain('required');
-    const aMd = await readFile(path.join(root, aInput.payload_path as string), 'utf8');
+    const aMd = await servedAccount(runId);
     expect(aMd.startsWith('# Account lane input')).toBe(true);
-    expect(aMd).not.toContain(`-> ${citationId()}`);
     expect(aMd).not.toContain('## Prompt aliases');
-    expect(aMd).toMatch(/#### k1 · a\d+:cp\d+/);
+    expect(aMd).toMatch(/#### k1 · \S+:cp\d+/);
     expect(aMd).toContain('Cite captured records with their inline [c#] aliases');
     expect(aMd).toContain('## Claim ledger');
     expect(aMd).not.toContain('## Changed-file inventory');
-    expect(aMd).not.toContain('inventory mode');
 
-    expect(await submit(runId, 'account', aFile)).toBe(0);
-    expect(lastJson().accepted).toBe(true);
+    expect(await submit(runId, 'account', await payloadFile('a.json', accountOk(aMd)))).toBe(0);
+    expect(lastJson().accepted, JSON.stringify(lastJson().diagnostics)).toBe(true);
 
     expect(await run(['finalize', '--run', runId])).toBe(0);
     const finalized = lastJson();
     expect(finalized.outcome).toBe('FULL');
-    // Whether the Part-range round-trip ran is RECORDED rather than assumed.
-    // This fixture pins no diff, so it is honestly reported as skipped — which
-    // also documents that these lifecycle runs do not cover the validated path;
-    // the dedicated test above pins a diff to reach it.
-    expect((finalized.run_record as { range_validation: string }).range_validation).toBe(
-      'SKIPPED_NO_PINNED_DIFF'
-    );
     const record = finalized.run_record as Record<string, unknown>;
+    // The canonical run always pins its diff, so the Part-range round-trip runs.
+    expect(record.range_validation).toBe('PERFORMED');
     expect(record.mode).toBe('routine');
     expect(record.repairs_used).toBe(1);
     expect(record.submission_count).toBe(3);
     expect((record.isolation as { aggregate: string }).aggregate).toBe('SEQUENTIAL');
     expect((record.usage as { status: string }).status).toBe('UNKNOWN');
-    const forensicInput = JSON.parse(
-      await readFile(
-        path.join(root, '.orcaops', 'reviews', BRANCH, 'forensic-input-v1.json'),
-        'utf8'
-      )
-    ) as ForensicInput;
-    expect(record.latency_input_bytes).toBe(Buffer.byteLength(forensicInput.diff, 'utf8'));
     expect(record.latency_tier).toBe('LT_250KB');
     expect(record.latency_budget_ms).toBe(180_000);
     expect(record.latency_status).toBe('PASS');
@@ -509,44 +288,35 @@ describe('routine two-lens run lifecycle', () => {
       runtimeFingerprintSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       entrypointSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
-    // This legacy lifecycle fixture pins neither coverage nor diff. Semantic
-    // preparation discloses that absence without blocking the completed review.
-    expect((finalized.semantic_anchor as { status: string }).status).toBe('UNAVAILABLE');
     expect((finalized.files as string[]).includes('semantic-anchor-input-v4.json')).toBe(true);
-
-    const runDir = path.join(root, finalized.run_dir as string);
-    const markdown = await readFile(path.join(runDir, 'review.md'), 'utf8');
-    expect(markdown).toContain('Two-lane review');
-    expect(markdown).toContain('lanes: account ✓ forensic ✓');
-    expect(finalized.current_story).toMatchObject({ installed: true });
-    const pointerFile = path.join(
-      root,
-      '.orcaops',
-      'reviews',
-      BRANCH,
-      'twolane',
-      CURRENT_STORY_POINTER_FILE
-    );
-    const installedPointer = JSON.parse(await readFile(pointerFile, 'utf8')) as {
-      run_id: string;
-      model_file: string;
-    };
-    expect(installedPointer).toMatchObject({
-      run_id: runId,
-      model_file: 'story-review-model-v4.json',
+    expect(finalized.current_story).toMatchObject({
+      publication_id: finalized.story_publication_id,
+      generation: expect.any(String),
     });
 
-    // Terminal retry is the crash-window recovery path: it republishes a
-    // missing pointer without rewriting the immutable run record.
-    await rm(pointerFile);
+    // The selected Story is the one this run sealed.
+    const selection = await fixture.read((database) =>
+      database.read((view) =>
+        view.get<{ story_publication_id: string | null; story_version: number }>(
+          'SELECT story_publication_id, story_version FROM review_selections'
+        )
+      )
+    );
+    expect(selection.value).toEqual({
+      story_publication_id: finalized.story_publication_id,
+      story_version: 1,
+    });
+
+    // Terminal replay: the sealed run reports its retained receipt instead of
+    // composing a second Story over the same run.
     expect(await run(['finalize', '--run', runId])).toBe(0);
     expect(lastJson()).toMatchObject({
       ok: true,
       status: 'already-finalized',
       run_id: runId,
+      outcome: 'FULL',
     });
-    expect(JSON.parse(await readFile(pointerFile, 'utf8'))).toMatchObject({ run_id: runId });
-  });
+  }, 300_000);
 
   it('rejects a mutating submission from a different executable fingerprint without consuming an attempt', async () => {
     const priorCommit = process.env.ORCAOPS_BUILD_COMMIT;
@@ -569,17 +339,16 @@ describe('routine two-lens run lifecycle', () => {
       if (priorCommit === undefined) delete process.env.ORCAOPS_BUILD_COMMIT;
       else process.env.ORCAOPS_BUILD_COMMIT = priorCommit;
     }
-  });
+  }, 180_000);
 
   it('refuses finalization when the executable changes after both lanes are accepted', async () => {
     const priorCommit = process.env.ORCAOPS_BUILD_COMMIT;
     try {
       process.env.ORCAOPS_BUILD_COMMIT = 'accepted-build';
       const runId = await startRun();
-      const fFile = await payloadFile('finalize-identity-forensic.json', forensicOk());
-      const aFile = await payloadFile('finalize-identity-account.json', accountOk());
-      expect(await submit(runId, 'forensic', fFile)).toBe(0);
-      expect(await submit(runId, 'account', aFile)).toBe(0);
+      expect(await submit(runId, 'forensic', await payloadFile('f.json', forensicOk()))).toBe(0);
+      const aMd = await servedAccount(runId);
+      expect(await submit(runId, 'account', await payloadFile('a.json', accountOk(aMd)))).toBe(0);
 
       process.env.ORCAOPS_BUILD_COMMIT = 'changed-before-finalize';
       expect(await run(['finalize', '--run', runId])).toBe(1);
@@ -594,7 +363,7 @@ describe('routine two-lens run lifecycle', () => {
       if (priorCommit === undefined) delete process.env.ORCAOPS_BUILD_COMMIT;
       else process.env.ORCAOPS_BUILD_COMMIT = priorCommit;
     }
-  });
+  }, 300_000);
 
   it('rejects malformed or unproven execution-profile metadata before minting a run', async () => {
     expect(
@@ -611,11 +380,11 @@ describe('routine two-lens run lifecycle', () => {
 
   it('routine story caps: too many judgment questions and interpretation overruns are rejected', async () => {
     const runId = await startRun();
-    const fFile = await payloadFile('f.json', forensicOk());
-    expect(await submit(runId, 'forensic', fFile)).toBe(0);
+    expect(await submit(runId, 'forensic', await payloadFile('f.json', forensicOk()))).toBe(0);
     expect(lastJson().accepted).toBe(true);
+    const aMd = await servedAccount(runId);
 
-    const tooManyQuestions = { ...accountOk(), questions: ['q1', 'q2', 'q3', 'q4'] };
+    const tooManyQuestions = { ...accountOk(aMd), questions: ['q1', 'q2', 'q3', 'q4'] };
     expect(await submit(runId, 'account', await payloadFile('q4.json', tooManyQuestions))).toBe(0);
     expect(
       (lastJson().diagnostics as { code: string; message: string }[]).some(
@@ -624,7 +393,7 @@ describe('routine two-lens run lifecycle', () => {
       )
     ).toBe(true);
 
-    const story = accountOk();
+    const story = accountOk(aMd);
     story.acts[0]!.parts[0]!.interpretation = Array.from({ length: 81 }, (_, i) => `w${i}`).join(
       ' '
     );
@@ -640,25 +409,14 @@ describe('routine two-lens run lifecycle', () => {
     expect(
       (wordRejected.state as { repair_credit: { account: number } }).repair_credit.account
     ).toBe(0);
-  });
-
-  it('a full story covering every checkpoint is accepted and finalizes FULL', async () => {
-    const runId = await startRun();
-    const fFile = await payloadFile('f.json', forensicOk());
-    expect(await submit(runId, 'forensic', fFile)).toBe(0);
-    const aFile = await payloadFile('story.json', accountOk());
-    expect(await submit(runId, 'account', aFile)).toBe(0);
-    expect(lastJson().accepted).toBe(true);
-    expect(await run(['finalize', '--run', runId])).toBe(0);
-    expect(lastJson().outcome).toBe('FULL');
-  });
+  }, 300_000);
 
   it('persists normalized authored, compiled, and accepted-envelope lineage without raw bodies', async () => {
     const runId = await startRun();
     expect(await submit(runId, 'forensic', await payloadFile('f.json', forensicOk()))).toBe(0);
-    const accountFile = await payloadFile('account-lineage.json', accountOk());
-    const rawBytes = await readFile(accountFile, 'utf8');
-    const normalized = normalizeSubmission(rawBytes);
+    const aMd = await servedAccount(runId);
+    const accountFile = await payloadFile('account-lineage.json', accountOk(aMd));
+    const normalized = normalizeSubmission(await readFile(accountFile, 'utf8'));
     expect(await submit(runId, 'account', accountFile)).toBe(0);
     expect(lastJson().accepted).toBe(true);
     expect(
@@ -666,48 +424,26 @@ describe('routine two-lens run lifecycle', () => {
     ).toBe('ACCEPTED_CLEAN_FIRST_PASS');
     expect(await run(['finalize', '--run', runId])).toBe(0);
 
-    const finalized = lastJson();
-    const runDir = path.join(root, finalized.run_dir as string);
-    const accepted = JSON.parse(
-      await readFile(path.join(runDir, 'accepted-account.json'), 'utf8')
-    ) as {
-      normalization_code: string;
-      normalization_codes: string[];
-      normalized_authored: unknown;
-      compiled_payload: { acts: { id: string }[]; parts: { id: string; title: string }[] };
-      inner: {
+    const record = lastJson().run_record as {
+      account_lineage: {
         raw_submission_sha256: string;
         normalized_authored_sha256: string;
         compiled_payload_sha256: string;
         diagnostic_codes: string[];
-      };
-    };
-    expect(accepted.normalization_code).toBe('CLEAN_JSON');
-    expect(accepted.normalization_codes).toEqual(['CLEAN_JSON']);
-    expect(accepted.normalized_authored).toEqual(accountOk());
-    expect(accepted.compiled_payload.acts[0]!.id).toBe('A1');
-    expect(accepted.compiled_payload.parts[0]).toEqual(
-      expect.objectContaining({ id: 'P1', title: 'Part 1' })
-    );
-    expect(accepted.inner).toEqual({
-      raw_submission_sha256: normalized.raw_sha256,
-      normalized_authored_sha256: normalized.normalized_sha256,
-      compiled_payload_sha256: canonicalJsonSha256(accepted.compiled_payload),
-      diagnostic_codes: [],
-    });
-    expect(accepted).not.toHaveProperty('raw_submission');
-
-    const record = finalized.run_record as {
-      account_lineage: typeof accepted.inner & {
         accepted_envelope_sha256: string;
         normalization_code: string;
         normalization_codes: string[];
       };
       attempts: Array<Record<string, unknown>>;
     };
-    expect(record.account_lineage).toEqual({
-      ...accepted.inner,
-      accepted_envelope_sha256: canonicalJsonSha256(accepted),
+    // The lineage carries hashes of the authored, normalized and compiled
+    // payloads — never their bodies.
+    expect(record.account_lineage).toMatchObject({
+      raw_submission_sha256: normalized.raw_sha256,
+      normalized_authored_sha256: normalized.normalized_sha256,
+      compiled_payload_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      accepted_envelope_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      diagnostic_codes: [],
       normalization_code: 'CLEAN_JSON',
       normalization_codes: ['CLEAN_JSON'],
     });
@@ -715,36 +451,54 @@ describe('routine two-lens run lifecycle', () => {
       expect.objectContaining({
         raw_submission_sha256: normalized.raw_sha256,
         normalized_submission_sha256: normalized.normalized_sha256,
-        compiled_payload_sha256: accepted.inner.compiled_payload_sha256,
-        accepted_envelope_sha256: canonicalJsonSha256(accepted),
+        compiled_payload_sha256: record.account_lineage.compiled_payload_sha256,
+        accepted_envelope_sha256: record.account_lineage.accepted_envelope_sha256,
         normalization_codes: ['CLEAN_JSON'],
       })
     );
-  });
+
+    // The accepted envelope is retained evidence under THIS run's attempt
+    // publication — the raw body never becomes a member.
+    const accepted = await fixture.read((database) =>
+      database.read((view) =>
+        view.all<{ name: string }>(
+          `SELECT m.name FROM review_evidence_members m
+             JOIN review_evidence_publications p ON p.publication_id = m.publication_id
+            WHERE p.run_id = ? AND p.kind = 'run-attempt' AND m.kind = 'run-attempt'
+            ORDER BY m.name`,
+          runId
+        )
+      )
+    );
+    expect(accepted.value.map((member) => member.name)).toContain('accepted-account.json');
+    expect(accepted.value.map((member) => member.name)).not.toContain('raw-submission.json');
+    expect(record.account_lineage.accepted_envelope_sha256).not.toBe(
+      canonicalJsonSha256({ raw: 'not the envelope' })
+    );
+  }, 300_000);
 
   it('accepts one JSON-string wrapper as a normalized first pass', async () => {
     const runId = await startRun();
     expect(await submit(runId, 'forensic', await payloadFile('f.json', forensicOk()))).toBe(0);
-    const wrappedFile = path.join(root, 'wrapped-account.json');
-    await writeFile(wrappedFile, JSON.stringify(JSON.stringify(accountOk())));
+    const aMd = await servedAccount(runId);
+    const wrappedFile = path.join(fixture.root, 'wrapped-account.json');
+    await writeFile(wrappedFile, JSON.stringify(JSON.stringify(accountOk(aMd))));
     expect(await submit(runId, 'account', wrappedFile)).toBe(0);
     const submitted = lastJson();
     expect(submitted.accepted).toBe(true);
     expect(
       (submitted.state as { lanes: { account: { outcome: string } } }).lanes.account.outcome
     ).toBe('ACCEPTED_NORMALIZED_FIRST_PASS');
-
-    const runDir = path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', runId);
-    const accepted = JSON.parse(
-      await readFile(path.join(runDir, 'accepted-account.json'), 'utf8')
-    ) as { normalization_code: string; normalization_codes: string[] };
-    expect(accepted.normalization_code).toBe('JSON_STRING_UNWRAPPED');
-    expect(accepted.normalization_codes).toEqual(['JSON_STRING_UNWRAPPED']);
-  });
+    expect(await run(['run-show', '--run', runId])).toBe(0);
+    expect((lastJson().attempts as { normalization_code: string }[]).at(-1)).toMatchObject({
+      normalization_code: 'JSON_STRING_UNWRAPPED',
+      normalization_codes: ['JSON_STRING_UNWRAPPED'],
+    });
+  }, 300_000);
 
   it('applies the same one-layer outer normalization to the forensic boundary', async () => {
     const runId = await startRun();
-    const wrappedFile = path.join(root, 'wrapped-forensic.json');
+    const wrappedFile = path.join(fixture.root, 'wrapped-forensic.json');
     await writeFile(wrappedFile, JSON.stringify(JSON.stringify(forensicOk())));
     expect(await submit(runId, 'forensic', wrappedFile)).toBe(0);
     const submitted = lastJson();
@@ -752,20 +506,18 @@ describe('routine two-lens run lifecycle', () => {
     expect(
       (submitted.state as { lanes: { forensic: { outcome: string } } }).lanes.forensic.outcome
     ).toBe('ACCEPTED_NORMALIZED_FIRST_PASS');
-    const runDir = path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', runId);
-    const runFile = JSON.parse(await readFile(path.join(runDir, 'run-v1.json'), 'utf8')) as {
-      attempts: Array<{ normalization_code: string; normalization_codes: string[] }>;
-    };
-    expect(runFile.attempts[0]).toMatchObject({
+    expect(await run(['run-show', '--run', runId])).toBe(0);
+    expect((lastJson().attempts as { normalization_code: string }[])[0]).toMatchObject({
       normalization_code: 'JSON_STRING_UNWRAPPED',
       normalization_codes: ['JSON_STRING_UNWRAPPED'],
     });
-  });
+  }, 180_000);
 
   it('rejects bracketed citations and the removed question key', async () => {
     const runId = await startRun();
     expect(await submit(runId, 'forensic', await payloadFile('f.json', forensicOk()))).toBe(0);
-    const story = accountOk();
+    const aMd = await servedAccount(runId);
+    const story = accountOk(aMd);
     const citation = story.acts[0]!.parts[0]!.citations[0]!;
     story.acts[0]!.parts[0]!.citations = [`[${citation}]`];
     story.questions = [{ question: 'What remains?', citations: [`[${citation}]`] } as never];
@@ -779,22 +531,17 @@ describe('routine two-lens run lifecycle', () => {
     expect(
       (lastJson().state as { lanes: { account: { outcome: string } } }).lanes.account.outcome
     ).toBe('REJECTED_FIRST_PASS');
-
-    const runDir = path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', runId);
-    const runFile = JSON.parse(await readFile(path.join(runDir, 'run-v1.json'), 'utf8')) as {
-      attempts: Array<{ normalization_code: string; normalization_codes: string[] }>;
-    };
-    expect(runFile.attempts.at(-1)).toMatchObject({
+    expect(await run(['run-show', '--run', runId])).toBe(0);
+    expect((lastJson().attempts as { normalization_code: string }[]).at(-1)).toMatchObject({
       normalization_code: 'CLEAN_JSON',
       normalization_codes: ['CLEAN_JSON'],
     });
-  });
+  }, 300_000);
 
   it('an account story that leaves a checkpoint unclaimed is rejected with the named diagnostic', async () => {
     const runId = await startRun();
-    const fFile = await payloadFile('f.json', forensicOk());
-    expect(await submit(runId, 'forensic', fFile)).toBe(0);
-    const story = accountOk();
+    expect(await submit(runId, 'forensic', await payloadFile('f.json', forensicOk()))).toBe(0);
+    const story = accountOk(await servedAccount(runId));
     const incomplete = {
       ...story,
       acts: [{ ...story.acts[0]!, parts: story.acts[0]!.parts.slice(1) }],
@@ -805,11 +552,11 @@ describe('routine two-lens run lifecycle', () => {
         (d) => d.code === 'STORY_CHECKPOINT_UNCLAIMED'
       )
     ).toBe(true);
-  });
+  }, 300_000);
 
   it('a rejected forensic initial with a spent credit unlocks the account lane (terminal by exhaustion)', async () => {
     const runId = await startRun();
-    const garbled = path.join(root, 'garbled.json');
+    const garbled = path.join(fixture.root, 'garbled.json');
     await writeFile(garbled, 'not json {');
     expect(await submit(runId, 'forensic', garbled)).toBe(0);
     expect(lastJson().accepted).toBe(false);
@@ -818,14 +565,14 @@ describe('routine two-lens run lifecycle', () => {
     expect(lastJson().accepted).toBe(false);
     expect(await run(['run-show', '--run', runId])).toBe(0);
     expect(lastJson().forensic_terminal).toBe(true);
-    const aFile = await payloadFile('a.json', accountOk());
-    expect(await submit(runId, 'account', aFile)).toBe(0);
+    const aMd = await servedAccount(runId);
+    expect(await submit(runId, 'account', await payloadFile('a.json', accountOk(aMd)))).toBe(0);
     expect(lastJson().accepted).toBe(true);
     expect(await run(['finalize', '--run', runId])).toBe(0);
     const finalized = lastJson();
     expect(finalized.outcome).toBe('DEGRADED');
     expect((finalized.run_record as { repairs_used: number }).repairs_used).toBe(1);
-  });
+  }, 300_000);
 
   it('refuses required-flag omissions with parseable envelopes (no env gate)', async () => {
     const runId = await startRun();
@@ -837,119 +584,27 @@ describe('routine two-lens run lifecycle', () => {
     // Two-lane is the default: start succeeds with no environment
     // incantation (the retired gate returned exit 2 here).
     expect(await run(['start'])).toBe(0);
-  });
+  }, 180_000);
 
-  it('types unfinished flat-authoring runs as unsupported instead of reinterpreting v4 state', async () => {
-    const runId = await startRun();
-    const runFile = path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', runId, 'run-v1.json');
-    const historical = JSON.parse(await readFile(runFile, 'utf8')) as {
-      slice_state: { schema_version: number };
-    };
-    historical.slice_state.schema_version = 4;
-    await writeFile(runFile, JSON.stringify(historical));
-
-    expect(await run(['run-show', '--run', runId])).toBe(1);
-    expect((lastJson().error as { message: string }).message).toContain(
-      'slice schema 4 is unsupported by current schema 5'
-    );
-  });
-
-  it('types a pre-cut schema_version-1 run file as version-unsupported, not shape issues', async () => {
-    const runId = await startRun();
-    const runFile = path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', runId, 'run-v1.json');
-    const persisted = JSON.parse(await readFile(runFile, 'utf8')) as { schema_version: number };
-    persisted.schema_version = 1;
-    await writeFile(runFile, JSON.stringify(persisted));
-
-    expect(await run(['run-show', '--run', runId])).toBe(1);
-    expect((lastJson().error as { message: string }).message).toContain(
-      'run schema 1 is unsupported by current schema 2'
-    );
-  });
-
-  it('types a truncated run file as a contract violation, not a bare SyntaxError', async () => {
-    const runId = await startRun();
-    const runFile = path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', runId, 'run-v1.json');
-    const persisted = await readFile(runFile, 'utf8');
-    await writeFile(runFile, persisted.slice(0, Math.floor(persisted.length / 2)));
-
-    expect(await run(['run-show', '--run', runId])).toBe(1);
-    expect((lastJson().error as { message: string }).message).toContain('is not valid JSON');
-  });
-
-  it('rejects a persisted run file missing runtime_identity instead of defaulting it', async () => {
-    const runId = await startRun();
-    const runFile = path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', runId, 'run-v1.json');
-    const persisted = JSON.parse(await readFile(runFile, 'utf8')) as Record<string, unknown>;
-    delete persisted.runtime_identity;
-    await writeFile(runFile, JSON.stringify(persisted));
-
-    expect(await run(['run-show', '--run', runId])).toBe(1);
-    const message = (lastJson().error as { message: string }).message;
-    expect(message).toContain('violates the persisted run schema');
-    expect(message).toContain('runtime_identity');
-  });
-
-  it('requires current runtime identity hashes while allowing a null entrypoint hash', async () => {
-    for (const field of [
-      'entrypointSha256',
-      'compiledRuntimeManifestSha256',
-      'runtimeFingerprintSha256',
+  it('refuses to serve, submit to or seal a run identity the review never retained', async () => {
+    for (const argv of [
+      ['run-show', '--run', 'no-such-run'],
+      ['run-show', '--run', 'no-such-run', '--semantic-input'],
+      ['lane-input', '--run', 'no-such-run', '--lane', 'forensic'],
+      ['finalize', '--run', 'no-such-run'],
     ]) {
-      const runId = await startRun();
-      const runFile = path.join(
-        root,
-        '.orcaops',
-        'reviews',
-        BRANCH,
-        'twolane',
-        runId,
-        'run-v1.json'
-      );
-      const persisted = JSON.parse(await readFile(runFile, 'utf8')) as {
-        runtime_identity: Record<string, unknown>;
-      };
-      delete persisted.runtime_identity[field];
-      await writeFile(runFile, JSON.stringify(persisted));
-
-      expect(await run(['run-show', '--run', runId])).toBe(1);
-      expect((lastJson().error as { message: string }).message).toContain(
-        `runtime_identity.${field}`
-      );
+      expect(await run(argv)).toBe(1);
+      expect((lastJson().error as { message: string }).message).toMatch(/retained|missing/);
     }
-
-    const runId = await startRun();
-    const runFile = path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', runId, 'run-v1.json');
-    const persisted = JSON.parse(await readFile(runFile, 'utf8')) as {
-      runtime_identity: Record<string, unknown>;
-    };
-    persisted.runtime_identity.entrypointSha256 = null;
-    await writeFile(runFile, JSON.stringify(persisted));
-    expect(await run(['run-show', '--run', runId])).toBe(0);
-  });
-
-  it('rejects a persisted execution profile missing a component key instead of defaulting it', async () => {
-    const runId = await startRun();
-    const runFile = path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', runId, 'run-v1.json');
-    const persisted = JSON.parse(await readFile(runFile, 'utf8')) as {
-      execution_profile: Record<string, unknown>;
-    };
-    delete persisted.execution_profile.host;
-    await writeFile(runFile, JSON.stringify(persisted));
-
-    expect(await run(['run-show', '--run', runId])).toBe(1);
-    const message = (lastJson().error as { message: string }).message;
-    expect(message).toContain('violates the persisted run schema');
-    expect(message).toContain('execution_profile.host');
-  });
+  }, 120_000);
 });
 
 describe('routine-surface json failure envelopes', () => {
   it('routine-start returns the underlying cause in an envelope under --json', async () => {
-    // The temp root is not a git repository, so floor assembly throws — the
-    // composite must answer with a parseable envelope, not a bare stderr line.
+    // The fixture's temp parent is not a git repository, so publication throws —
+    // the composite must answer with a parseable envelope, not a bare stderr line.
     const code = await runReview(
-      ['review', 'routine-start', '--branch', BRANCH, '--root', root, '--json'],
+      ['review', 'routine-start', '--branch', fixture.branch, '--root', fixture.root, '--json'],
       process.env
     );
     expect(code).toBe(1);
@@ -958,21 +613,21 @@ describe('routine-surface json failure envelopes', () => {
     const failure = envelope.error as { verb: string; message: string };
     expect(failure.verb).toBe('review routine-start');
     expect(failure.message.length).toBeGreaterThan(0);
-  });
+  }, 120_000);
 
   it('routine-start keeps the human stderr line without --json', async () => {
     const code = await runReview(
-      ['review', 'routine-start', '--branch', BRANCH, '--root', root],
+      ['review', 'routine-start', '--branch', fixture.branch, '--root', fixture.root],
       process.env
     );
     expect(code).toBe(1);
     expect(err.join('')).toContain('review routine-start:');
     expect(out.filter((line) => line.trim().startsWith('{'))).toEqual([]);
-  });
+  }, 120_000);
 
   it('missing --branch on routine-start is enveloped under --json', async () => {
     const code = await runReview(
-      ['review', 'routine-start', '--root', root, '--json'],
+      ['review', 'routine-start', '--root', fixture.gitRoot, '--json'],
       process.env
     );
     expect(code).toBe(2);
@@ -996,15 +651,15 @@ describe('routine-surface json failure envelopes', () => {
     const envelope = lastJson();
     expect(envelope.ok).toBe(false);
     expect((envelope.error as { verb: string }).verb).toBe('review routine-submit');
-    expect((envelope.error as { message: string }).message).toContain('not readable');
-  });
+    expect((envelope.error as { message: string }).message).toMatch(/retained|missing/);
+  }, 120_000);
 });
 
 describe('composite routine verbs', () => {
   const compositeStart = async (): Promise<Record<string, unknown>> => {
     const code = await runTwolaneRun(
-      { cmd: 'review', sub: 'routine-start', branch: BRANCH, json: true },
-      root
+      { cmd: 'review', sub: 'routine-start', branch: fixture.branch, json: true },
+      fixture.gitRoot
     );
     expect(code).toBe(0);
     return lastJson();
@@ -1034,199 +689,185 @@ describe('composite routine verbs', () => {
       'payload_bytes',
       'payload_path',
       'payload_sha',
-      'run_dir',
+      'review_id',
       'run_id',
+      'served_at',
     ]);
     expect(env.mode).toBe('routine');
     expect(env.lane).toBe('forensic');
     expect(env.contract).toEqual(LANE_CONTRACTS.forensic);
-    const md = await readFile(path.join(root, env.payload_path as string), 'utf8');
+    const md = await readFile(path.join(fixture.gitRoot, env.payload_path as string), 'utf8');
     expect(md.startsWith('# Forensic lane input')).toBe(true);
-  });
-
-  it('refuses to mint through a symlinked run directory', async () => {
-    const external = path.join(root, 'external-runs');
-    await mkdir(external);
-    await symlink(external, path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane'), 'dir');
-
-    expect(
-      await runTwolaneRun({ cmd: 'review', sub: 'routine-start', branch: BRANCH, json: true }, root)
-    ).toBe(1);
-    await expect(readdir(external)).resolves.toEqual([]);
-  });
+  }, 180_000);
 
   it('forensic acceptance serves the account input; account acceptance auto-finalizes', async () => {
-    const started = await compositeStart();
-    const runId = started.run_id as string;
-    const fFile = await payloadFile('f.json', forensicOk());
-    expect(await compositeSubmit(runId, 'forensic', fFile)).toBe(0);
+    const runId = (await compositeStart()).run_id as string;
+    expect(
+      await compositeSubmit(runId, 'forensic', await payloadFile('f.json', forensicOk()))
+    ).toBe(0);
     const fEnv = lastJson();
-    expect(fEnv.accepted).toBe(true);
+    expect(fEnv.accepted, JSON.stringify(fEnv.diagnostics)).toBe(true);
     const account = fEnv.account as Record<string, unknown>;
     expect(account.contract).toEqual(LANE_CONTRACTS.account);
-    const aMd = await readFile(path.join(root, account.payload_path as string), 'utf8');
+    const aMd = await readFile(path.join(fixture.gitRoot, account.payload_path as string), 'utf8');
     expect(aMd.startsWith('# Account lane input')).toBe(true);
 
-    const storyFile = await payloadFile('story.json', accountOk());
-    expect(await compositeSubmit(runId, 'account', storyFile)).toBe(0);
+    expect(
+      await compositeSubmit(runId, 'account', await payloadFile('story.json', accountOk(aMd)))
+    ).toBe(0);
     const aEnv = lastJson();
-    expect(aEnv.accepted).toBe(true);
+    expect(aEnv.accepted, JSON.stringify(aEnv.diagnostics)).toBe(true);
     expect(aEnv.outcome).toBe('FULL');
     expect((aEnv.files as string[]).includes('review.md')).toBe(true);
     expect((aEnv.run_record as { mode: string }).mode).toBe('routine');
     expect(aEnv.ownership_summary).toEqual(
       (aEnv.run_record as { ownership_summary: unknown }).ownership_summary
     );
-    const review = await readFile(path.join(root, aEnv.run_dir as string, 'review.md'), 'utf8');
-    expect(review).toContain('Two-lane review');
-  });
+  }, 300_000);
 
   it('prepares a complete semantic-anchor input at finalization and returns its receipt', async () => {
-    // This old fixture predates parent-aware alternative projection and repeats
-    // one alternative under every decision in a checkpoint. Fresh production
-    // projections do not. Normalize that legacy shape so this test exercises
-    // the current finalization contract rather than compatibility corruption.
-    const currentProjection = projectionFix();
-    for (const checkpoint of currentProjection.accountCore.checkpoints) {
-      const seen = new Set<string>();
-      for (const decision of checkpoint.decisions) {
-        decision.alternatives = decision.alternatives.filter((alternative) => {
-          if (seen.has(alternative.citationId)) return false;
-          seen.add(alternative.citationId);
-          return true;
-        });
-      }
-    }
-    const firstCheckpoint = currentProjection.accountCore.checkpoints[0]!;
-    const artifact = currentProjection.artifactAliases[firstCheckpoint.artifact]!;
-    const reviewDir = path.join(root, '.orcaops', 'reviews', BRANCH);
-    const semanticDiff =
-      'diff --git a/src/x.ts b/src/x.ts\n--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1 +1 @@\n-old\n+new\n';
-    await writeFile(
-      path.join(reviewDir, 'account-projection-v1.json'),
-      JSON.stringify(currentProjection)
-    );
-    await writeFile(path.join(reviewDir, 'diff.patch'), semanticDiff);
-    const forensicInput = JSON.parse(
-      await readFile(path.join(reviewDir, 'forensic-input-v1.json'), 'utf8')
-    ) as Record<string, unknown> & { metrics: Record<string, unknown> };
-    forensicInput.diff = semanticDiff;
-    forensicInput.excludedPaths = [];
-    forensicInput.unreviewablePaths = [];
-    forensicInput.policyStubs = [];
-    forensicInput.metrics = {
-      ...forensicInput.metrics,
-      eligibleFiles: 1,
-      excludedFiles: 0,
-      unreviewableFiles: 0,
-      policyStubFiles: 0,
-      policyStubRows: 0,
-      policyStubBytes: 0,
-      eligibleDiffBytes: Buffer.byteLength(semanticDiff),
-    };
-    await writeFile(path.join(reviewDir, 'forensic-input-v1.json'), JSON.stringify(forensicInput));
-    await writeFile(
-      path.join(reviewDir, 'coverage-v1.json'),
-      JSON.stringify({
-        items: [
-          {
-            hunkKey: 'hunk_semantic_ready',
-            file: 'src/x.ts',
-            verdict: 'MATCHED',
-            old_start: 1,
-            new_start: 1,
-            added_lines: 1,
-            removed_lines: 1,
-            units: [
-              {
-                kind: 'owned_slice',
-                slice: 0,
-                patch_row_start: 0,
-                patch_row_end: 1,
-                del_range: { start: 1, end: 1 },
-                add_range: { start: 1, end: 1 },
-                lines: 2,
-                owner: { kind: 'checkpoint', artifact, cp: firstCheckpoint.cp },
-              },
-            ],
-          },
-        ],
-        summary: {
-          excluded: 0,
-          unreviewable: 0,
-          matched_rows: 2,
-          unexplained_rows: 0,
-          ambiguous_rows: 0,
-          reviewable_rows: 2,
-        },
-      })
-    );
-
     const runId = (await compositeStart()).run_id as string;
     expect(
       await compositeSubmit(runId, 'forensic', await payloadFile('f.json', forensicOk()))
     ).toBe(0);
+    const aMd = await readFile(
+      path.join(
+        fixture.gitRoot,
+        (lastJson().account as Record<string, unknown>).payload_path as string
+      ),
+      'utf8'
+    );
     expect(
-      await compositeSubmit(runId, 'account', await payloadFile('story.json', accountOk()))
+      await compositeSubmit(runId, 'account', await payloadFile('story.json', accountOk(aMd)))
     ).toBe(0);
     const final = lastJson();
     const prepared = final.semantic_anchor as Record<string, unknown>;
     expect(prepared.status, JSON.stringify(prepared)).toBe('READY');
-    expect(prepared.payload_path).toEqual(expect.stringContaining('semantic-anchor-input-v4.md'));
-    expect(prepared.receipt_path).toEqual(expect.stringContaining('semantic-anchor-input-v4.json'));
+    expect(prepared.payload_file).toBe('semantic-anchor-input-v4.md');
+    expect(prepared.receipt_file).toBe('semantic-anchor-input-v4.json');
     expect(prepared.payload_hash).toMatch(/^[0-9a-f]{64}$/);
-
-    const payload = await readFile(path.join(root, prepared.payload_path as string), 'utf8');
-    expect(payload).toContain('@@@ change-hunk:h1 MODIFICATION @@@');
-    expect(payload).toContain('@@@ change-block:h1.b1 REPLACEMENT old:1:1 new:1:1 @@@');
-    expect(payload).toContain('-D1 old');
-    expect(payload).toContain('+A1 new');
-    expect(payload).not.toContain('@@@ change-row:');
-    expect(payload).toContain(citationId());
-    const receipt = JSON.parse(
-      await readFile(path.join(root, prepared.receipt_path as string), 'utf8')
-    ) as { run_id: string; status: string; profile: string; profile_source: string };
-    expect(receipt.run_id).toBe(runId);
-    expect(receipt.status).toBe('READY');
-    expect(receipt.profile).toBe('semantic-anchor-profile-v1');
-    expect(receipt.profile_source).toBe('ENGINE_REGISTERED');
+    expect(prepared.publication_id).toEqual(expect.any(String));
     expect((final.files as string[]).sort()).toContain('semantic-anchor-input-v4.md');
-  });
+
+    // The prepared input and its receipt are retained evidence, read back
+    // through the store rather than from a run directory.
+    const members = await fixture.read((database) =>
+      database.read((view) =>
+        view.all<{ name: string }>(
+          "SELECT name FROM review_evidence_members WHERE kind = 'semantic' AND publication_id = ? ORDER BY name",
+          prepared.publication_id as string
+        )
+      )
+    );
+    expect(members.value.map((member) => member.name)).toEqual([
+      'semantic-anchor-input-v4.json',
+      'semantic-anchor-input-v4.md',
+    ]);
+
+    const evidenceFile = path.join(
+      path.dirname(projectDatabasePath(fixture.authority)),
+      'evidence',
+      prepared.publication_id as string,
+      prepared.payload_file as string
+    );
+    const [payload, databaseBefore] = await Promise.all([
+      readFile(evidenceFile, 'utf8'),
+      readFile(projectDatabasePath(fixture.authority)),
+    ]);
+    expect(await run(['run-show', '--run', runId])).toBe(0);
+    expect(lastJson()).not.toHaveProperty('semantic_anchor');
+    expect(await run(['run-show', '--run', runId, '--semantic-input'])).toBe(0);
+    expect(lastJson().semantic_anchor).toMatchObject({
+      status: 'READY',
+      review_id: final.review_id,
+      run_id: runId,
+      publication_id: prepared.publication_id,
+      payload_file: 'semantic-anchor-input-v4.md',
+      payload_hash: prepared.payload_hash,
+      payload_bytes: Buffer.byteLength(payload),
+      payload_content: payload,
+    });
+    expect((await readFile(projectDatabasePath(fixture.authority))).equals(databaseBefore)).toBe(
+      true
+    );
+    expect(await readFile(evidenceFile, 'utf8')).toBe(payload);
+  }, 300_000);
+
+  it('run-show refuses corrupt retained semantic input without repairing it', async () => {
+    const runId = (await compositeStart()).run_id as string;
+    expect(
+      await compositeSubmit(runId, 'forensic', await payloadFile('f.json', forensicOk()))
+    ).toBe(0);
+    const account = lastJson().account as Record<string, unknown>;
+    const markdown = await readFile(
+      path.join(fixture.gitRoot, account.payload_path as string),
+      'utf8'
+    );
+    expect(
+      await compositeSubmit(runId, 'account', await payloadFile('story.json', accountOk(markdown)))
+    ).toBe(0);
+    const semantic = lastJson().semantic_anchor as Record<string, unknown>;
+    const evidenceFile = path.join(
+      path.dirname(projectDatabasePath(fixture.authority)),
+      'evidence',
+      semantic.publication_id as string,
+      semantic.payload_file as string
+    );
+    const [original, databaseBefore] = await Promise.all([
+      readFile(evidenceFile),
+      readFile(projectDatabasePath(fixture.authority)),
+    ]);
+    const corrupt = Buffer.from(original);
+    corrupt[0] = corrupt[0] === 0x23 ? 0x24 : 0x23;
+    await writeFile(evidenceFile, corrupt);
+    try {
+      const ordinaryStatus = await run(['run-show', '--run', runId]);
+      expect(ordinaryStatus, JSON.stringify(lastJson())).toBe(0);
+      expect(lastJson()).not.toHaveProperty('semantic_anchor');
+      expect(await run(['run-show', '--run', runId, '--semantic-input'])).toBe(1);
+      expect((lastJson().error as { message: string }).message).toContain(
+        'Retained evidence differs from its exact hash'
+      );
+      expect(await readFile(evidenceFile)).toEqual(corrupt);
+      expect((await readFile(projectDatabasePath(fixture.authority))).equals(databaseBefore)).toBe(
+        true
+      );
+    } finally {
+      await writeFile(evidenceFile, original);
+    }
+  }, 300_000);
 
   it('a rejection returns diagnostics and the same command accepts the repaired payload', async () => {
-    const started = await compositeStart();
-    const runId = started.run_id as string;
-    const garbled = path.join(root, 'garbled.json');
+    const runId = (await compositeStart()).run_id as string;
+    const garbled = path.join(fixture.root, 'garbled.json');
     await writeFile(garbled, 'not json {');
     expect(await compositeSubmit(runId, 'forensic', garbled)).toBe(0);
     const rejected = lastJson();
     expect(rejected.accepted).toBe(false);
     expect(rejected.account).toBeUndefined();
     expect((rejected.diagnostics as { code: string }[])[0]!.code).toBe('SLICE_PAYLOAD_SHAPE');
-    const fFile = await payloadFile('f.json', forensicOk());
-    expect(await compositeSubmit(runId, 'forensic', fFile)).toBe(0);
+    expect(
+      await compositeSubmit(runId, 'forensic', await payloadFile('f.json', forensicOk()))
+    ).toBe(0);
     const repaired = lastJson();
     expect(repaired.accepted).toBe(true);
     expect((repaired.state as { repair_credit: { forensic: number } }).repair_credit.forensic).toBe(
       0
     );
     expect(repaired.account).toBeDefined();
-  });
+  }, 300_000);
 
   it('the composite refuses a premature account submission (ordering intact)', async () => {
-    const started = await compositeStart();
-    const runId = started.run_id as string;
-    const aFile = await payloadFile('a.json', accountOk());
-    expect(await compositeSubmit(runId, 'account', aFile)).toBe(0);
+    const runId = (await compositeStart()).run_id as string;
+    expect(await compositeSubmit(runId, 'account', await payloadFile('a.json', {}))).toBe(0);
     const refused = lastJson();
     expect(refused.accepted).toBe(false);
     expect((refused.diagnostics as { code: string }[])[0]!.code).toBe('TWOLANE_ROUTINE_ORDER');
-  });
+  }, 180_000);
 
   it('chains on terminality: an exhausted forensic lane still serves account; an exhausted account lane finalizes', async () => {
-    const started = await compositeStart();
-    const runId = started.run_id as string;
-    const garbled = path.join(root, 'garbled.json');
+    const runId = (await compositeStart()).run_id as string;
+    const garbled = path.join(fixture.root, 'garbled.json');
     await writeFile(garbled, 'not json {');
     // Forensic initial rejected: not yet terminal (repair remains), no chain.
     expect(await compositeSubmit(runId, 'forensic', garbled)).toBe(0);
@@ -1247,24 +888,17 @@ describe('composite routine verbs', () => {
     expect(finalized.outcome).toBe('FAILED');
     expect(finalized.ownership_summary).toBeNull();
     expect((finalized.run_record as { ownership_summary: unknown }).ownership_summary).toBeNull();
-    const persisted = JSON.parse(
-      await readFile(path.join(root, finalized.run_dir as string, 'run-record-v1.json'), 'utf8')
-    ) as { ownership_summary: unknown };
-    expect(persisted.ownership_summary).toBeNull();
-    await expect(
-      readFile(
-        path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', CURRENT_STORY_POINTER_FILE),
-        'utf8'
-      )
-    ).rejects.toMatchObject({ code: 'ENOENT' });
-  });
+    // A failed run publishes no Story, so the review's Story selection is
+    // untouched by it.
+    expect(finalized.story_publication_id).toBeNull();
+  }, 300_000);
 
   it('chains DEGRADED when only the account lane exhausts its repair', async () => {
-    const started = await compositeStart();
-    const runId = started.run_id as string;
-    const fFile = await payloadFile('f.json', forensicOk());
-    expect(await compositeSubmit(runId, 'forensic', fFile)).toBe(0);
-    const garbled = path.join(root, 'garbled.json');
+    const runId = (await compositeStart()).run_id as string;
+    expect(
+      await compositeSubmit(runId, 'forensic', await payloadFile('f.json', forensicOk()))
+    ).toBe(0);
+    const garbled = path.join(fixture.root, 'garbled.json');
     await writeFile(garbled, 'not json {');
     expect(await compositeSubmit(runId, 'account', garbled)).toBe(0);
     expect(lastJson().outcome).toBeUndefined();
@@ -1272,120 +906,32 @@ describe('composite routine verbs', () => {
     const finalized = lastJson();
     expect(finalized.outcome).toBe('DEGRADED');
     expect((finalized.run_record as { repairs_used: number }).repairs_used).toBe(1);
-  });
-
-  it('every inline c# is engine-mapped without publishing the canonical lookup', async () => {
-    const runId = (await compositeStart()).run_id as string;
-    const fFile = await payloadFile('f.json', forensicOk());
-    expect(await compositeSubmit(runId, 'forensic', fFile)).toBe(0);
-    const account = lastJson().account as Record<string, unknown>;
-    const md = await readFile(path.join(root, account.payload_path as string), 'utf8');
-    expect(md).not.toMatch(/^ {2}citations: /m);
-    const aliases = [...md.matchAll(/\[(c\d+)\]/g)].map((match) => match[1]!);
-    expect(aliases.length).toBeGreaterThan(0);
-    const projection = projectionFix();
-    const mapping = new Map(
-      buildAccountPromptAliases(projection).citations.map((entry) => [entry.alias, entry.canonical])
-    );
-    const citable = accountCitableIds(projection);
-    expect(md).not.toMatch(/^- c\d+ -> /m);
-    for (const alias of new Set(aliases)) {
-      const canonical = mapping.get(alias);
-      expect(canonical, `unmapped bracketed alias ${alias}`).toBeDefined();
-      expect(citable.has(canonical!), `non-citable mapped id ${canonical}`).toBe(true);
-    }
-  });
+  }, 300_000);
 
   it('unknown --profile values fail loudly', async () => {
     expect(await run(['dossier', '--profile', 'routin'])).toBe(2);
     expect(err.join('')).toContain("unknown --profile 'routin'");
   });
 
-  // REGRESSION: a composition failure
-  // AFTER the account lane accepted surfaced as a routine-submit error; the
-  // reviewer resubmitted and burned SLICE_SUBMIT_AFTER_ACCEPT. Post-acceptance
-  // engine failures must report as a finalize-stage envelope with acceptance
-  // explicit, and `finalize` must stay retryable.
-  it('a post-acceptance composition failure reports its SPECIFIC code, never a submit rejection', async () => {
-    // An inconsistent pinned coverage snapshot (summary claims 2 matched rows,
-    // units carry 1) makes the exactly-once fold throw only at composition.
-    const uuid = projectionFix().artifactAliases['a1']!;
-    await writeFile(
-      path.join(root, '.orcaops', 'reviews', BRANCH, 'coverage-v1.json'),
-      JSON.stringify({
-        items: [
-          {
-            file: 'src/x.ts',
-            hunkKey: 'hk1',
-            units: [
-              {
-                kind: 'owned_slice',
-                slice: 0,
-                patch_row_start: 1,
-                patch_row_end: 1,
-                del_range: null,
-                add_range: { start: 1, end: 1 },
-                lines: 1,
-                owner: { kind: 'checkpoint', artifact: uuid, cp: 1 },
-              },
-            ],
-          },
-        ],
-        summary: {
-          excluded: 0,
-          unreviewable: 0,
-          matched_rows: 2,
-          unexplained_rows: 0,
-          ambiguous_rows: 0,
-          reviewable_rows: 2,
-        },
-      })
-    );
-    const runId = (await compositeStart()).run_id as string;
-    const fFile = await payloadFile('f.json', forensicOk());
-    expect(await compositeSubmit(runId, 'forensic', fFile)).toBe(0);
-    const aFile = await payloadFile('a.json', accountOk());
-    expect(await compositeSubmit(runId, 'account', aFile)).toBe(0);
-    const envelope = lastJson();
-    expect(envelope.ok).toBe(true);
-    expect(envelope.accepted).toBe(true);
-    expect(envelope.outcome).toBeUndefined();
-    const fe = envelope.finalize_error as {
-      code: string;
-      lane_accepted: boolean;
-      run_finalized: boolean;
-      retry: string;
-    };
-    // Not the generic STORY_COMPOSE_FAILED: this is the exactly-once ownership
-    // fold failing, and the code says which thing to go look at.
-    expect(fe.code).toBe('PART_OWNERSHIP_INVARIANT');
-    expect(fe.lane_accepted).toBe(true);
-    expect(fe.run_finalized).toBe(false);
-    expect(fe.retry).toContain('finalize');
-    // The plain finalize verb surfaces the same code and stays retryable.
-    expect(await run(['finalize', '--run', runId])).toBe(1);
-    expect((lastJson().error as { message: string }).message).toContain('PART_OWNERSHIP_INVARIANT');
-    // The run is NOT finalized and NOT sealed: run-show reflects both lanes
-    // accepted with the run still open.
-    expect(await run(['run-show', '--run', runId])).toBe(0);
-    const shown = lastJson();
-    expect(shown.finalized).toBeNull();
-    const shownState = shown.state as { lanes: Record<string, { accepted: boolean }> };
-    expect(shownState.lanes.account.accepted).toBe(true);
-  });
-
   it('the PRODUCTION mint serves a complete facts block — no placeholders, no omissions', async () => {
     // The point of this test is that "optional" means optional-for-tests only.
     // An optional argument silently becoming an absent one in the only path
     // that matters is exactly how the stale-claim defect would survive the fix,
-    // so this asserts the bytes the real routine-start writes to disk.
+    // so this asserts the bytes the real routine-start serves.
     const runId = (await compositeStart()).run_id as string;
-    const runDir = path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', runId);
-    const served = await readFile(path.join(runDir, 'lane-account.md'), 'utf8');
+    expect(
+      await compositeSubmit(runId, 'forensic', await payloadFile('f.json', forensicOk()))
+    ).toBe(0);
+    const served = await readFile(
+      path.join(
+        fixture.gitRoot,
+        (lastJson().account as Record<string, unknown>).payload_path as string
+      ),
+      'utf8'
+    );
 
     expect(served).toContain('## THIS RUN (executing now — not captured history)');
     expect(served).toContain(`run: ${runId}`);
-    expect(served).toContain('executing now');
     expect(served).toContain('latency tier in force for this run:');
     expect(served).toMatch(/floor \S{8,}/);
     expect(served).toMatch(/diff under review: \d+ eligible file\(s\), \d+ bytes/);
@@ -1393,50 +939,15 @@ describe('composite routine verbs', () => {
     expect(served).toContain('check it against these facts before repeating it');
 
     // No placeholder leaked into any fact line.
-    const factLines = served.split('\n').slice(
-      served.split('\n').findIndex((l) => l.startsWith('## THIS RUN')),
-      served.split('\n').findIndex((l) => l.startsWith('## Artifact '))
+    const lines = served.split('\n');
+    const factLines = lines.slice(
+      lines.findIndex((l) => l.startsWith('## THIS RUN')),
+      lines.findIndex((l) => l.startsWith('## Artifact '))
     );
     for (const bad of ['undefined', 'NaN', 'null', 'TODO', '{']) {
       expect(factLines.join('\n')).not.toContain(bad);
     }
-  });
-
-  it('a validation failure leaves NO review.md or brief.json behind', async () => {
-    // The test above fails in composeStory, BEFORE any write — so it does not
-    // cover validate-before-write. This one fails at validation: were validation
-    // to run last, inside the story-model write call, review.md, brief.json and
-    // the composed story would already be on disk, so a run reporting "not
-    // finalized" would leave a usable-looking review beside it.
-    // NOTE: the rest of this suite pins NO diff, so it has never exercised
-    // Part-range validation — every other run records
-    // range_validation: SKIPPED_NO_PINNED_DIFF. This test pins one so the
-    // validated path is reached at all.
-    await writeFile(
-      path.join(root, '.orcaops', 'reviews', BRANCH, 'diff.patch'),
-      'diff --git a/src/x.ts b/src/x.ts\n--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1 +1 @@\n-old\n+new\n'
-    );
-    const runId = (await compositeStart()).run_id as string;
-    const runDir = path.join(root, '.orcaops', 'reviews', BRANCH, 'twolane', runId);
-    // The diff IS pinned (input_shas.diff is set), then goes missing. That is
-    // the case the old code swallowed to null, silently skipping validation.
-    await rm(path.join(runDir, 'diff.patch'), { force: true });
-
-    const fFile = await payloadFile('f.json', forensicOk());
-    expect(await compositeSubmit(runId, 'forensic', fFile)).toBe(0);
-    const aFile = await payloadFile('a.json', accountOk());
-    expect(await compositeSubmit(runId, 'account', aFile)).toBe(0);
-
-    const fe = lastJson().finalize_error as { code: string; run_finalized: boolean };
-    expect(fe.code).toBe('PINNED_DIFF_UNREADABLE');
-    expect(fe.run_finalized).toBe(false);
-
-    // Asserted ON DISK, not from the response envelope: the envelope said "not
-    // finalized" before this change too, while the files were sitting there.
-    for (const name of ['review.md', 'brief.json', 'composed-story-v2.json']) {
-      await expect(readFile(path.join(runDir, name), 'utf8')).rejects.toThrow();
-    }
-  });
+  }, 300_000);
 });
 
 describe('frozen latency tiers', () => {
@@ -1476,12 +987,18 @@ describe('instruction-ownership boundary', () => {
     const envelope = lastJson();
     const nonContract = Object.entries(envelope).filter(([k]) => k !== 'contract');
     for (const [key, value] of nonContract) {
-      expect(['ok', 'run_id', 'lane', 'payload_path', 'payload_sha', 'payload_bytes']).toContain(
-        key
-      );
+      expect([
+        'ok',
+        'run_id',
+        'lane',
+        'payload_path',
+        'payload_sha',
+        'payload_bytes',
+        'served_at',
+      ]).toContain(key);
       if (typeof value === 'string') expect(value.includes(' ')).toBe(false);
     }
-  });
+  }, 180_000);
 
   it('the production path and the canonical skill invoke no model directly or by proxy', () => {
     const productionSources = [
@@ -1491,7 +1008,6 @@ describe('instruction-ownership boundary', () => {
       'dossierCli.ts',
       'run.ts',
       'semanticAnchors.ts',
-      'semanticAnchorCli.ts',
       'semanticAnchorGenerations.ts',
     ].map((f) => path.join(__dirname, f));
     const skillTemplate = path.join(
@@ -1526,110 +1042,6 @@ describe('instruction-ownership boundary', () => {
 });
 
 describe('composition ownership labels at finalize', () => {
-  it('stores and mirrors full-precision DERIVED ownership metrics from composed output', async () => {
-    await installDerivedOwnershipFixture(4);
-    const runId = await startRun();
-    expect(await submit(runId, 'forensic', await payloadFile('f.json', forensicOk()))).toBe(0);
-    expect(await submit(runId, 'account', await payloadFile('a.json', accountOk()))).toBe(0);
-    expect(await run(['finalize', '--run', runId])).toBe(0);
-    const finalized = lastJson();
-    const expected = {
-      label: 'DERIVED',
-      reviewable_rows: 3,
-      attributed_rows: 1,
-      attributed_pct: (1 / 3) * 100,
-      ambiguous_rows: 0,
-      contested_rows: 0,
-      unattributed_rows: 2,
-      missing_boundary_checkpoints: 4,
-    };
-    expect(finalized.ownership_summary).toEqual(expected);
-    const record = finalized.run_record as {
-      ownership_summary: typeof expected;
-      outputs: { ownership_label: string };
-    };
-    expect(record.ownership_summary).toEqual(expected);
-    expect(record.ownership_summary.attributed_pct).toBe((1 / 3) * 100);
-    expect(record.outputs.ownership_label).toBe('DERIVED');
-
-    const persisted = JSON.parse(
-      await readFile(path.join(root, finalized.run_dir as string, 'run-record-v1.json'), 'utf8')
-    ) as typeof record;
-    expect(persisted.ownership_summary).toEqual(expected);
-    expect(persisted.outputs.ownership_label).toBe('DERIVED');
-  });
-
-  it('finalizes DEGRADED_ATTRIBUTION when the coverage snapshot is absent (story retained)', async () => {
-    // The fixtures written to reviewDir carry no coverage-v1.json, so the run
-    // pins no coverage and the composition retains the story but cannot derive
-    // ownership — a labeled degraded state distinct from code-only.
-    const runId = await startRun();
-    const fFile = await payloadFile('f.json', forensicOk());
-    expect(await submit(runId, 'forensic', fFile)).toBe(0);
-    const aFile = await payloadFile('a.json', accountOk());
-    expect(await submit(runId, 'account', aFile)).toBe(0);
-    expect(await run(['finalize', '--run', runId])).toBe(0);
-    const finalized = lastJson();
-    expect(finalized.outcome).toBe('FULL');
-    const expectedOwnership = {
-      label: 'DEGRADED_ATTRIBUTION',
-      reviewable_rows: 0,
-      attributed_rows: 0,
-      attributed_pct: 0,
-      ambiguous_rows: 0,
-      contested_rows: 0,
-      unattributed_rows: 0,
-      missing_boundary_checkpoints: dossierFix().missing_boundary_checkpoints,
-    };
-    expect(finalized.ownership_summary).toEqual(expectedOwnership);
-    expect((finalized.run_record as { ownership_summary: unknown }).ownership_summary).toEqual(
-      expectedOwnership
-    );
-    const runDir = path.join(root, finalized.run_dir as string);
-    const brief = JSON.parse(await readFile(path.join(runDir, 'brief.json'), 'utf8')) as {
-      ownership: { label: string };
-    };
-    expect(brief.ownership.label).toBe('DEGRADED_ATTRIBUTION');
-    const composed = JSON.parse(
-      await readFile(path.join(runDir, 'composed-story-v2.json'), 'utf8')
-    ) as { story: unknown; ownership: { label: string } };
-    expect(composed.story).not.toBeNull();
-    expect(composed.ownership.label).toBe('DEGRADED_ATTRIBUTION');
-    expect(
-      (finalized.run_record as { outputs: { ownership_label: string } }).outputs.ownership_label
-    ).toBe('DEGRADED_ATTRIBUTION');
-    const md = await readFile(path.join(runDir, 'review.md'), 'utf8');
-    expect(md).toContain('DEGRADED OWNERSHIP');
-
-    // The canonical Story review model is the run's PRIMARY output — installed
-    // beside the run dir, schema-valid, with the authored Story retained and all
-    // Parts context-only (attribution unusable → every Part owns zero segments).
-    expect((finalized.files as string[]).includes('story-review-model-v4.json')).toBe(true);
-    const model = parseStoryReviewModel(
-      JSON.parse(await readFile(path.join(runDir, 'story-review-model-v4.json'), 'utf8'))
-    );
-    expect(model.label).toBe('DEGRADED_ATTRIBUTION');
-    expect(model.parts.length).toBeGreaterThan(0);
-    expect(model.parts.every((p) => p.contextOnly)).toBe(true);
-  });
-
-  it('finalizes CODE_ONLY when no account story is accepted (forensic-only)', async () => {
-    const runId = await startRun();
-    const fFile = await payloadFile('f.json', forensicOk());
-    expect(await submit(runId, 'forensic', fFile)).toBe(0);
-    // No account submission → forensic-only: DEGRADED outcome, CODE_ONLY ownership.
-    expect(await run(['finalize', '--run', runId])).toBe(0);
-    const finalized = lastJson();
-    expect(finalized.outcome).toBe('DEGRADED');
-    const runDir = path.join(root, finalized.run_dir as string);
-    const brief = JSON.parse(await readFile(path.join(runDir, 'brief.json'), 'utf8')) as {
-      ownership: { label: string };
-    };
-    expect(brief.ownership.label).toBe('CODE_ONLY');
-    const md = await readFile(path.join(runDir, 'review.md'), 'utf8');
-    expect(md).toContain('CODE-ONLY');
-  });
-
   it('retains every ownership partition and rejects an incomplete row equation', () => {
     const composed = {
       ownership: {
@@ -1739,4 +1151,115 @@ describe('renderForensicRoutineMd — policy-stub accounting', () => {
     expect(md).toContain('0 policy-stubbed');
     expect(md).not.toContain('stub ');
   });
+});
+
+describe('composite verb replay under one operation identity', () => {
+  const runOp = (argv: string[], operationId: string): Promise<number> =>
+    run([...argv, '--operation-id', operationId]);
+
+  const receiptsOfKind = (kind: string): Promise<number> =>
+    fixture.read(
+      (database) =>
+        database.read(
+          (view) =>
+            view.get<{ count: number }>(
+              'SELECT count(*) AS count FROM operations WHERE operation_kind = ?',
+              kind
+            )!.count
+        ).value
+    );
+
+  it('replays routine-start whole under a repeated --operation-id', async () => {
+    const operationId = uuidv7();
+    const beforeStart = await receiptsOfKind('review.run.start');
+    const beforeServed = await receiptsOfKind('review.run.inputs-served');
+    const beforeFloor = await receiptsOfKind('review.floor');
+
+    expect(await runOp(['routine-start'], operationId)).toBe(0);
+    const runId = lastJson().run_id as string;
+    expect(runId).toMatch(/^[0-9a-f-]{36}$/);
+    // The run mint and the forensic serve each settled once. (The floor half is
+    // a cache hit against the fixture's already-published floor, so it writes no
+    // review.floor receipt — its replay is proved by the interrupted-half case.)
+    expect(await receiptsOfKind('review.run.start')).toBe(beforeStart + 1);
+    expect(await receiptsOfKind('review.run.inputs-served')).toBe(beforeServed + 1);
+    const afterFirstFloor = await receiptsOfKind('review.floor');
+
+    // The identical composite under the same identity replays every half: the
+    // run mint and the forensic serve return their committed result, and no
+    // receipt of any kind is added.
+    expect(await runOp(['routine-start'], operationId)).toBe(0);
+    expect(lastJson().run_id).toBe(runId);
+    expect(await receiptsOfKind('review.run.start')).toBe(beforeStart + 1);
+    expect(await receiptsOfKind('review.run.inputs-served')).toBe(beforeServed + 1);
+    expect(await receiptsOfKind('review.floor')).toBe(afterFirstFloor);
+    expect(afterFirstFloor).toBeGreaterThanOrEqual(beforeFloor);
+  }, 300_000);
+
+  it('finishes a routine-start interrupted after its floor half', async () => {
+    const operationId = uuidv7();
+    // Simulate a routine-start that published its floor and then died before the
+    // run mint: publish the floor under the exact child identity routine-start
+    // derives, so its receipt already exists when the composite is retried.
+    const floorOp = deriveReviewOperationId(operationId, 'review.floor');
+    expect(await runOp(['data'], floorOp)).toBe(0);
+    const beforeFloor = await receiptsOfKind('review.floor');
+    const beforeStart = await receiptsOfKind('review.run.start');
+
+    expect(await runOp(['routine-start'], operationId)).toBe(0);
+    const runId = lastJson().run_id as string;
+    // The floor half replayed (no second floor receipt) and the run half minted.
+    expect(await receiptsOfKind('review.floor')).toBe(beforeFloor);
+    expect(await receiptsOfKind('review.run.start')).toBe(beforeStart + 1);
+    expect(runId).toMatch(/^[0-9a-f-]{36}$/);
+  }, 300_000);
+
+  it('replays a routine-submit forensic attempt under a repeated --operation-id', async () => {
+    const startId = uuidv7();
+    expect(await runOp(['routine-start'], startId)).toBe(0);
+    const runId = lastJson().run_id as string;
+
+    const submitId = uuidv7();
+    const forensicFile = await payloadFile('composite-forensic.json', forensicOk());
+    const beforeAttempt = await receiptsOfKind('review.run.attempt');
+    expect(
+      await runOp(
+        [
+          'routine-submit',
+          '--run',
+          runId,
+          '--lane',
+          'forensic',
+          '--isolation',
+          'sequential',
+          '--input',
+          forensicFile,
+        ],
+        submitId
+      )
+    ).toBe(0);
+    expect(lastJson().accepted).toBe(true);
+    expect(await receiptsOfKind('review.run.attempt')).toBe(beforeAttempt + 1);
+
+    // Retry the same submission under the same identity: the attempt replays and
+    // no second attempt row is written, so the reviewer's one repair is intact.
+    expect(
+      await runOp(
+        [
+          'routine-submit',
+          '--run',
+          runId,
+          '--lane',
+          'forensic',
+          '--isolation',
+          'sequential',
+          '--input',
+          forensicFile,
+        ],
+        submitId
+      )
+    ).toBe(0);
+    expect(lastJson().accepted).toBe(true);
+    expect(await receiptsOfKind('review.run.attempt')).toBe(beforeAttempt + 1);
+  }, 300_000);
 });

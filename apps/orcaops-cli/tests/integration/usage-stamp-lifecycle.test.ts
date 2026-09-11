@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { Store } from '@orcaops/storage';
+import { requireDatabaseExecutionContext } from '@orcaops/core/history/database-capture';
+import { openProjectDatabase } from '@orcaops/storage/history/database';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -79,30 +81,63 @@ describe('usage stamping across the capture lifecycle', () => {
   let repo: TempRepo;
   let agent: ReturnType<typeof makeAgent>;
   let sid: string;
+  let dataRoot: string;
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-usage-history-'));
     sid = `sess-${randomUUID()}`;
     const claudeBase = path.join(repo.path, 'claude-config');
     await writeTranscriptFixture(claudeBase, sid);
     // Source reads CLAUDE_CONFIG_DIR from process.env directly (not the ALS frame).
     vi.stubEnv('CLAUDE_CONFIG_DIR', claudeBase);
     // Session id is read via the ALS frame → thread it through the harness env.
-    agent = makeAgent({ cwd: repo.path, env: { CLAUDE_CODE_SESSION_ID: sid }, timeoutMs: 60_000 });
+    agent = makeAgent({
+      cwd: repo.path,
+      env: {
+        CLAUDE_CODE_SESSION_ID: sid,
+        ORCAOPS_DATA_DIR: dataRoot,
+        ORCAOPS_DISABLE_DRAIN: '1',
+      },
+      timeoutMs: 60_000,
+    });
   });
 
   afterEach(async () => {
     vi.unstubAllEnvs();
     await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
   });
 
-  function readSnapshots(artifactId: string): SnapshotRow[] {
-    const dbPath = path.join(repo.path, '.orcaops', 'cache', 'orcaops.db');
-    const store = new Store(dbPath);
+  async function readSnapshots(artifactId: string): Promise<SnapshotRow[]> {
+    const context = await requireDatabaseExecutionContext({ cwd: repo.path, root: dataRoot });
+    const database = await openProjectDatabase({ authority: context.authority, mode: 'reader' });
     try {
-      return store.readUsageSnapshots(artifactId) as unknown as SnapshotRow[];
+      return database.read((view) =>
+        view
+          .all<{
+            lifecycle_event: string;
+            session_id: string;
+            agent: string;
+            idempotency_key: string;
+            cumulative_json: string;
+          }>(
+            `SELECT lifecycle_event,session_id,agent,e.idempotency_key,cumulative_json
+             FROM usage_snapshots s JOIN usage_events e ON e.event_id=s.event_id
+             WHERE artifact_id=? ORDER BY as_of,snapshot_id`,
+            artifactId
+          )
+          .map((row) => ({
+            lifecycle_event: row.lifecycle_event,
+            session_id: row.session_id,
+            agent: row.agent,
+            idempotency_key: row.idempotency_key,
+            cumulative_input_tokens: (JSON.parse(row.cumulative_json) as { input_tokens: number })
+              .input_tokens,
+          }))
+      ).value;
     } finally {
-      store.close();
+      database.close();
     }
   }
 
@@ -135,7 +170,7 @@ describe('usage stamping across the capture lifecycle', () => {
     return { artifactId: ok.artifact_id, stepIds: ok.plan_steps.map((s) => s.step_id) };
   }
 
-  it('stamps every lifecycle boundary; idempotent commands never duplicate', async () => {
+  it('stamps plan revision and checkpoint abandon once across replay', async () => {
     const { artifactId, stepIds } = await capturePlan();
 
     // plan revise — invoke twice with the SAME key; the second is a replay.
@@ -218,7 +253,20 @@ describe('usage stamping across the capture lifecycle', () => {
     );
     expect(abandonReplay.idempotency_status).toBe('replay');
 
-    // checkpoint open[2] → close[2].
+    const snaps = await readSnapshots(artifactId);
+    const byEvent = (event: string): SnapshotRow[] =>
+      snaps.filter((snapshot) => snapshot.lifecycle_event === event);
+    for (const event of ['plan', 'plan_revision', 'checkpoint_open', 'checkpoint_abandon'])
+      expect(byEvent(event).length, `expected a '${event}' snapshot`).toBeGreaterThanOrEqual(1);
+    expect(byEvent('plan')[0].cumulative_input_tokens).toBeGreaterThan(0);
+    expect(snaps.every((snapshot) => snapshot.session_id === sid)).toBe(true);
+    expect(byEvent('plan_revision')).toHaveLength(1);
+    expect(byEvent('checkpoint_abandon')).toHaveLength(1);
+  });
+
+  it('stamps checkpoint close, pre-pr, and summary once across replay', async () => {
+    const { artifactId, stepIds } = await capturePlan();
+
     parseOk(
       await agent.runRaw([
         'capture',
@@ -246,7 +294,7 @@ describe('usage stamping across the capture lifecycle', () => {
           JSON.stringify({
             idempotency_key: `close-${randomUUID()}`,
             artifact_id: artifactId,
-            n: 2,
+            n: 1,
             summary: 'did step b',
             verification: [{ command: 'test fixture', exit_code: 0 }],
             completed_step_ids: [stepIds[1]],
@@ -292,22 +340,13 @@ describe('usage stamping across the capture lifecycle', () => {
     );
     expect(summaryReplay.idempotency_status).toBe('replay');
 
-    // ── assert the ledger ──
-    const snaps = readSnapshots(artifactId);
+    const snaps = await readSnapshots(artifactId);
     const byEvent = (e: string): SnapshotRow[] => snaps.filter((s) => s.lifecycle_event === e);
 
     // Every lifecycle boundary recorded at least once (proves the stamps fire
     // AND that the transcript fixture was actually read — a broken env seam
     // would yield zero snapshots and fail here).
-    for (const e of [
-      'plan',
-      'plan_revision',
-      'checkpoint_open',
-      'checkpoint_abandon',
-      'checkpoint_close',
-      'pre_pr_check',
-      'summary',
-    ]) {
+    for (const e of ['plan', 'checkpoint_open', 'checkpoint_close', 'pre_pr_check', 'summary']) {
       expect(byEvent(e).length, `expected at least one '${e}' snapshot`).toBeGreaterThanOrEqual(1);
     }
 
@@ -318,8 +357,6 @@ describe('usage stamping across the capture lifecycle', () => {
     // The load-bearing contract: idempotent commands stamp exactly once despite
     // the replay re-invocation.
     expect(byEvent('summary')).toHaveLength(1);
-    expect(byEvent('plan_revision')).toHaveLength(1);
-    expect(byEvent('checkpoint_abandon')).toHaveLength(1);
   });
 
   it('pre-pr-check re-stamps on every invocation, even with the same idempotency_key', async () => {
@@ -339,7 +376,7 @@ describe('usage stamping across the capture lifecycle', () => {
     parseOk(await prePr());
     parseOk(await prePr());
 
-    const prePrSnaps = readSnapshots(artifactId).filter(
+    const prePrSnaps = (await readSnapshots(artifactId)).filter(
       (s) => s.lifecycle_event === 'pre_pr_check'
     );
     expect(prePrSnaps).toHaveLength(2);

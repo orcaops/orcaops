@@ -41,12 +41,7 @@ export type SkillGroup =
  * config, and the only one whose unsatisfied templates are hidden outright
  * rather than reported as gated.
  */
-export type SkillCapability =
-  | 'diff-fingerprint'
-  | 'archive'
-  | 'snapshot-checkout'
-  | 'matcher'
-  | 'cloud';
+export type SkillCapability = 'diff-fingerprint' | 'snapshot-checkout' | 'matcher' | 'cloud';
 
 export type SubagentOrchestration = 'parallel' | 'none';
 

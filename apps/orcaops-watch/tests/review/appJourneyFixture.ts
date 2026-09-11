@@ -30,7 +30,7 @@ function watchThread(index: number, now: number): WatchThread {
   return {
     artifactId: reviewable ? 'journey-artifact' : `background-${suffix}`,
     artifactStatus: 'active',
-    source: 'hot',
+    version: '1:retained',
     branch: reviewable ? REVIEWABLE_JOURNEY_BRANCH : `branch-${suffix}`,
     title: reviewable ? 'Premium journey fixture' : `Background fixture ${suffix}`,
     agent: 'codex',
@@ -67,6 +67,8 @@ function watchThread(index: number, now: number): WatchThread {
     planDecisions: [],
     nonGoals: [],
     recentEvents: [],
+    omittedEvents: 0,
+    activityWindowComplete: true,
   };
 }
 
@@ -78,9 +80,26 @@ export function reviewableWatchSnapshot(): WatchSnapshot {
     generated_at: new Date(now).toISOString(),
     generatedAtMs: now,
     dataRoot: '/tmp/orcaops-journey',
-    archiveEnabled: false,
-    totals: { activeThreads: threads.length, openCheckpoints: 1, sessionTokens: 0 },
-    projects: [{ projectId: null, displayName: 'journey-project', threads }],
+    rootKey: 'journey-root',
+    state: 'current',
+    completeness: { complete: true, issues: [] },
+    totals: {
+      activeThreads: threads.length,
+      openCheckpoints: 1,
+      sessionTokens: 0,
+      usageStatus: 'unavailable',
+    },
+    projects: [
+      {
+        projectId: 'journey-project-id',
+        displayName: 'journey-project',
+        authorityKey: 'journey-store',
+        writeSequence: 1,
+        state: 'current',
+        completeness: { complete: true, issues: [] },
+        threads,
+      },
+    ],
     ticker: [],
   };
 }

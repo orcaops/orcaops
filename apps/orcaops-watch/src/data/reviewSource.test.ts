@@ -4,9 +4,8 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { buildReviewFloorFixture } from '@orcaops/review-core';
-import { ReviewCacheBehindError } from '@orcaops/watch-data/ui';
 
-import { loadReview, loadReviewProjections } from './reviewSource';
+import { loadReview, loadReviewProjections, ReviewPaneError } from './reviewSource';
 
 const diff = [
   'diff --git a/src/fixture.ts b/src/fixture.ts',
@@ -47,18 +46,16 @@ describe('narrative-free deterministic projections', () => {
 });
 
 describe('active review generation', () => {
-  it('returns a typed cache-behind error from the sidecar envelope', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'orcaops-review-cache-behind-'));
-    const sidecarPath = path.join(root, 'cache-behind-sidecar.mjs');
+  it('preserves a canonical pane failure code from sidecar stdout', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'orcaops-review-format-unsupported-'));
+    const sidecarPath = path.join(root, 'format-unsupported-sidecar.mjs');
     await writeFile(
       sidecarPath,
       `
-        process.stderr.write(JSON.stringify({
-          schema: 'orcaops.watch-sidecar-error/v1',
-          code: 'CACHE_BEHIND',
-          message: 'cache 23 is behind 24',
-          cache_version: 23,
-          current_version: 24,
+        process.stdout.write(JSON.stringify({
+          ok: false,
+          code: 'HISTORY_FORMAT_UNSUPPORTED',
+          message: 'This database needs an explicitly supported schema upgrade or repair',
         }) + '\\n');
         process.exitCode = 1;
       `
@@ -67,11 +64,10 @@ describe('active review generation', () => {
       await expect(
         loadReview({ root, branch: 'cold-review', nodeBin: process.execPath, sidecarPath })
       ).rejects.toEqual(
-        expect.objectContaining<Partial<ReviewCacheBehindError>>({
-          name: 'ReviewCacheBehindError',
-          code: 'CACHE_BEHIND',
-          cacheVersion: 23,
-          currentVersion: 24,
+        expect.objectContaining<Partial<ReviewPaneError>>({
+          name: 'ReviewPaneError',
+          code: 'HISTORY_FORMAT_UNSUPPORTED',
+          message: 'This database needs an explicitly supported schema upgrade or repair',
         })
       );
     } finally {
@@ -123,6 +119,70 @@ describe('active review generation', () => {
         await new Promise<void>((resolve) => setTimeout(resolve, 350));
         await expect(stat(survivorPath)).rejects.toMatchObject({ code: 'ENOENT' });
       }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('loads a review from the canonical pane envelope the sidecar emits', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'orcaops-review-pane-'));
+    const fixture = buildReviewFloorFixture('clean');
+    const sidecarPath = path.join(root, 'pane-sidecar.mjs');
+    const pane = {
+      ok: true,
+      reviewId: 'review-1',
+      floor: fixture.floor,
+      diff,
+      routineStory: {
+        model: null,
+        status: 'absent',
+        issue: null,
+        runId: null,
+        generation: null,
+        anchors: { model: null, status: 'absent', issue: null, generation: null },
+      },
+      generations: {
+        floor: 'floor-pub-1',
+        story: null,
+        storyInstallation: null,
+        storyAnchors: null,
+        comments: '0:0',
+        workflow: '0',
+      },
+    };
+    await writeFile(
+      sidecarPath,
+      `process.stdout.write(${JSON.stringify(JSON.stringify(pane))} + '\\n');\n`
+    );
+    try {
+      const data = await loadReview({
+        root,
+        branch: 'pane-review',
+        nodeBin: process.execPath,
+        sidecarPath,
+      });
+      expect(data.floor.input_hash).toBe(fixture.floor.input_hash);
+      expect(data.reviewDiff).toBe(diff);
+      expect(data.targetsStatus).toEqual({ ok: true });
+      expect(data.eligibleTargets).toHaveLength(1);
+      expect(data.currentThreads[0]?.rows).toHaveLength(1);
+      expect(data.routineStory.status).toBe('absent');
+      expect(data.slug).toBe('pane-review');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces a not-yet-published review as an error rather than a floorless pane', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'orcaops-review-absent-'));
+    const sidecarPath = path.join(root, 'absent-sidecar.mjs');
+    await writeFile(
+      sidecarPath,
+      `process.stdout.write(JSON.stringify({ ok: false, code: 'REVIEW_NOT_FOUND' }) + '\\n'); process.exitCode = 1;\n`
+    );
+    try {
+      await expect(
+        loadReview({ root, branch: 'unpublished', nodeBin: process.execPath, sidecarPath })
+      ).rejects.toThrow(/REVIEW_NOT_FOUND|review pane/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

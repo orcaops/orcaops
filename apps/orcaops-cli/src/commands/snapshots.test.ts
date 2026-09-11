@@ -7,31 +7,7 @@ import {
   preparePipedDiff,
   trimRedactedToCap,
   trimToUtf8Boundary,
-  underivedPruneRefusal,
 } from './snapshots.js';
-
-describe('underivedPruneRefusal', () => {
-  it('names the stakes, the executable remedy, the enumeration path, and the escape hatch', () => {
-    const msg = underivedPruneRefusal(3);
-    expect(msg).toContain('3 candidate ref(s)');
-    expect(msg).toContain('permanently non-derivable');
-    // The named command must be runnable as written — selectors included.
-    expect(msg).toContain('orcaops fingerprint derive --artifact <id> --checkpoint <n>');
-    // "for each" is resolvable: the dry-run enumerates the targets.
-    expect(msg).toContain('Re-run without `--apply` to list them (marked [underived])');
-    expect(msg).toContain('--allow-underived');
-  });
-
-  it('the --all remedy never points at a re-run that would itself refuse', () => {
-    const msg = underivedPruneRefusal(2, 'all');
-    // --all has no dry-run (it requires --apply), so the listing path is
-    // doctor, and the dry-run pointer must be absent.
-    expect(msg).toContain('Run `orcaops doctor` to list them');
-    expect(msg).not.toContain('Re-run without');
-    expect(msg).toContain('orcaops fingerprint derive --artifact <id> --checkpoint <n>');
-    expect(msg).toContain('--allow-underived');
-  });
-});
 
 describe('parseDiffRange', () => {
   it('parses a single checkpoint window', () => {

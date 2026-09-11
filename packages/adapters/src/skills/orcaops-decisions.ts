@@ -32,8 +32,8 @@ Skip when:
 # How to invoke
 
 \`\`\`bash
-orcaops decisions --json                          # current branch
-orcaops decisions --all-branches --json           # repo-wide
+orcaops decisions --json                          # current project
+orcaops decisions --scope project --json           # repo-wide
 orcaops decisions --artifact <id> --json          # exact scope (repeatable)
 orcaops decisions --active-since 2026-06-01 --json  # windowed
 \`\`\`

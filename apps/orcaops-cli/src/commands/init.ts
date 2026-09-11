@@ -5,18 +5,22 @@ import path from 'node:path';
 import { getAgentOverlay, type ToolId } from '@orcaops/adapters';
 import { configLocationForScope, Repo, resolveConfigSource } from '@orcaops/core';
 import {
+  type DatabaseSetupWait,
+  inspectDatabaseSetup,
+  setupProjectDatabase,
+} from '@orcaops/core/history/database-setup';
+import {
   assertConfigVersionCurrent,
   type Config,
   CONFIG_SCHEMA_VERSION,
   ConfigValidationError,
   getDefaultConfig,
-  hasArtifactEventLogs,
-  isAcceptedConfigVersion,
   resolveConfig,
   type SupportedAgentId,
 } from '@orcaops/storage';
+import { HistoryError, normalizeHistoryRoot } from '@orcaops/storage/history/authority';
+import { ProjectDatabaseError } from '@orcaops/storage/history/database';
 
-import { type BackfillArtifactIssue, enableArchiveAndBackfillForInit } from './archive.js';
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
 import {
@@ -27,6 +31,7 @@ import {
   writeTerminalSafeStderr,
   writeTerminalSafeStdout,
 } from '../io/output.js';
+import { repositoryHasCapturedHistory } from '../lib/captured-history-presence.js';
 import { CLI_VERSION } from '../lib/cli-version.js';
 import { buildConfigDelta } from '../lib/config-delta.js';
 import {
@@ -77,7 +82,7 @@ import {
   writeMutation,
 } from '../lib/mutations.js';
 import { readEffectiveLocalManifest } from '../lib/personal-manifest.js';
-import { ensureProjectId, readProjectId } from '../lib/project-identity.js';
+import { adoptProjectId, readProjectId } from '../lib/project-identity.js';
 import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { bestEffortRealpath, discoverGitRoot } from '../lib/resolve-root.js';
 import {
@@ -100,7 +105,6 @@ import {
   sessionHooksRestartRequired,
 } from '../lib/session-hooks.js';
 import {
-  editArchiveEnabled,
   editBlockChoice,
   editGeneratedFiles,
   editGitHooksConfirm,
@@ -169,8 +173,7 @@ export interface InitOptions {
    * (session hooks > instruction block > manual). True enables (persisted to
    * `config.session_hooks.enabled`); false disables; undefined lets a fresh
    * interactive init recommend them when any selected agent is hook-capable,
-   * while unattended fresh init stays disabled (same no-surprise asymmetry as
-   * the archive). Existing config is preserved.
+   * while unattended fresh init stays disabled. Existing config is preserved.
    */
   sessionHooks?: boolean;
   /**
@@ -207,10 +210,21 @@ export interface InitOptions {
 }
 
 export async function initAction(opts: InitOptions = {}): Promise<void> {
+  const controller = new AbortController();
+  const interrupt = () => controller.abort();
+  process.on('SIGINT', interrupt);
+  let waiting = false;
   try {
-    const raw = await runInit(opts);
-    // Warnings interpolate raw fs/parse error text (machine-hook applies,
-    // archive backfill issues) — scrub once here, ahead of both exits.
+    const raw = await runInit(opts, {
+      signal: controller.signal,
+      onWait: (wait) => {
+        if (waiting) return;
+        waiting = true;
+        writeTerminalSafeStderr(`Waiting to ${wait.operation}; Ctrl-C cancels the wait.\n`);
+      },
+    });
+    // Warnings interpolate raw fs/parse error text from machine-hook applies,
+    // so scrub once here, ahead of both exits.
     const result = { ...raw, warnings: raw.warnings.map(scrubOutboundText) };
     if (opts.json) {
       emitOk(result);
@@ -231,11 +245,17 @@ export async function initAction(opts: InitOptions = {}): Promise<void> {
     if (opts.json) {
       emitError(renderedError);
     }
-    if (renderedError instanceof OrcaopsError) {
+    if (
+      renderedError instanceof OrcaopsError ||
+      renderedError instanceof ProjectDatabaseError ||
+      renderedError instanceof HistoryError
+    ) {
       writeErrorLine(renderedError);
       throw new CliExit(1);
     }
     throw err;
+  } finally {
+    process.off('SIGINT', interrupt);
   }
 }
 
@@ -290,20 +310,6 @@ interface InitResult {
   preserved_ahead: { path: string; stamped_version: string }[];
   /** Non-fatal advisories (e.g. divergent instruction files being dual-maintained). */
   warnings: string[];
-  /** Present only when this applied init transitioned archive false → true. */
-  archive_backfill: {
-    project_id: string;
-    missing_before: number;
-    replayed_events: number;
-    remaining_missing: number;
-    blocked_missing: number;
-    usage_blocked_missing: number;
-    blocked_artifacts: number;
-    complete: boolean;
-    artifact_issues: BackfillArtifactIssue[];
-    rebuilt_artifacts: Array<{ artifact_id: string; backup_path: string }>;
-    remaining_rebuilds: number;
-  } | null;
   /** True when an existing config was explicitly replaced with current defaults. */
   config_reset: boolean;
   /** Empty unless --with-hooks was passed. */
@@ -340,7 +346,10 @@ interface InitResult {
   seed_suggested: boolean;
 }
 
-async function runInit(opts: InitOptions): Promise<InitResult> {
+async function runInit(
+  opts: InitOptions,
+  operation: { signal: AbortSignal; onWait: (wait: DatabaseSetupWait) => void }
+): Promise<InitResult> {
   const cwd = path.resolve(opts.cwd ?? getInvocationCwd());
 
   // init is bespoke: it must distinguish "cwd IS the worktree root" from
@@ -401,7 +410,7 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
   if (opts.resetConfig && !opts.force) {
     throw new OrcaopsError(
       ErrorCodes.INVALID_INPUT,
-      '`--reset-config` requires `--force`; captured artifacts and cache data are preserved.'
+      '`--reset-config` requires `--force`; canonical history is preserved.'
     );
   }
   // Re-entry is decided by the config that governs this worktree, never by the
@@ -469,7 +478,6 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
     }
   }
   const configExists = currentConfig !== null;
-  let archiveEnabledBefore = false;
   let rawCurrent: unknown = null;
   let currentJsonReadable = false;
   if (currentConfig !== null) {
@@ -482,17 +490,6 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
           : undefined;
       if (typeof version === 'number' && version > CONFIG_SCHEMA_VERSION) {
         assertConfigVersionCurrent(rawCurrent);
-      }
-      // An accepted predecessor still carries archive state. Comparing to the
-      // current version alone read it as disabled, so the first `init --force`
-      // after a schema bump ran a spurious archive backfill.
-      if (isAcceptedConfigVersion(version)) {
-        const archive = (rawCurrent as Record<string, unknown>).archive;
-        archiveEnabledBefore =
-          archive !== null &&
-          typeof archive === 'object' &&
-          !Array.isArray(archive) &&
-          (archive as Record<string, unknown>).enabled === true;
       }
     } catch (err) {
       if (err instanceof ConfigValidationError) throw err;
@@ -702,15 +699,6 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
     isInteractiveInit(opts)
   ) {
     await askBlockQuestion();
-  }
-
-  // Only fresh/reset initialization asks configuration questions. A forced
-  // reconciliation without --reset-config preserves every existing choice.
-  if (!preservingConfig && isInteractiveInit(opts)) {
-    config.archive = {
-      ...config.archive,
-      enabled: await promptArchiveEnable(config.archive.enabled),
-    };
   }
 
   // Customize-more branch — the settings init does not otherwise ask about
@@ -1003,15 +991,58 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
 
   const mode: MutationMode = opts.dryRun ? 'preview' : 'apply';
 
-  // Eager identity: mint `orcaops.projectid` at init (idempotent — an
-  // existing id is kept). Repo-local git config inside the repo the user just
-  // asked orcaops to initialize, shared across worktrees, invisible to
-  // `git status`. Dry-run reads only (git config sits outside the mutation
-  // executor), and the mint precedes the global preview below so the preview
-  // keys by the real identity with zero fs writes.
-  const identity = opts.dryRun
-    ? { projectId: await readProjectId(repo), minted: false }
-    : await ensureProjectId(repo);
+  const historyRoot = await normalizeHistoryRoot({ env: getInvocationEnv(), cwd: repoRoot });
+  const configuredProjectId = await readProjectId(repo);
+  const databaseSetup =
+    mode === 'preview'
+      ? await inspectDatabaseSetup(
+          {
+            cwd: repoRoot,
+            root: historyRoot.resolvedRoot,
+            ...(configuredProjectId === null ? {} : { projectId: configuredProjectId }),
+          },
+          { signal: operation.signal }
+        )
+      : null;
+
+  let identity = {
+    projectId: configuredProjectId ?? databaseSetup?.initialization?.authority.projectId ?? null,
+    minted: false,
+  };
+  if (mode === 'apply') {
+    const setup = await setupProjectDatabase(
+      {
+        cwd: repoRoot,
+        root: historyRoot.resolvedRoot,
+        ...(configuredProjectId === null ? {} : { projectId: configuredProjectId }),
+        authoredPayloads: [],
+        secretAllow: [...config.redact.allow],
+      },
+      { signal: operation.signal, onWait: operation.onWait }
+    );
+    try {
+      if (operation.signal.aborted) {
+        throw new ProjectDatabaseError(
+          'CANCELLED',
+          'Initialization cancelled after project history setup; retry to reuse the retained registration'
+        );
+      }
+      identity = await adoptProjectId(repo, setup.initialization.authority.projectId);
+      if (operation.signal.aborted) {
+        throw new ProjectDatabaseError(
+          'CANCELLED',
+          'Initialization cancelled after project history registration; retry to reuse it'
+        );
+      }
+    } catch (cause) {
+      reportRetainedDatabaseSetup(setup.initialization.authority.projectId);
+      throw cause;
+    }
+    for (const pending of setup.pending)
+      warnings.push(
+        `Project history ${pending.resource} publication is pending (${pending.code}): ${pending.message}`
+      );
+  }
 
   // Under global scope, materialize skills/commands into the per-user global
   // dirs (ref-counted, per-user-current, copy-default/guarded-symlink) — separate from
@@ -1022,9 +1053,9 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
     globalManifest: GlobalInstallManifest | null,
     lockScope?: GlobalInstallLockScope
   ): Promise<GlobalInstallResult | null> => {
-    // Home-dir stores key by the minted identity; a dry-run of a repo with no
-    // identity yet has nothing recorded under any key, so global planning is
-    // skipped rather than previewed against a key that does not exist.
+    // A fresh dry-run has no identity yet, so global planning is skipped rather
+    // than previewed against a key that does not exist. Registered history can
+    // supply the retained identity without a write.
     if (repoId === null) return Promise.resolve(null);
     if (
       (config.install.scope === 'global' || config.install.scope === 'personal') &&
@@ -1060,78 +1091,52 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
   };
 
   let global: GlobalInstallResult | null;
-  if (mode === 'preview') {
-    const globalManifest = await readGlobalManifest();
-    global = await planGlobalPhase('preview', globalManifest);
-    await executeMutations(publishInstallManifestsLast(mutations), mode);
-  } else {
-    const commonDir = await repo.getCommonDirAbsolute();
-    global = await withRepositoryInstallLock(commonDir, async (installLease) => {
+  try {
+    if (mode === 'preview') {
       const globalManifest = await readGlobalManifest();
-      // repoId is never null here: apply mode minted it above.
-      const needsGlobalWrite =
-        ((config.install.scope === 'global' || config.install.scope === 'personal') &&
-          config.install.agents.length > 0) ||
-        (repoId !== null &&
-          globalManifest?.entries.some((entry) => entry.refs.includes(repoId)) === true);
-      if (needsGlobalWrite) {
-        return withGlobalInstallLock(async (scope) => {
-          await planGlobalPhase('preview', scope.manifest);
-          await installLease.verify();
-          await executeMutations(publishInstallManifestsLast(mutations), mode);
-          await installLease.verify();
-          return planGlobalPhase('apply', scope.manifest, scope);
-        });
-      }
-      await installLease.verify();
+      global = await planGlobalPhase('preview', globalManifest);
       await executeMutations(publishInstallManifestsLast(mutations), mode);
-      return null;
-    });
+    } else {
+      const commonDir = await repo.getCommonDirAbsolute();
+      global = await withRepositoryInstallLock(commonDir, async (installLease) => {
+        const globalManifest = await readGlobalManifest();
+        // repoId is never null here: apply mode adopted it above.
+        const needsGlobalWrite =
+          ((config.install.scope === 'global' || config.install.scope === 'personal') &&
+            config.install.agents.length > 0) ||
+          (repoId !== null &&
+            globalManifest?.entries.some((entry) => entry.refs.includes(repoId)) === true);
+        if (needsGlobalWrite) {
+          return withGlobalInstallLock(async (scope) => {
+            await planGlobalPhase('preview', scope.manifest);
+            await installLease.verify();
+            await executeMutations(publishInstallManifestsLast(mutations), mode);
+            await installLease.verify();
+            return planGlobalPhase('apply', scope.manifest, scope);
+          });
+        }
+        await installLease.verify();
+        await executeMutations(publishInstallManifestsLast(mutations), mode);
+        return null;
+      });
+    }
+  } catch (cause) {
+    if (mode === 'apply') reportRetainedDatabaseSetup(identity.projectId!);
+    throw cause;
   }
   if (global) warnings.push(...global.warnings);
-
-  let archiveBackfill: InitResult['archive_backfill'] = null;
-  if (mode === 'apply' && !archiveEnabledBefore && config.archive.enabled) {
-    const activation = await enableArchiveAndBackfillForInit(repoRoot);
-    archiveBackfill = {
-      project_id: activation.backfill.projectId,
-      missing_before: activation.backfill.missingBefore,
-      replayed_events: activation.backfill.replayedEvents,
-      remaining_missing: activation.backfill.remainingMissing,
-      blocked_missing: activation.backfill.blockedMissing,
-      usage_blocked_missing: activation.backfill.quarantinedUsageEvents,
-      blocked_artifacts: activation.backfill.blockedArtifacts,
-      complete: activation.backfill.complete,
-      artifact_issues: activation.backfill.artifactIssues,
-      rebuilt_artifacts: activation.backfill.rebuiltArtifacts,
-      remaining_rebuilds: activation.backfill.remainingRebuilds,
-    };
-    if (!activation.backfill.complete) {
-      warnings.push(
-        `Archive backfill is incomplete: ${activation.backfill.remainingMissing} repairable ` +
-          `event(s), ${activation.backfill.remainingRebuilds} rebuild(s), and ` +
-          `${activation.backfill.blockedArtifacts} blocked artifact(s) remain. ` +
-          'Run `orcaops archive status --json` for the exact disposition.'
-      );
-    }
-    if (activation.backfill.quarantinedUsageEvents > 0) {
-      warnings.push(
-        `Archive backfill quarantined ${activation.backfill.quarantinedUsageEvents} invalid ` +
-          'usage event(s) in the hot ledger; they remain without archive-readable content and ' +
-          'do not block archive activation.'
-      );
-    }
-    for (const issue of activation.backfill.artifactIssues) {
-      warnings.push(archiveActivationWarning(issue));
-    }
-  }
 
   let machineHooks: AppliedUserSessionHookInstall | null = null;
   let machineHookGuidance: string | null = null;
   if (mode === 'apply' && stagedMachineHooks !== null && config.session_hooks.enabled) {
-    machineHooks = await applyUserSessionHookInstall(stagedMachineHooks, CLI_VERSION);
-    machineHookGuidance = await codexSessionHookGuidance(machineHooks.codexOutcome);
-    warnings.push(...machineHooks.warnings);
+    try {
+      machineHooks = await applyUserSessionHookInstall(stagedMachineHooks, CLI_VERSION);
+      machineHookGuidance = await codexSessionHookGuidance(machineHooks.codexOutcome);
+      warnings.push(...machineHooks.warnings);
+    } catch (cause) {
+      reportRetainedDatabaseSetup(identity.projectId!);
+      throw cause;
+    }
   }
   const machineHooksDeferred =
     config.session_hooks.enabled &&
@@ -1139,8 +1144,12 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
       (agent) => !projectHookWillBeLive(agent) && !machineHooks?.liveAgents.includes(agent)
     );
 
+  // The seed offer asks the project database whether anything has been captured,
+  // not whether a legacy artifact directory exists — on a migrated project that
+  // directory is gone and the legacy probe offered to seed a repository that
+  // already had its whole history.
   const seedSuggested =
-    (await countHistoryCommits(repoRoot)) >= 20 && !hasArtifactEventLogs(repoRoot, config);
+    (await countHistoryCommits(repoRoot)) >= 20 && !(await repositoryHasCapturedHistory(repoRoot));
 
   return {
     repo_root: repoRoot,
@@ -1170,7 +1179,6 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
       stamped_version: p.stampedVersion,
     })),
     warnings,
-    archive_backfill: archiveBackfill,
     config_reset: configExists && opts.resetConfig === true,
     git_hooks: gitHooksResult,
     session_hooks: plan.sessionHooks,
@@ -1196,6 +1204,13 @@ async function runInit(opts: InitOptions): Promise<InitResult> {
     dry_run: !!opts.dryRun,
     seed_suggested: seedSuggested,
   };
+}
+
+function reportRetainedDatabaseSetup(projectId: string): void {
+  writeTerminalSafeStderr(
+    `Project history ${projectId} remains registered, but installation did not complete. ` +
+      'Retry `orcaops init`; it will reuse the retained registration.\n'
+  );
 }
 
 async function countHistoryCommits(repoRoot: string): Promise<number> {
@@ -1317,27 +1332,6 @@ function formatHumanInitResult(r: InitResult): string {
   }
   if (r.warnings.length > 0) {
     for (const w of r.warnings) lines.push(`! ${w}`);
-    lines.push('');
-  }
-  if (r.archive_backfill !== null) {
-    lines.push(
-      `Archive backfill: ${r.archive_backfill.replayed_events} event(s) replayed, ` +
-        `${r.archive_backfill.remaining_missing} remaining; ` +
-        `${r.archive_backfill.rebuilt_artifacts.length} artifact(s) rebuilt, ` +
-        `${r.archive_backfill.remaining_rebuilds} rebuild(s) remaining.`
-    );
-    if (!r.archive_backfill.complete) {
-      lines.push(
-        `Archive backfill is incomplete: ${r.archive_backfill.blocked_artifacts} ` +
-          `artifact(s) blocked, ${r.archive_backfill.blocked_missing} blocked artifact event(s).`
-      );
-    }
-    if (r.archive_backfill.usage_blocked_missing > 0) {
-      lines.push(
-        `Archive quarantine: ${r.archive_backfill.usage_blocked_missing} invalid usage event(s) ` +
-          'remain outside the readable archive.'
-      );
-    }
     lines.push('');
   }
   if (r.gitignore_added.length > 0) {
@@ -1588,25 +1582,6 @@ function displayPath(absolutePath: string): string {
     return `~/${relative.split(path.sep).join('/')}`;
   }
   return absolutePath;
-}
-
-function archiveActivationWarning(issue: BackfillArtifactIssue): string {
-  const prefix = `Archive artifact ${issue.artifact_id} is blocked (${issue.kind}): ${issue.message}`;
-  if (issue.resolution_commands.length === 0) {
-    return (
-      `${prefix} Neither source strictly reconstructs, so no automated resolution is safe. ` +
-      'Inspect with `orcaops archive status --json`; nothing was mutated.'
-    );
-  }
-  return (
-    `${prefix} Inspect with \`orcaops archive status --json\`, then explicitly choose: ` +
-    issue.resolution_commands.map((command) => `\`${command}\``).join(' or ') +
-    '.'
-  );
-}
-
-async function promptArchiveEnable(initialValue: boolean): Promise<boolean> {
-  return requireInitAnswer(await editArchiveEnabled(initialValue));
 }
 
 async function promptBlockSelect(

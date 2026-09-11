@@ -19,15 +19,14 @@ afterAll(() => {
 
 // Hermeticity (mirrors apps/orcaops-cli/vitest.cli-setup.ts): the watch suite
 // must honor only the orcaops env it sets itself, never the developer's ambient
-// ORCAOPS_* / archive dirs. The snapshot layer resolves the archive through
-// ORCAOPS_DATA_DIR → XDG_DATA_HOME → ~/.orcaops and the index through
-// XDG_CACHE_HOME, so a leaked ambient var would read the machine's real archive.
-// Scrub every ORCAOPS_* override, then point the archive + caches at throwaway
-// dirs. Tests that assert path tiers pass explicit env params to collectSnapshot.
+// ORCAOPS_* / data dirs. The history root resolves through ORCAOPS_DATA_DIR →
+// XDG_DATA_HOME → ~/.orcaops and caches through XDG_CACHE_HOME, so a leaked
+// ambient var would read the machine's real project databases. Scrub every
+// ORCAOPS_* override, then point the data root + caches at throwaway dirs.
 for (const key of Object.keys(process.env)) {
   if (key.startsWith('ORCAOPS_')) delete process.env[key];
 }
-process.env.ORCAOPS_DATA_DIR = makeFixtureTempDir('orcaops-watch-archive-');
+process.env.ORCAOPS_DATA_DIR = makeFixtureTempDir('orcaops-watch-history-');
 process.env.XDG_DATA_HOME = makeFixtureTempDir('orcaops-watch-data-');
 process.env.XDG_CACHE_HOME = makeFixtureTempDir('orcaops-watch-cache-');
 

@@ -8,6 +8,7 @@ import {
   DEFAULT_ARTIFACT_CEILING,
   DEFAULT_MAX_COMMITS,
   DEFAULT_RECENCY_COMMIT_CAP,
+  defaultSeedSince,
   loadSeedHistory,
   MAX_SEED_COMMITS,
   rankSeedImportance,
@@ -21,16 +22,29 @@ import {
   type ArtifactOrigin,
   type ArtifactOriginJob,
   type Checkpoint,
-  listArchivedArtifactIds,
-  loadArtifactThreadFromArchive,
-  restoreArtifactFromArchive,
   type Summary,
   uuidv7,
 } from '@orcaops/storage';
+import {
+  type ProjectDatabase,
+  ProjectDatabaseError,
+  queryProjectArtifacts,
+  readProjectArtifact,
+  readProjectSeedBundle,
+} from '@orcaops/storage/history/database';
+import type {
+  SeedCoverageReport,
+  SeedJobRecord,
+  SeedJournal,
+} from '@orcaops/storage/history/seed-schema';
 
 import {
+  pendingSeedEnrichmentDir,
   readSeedEnrichmentManifest,
   resolveSeedEnrichment,
+  type SeedBundlePersistence,
+  type SeedEnrichmentManifest,
+  type SeedEnrichmentPersistence,
   type SeedEnrichmentReport,
   type SeedSelectionRecord,
   writeSeedEnrichmentBundles,
@@ -39,28 +53,49 @@ import {
   buildSeedCoverageReport,
   clearSeedArea,
   declinedSeedAreas,
-  loadSeedStateForWrite,
   normalizeSeedArea,
   offeredSeedAreas,
-  readSeedCoverage,
-  readSeedState,
   recordSeedAreaOffered,
   recordSeedJob,
   rememberDeclinedSeedArea,
-  type SeedJobRecord,
-  withSeedRunLock,
-  writeSeedCoverage,
-  writeSeedJournal,
-  writeSeedPreciousState,
-} from './journal.js';
+} from './state.js';
 import { type SeedClusterSynthesis, synthesizeSeedCluster } from './synthesize.js';
-import { prepareSeedSnapshots, writeSeedCluster } from './write.js';
+import { prepareSeedSnapshots } from './write.js';
 import { ErrorCodes, OrcaopsError } from '../../io/errors.js';
 import { CliExit } from '../../io/exit.js';
-import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../../io/output.js';
+import {
+  emitError,
+  emitOk,
+  writeErrorLine,
+  writeTerminalSafeStderr,
+  writeTerminalSafeStdout,
+} from '../../io/output.js';
 import { CLI_VERSION } from '../../lib/cli-version.js';
-import { buildContext, type CliContext } from '../../lib/context.js';
-import { getInvocationEnv } from '../../lib/invocation-context.js';
+import {
+  type DatabaseSeedCommandContext,
+  resolveDatabaseSeedCommandContext,
+} from '../../lib/database-seed-context.js';
+import {
+  databaseInitialSeedPersistence,
+  prepareDatabasePendingSeedBundle,
+  prepareDatabaseSeedEnrichmentSources,
+  type PreparedDatabasePendingSeedBundle,
+  type PreparedDatabaseSeedEnrichmentSources,
+} from '../../lib/database-seed-enrichment.js';
+import {
+  collectDatabaseCoveredShas,
+  inspectDatabaseOpenCheckpointGuard,
+} from '../../lib/database-seed-read.js';
+import {
+  loadDatabaseSeedStateForWrite,
+  publishDatabaseSeedState,
+  readDatabaseSeedState,
+} from '../../lib/database-seed-state.js';
+import {
+  abandonDatabaseSeedCheckpoint,
+  writeDatabaseSeedCluster,
+} from '../../lib/database-seed-write.js';
+import { closeFailedHistoryRead } from '../../lib/history-reader-close.js';
 
 export interface SeedOptions {
   since?: string;
@@ -87,7 +122,7 @@ export interface SeedPreflight {
   warnings: string[];
 }
 
-interface SeedOpenCheckpoint {
+export interface SeedOpenCheckpoint {
   artifact_id: string;
   artifact_label: string;
   checkpoint_n: number;
@@ -95,7 +130,7 @@ interface SeedOpenCheckpoint {
   seed_owned: boolean;
 }
 
-interface SeedOpenCheckpointGuard {
+export interface SeedOpenCheckpointGuard {
   blocked: boolean;
   open_checkpoints: SeedOpenCheckpoint[];
   /** Seed-owned strays: an interrupted run to recover, never a reason to refuse. */
@@ -186,101 +221,6 @@ export function collectArtifactCoverage(
 }
 
 /**
- * `localCovered` is the subset explained by this checkout's store alone.
- * The apply/dry-run surface uses the gap to say when a covered count is
- * carried by the shared project archive, which a fresh linked worktree's
- * `Imported artifacts: 0` would otherwise appear to contradict.
- */
-async function collectCoveredShas(ctx: CliContext): Promise<{
-  covered: Set<string>;
-  localCovered: Set<string>;
-  lossyArchivedThreads: number;
-  /**
-   * Imported artifacts the shared project archive holds but this checkout's
-   * store does not — a linked worktree's whole imported corpus on first seed.
-   * Their coverage suppresses the import, so leaving them unmaterialized is
-   * what produced "covered 235" beside an empty `list --imported`.
-   */
-  restorableImports: string[];
-}> {
-  const localCovered = new Set<string>();
-  const localRanges = new Map<string, { base: string; head: string }>();
-  for (const row of ctx.store.store.listArtifacts()) {
-    collectArtifactCoverage(
-      await ctx.store.readCheckpoints(row.id),
-      await ctx.store.readSummary(row.id),
-      localCovered,
-      localRanges
-    );
-  }
-  await expandCoveredRanges(ctx.repo, [...localRanges.values()], localCovered);
-  const covered = new Set(localCovered);
-  let lossyArchivedThreads = 0;
-  const restorableImports: string[] = [];
-  if (ctx.archive) {
-    const archiveRanges = new Map<string, { base: string; head: string }>();
-    for (const artifactId of await listArchivedArtifactIds(ctx.archive.projectDir)) {
-      const thread = await loadArtifactThreadFromArchive(ctx.archive.projectDir, artifactId);
-      // Only imported threads: a live capture belongs to whoever is running
-      // it, and restoring an in-flight one would plant a foreign open
-      // checkpoint that then refuses the very run doing the restoring.
-      if (
-        thread.plan?.origin?.kind === 'git-import' &&
-        ctx.store.store.getArtifact(artifactId) === null
-      ) {
-        restorableImports.push(artifactId);
-      }
-      if (thread.lossyLines === 0) {
-        collectArtifactCoverage(thread.checkpoints, thread.summary, covered, archiveRanges);
-      } else {
-        // A lossy archived thread still testifies to the head shas its
-        // readable prefix closed — skipping it whole would re-import that
-        // history as duplicates. Only range expansion is withheld: an
-        // open-to-close range rebuilt over missing events cannot be
-        // trusted to bound the same commits, and a malformed range must
-        // never widen coverage.
-        lossyArchivedThreads += 1;
-        collectArtifactCoverage(thread.checkpoints, thread.summary, covered);
-      }
-    }
-    await expandCoveredRanges(ctx.repo, [...archiveRanges.values()], covered);
-  }
-  return { covered, localCovered, lossyArchivedThreads, restorableImports };
-}
-
-/**
- * Materialize archive-held imports into this checkout. The alternative —
- * disclosing a restore command — leaves the tool asserting coverage the
- * checkout cannot show, and the design authority already requires a fresh
- * worktree to "restore or skip, never re-write". Failures are per-artifact
- * and non-fatal: a thread that will not restore simply stays covered-only.
- */
-async function restoreArchivedImports(
-  ctx: CliContext,
-  artifactIds: readonly string[]
-): Promise<{ restored: number; failed: number }> {
-  if (!ctx.archive) return { restored: 0, failed: 0 };
-  let restored = 0;
-  let failed = 0;
-  for (const artifactId of artifactIds) {
-    try {
-      await restoreArtifactFromArchive({
-        repoRoot: ctx.repoRoot,
-        config: ctx.config,
-        store: ctx.store,
-        projectDir: ctx.archive.projectDir,
-        artifactId,
-        archiveLock: ctx.archive,
-      });
-      restored += 1;
-    } catch {
-      failed += 1;
-    }
-  }
-  return { restored, failed };
-}
-
-/**
  * Ancestry-guarded open-to-close range expansion. When the open head is
  * NOT an ancestor of the close head (rebase or branch switch mid-
  * checkpoint) rev-listing the range would mark unrelated history covered
@@ -307,15 +247,12 @@ export async function expandCoveredRanges(
   }
 }
 
-async function collectImportedShas(ctx: CliContext): Promise<Set<string>> {
+async function collectImportedShas(database: ProjectDatabase): Promise<Set<string>> {
   const imported = new Set<string>();
-  for (const row of ctx.store.store.listArtifacts()) {
-    if (row.origin_kind !== 'git-import') continue;
-    collectArtifactCoverage(
-      await ctx.store.readCheckpoints(row.id),
-      await ctx.store.readSummary(row.id),
-      imported
-    );
+  for (const row of queryProjectArtifacts(database, { origin: 'imported' }).rows) {
+    const retained = readProjectArtifact(database, row.artifactId);
+    if (!retained) continue;
+    collectArtifactCoverage(retained.thread.checkpoints, retained.thread.summary, imported);
   }
   return imported;
 }
@@ -347,6 +284,176 @@ function clusterTouchesPath(cluster: SeedCluster, pathFilter: string): boolean {
  */
 const ROOT_AREA = '.';
 
+interface SeedJobIdentity {
+  jobId: string;
+  record: SeedJobRecord;
+}
+
+function unfinishedSeedJob(journal: SeedJournal): SeedJobIdentity | null {
+  const unfinished = Object.entries(journal.jobs)
+    .filter(([, record]) => record.finished_at === undefined)
+    .map(([jobId, record]) => ({ jobId, record }));
+  if (unfinished.length > 1) {
+    throw invalidInput(
+      'Seed state contains more than one unfinished run. Preserve the database and run `orcaops doctor`.'
+    );
+  }
+  return unfinished[0] ?? null;
+}
+
+function assertMatchingPendingSeedRun(
+  journal: SeedJournal,
+  optionsHash: string,
+  syntheses: readonly SeedClusterSynthesis[]
+): SeedJobIdentity {
+  const active = unfinishedSeedJob(journal);
+  if (!active || journal.options_hash !== optionsHash) {
+    throw invalidInput(
+      'A concurrent or interrupted seed run selected different Git input. Re-run its original selection or inspect `orcaops seed status` before starting another apply.'
+    );
+  }
+  const selected = new Map(
+    syntheses.map((synthesis) => [synthesis.cluster.key, synthesis.artifactId] as const)
+  );
+  for (const [clusterKey, cluster] of Object.entries(journal.clusters)) {
+    if (cluster.status !== 'pending' && cluster.status !== 'writing') continue;
+    if (selected.get(clusterKey) !== cluster.artifact_id) {
+      throw invalidInput(
+        'The pending seed roster differs from the current Git source. Preserve the database and retry the original selection.'
+      );
+    }
+  }
+  for (const [clusterKey, artifactId] of selected) {
+    if (journal.clusters[clusterKey]?.artifact_id !== artifactId) {
+      throw invalidInput(
+        'The pending seed roster differs from the current Git source. Preserve the database and retry the original selection.'
+      );
+    }
+  }
+  return active;
+}
+
+function seedRosterMatches(
+  journal: SeedJournal,
+  optionsHash: string,
+  syntheses: readonly SeedClusterSynthesis[],
+  terminal: boolean
+): boolean {
+  if (journal.options_hash !== optionsHash) return false;
+  const selected = new Map(
+    syntheses.map((synthesis) => [synthesis.cluster.key, synthesis.artifactId] as const)
+  );
+  for (const [clusterKey, artifactId] of selected) {
+    const cluster = journal.clusters[clusterKey];
+    if (!cluster || cluster.artifact_id !== artifactId) return false;
+    if (terminal && cluster.status !== 'complete' && cluster.status !== 'covered') return false;
+  }
+  return !Object.entries(journal.clusters).some(
+    ([clusterKey, cluster]) =>
+      (cluster.status === 'pending' || cluster.status === 'writing') &&
+      selected.get(clusterKey) !== cluster.artifact_id
+  );
+}
+
+function completedConcurrentSeedJob(
+  journal: SeedJournal,
+  priorJobIds: ReadonlySet<string>,
+  optionsHash: string,
+  syntheses: readonly SeedClusterSynthesis[]
+): SeedJobIdentity | null {
+  if (!seedRosterMatches(journal, optionsHash, syntheses, true)) return null;
+  const completed = Object.entries(journal.jobs)
+    .filter(([jobId, record]) => !priorJobIds.has(jobId) && record.finished_at !== undefined)
+    .map(([jobId, record]) => ({ jobId, record }));
+  return completed.length === 1 ? completed[0]! : null;
+}
+
+function concurrentJobOwnsCluster(job: SeedJobIdentity, clusterKey: string): boolean {
+  return !job.record.skips?.some((skip) => skip.cluster_key === clusterKey);
+}
+
+function selectConcurrentSeedJob(
+  journal: SeedJournal,
+  priorJobIds: ReadonlySet<string>,
+  observed: SeedJobIdentity | null
+): SeedJobIdentity | null {
+  const added = Object.entries(journal.jobs)
+    .filter(([jobId]) => !priorJobIds.has(jobId) && jobId !== observed?.jobId)
+    .map(([jobId, record]) => ({ jobId, record }));
+  if (added.length > 1 || (observed && added.length > 0)) {
+    throw invalidInput(
+      'Seed state gained multiple concurrent runs. Preserve the database and inspect `orcaops seed status`.'
+    );
+  }
+  return observed ?? added[0] ?? null;
+}
+
+export interface SeedRunHooks {
+  afterInitialStateRead?: () => Promise<void>;
+  beforePendingPublication?: () => Promise<void>;
+  afterPendingPublication?: () => Promise<void>;
+  beforeConcurrentRetry?: (jobId: string) => Promise<void>;
+}
+
+interface PreparedInitialSeedEnrichment {
+  pendingManifest: SeedEnrichmentManifest | null;
+  pendingBundle: PreparedDatabasePendingSeedBundle | null;
+  authored: PreparedDatabaseSeedEnrichmentSources | undefined;
+}
+
+interface InitialSeedPersistence {
+  bundle: SeedBundlePersistence;
+  enrichment: SeedEnrichmentPersistence;
+  prepared: PreparedInitialSeedEnrichment;
+}
+
+async function prepareInitialSeedEnrichment(input: {
+  repoRoot: string;
+  config: DatabaseSeedCommandContext['config'];
+  database: DatabaseSeedCommandContext['database'] | null;
+  opts: SeedOptions;
+  preparePendingBundle?: typeof prepareDatabasePendingSeedBundle;
+  prepareAuthored?: typeof prepareDatabaseSeedEnrichmentSources;
+}): Promise<PreparedInitialSeedEnrichment> {
+  const directory = pendingSeedEnrichmentDir(input.repoRoot, input.config);
+  const retained = input.database
+    ? readProjectSeedBundle(input.database, { kind: 'pending' })
+    : null;
+  const state = input.database ? readDatabaseSeedState(input.database) : null;
+  const retainedActive =
+    retained !== null &&
+    (state?.journal === null ||
+      state?.journal === undefined ||
+      state.journal.options_hash !== retained.manifest?.options_hash ||
+      unfinishedSeedJob(state.journal) !== null);
+  const workspace = input.opts.since
+    ? null
+    : await (input.preparePendingBundle ?? prepareDatabasePendingSeedBundle)({
+        directory,
+        secretAllow: input.config.redact.allow,
+      });
+  const pendingBundle =
+    workspace && (!retained || workspace.manifest.options_hash !== retained.manifest?.options_hash)
+      ? workspace
+      : null;
+  const authored = input.opts.enrichmentDir
+    ? await (input.prepareAuthored ?? prepareDatabaseSeedEnrichmentSources)({
+        directory: input.opts.enrichmentDir,
+        secretAllow: input.config.redact.allow,
+      })
+    : undefined;
+  return {
+    pendingManifest: pendingBundle?.manifest ?? (retainedActive ? retained.manifest : null),
+    pendingBundle,
+    authored,
+  };
+}
+
+interface RunSeedControl {
+  retriedConcurrentStart?: boolean;
+  concurrentJob?: SeedJobIdentity;
+}
+
 function areaContainsFile(area: string, file: string): boolean {
   if (area === ROOT_AREA) return !file.includes('/');
   return file === area || file.startsWith(`${area}/`);
@@ -376,39 +483,35 @@ export function importSupersedesArea(
   );
 }
 
-async function cacheCoverage(
-  ctx: CliContext,
+async function prepareCoverage(
+  database: ProjectDatabase,
   branchSha: string,
   ownership: readonly SeedFileOwnership[],
   complete: boolean,
-  scoped: boolean
-): Promise<void> {
-  if (ownership.length === 0) return;
+  scoped: boolean,
+  prior: SeedCoverageReport | null
+): Promise<SeedCoverageReport | null> {
+  if (ownership.length === 0) return prior;
   const report = buildSeedCoverageReport(
     branchSha,
     ownership,
-    await collectImportedShas(ctx),
+    await collectImportedShas(database),
     complete
   );
   if (scoped) {
-    // A path-scoped job ranks only its own subtree; replacing the report
-    // would drop every previously reported directory row. Merge the fresh
-    // rows over the prior ones and keep the whole-tree completeness
-    // verdict — a scoped refresh can neither prove nor revoke it.
-    const prior = await readSeedCoverage(ctx.repoRoot, ctx.config);
     if (prior) {
       report.directories = { ...prior.directories, ...report.directories };
       report.complete = prior.complete;
     }
   }
-  await writeSeedCoverage(ctx.repoRoot, ctx.config, report);
+  return report;
 }
 
 function clusterIsCovered(cluster: SeedCluster, covered: ReadonlySet<string>): boolean {
   return covered.has(cluster.headSha) || cluster.commits.some((commit) => covered.has(commit.sha));
 }
 
-function optionsHash(selection: SeedSelectionRecord, branchSha: string): string {
+export function seedOptionsHash(selection: SeedSelectionRecord, branchSha: string): string {
   return createHash('sha256')
     .update(
       JSON.stringify({
@@ -493,7 +596,10 @@ function invalidInput(message: string): OrcaopsError {
   return new OrcaopsError(ErrorCodes.INVALID_INPUT, message);
 }
 
-function validateSeedOptions(opts: SeedOptions): number {
+export function validateSeedOptions(opts: SeedOptions): number {
+  if (!opts || typeof opts !== 'object' || Array.isArray(opts)) {
+    throw invalidInput('Seed options must be an object.');
+  }
   const maxCommits = opts.maxCommits ?? DEFAULT_MAX_COMMITS;
   if (!Number.isSafeInteger(maxCommits) || maxCommits <= 0 || maxCommits > MAX_SEED_COMMITS) {
     throw invalidInput(`--max-commits must be an integer from 1 to ${MAX_SEED_COMMITS}`);
@@ -509,7 +615,7 @@ function validateSeedOptions(opts: SeedOptions): number {
   return maxCommits;
 }
 
-function describeOpenCheckpoint(checkpoint: SeedOpenCheckpoint): string {
+export function describeOpenCheckpoint(checkpoint: SeedOpenCheckpoint): string {
   return `"${checkpoint.artifact_label}" (${checkpoint.artifact_id}), checkpoint #${checkpoint.checkpoint_n}`;
 }
 
@@ -522,63 +628,27 @@ function describeOpenCheckpoint(checkpoint: SeedOpenCheckpoint): string {
  * wedges `seed --yes` permanently with no in-tool way out. Ownership is read
  * off `origin_kind`, the storage-class choke point.
  */
-function inspectOpenCheckpointGuard(ctx: CliContext): SeedOpenCheckpointGuard {
-  const openCheckpoints = ctx.store.store
-    .listArtifacts()
-    .flatMap((artifact) =>
-      ctx.store.store.getOpenCheckpoints(artifact.id).map((checkpoint) => ({
-        artifact_id: artifact.id,
-        artifact_label: artifact.label,
-        checkpoint_n: checkpoint.n,
-        seed_owned: artifact.origin_kind === 'git-import',
-      }))
-    )
-    .sort(
-      (left, right) =>
-        left.artifact_id.localeCompare(right.artifact_id) || left.checkpoint_n - right.checkpoint_n
-    );
-  const foreign = openCheckpoints.filter((checkpoint) => !checkpoint.seed_owned);
-  const stranded = openCheckpoints.filter((checkpoint) => checkpoint.seed_owned);
-  return {
-    blocked: foreign.length > 0,
-    open_checkpoints: openCheckpoints,
-    stranded,
-    message:
-      foreign.length > 0
-        ? `Seed cannot write while a checkpoint is open: ${foreign
-            .map(describeOpenCheckpoint)
-            .join('; ')}. Close or abandon it first.`
-        : null,
-    recovery_message:
-      stranded.length > 0
-        ? `recovering an interrupted seed run: ${stranded.map(describeOpenCheckpoint).join('; ')}`
-        : null,
-  };
-}
-
-async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<string, unknown>> {
+export async function prepareSeedGitSelection(
+  repo: Repo,
+  supplied: SeedOptions,
+  pendingSelection?: SeedSelectionRecord
+) {
+  const opts = structuredClone(supplied);
+  pendingSelection = pendingSelection ? structuredClone(pendingSelection) : undefined;
   const maxCommits = validateSeedOptions(opts);
-  const openCheckpointGuard = inspectOpenCheckpointGuard(ctx);
-  if (opts.yes === true && openCheckpointGuard.message) {
-    throw new OrcaopsError(ErrorCodes.SEED_OPEN_CHECKPOINT, openCheckpointGuard.message);
-  }
-  const preflight = await inspectSeedClone(ctx.repo);
-  let sinceIso = opts.since ? await resolveSeedSince(ctx.repo, opts.since) : undefined;
+  const preflight = await inspectSeedClone(repo);
+  let sinceIso = opts.since ? await resolveSeedSince(repo, opts.since) : undefined;
   let sinceExplicit = opts.since !== undefined;
   if (sinceIso === undefined && opts.yes === true) {
-    const pendingManifest = await readSeedEnrichmentManifest(ctx.repoRoot, ctx.config);
-    if (
-      pendingManifest?.selection &&
-      selectionFlagsMatch(opts, maxCommits, pendingManifest.selection)
-    ) {
-      sinceIso = pendingManifest.selection.since;
-      sinceExplicit = pendingManifest.selection.since_explicit === true;
+    if (pendingSelection && selectionFlagsMatch(opts, maxCommits, pendingSelection)) {
+      sinceIso = pendingSelection.since;
+      sinceExplicit = pendingSelection.since_explicit === true;
     }
   }
-  const commitSha = opts.commit ? await ctx.repo.resolveCommit(opts.commit) : null;
+  const commitSha = opts.commit ? await repo.resolveCommit(opts.commit) : null;
   if (opts.commit && !commitSha)
     throw invalidInput(`--commit does not resolve to a commit: ${opts.commit}`);
-  const history = await loadSeedHistory(ctx.repo, {
+  const history = await loadSeedHistory(repo, {
     ...(sinceIso ? { sinceIso } : {}),
     ...(opts.branch ? { branch: opts.branch } : {}),
     ...(opts.author ? { author: opts.author } : {}),
@@ -633,7 +703,7 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
     importanceCommitsBeyond = selection.candidateCommitCount - selection.selectedCommitCount;
     importanceClustersBeyond = selection.candidateClusterCount - selection.clusters.length;
   } else if (opts.path || (!opts.commit && !preflight.partialClone)) {
-    const ranking = await rankSeedImportance(ctx.repo, {
+    const ranking = await rankSeedImportance(repo, {
       branchSha: history.branch.sha,
       commits: history.graphCommits,
       historyCommitCount: preflight.historyCommitCount,
@@ -704,43 +774,95 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
       `The canonical cluster for ${opts.commit} expands to ${selectedCommitCount} commits, exceeding --max-commits ${maxCommits}.`
     );
   }
+  return {
+    preflight,
+    sinceExplicit,
+    commitSha,
+    history,
+    rootSha,
+    canonicalClusters,
+    selectedClusters,
+    ownership,
+    coverageComplete,
+    importanceTruncated,
+    importanceDeferred,
+    probeMedianMs,
+    selectedCommitCount,
+    commitsBeyondBudget,
+    clustersBeyondBudget,
+    truncationCounts,
+  };
+}
+
+export async function runSeed(
+  ctx: DatabaseSeedCommandContext,
+  opts: SeedOptions,
+  hooks: SeedRunHooks = {},
+  persistence?: InitialSeedPersistence
+): Promise<Record<string, unknown>> {
+  return runSeedAttempt(ctx, opts, hooks, {}, persistence);
+}
+
+async function runSeedAttempt(
+  ctx: DatabaseSeedCommandContext,
+  opts: SeedOptions,
+  hooks: SeedRunHooks,
+  control: RunSeedControl = {},
+  persistence?: InitialSeedPersistence
+): Promise<Record<string, unknown>> {
+  const maxCommits = validateSeedOptions(opts);
+  const attemptStartedAt = new Date().toISOString();
   const dryRun = opts.dryRun === true || opts.yes !== true;
-  let coverageScan = await collectCoveredShas(ctx);
+  const openCheckpointGuard = inspectDatabaseOpenCheckpointGuard(ctx.database);
+  if (opts.yes === true && openCheckpointGuard.message) {
+    throw new OrcaopsError(ErrorCodes.SEED_OPEN_CHECKPOINT, openCheckpointGuard.message);
+  }
+  const pendingManifest =
+    !opts.since && opts.yes === true
+      ? (persistence?.prepared.pendingManifest ??
+        (persistence ? null : await readSeedEnrichmentManifest(ctx.repoRoot, ctx.config)))
+      : null;
+  const observedState = dryRun ? null : loadDatabaseSeedStateForWrite(ctx.database);
+  const observedUnfinished = observedState ? unfinishedSeedJob(observedState.journal) : null;
+  const selectionJob = control.concurrentJob ?? observedUnfinished;
+  await hooks.afterInitialStateRead?.();
+  const resumedSelection: SeedSelectionRecord = {
+    since: defaultSeedSince(new Date(selectionJob?.record.started_at ?? attemptStartedAt)),
+    since_explicit: false,
+    max_commits: maxCommits,
+    author: opts.author ?? null,
+    include_bots: opts.includeBots ?? false,
+    path: opts.path ?? null,
+    commit: opts.commit ?? null,
+    importance: opts.importance ?? false,
+  };
+  const pendingSelection =
+    pendingManifest?.selection &&
+    (!selectionJob || pendingManifest.options_hash === observedState?.journal.options_hash)
+      ? pendingManifest.selection
+      : resumedSelection;
+  const {
+    preflight,
+    sinceExplicit,
+    commitSha,
+    history,
+    rootSha,
+    canonicalClusters,
+    selectedClusters,
+    ownership,
+    coverageComplete,
+    importanceTruncated,
+    importanceDeferred,
+    probeMedianMs,
+    selectedCommitCount,
+    commitsBeyondBudget,
+    clustersBeyondBudget,
+    truncationCounts,
+  } = await prepareSeedGitSelection(ctx.repo, opts, pendingSelection);
+  const withinWindow = (cluster: SeedCluster): boolean =>
+    Date.parse(cluster.latestCommitDateIso) >= Date.parse(history.sinceIso);
+  const covered = await collectDatabaseCoveredShas(ctx.database, ctx.repo);
   const notes: string[] = [];
-  // Materialize before the pre-filter reads coverage: the restored artifacts
-  // become locally covered, so the same run that reports them also makes
-  // `list --imported`, `search` and `stats` show them in this checkout.
-  const restoration = dryRun
-    ? { restored: 0, failed: 0 }
-    : await restoreArchivedImports(ctx, coverageScan.restorableImports);
-  if (restoration.restored > 0) {
-    coverageScan = await collectCoveredShas(ctx);
-    notes.push(
-      `Restored ${restoration.restored} artifact${restoration.restored === 1 ? '' : 's'} ` +
-        'from the shared project archive into this checkout.'
-    );
-  }
-  if (restoration.failed > 0) {
-    notes.push(
-      `${restoration.failed} archived artifact${restoration.failed === 1 ? '' : 's'} could not be ` +
-        'restored into this checkout; they stay covered but unreadable here.'
-    );
-  }
-  if (dryRun && coverageScan.restorableImports.length > 0) {
-    notes.push(
-      `${coverageScan.restorableImports.length} imported artifact` +
-        `${coverageScan.restorableImports.length === 1 ? '' : 's'} live in the shared project ` +
-        'archive but not in this checkout; the apply restores them here.'
-    );
-  }
-  const { covered, localCovered, lossyArchivedThreads } = coverageScan;
-  if (lossyArchivedThreads > 0) {
-    notes.push(
-      `${lossyArchivedThreads} archived thread${lossyArchivedThreads === 1 ? '' : 's'} with ` +
-        'corrupt event lines contributed head-sha coverage from the readable prefix only; ' +
-        'commit-range expansion was skipped for them.'
-    );
-  }
   if (sinceExplicit && (opts.commit || opts.path)) {
     notes.push(
       `Honoring explicit --since ${history.sinceIso}; targeted runs ignore the selection window by default.`
@@ -804,12 +926,35 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
     commit: opts.commit ?? null,
     importance: opts.importance ?? false,
   };
-  const {
-    precious,
-    journal,
-    location: stateLocation,
-  } = await loadSeedStateForWrite(ctx.repo, getInvocationEnv(), ctx.repoRoot, ctx.config);
-  journal.options_hash = optionsHash(selection, history.branch.sha);
+  const state = loadDatabaseSeedStateForWrite(ctx.database);
+  const { precious, journal } = state;
+  const optionsHash = seedOptionsHash(selection, history.branch.sha);
+  const retainedUnfinished = dryRun ? null : unfinishedSeedJob(journal);
+  let unfinished = retainedUnfinished;
+  let completedConcurrentJob = false;
+  const expectedJob = dryRun
+    ? null
+    : selectConcurrentSeedJob(
+        journal,
+        new Set(Object.keys(observedState?.journal.jobs ?? {})),
+        control.concurrentJob ?? observedUnfinished
+      );
+  if (expectedJob) {
+    const record = journal.jobs[expectedJob.jobId];
+    if (!record || (retainedUnfinished && retainedUnfinished.jobId !== expectedJob.jobId)) {
+      throw invalidInput(
+        'The concurrent seed run changed identity. Preserve the database and inspect `orcaops seed status`.'
+      );
+    }
+    unfinished = { jobId: expectedJob.jobId, record };
+    completedConcurrentJob = record.finished_at !== undefined;
+  }
+  if (unfinished && journal.options_hash !== optionsHash) {
+    throw invalidInput(
+      'An interrupted seed run selected different Git input. Re-run its original selection or inspect `orcaops seed status` before starting another apply.'
+    );
+  }
+  journal.options_hash = optionsHash;
   precious.pr_context = precious.pr_context || opts.prContext === true;
   if (shouldShowCommitGraphHint(preflight, opts, precious)) {
     preflight.warnings.push(COMMIT_GRAPH_WARNING);
@@ -817,10 +962,14 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
   }
   // The ledger accounts for runs that produced artifacts, so only an apply
   // mints a job id — stamping a dry run would name a run that wrote nothing.
+  const jobStartedAt = unfinished?.record.started_at ?? attemptStartedAt;
   const job: ArtifactOriginJob | undefined = dryRun
     ? undefined
-    : { job_id: uuidv7(), kind: seedJobKind(opts, journal) };
-  const importedAt = new Date().toISOString();
+    : {
+        job_id: unfinished?.jobId ?? uuidv7(),
+        kind: unfinished?.record.kind ?? seedJobKind(opts, journal),
+      };
+  const importedAt = job ? jobStartedAt : new Date().toISOString();
   const syntheses = selectedClusters.map((cluster) =>
     synthesizeSeedCluster({
       cluster,
@@ -832,26 +981,46 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
       ...(job ? { job } : {}),
     })
   );
+  if (unfinished) {
+    if (completedConcurrentJob) {
+      if (!seedRosterMatches(journal, optionsHash, syntheses, true)) {
+        throw invalidInput(
+          'The completed concurrent seed roster differs from the current Git source. Preserve the database and inspect `orcaops seed status`.'
+        );
+      }
+    } else {
+      const active = assertMatchingPendingSeedRun(journal, optionsHash, syntheses);
+      if (active.jobId !== unfinished.jobId) {
+        throw invalidInput(
+          'The concurrent seed run changed identity. Preserve the database and inspect `orcaops seed status`.'
+        );
+      }
+    }
+  }
   let pending: SeedClusterSynthesis[] = [];
+  const completedConcurrentClusters = new Set<string>();
+  const completedConcurrentSyntheses: SeedClusterSynthesis[] = [];
   let coveredClusters = 0;
-  let coveredViaArchive = 0;
   const skips: Array<{ cluster_key: string; reason: string }> = [];
   for (const synthesis of syntheses) {
-    const existing = ctx.store.store.getArtifact(synthesis.artifactId);
-    // Deliberately the CACHE, not the event log. A row missing for a thread
-    // the log proves complete is exactly what must route the cluster into the
-    // resume lane, where the write path repairs it. Reading the log here would
-    // classify it already-imported and leave the cache wrong forever.
-    const existingSummary = ctx.store.store.getSummary(synthesis.artifactId);
+    const existing = readProjectArtifact(ctx.database, synthesis.artifactId);
+    const existingSummary = existing?.thread.summary ?? null;
     if (existing && !existingSummary) {
       pending.push(synthesis);
       continue;
     }
     if (existingSummary || clusterIsCovered(synthesis.cluster, covered)) {
-      coveredClusters += 1;
-      if (!existingSummary && !clusterIsCovered(synthesis.cluster, localCovered)) {
-        coveredViaArchive += 1;
+      if (existingSummary) {
+        if (expectedJob && concurrentJobOwnsCluster(expectedJob, synthesis.cluster.key)) {
+          completedConcurrentClusters.add(synthesis.cluster.key);
+          completedConcurrentSyntheses.push(synthesis);
+        } else {
+          await writeDatabaseSeedCluster(ctx.database, synthesis, {
+            operationOptions: ctx.operationOptions,
+          });
+        }
       }
+      coveredClusters += 1;
       // A preview never persists cluster entries: journal.clusters records
       // apply outcomes only, so `seed status` cannot flip to partial off a
       // dry run and `writing` stays a trustworthy crash-resume signal.
@@ -876,8 +1045,8 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
     }
   }
   pending.sort((left, right) => {
-    const leftIncomplete = ctx.store.store.getArtifact(left.artifactId) !== null ? 1 : 0;
-    const rightIncomplete = ctx.store.store.getArtifact(right.artifactId) !== null ? 1 : 0;
+    const leftIncomplete = readProjectArtifact(ctx.database, left.artifactId) !== null ? 1 : 0;
+    const rightIncomplete = readProjectArtifact(ctx.database, right.artifactId) !== null ? 1 : 0;
     return rightIncomplete - leftIncomplete;
   });
   const coveredClusterReasons = new Map(
@@ -892,12 +1061,28 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
       )
       .map((skip) => [skip.cluster_key, skip.reason] as const)
   );
-  const enrichment = await resolveSeedEnrichment(ctx.repoRoot, ctx.config, pending, {
-    ...(opts.enrichmentDir ? { enrichmentDir: opts.enrichmentDir } : {}),
-    optionsHash: journal.options_hash,
-    prContextConsented: precious.pr_context,
-    coveredClusters: coveredClusterReasons,
-  });
+  const pendingClusterKeys = new Set(pending.map((synthesis) => synthesis.cluster.key));
+  if (persistence?.prepared.pendingBundle) {
+    await persistence.bundle.preflight({
+      syntheses: [...pending, ...completedConcurrentSyntheses],
+      optionsHash: journal.options_hash,
+      prContextConsented: precious.pr_context,
+      selection,
+    });
+    await persistence.bundle.publish(persistence.prepared.pendingBundle.files);
+  }
+  const enrichment = await resolveSeedEnrichment(
+    ctx.repoRoot,
+    ctx.config,
+    [...pending, ...completedConcurrentSyntheses],
+    {
+      ...(opts.enrichmentDir ? { enrichmentDir: opts.enrichmentDir } : {}),
+      optionsHash: journal.options_hash,
+      prContextConsented: precious.pr_context,
+      coveredClusters: coveredClusterReasons,
+      persistence: persistence?.enrichment,
+    }
+  );
   if (enrichment.report.invalid.length > 0) {
     const details = enrichment.report.invalid
       .map((entry) => `${entry.file}: ${entry.reason}`)
@@ -907,51 +1092,30 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
         `no pending clusters were imported. Correct or remove them and retry. ${details}`
     );
   }
-  pending = enrichment.syntheses;
-  // Crash residue from an earlier seed run. An artifact this run will write
-  // resumes for free — the deterministic open key replays onto the stranded
-  // checkpoint and the close completes it — but one outside the pending set
-  // has nothing left to close it, and a backdated dangling open matches every
-  // future live close's wall-clock overlap scan. Abandon those.
-  const recovery = { resumed: 0, abandoned: 0 };
-  if (!dryRun && openCheckpointGuard.stranded.length > 0) {
-    const pendingIds = new Set(pending.map((synthesis) => synthesis.artifactId));
-    for (const stranded of openCheckpointGuard.stranded) {
-      if (pendingIds.has(stranded.artifact_id)) {
-        recovery.resumed += 1;
-        continue;
-      }
-      await ctx.store.writeCheckpointAbandoned(
-        {
-          artifact_id: stranded.artifact_id,
-          n: stranded.checkpoint_n,
-          reason: 'Interrupted seed run; this cluster is outside the current selection.',
-        },
-        {
-          idempotencyKey: `orcaops-seed:recover-abandon:${stranded.artifact_id}:${stranded.checkpoint_n}`,
-          invokedByAgent: 'other',
-        }
-      );
-      recovery.abandoned += 1;
-    }
-    notes.push(
-      `${openCheckpointGuard.recovery_message} — ` +
-        `resumed ${recovery.resumed}, abandoned ${recovery.abandoned}.`
-    );
+  pending = enrichment.syntheses.filter((synthesis) =>
+    pendingClusterKeys.has(synthesis.cluster.key)
+  );
+  for (const synthesis of enrichment.syntheses) {
+    if (!completedConcurrentClusters.has(synthesis.cluster.key)) continue;
+    await writeDatabaseSeedCluster(ctx.database, synthesis, {
+      exactExisting: true,
+      operationOptions: ctx.operationOptions,
+    });
   }
+  const recovery = { resumed: 0, abandoned: 0 };
   // Targeted lanes never ran the whole-history importance pass, so they
   // preserve the stored flag instead of clearing it; previews report the
   // would-be value without persisting it.
   const pendingImportance =
     opts.commit || opts.path ? precious.pending_importance : importanceDeferred;
   if (!dryRun) precious.pending_importance = pendingImportance;
-  if (job) {
+  if (job && !unfinished) {
     recordSeedJob(journal.jobs, job.job_id, {
       kind: job.kind,
       // Job-ledger attribution only: the artifact-level agent stays
       // 'other' because imported history is not the invoking agent's work.
       invoked_by: ctx.invokingAgent.agent,
-      started_at: new Date().toISOString(),
+      started_at: jobStartedAt,
       budget: {
         max_commits: maxCommits,
         selected_commits: selectedCommitCount,
@@ -962,13 +1126,6 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
       ...(skips.length > 0 ? { skips } : {}),
     });
   }
-  // The precious write still runs on previews: it records --pr-context
-  // consent and the show-once commit-graph hint, neither of which `seed
-  // status` reports. The scratch journal and the coverage report are both
-  // status-visible, so only applies write them.
-  await writeSeedPreciousState(stateLocation, precious);
-  if (!dryRun) await writeSeedJournal(ctx.repoRoot, ctx.config, journal);
-
   const preview = pending.map((synthesis) => ({
     artifact_id: synthesis.artifactId,
     cluster_key: synthesis.cluster.key,
@@ -1004,7 +1161,7 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
         selected: syntheses.length,
         pending: pending.length,
         covered: coveredClusters,
-        covered_via_archive: coveredViaArchive,
+        covered_via_archive: 0,
         commits: pending.reduce((total, item) => total + item.cluster.commits.length, 0),
       },
       truncation: {
@@ -1030,6 +1187,99 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
     };
   }
 
+  let finalExpectedRevision = state.expectedRevision;
+  if (!unfinished) {
+    precious.updated_at = jobStartedAt;
+    journal.updated_at = jobStartedAt;
+    try {
+      await hooks.beforePendingPublication?.();
+      const started = await publishDatabaseSeedState(
+        ctx.database,
+        {
+          precious,
+          journal,
+          coverage: state.coverage,
+          expectedRevision: state.expectedRevision,
+        },
+        ctx.operationOptions
+      );
+      finalExpectedRevision = started.revision;
+      await hooks.afterPendingPublication?.();
+    } catch (error) {
+      if (
+        error instanceof ProjectDatabaseError &&
+        error.code === 'STALE_CONTEXT' &&
+        !control.retriedConcurrentStart
+      ) {
+        const concurrent = loadDatabaseSeedStateForWrite(ctx.database);
+        const active = unfinishedSeedJob(concurrent.journal);
+        if (active) {
+          assertMatchingPendingSeedRun(concurrent.journal, optionsHash, syntheses);
+          if (opts.prContext === true && concurrent.precious.pr_context !== true) throw error;
+          await hooks.beforeConcurrentRetry?.(active.jobId);
+          return runSeedAttempt(
+            ctx,
+            opts,
+            {},
+            {
+              retriedConcurrentStart: true,
+              concurrentJob: active,
+            },
+            persistence
+          );
+        }
+        const completed = completedConcurrentSeedJob(
+          concurrent.journal,
+          new Set(Object.keys(state.journal.jobs)),
+          optionsHash,
+          syntheses
+        );
+        if (!completed || (opts.prContext === true && concurrent.precious.pr_context !== true))
+          throw error;
+        return runSeedAttempt(
+          ctx,
+          opts,
+          {},
+          {
+            retriedConcurrentStart: true,
+            concurrentJob: completed,
+          },
+          persistence
+        );
+      }
+      throw error;
+    }
+  } else if (completedConcurrentJob) {
+    notes.push(`Converged on completed concurrent seed job ${unfinished.jobId}.`);
+  } else {
+    notes.push(`Resuming unfinished seed job ${unfinished.jobId}.`);
+  }
+
+  // Recovery can append an abandon event, so it runs only after the pending
+  // state revision has durably named this run and its cluster roster.
+  if (!completedConcurrentJob && openCheckpointGuard.stranded.length > 0) {
+    const pendingIds = new Set(pending.map((synthesis) => synthesis.artifactId));
+    for (const stranded of openCheckpointGuard.stranded) {
+      if (pendingIds.has(stranded.artifact_id)) {
+        recovery.resumed += 1;
+        continue;
+      }
+      await abandonDatabaseSeedCheckpoint(
+        ctx.database,
+        {
+          artifactId: stranded.artifact_id,
+          checkpointN: stranded.checkpoint_n,
+        },
+        ctx.operationOptions
+      );
+      recovery.abandoned += 1;
+    }
+    notes.push(
+      `${openCheckpointGuard.recovery_message} — ` +
+        `resumed ${recovery.resumed}, abandoned ${recovery.abandoned}.`
+    );
+  }
+
   const prepared = await prepareSeedSnapshots(ctx.repo, pending, {
     fingerprints: ctx.config.diff_fingerprint.enabled && !preflight.partialClone,
     maxDiffBytes: ctx.config.diff_fingerprint.max_diff_bytes,
@@ -1041,13 +1291,12 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
   let enrichedWritten = 0;
   let skeletonWritten = 0;
   for (const synthesis of pending) {
-    journal.clusters[synthesis.cluster.key] = {
-      artifact_id: synthesis.artifactId,
-      status: 'writing',
-    };
-    await writeSeedJournal(ctx.repoRoot, ctx.config, journal);
     try {
-      const result = await writeSeedCluster(ctx, synthesis, { prepared });
+      const result = await writeDatabaseSeedCluster(ctx.database, synthesis, {
+        prepared,
+        registered: ctx.registered,
+        operationOptions: ctx.operationOptions,
+      });
       results.push(result);
       if (result.outcome !== 'complete') {
         if (synthesis.plan.origin?.enriched_at) enrichedWritten += 1;
@@ -1064,17 +1313,14 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
         error: error instanceof Error ? error.message : String(error),
       };
     }
-    await writeSeedJournal(ctx.repoRoot, ctx.config, journal);
   }
-  // Cached AFTER the writes, never before: the report counts lines owned by
-  // imported artifacts, so caching it up front publishes a 0%-covered report
-  // that an interrupted run then leaves behind as the last word.
-  await cacheCoverage(
-    ctx,
+  const coverage = await prepareCoverage(
+    ctx.database,
     history.branch.sha,
     ownership,
     coverageComplete,
-    opts.path !== undefined
+    opts.path !== undefined,
+    state.coverage
   );
   const writtenIds = new Set(
     results.filter((result) => result.outcome !== 'complete').map((result) => result.artifactId)
@@ -1094,26 +1340,51 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
     }
   }
   if (clearedAreas.length > 0) {
-    await writeSeedPreciousState(stateLocation, precious);
     for (const cleared of clearedAreas) {
       if (cleared.declined) notes.push(`cleared decline for ${cleared.area}`);
       if (cleared.offered) notes.push(`cleared offer cooldown for ${cleared.area}`);
     }
   }
   const jobRecord = job ? journal.jobs[job.job_id] : undefined;
-  if (jobRecord) {
+  if (jobRecord && !completedConcurrentJob) {
     const finishedAt = new Date();
     jobRecord.finished_at = finishedAt.toISOString();
     jobRecord.wall_time_ms = Math.max(0, finishedAt.getTime() - Date.parse(jobRecord.started_at));
-    await writeSeedJournal(ctx.repoRoot, ctx.config, journal);
   }
-  await cacheCoverage(
-    ctx,
-    history.branch.sha,
-    ownership,
-    coverageComplete,
-    opts.path !== undefined
-  );
+  const stateUpdatedAt = jobRecord?.finished_at ?? new Date().toISOString();
+  precious.updated_at = stateUpdatedAt;
+  journal.updated_at = stateUpdatedAt;
+  let finalJournal = journal;
+  if (!completedConcurrentJob) {
+    try {
+      await publishDatabaseSeedState(
+        ctx.database,
+        {
+          precious,
+          journal,
+          coverage,
+          expectedRevision: finalExpectedRevision,
+        },
+        ctx.operationOptions
+      );
+    } catch (error) {
+      if (error instanceof ProjectDatabaseError && error.code === 'STALE_CONTEXT' && job) {
+        const concurrent = readDatabaseSeedState(ctx.database);
+        const concurrentJob = concurrent?.journal?.jobs[job.job_id];
+        if (
+          concurrent?.journal &&
+          concurrentJob?.finished_at !== undefined &&
+          seedRosterMatches(concurrent.journal, optionsHash, syntheses, true)
+        ) {
+          finalJournal = concurrent.journal;
+        } else {
+          throw error;
+        }
+      } else {
+        throw error;
+      }
+    }
+  }
   return {
     mode: 'applied',
     branch: history.branch,
@@ -1121,7 +1392,7 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
     notes,
     preflight,
     recovery,
-    restored_from_archive: restoration.restored,
+    restored_from_archive: 0,
     seeded: results,
     totals: {
       selected: syntheses.length,
@@ -1129,8 +1400,9 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
       resumed: results.filter((result) => result.outcome === 'resumed').length,
       already_complete: results.filter((result) => result.outcome === 'complete').length,
       covered: coveredClusters,
-      covered_via_archive: coveredViaArchive,
-      failed: Object.values(journal.clusters).filter((entry) => entry.status === 'failed').length,
+      covered_via_archive: 0,
+      failed: Object.values(finalJournal.clusters).filter((entry) => entry.status === 'failed')
+        .length,
     },
     truncation: {
       recency_commit_cap: history.truncatedByCommitCap,
@@ -1152,11 +1424,38 @@ async function runSeed(ctx: CliContext, opts: SeedOptions): Promise<Record<strin
 }
 
 export async function repairSeed(repoRoot: string): Promise<Record<string, unknown>> {
-  const ctx = await buildContext({ root: repoRoot });
+  let prepared: PreparedInitialSeedEnrichment | undefined;
+  const ctx = await resolveDatabaseSeedCommandContext({
+    write: true,
+    initialize: true,
+    cwd: repoRoot,
+    authoredPayloads: [{ yes: true }],
+    beforeWrite: async ({ repoRoot: root, config, database }) => {
+      prepared = await prepareInitialSeedEnrichment({
+        repoRoot: root,
+        config,
+        database,
+        opts: { yes: true },
+      });
+    },
+  });
   try {
-    return await withSeedRunLock(ctx.repo, getInvocationEnv(), () => runSeed(ctx, { yes: true }));
+    const persistence = prepared
+      ? {
+          ...databaseInitialSeedPersistence({
+            handle: ctx.database,
+            repoRoot: ctx.repoRoot,
+            directory: pendingSeedEnrichmentDir(ctx.repoRoot, ctx.config),
+            operationOptions: ctx.operationOptions,
+            secretAllow: ctx.config.redact.allow,
+            linkPending: prepared.pendingManifest !== null,
+          }),
+          prepared,
+        }
+      : undefined;
+    return await runSeed(ctx, { yes: true }, {}, persistence);
   } finally {
-    ctx.store.close();
+    ctx.close();
   }
 }
 
@@ -1322,7 +1621,13 @@ export async function seedStatusAction(
   } = {}
 ): Promise<void> {
   try {
-    const ctx = await buildContext();
+    const mayWrite =
+      opts.decline !== undefined || opts.offered !== undefined || opts.offerAgain !== undefined;
+    const ctx = await resolveDatabaseSeedCommandContext({
+      write: mayWrite,
+      initialize: mayWrite,
+      authoredPayloads: [opts],
+    });
     try {
       // A blank selector is not an area; recording it would suppress nothing
       // forever, so say it was ignored instead of exiting 0 silently.
@@ -1354,41 +1659,42 @@ export async function seedStatusAction(
       // claim a decline was cleared when only an offer cooldown was.
       let offerAgainClearedDecline = false;
       let offerAgainClearedOffer = false;
-      // Every precious-state write goes through the CLI, so the discovery
-      // workflow reads one source of suppression truth and owns no file format.
+      const state = loadDatabaseSeedStateForWrite(ctx.database);
       if (declineArea || offeredArea || offerAgainArea) {
-        await withSeedRunLock(ctx.repo, getInvocationEnv(), async () => {
-          const { precious, location } = await loadSeedStateForWrite(
-            ctx.repo,
-            getInvocationEnv(),
-            ctx.repoRoot,
-            ctx.config
+        if (declineArea) {
+          rememberDeclinedSeedArea(
+            state.precious,
+            declineArea,
+            declineValidation?.ok === true ? declineValidation.normalizedFrom : null
           );
-          if (declineArea) {
-            rememberDeclinedSeedArea(
-              precious,
-              declineArea,
-              declineValidation?.ok === true ? declineValidation.normalizedFrom : null
-            );
-          }
-          if (offeredArea) recordSeedAreaOffered(precious, offeredArea);
-          if (offerAgainArea) {
-            const prior = precious.discovery_areas[offerAgainArea];
-            offerAgainCleared = clearSeedArea(precious, offerAgainArea);
-            offerAgainClearedDecline = offerAgainCleared && prior?.declined_at !== undefined;
-            offerAgainClearedOffer = offerAgainCleared && prior?.offered_at !== undefined;
-          }
-          await writeSeedPreciousState(location, precious);
-        });
+        }
+        if (offeredArea) recordSeedAreaOffered(state.precious, offeredArea);
+        if (offerAgainArea) {
+          const prior = state.precious.discovery_areas[offerAgainArea];
+          offerAgainCleared = clearSeedArea(state.precious, offerAgainArea);
+          offerAgainClearedDecline = offerAgainCleared && prior?.declined_at !== undefined;
+          offerAgainClearedOffer = offerAgainCleared && prior?.offered_at !== undefined;
+        }
+        const stateUpdatedAt = new Date().toISOString();
+        state.precious.updated_at = stateUpdatedAt;
+        state.journal.updated_at = stateUpdatedAt;
+        await publishDatabaseSeedState(
+          ctx.database,
+          {
+            precious: state.precious,
+            journal: state.journal,
+            coverage: state.coverage,
+            expectedRevision: state.expectedRevision,
+          },
+          ctx.operationOptions
+        );
       }
-      const [{ precious, journal }, coverage, currentHeadSha] = await Promise.all([
-        readSeedState(ctx.repo, getInvocationEnv(), ctx.repoRoot, ctx.config),
-        readSeedCoverage(ctx.repoRoot, ctx.config),
-        ctx.repo.getHeadSha(),
-      ]);
-      const importedRows = ctx.store.store
-        .listArtifacts()
-        .filter((artifact) => artifact.origin_kind === 'git-import');
+      const currentState = readDatabaseSeedState(ctx.database);
+      const precious = currentState?.precious ?? null;
+      const journal = currentState?.journal ?? null;
+      const coverage = currentState?.coverage ?? null;
+      const currentHeadSha = await ctx.repo.getHeadSha();
+      const importedRows = queryProjectArtifacts(ctx.database, { origin: 'imported' }).rows;
       const importedArtifacts = importedRows.length;
       // Commit-lane applies never blame files, because a blame bounded to
       // the cluster's touched files would understate the per-directory
@@ -1398,7 +1704,7 @@ export async function seedStatusAction(
       // than silently understating coverage.
       let commitImportsExcludedFromCoverage = 0;
       for (const row of importedRows) {
-        const origin = (await ctx.store.readPlan(row.id))?.origin;
+        const origin = readProjectArtifact(ctx.database, row.artifactId)?.thread.plan?.origin;
         if (origin?.job?.kind !== 'commit') continue;
         if (coverage === null || origin.imported_at > coverage.generated_at) {
           commitImportsExcludedFromCoverage += 1;
@@ -1420,13 +1726,9 @@ export async function seedStatusAction(
             const status = journal.clusters[key]!.status;
             return status === 'pending' || status === 'writing' || status === 'failed';
           }));
-      // A cluster stuck at `writing` is the fingerprint of an apply that died
-      // mid-write — no other path leaves that status behind. The store is a
-      // torn prefix of the run, so no coverage verdict computed over it may
-      // present itself as complete or fresh.
       const interrupted =
-        journal !== null &&
-        Object.values(journal.clusters).some((cluster) => cluster.status === 'writing');
+        (journal !== null && unfinishedSeedJob(journal) !== null) ||
+        inspectDatabaseOpenCheckpointGuard(ctx.database).stranded.length > 0;
       const failures = journal
         ? Object.entries(journal.clusters)
             .filter(([, cluster]) => cluster.status === 'failed')
@@ -1436,9 +1738,6 @@ export async function seedStatusAction(
               error: cluster.error ?? 'unknown',
             }))
         : [];
-      // Run state lives in the disposable journal, but imported artifacts in
-      // the store are proof seed ran — a wiped cache must not claim never-run
-      // beside a non-zero import count.
       const journalLost = journal === null && !pendingImportance && importedArtifacts > 0;
       // "complete" means the whole first-parent history was processed; a
       // store built only from --path/--commit jobs never was, so it must
@@ -1536,8 +1835,13 @@ export async function seedStatusAction(
           ? {
               jobs: await buildSeedJobLedger(
                 {
-                  listArtifacts: () => ctx.store.store.listArtifacts(),
-                  readPlan: (artifactId) => ctx.store.readPlan(artifactId),
+                  listArtifacts: () =>
+                    importedRows.map((row) => ({
+                      id: row.artifactId,
+                      origin_kind: 'git-import',
+                    })),
+                  readPlan: async (artifactId) =>
+                    readProjectArtifact(ctx.database, artifactId)?.thread.plan ?? null,
                 },
                 journal?.jobs ?? {}
               ),
@@ -1684,7 +1988,7 @@ export async function seedStatusAction(
         writeTerminalSafeStdout(`${lines.join('\n')}\n`);
       }
     } finally {
-      ctx.store.close();
+      ctx.close();
     }
   } catch (error) {
     if (opts.json) emitError(error);
@@ -1858,28 +2162,91 @@ export function renderSeedResult(result: Record<string, unknown>): string {
   return `${lines.join('\n')}\n`;
 }
 
-export async function seedAction(opts: SeedOptions = {}): Promise<void> {
-  // `ok` keeps meaning "the command ran", so the report still emits in full and
-  // only the exit status carries the failure. Raised after the emit so it never
-  // routes through the error envelope below and double-reports.
-  let failedClusters = 0;
-  try {
-    const ctx = await buildContext();
+export function createDatabaseSeedAction(dependencies: {
+  resolveContext: typeof resolveDatabaseSeedCommandContext;
+  run: typeof runSeed;
+  preparePendingBundle?: typeof prepareDatabasePendingSeedBundle;
+  prepareAuthored?: typeof prepareDatabaseSeedEnrichmentSources;
+  createPersistence?: typeof databaseInitialSeedPersistence;
+}) {
+  return async (received: SeedOptions = {}): Promise<void> => {
+    const json = !!received && typeof received === 'object' && received.json === true;
+    const controller = new AbortController();
+    const interrupt = () => controller.abort();
+    process.on('SIGINT', interrupt);
+    let failedClusters = 0;
+    let waiting = false;
     try {
-      const result = await withSeedRunLock(ctx.repo, getInvocationEnv(), () => runSeed(ctx, opts));
-      if (opts.json) emitOk(result);
-      else writeTerminalSafeStdout(renderSeedResult(result));
-      if (result.mode !== 'dry-run') {
-        const applyTotals = result.totals as Record<string, number> | undefined;
-        failedClusters = applyTotals?.failed ?? 0;
+      const opts = structuredClone(received);
+      validateSeedOptions(opts);
+      let prepared: PreparedInitialSeedEnrichment | undefined;
+      const ctx = await dependencies.resolveContext({
+        write: opts.yes === true,
+        initialize: opts.yes === true,
+        authoredPayloads: [opts],
+        signal: controller.signal,
+        beforeWrite: async ({ repoRoot, config, database }) => {
+          prepared = await prepareInitialSeedEnrichment({
+            repoRoot,
+            config,
+            database,
+            opts,
+            preparePendingBundle: dependencies.preparePendingBundle,
+            prepareAuthored: dependencies.prepareAuthored,
+          });
+        },
+        onWait: () => {
+          if (waiting) return;
+          waiting = true;
+          writeTerminalSafeStderr(
+            'Waiting for seed on the selected project database; Ctrl-C cancels the wait.\n'
+          );
+        },
+      });
+      if (controller.signal.aborted) {
+        closeFailedHistoryRead(ctx);
+        throw new ProjectDatabaseError('CANCELLED', 'Seed cancelled while opening the writer');
       }
+      try {
+        const persistence = prepared
+          ? {
+              ...(dependencies.createPersistence ?? databaseInitialSeedPersistence)({
+                handle: ctx.database,
+                repoRoot: ctx.repoRoot,
+                directory: pendingSeedEnrichmentDir(ctx.repoRoot, ctx.config),
+                operationOptions: ctx.operationOptions,
+                secretAllow: ctx.config.redact.allow,
+                preparedAuthored: prepared.authored,
+                linkPending: prepared.pendingManifest !== null,
+              }),
+              prepared,
+            }
+          : undefined;
+        const result = await dependencies.run(ctx, opts, {}, persistence);
+        if (json) emitOk(result);
+        else writeTerminalSafeStdout(renderSeedResult(result));
+        if (result.mode !== 'dry-run') {
+          const applyTotals = result.totals as Record<string, number> | undefined;
+          failedClusters = applyTotals?.failed ?? 0;
+        }
+      } finally {
+        ctx.close();
+      }
+    } catch (error) {
+      if (json) emitError(error);
+      writeErrorLine(error);
+      throw new CliExit(1);
     } finally {
-      ctx.store.close();
+      process.off('SIGINT', interrupt);
     }
-  } catch (error) {
-    if (opts.json) emitError(error);
-    writeErrorLine(error);
-    throw new CliExit(1);
-  }
-  if (failedClusters > 0) throw new CliExit(1);
+    // `ok` keeps meaning "the command ran", so the report still emits in full and
+    // only the exit status carries the failure. Raised after the emit so it never
+    // routes through the error envelope above and double-reports.
+    if (failedClusters > 0) throw new CliExit(1);
+  };
 }
+
+export const seedAction = createDatabaseSeedAction({
+  resolveContext: resolveDatabaseSeedCommandContext,
+  run: runSeed,
+});

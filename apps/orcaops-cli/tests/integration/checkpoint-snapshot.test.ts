@@ -1,11 +1,16 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { baselineRefName } from '@orcaops/core';
+import { resolveDatabaseHistoryScope } from '@orcaops/project-scope/history/database';
 import { CheckpointSnapshotBoundarySchema } from '@orcaops/storage';
+import {
+  type ProjectArtifactSnapshot,
+  readProjectArtifact,
+} from '@orcaops/storage/history/database';
 import { createRepoTemplate, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -20,13 +25,7 @@ import { clearCloudLogin, commitFile, seedCloudLogin } from '../support/test-hel
  * `diffSnapshotTrees` and `buildDiffFingerprintManifest`,
  * producing real `open_snapshot` / `close_snapshot` boundaries and
  * `diff_fingerprint_summary` / `diff_fingerprint_manifest` event
- * payloads on disk.
- *
- * Readback: plain `readFile` on `.orcaops/artifacts/<id>/checkpoint-<n>.json`
- * (projection) and `events.ndjson` (full event payload — the manifest
- * lives here, not on the projection). For small fixtures the manifest
- * stays inline; these tests don't exercise the 8 KB sidecar
- * spill (covered by the rebuilder tests).
+ * payloads in canonical project history.
  */
 
 interface CliResult {
@@ -35,13 +34,15 @@ interface CliResult {
   exitCode: number;
 }
 
+let dataRoot: string;
+
 interface OkEnvelope {
   ok: true;
   [k: string]: unknown;
 }
 
 function parseOk<T = OkEnvelope>(r: CliResult): T {
-  expect(r.exitCode).toBe(0);
+  expect(r.exitCode, r.stdout + r.stderr).toBe(0);
   const parsed = JSON.parse(r.stdout) as { ok: boolean };
   expect(parsed.ok).toBe(true);
   return parsed as T;
@@ -112,8 +113,11 @@ async function readCheckpointProjection<T = unknown>(
   artifactId: string,
   n: number
 ): Promise<T> {
-  const p = path.join(repoPath, '.orcaops', 'artifacts', artifactId, `checkpoint-${n}.json`);
-  return JSON.parse(await readFile(p, 'utf8')) as T;
+  const checkpoint = (await readArtifactSnapshot(repoPath, artifactId)).thread.checkpoints.find(
+    (candidate) => candidate.n === n
+  );
+  if (!checkpoint) throw new Error(`Fixture checkpoint ${n} unavailable`);
+  return checkpoint as T;
 }
 
 interface EventRecord {
@@ -126,32 +130,94 @@ interface EventRecord {
 }
 
 async function readEventLog(repoPath: string, artifactId: string): Promise<EventRecord[]> {
-  const p = path.join(repoPath, '.orcaops', 'artifacts', artifactId, 'events.ndjson');
-  const text = await readFile(p, 'utf8');
-  return text
-    .split('\n')
-    .filter((l) => l.length > 0)
-    .map((l) => JSON.parse(l) as EventRecord);
+  return (await readArtifactSnapshot(repoPath, artifactId)).thread.events.map((event) => ({
+    ...event.record,
+    payload: event.payload,
+  })) as EventRecord[];
 }
 
 async function loadEventPayload<T>(
-  repoPath: string,
-  artifactId: string,
+  _repoPath: string,
+  _artifactId: string,
   rec: EventRecord
 ): Promise<T> {
-  if (rec.payload !== undefined) return rec.payload as T;
-  if (rec.sidecar_sha256) {
-    const sidecarPath = path.join(
-      repoPath,
-      '.orcaops',
-      'artifacts',
-      artifactId,
-      'sidecars',
-      `${rec.event_id}.json`
-    );
-    return JSON.parse(await readFile(sidecarPath, 'utf8')) as T;
+  return rec.payload as T;
+}
+
+async function readArtifactSnapshot(
+  repoPath: string,
+  artifactId: string
+): Promise<ProjectArtifactSnapshot> {
+  const scope = await resolveDatabaseHistoryScope({
+    cwd: repoPath,
+    root: dataRoot,
+    profile: 'exact',
+    selector: {},
+  });
+  try {
+    const database = scope.projects[0]?.database;
+    if (!scope.completeness.complete || !database) throw new Error('Fixture history unavailable');
+    const artifact = readProjectArtifact(database, artifactId);
+    if (!artifact) throw new Error(`Fixture artifact ${artifactId} unavailable`);
+    return artifact;
+  } finally {
+    scope.close();
   }
-  throw new Error(`event ${rec.event_id} has neither inline payload nor sidecar`);
+}
+
+async function readBaselinePublication(repoPath: string, artifactId: string) {
+  const scope = await resolveDatabaseHistoryScope({
+    cwd: repoPath,
+    root: dataRoot,
+    profile: 'exact',
+    selector: {},
+  });
+  try {
+    const database = scope.projects[0]?.database;
+    if (!scope.completeness.complete || !database) throw new Error('Fixture history unavailable');
+    return database.read((view) =>
+      view.get<{ fullRef: string; treeOid: string }>(
+        `SELECT p.full_ref AS fullRef, p.tree_oid AS treeOid
+         FROM artifact_baseline_current b
+         JOIN git_retention_publications p ON p.publication_id = b.publication_id
+         WHERE b.artifact_id = ?`,
+        artifactId
+      )
+    ).value;
+  } finally {
+    scope.close();
+  }
+}
+
+async function readCheckpointPublications(
+  repoPath: string,
+  artifactId: string,
+  n: number,
+  phase: 'open' | 'close' | 'abandon'
+) {
+  const scope = await resolveDatabaseHistoryScope({
+    cwd: repoPath,
+    root: dataRoot,
+    profile: 'exact',
+    selector: {},
+  });
+  try {
+    const database = scope.projects[0]?.database;
+    if (!scope.completeness.complete || !database) throw new Error('Fixture history unavailable');
+    return database.read((view) =>
+      view.all<{ publicationId: string; fullRef: string }>(
+        `SELECT p.publication_id AS publicationId, p.full_ref AS fullRef
+         FROM artifact_retention_selections s
+         JOIN git_retention_publications p ON p.publication_id = s.publication_id
+         WHERE s.artifact_id = ? AND p.checkpoint_number = ? AND p.checkpoint_phase = ?`,
+        artifactId,
+        n,
+        phase
+      )
+    ).value;
+  } finally {
+    scope.close();
+  }
 }
 
 async function readLatestCheckpointClosedPayload(
@@ -230,32 +296,29 @@ describe('checkpoint snapshot + fingerprint capture', () => {
   let repo: TempRepo;
   let agent: ReturnType<typeof makeAgent>;
 
-  // `init` is identical for every test here and costs ~450ms; run it once and
-  // give each test a ~20ms copy of the result.
-  const template = createRepoTemplate(
-    async (repoPath) => {
-      await makeAgent({ cwd: repoPath, env: { ORCAOPS_DISABLE_DRAIN: '1' } }).runRaw([
-        'init',
-        '--scope',
-        'project',
-        '--json',
-        '--no-llm',
-      ]);
-    },
-    { initialBranch: 'main' }
-  );
+  const template = createRepoTemplate(async () => undefined, { initialBranch: 'main' });
 
   beforeEach(async () => {
     repo = await template.checkout();
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-snapshot-history-'));
     // Drain disabled so capture runs with no real cloud I/O (the temp repo also has no
     // git remote, which short-circuits eager push). No login seed: snapshot capture is
     // auth-independent; the auth-state tests below seed creds per-test.
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+    agent = makeAgent({
+      cwd: repo.path,
+      env: { ORCAOPS_DATA_DIR: dataRoot, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
+    const init = await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
+    expect(init.exitCode, init.stdout + init.stderr).toBe(0);
   });
 
   afterEach(async () => {
     clearCloudLogin();
-    await repo.cleanup();
+    try {
+      await repo.cleanup();
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
   });
 
   afterAll(async () => {
@@ -437,7 +500,9 @@ describe('checkpoint snapshot + fingerprint capture', () => {
     expect(proj.open_snapshot.tree_sha).not.toEqual(proj.close_snapshot.tree_sha);
     expect(proj.open_snapshot.snapshot_error_reason).toBeNull();
     expect(proj.close_snapshot.snapshot_error_reason).toBeNull();
-    expect(proj.open_snapshot.snapshot_ref).toBe(`refs/orcaops/snap/${plan.artifact_id}/1/open`);
+    expect(proj.open_snapshot.snapshot_ref).toMatch(
+      new RegExp(`^refs/orcaops/snap/${plan.artifact_id}/1/open-[0-9a-f-]{36}$`)
+    );
 
     // And the fingerprint the boundaries feed still lands.
     expect(proj.diff_fingerprint_summary.status).toBe('captured');
@@ -510,17 +575,18 @@ describe('checkpoint snapshot + fingerprint capture', () => {
     };
     parseOk(await closeCp(closePayload, closeKey));
 
-    // Snapshot pre-replay state: close-ref commit target, projection JSON
-    // contents, event-log checkpoint_closed count.
-    const closeRefName = `refs/orcaops/snap/${plan.artifact_id}/1/close`;
+    // Snapshot pre-replay state: retained close publication, checkpoint value,
+    // and checkpoint_closed event count.
+    const projectionBefore = await readCheckpointProjection<ClosedCheckpointProjection>(
+      repo.path,
+      plan.artifact_id,
+      1
+    );
+    const closeRefName = projectionBefore.close_snapshot.snapshot_ref!;
     const commitBefore = execFileSync('git', ['rev-parse', closeRefName], {
       cwd: repo.path,
       encoding: 'utf8',
     }).trim();
-    const projectionBefore = await readFile(
-      path.join(repo.path, '.orcaops', 'artifacts', plan.artifact_id, 'checkpoint-1.json'),
-      'utf8'
-    );
     const eventsBefore = await readEventLog(repo.path, plan.artifact_id);
     const closedCountBefore = countCheckpointClosedEvents(eventsBefore);
 
@@ -546,12 +612,13 @@ describe('checkpoint snapshot + fingerprint capture', () => {
     const eventsAfter = await readEventLog(repo.path, plan.artifact_id);
     expect(countCheckpointClosedEvents(eventsAfter)).toBe(closedCountBefore);
 
-    // Defense-in-depth: projection JSON unchanged byte-for-byte.
-    const projectionAfter = await readFile(
-      path.join(repo.path, '.orcaops', 'artifacts', plan.artifact_id, 'checkpoint-1.json'),
-      'utf8'
+    // Defense-in-depth: the canonical checkpoint value is unchanged.
+    const projectionAfter = await readCheckpointProjection<ClosedCheckpointProjection>(
+      repo.path,
+      plan.artifact_id,
+      1
     );
-    expect(projectionAfter).toBe(projectionBefore);
+    expect(projectionAfter).toEqual(projectionBefore);
   });
 
   it('open → abandon mid-work: abandon_snapshot captured, no fingerprint manifest', async () => {
@@ -577,8 +644,8 @@ describe('checkpoint snapshot + fingerprint capture', () => {
     expect(proj.abandon_snapshot.tree_sha).not.toBeNull();
     expect(proj.abandon_snapshot.snapshot_commit_sha).not.toBeNull();
     expect(proj.abandon_snapshot.snapshot_error_reason).toBeNull();
-    expect(proj.abandon_snapshot.snapshot_ref).toBe(
-      `refs/orcaops/snap/${plan.artifact_id}/1/abandon`
+    expect(proj.abandon_snapshot.snapshot_ref).toMatch(
+      new RegExp(`^refs/orcaops/snap/${plan.artifact_id}/1/abandon-[0-9a-f-]{36}$`)
     );
 
     // Mid-work change makes the abandon tree differ from the open tree.
@@ -634,8 +701,12 @@ describe('checkpoint snapshot + fingerprint capture', () => {
     expect(proj1.open_snapshot.tree_sha).toEqual(proj2.open_snapshot.tree_sha);
 
     // Refs are per-(artifact, n, phase) and therefore distinct.
-    expect(proj1.open_snapshot.snapshot_ref).toBe(`refs/orcaops/snap/${plan.artifact_id}/1/open`);
-    expect(proj2.open_snapshot.snapshot_ref).toBe(`refs/orcaops/snap/${plan.artifact_id}/2/open`);
+    expect(proj1.open_snapshot.snapshot_ref).toMatch(
+      new RegExp(`^refs/orcaops/snap/${plan.artifact_id}/1/open-[0-9a-f-]{36}$`)
+    );
+    expect(proj2.open_snapshot.snapshot_ref).toMatch(
+      new RegExp(`^refs/orcaops/snap/${plan.artifact_id}/2/open-[0-9a-f-]{36}$`)
+    );
     expect(proj1.open_snapshot.snapshot_ref).not.toEqual(proj2.open_snapshot.snapshot_ref);
 
     // Both refs pinned in git's ref store.
@@ -645,8 +716,8 @@ describe('checkpoint snapshot + fingerprint capture', () => {
       { cwd: repo.path, encoding: 'utf8' }
     );
     const refs = refsOut.split('\n').filter((l) => l.length > 0);
-    expect(refs).toContain(`refs/orcaops/snap/${plan.artifact_id}/1/open`);
-    expect(refs).toContain(`refs/orcaops/snap/${plan.artifact_id}/2/open`);
+    expect(refs).toContain(proj1.open_snapshot.snapshot_ref);
+    expect(refs).toContain(proj2.open_snapshot.snapshot_ref);
   });
 
   it('unmerged index at open → capture proceeds: real boundary + degraded warning', async () => {
@@ -676,7 +747,9 @@ describe('checkpoint snapshot + fingerprint capture', () => {
     );
     expect(proj.open_snapshot.snapshot_error_reason).toBeNull();
     expect(proj.open_snapshot.tree_sha).not.toBeNull();
-    expect(proj.open_snapshot.snapshot_ref).toBe(`refs/orcaops/snap/${plan.artifact_id}/1/open`);
+    expect(proj.open_snapshot.snapshot_ref).toMatch(
+      new RegExp(`^refs/orcaops/snap/${plan.artifact_id}/1/open-[0-9a-f-]{36}$`)
+    );
     expect(proj.open_snapshot.snapshot_commit_sha).not.toBeNull();
 
     // The real index is byte-for-byte untouched.
@@ -1106,7 +1179,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         '',
       ].join('\n');
 
-    it('supersession adopts the superseded pre-work tree as the recovery seed + repins the baseline ref', async () => {
+    it('supersession adopts and retains the superseded pre-work tree as its baseline', async () => {
       // Artifact A: capture, then an UNCOMMITTED change so A's OPEN tree (Tsup) is
       // NOT reachable via git history and differs from A's plan-time baseline.
       const planA = await capturePlan(['step a']);
@@ -1127,7 +1200,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
 
       // Artifact B: a --source-plan re-capture. B detects A (the single other
       // in-flight artifact with an open cp) → adopts A's open tree (Tsup) as B's
-      // recovery seed AND repins refs/orcaops/baseline/<B> to Tsup.
+      // recovery seed and retains an immutable baseline publication for Tsup.
       const slicePlan = path.join(repo.path, 'slice.md');
       await writeFile(slicePlan, '# slice\nstep b\n', 'utf8');
       const rB = parseOk<
@@ -1153,178 +1226,19 @@ describe('checkpoint snapshot + fingerprint capture', () => {
       );
       const bId = rB.artifact_id;
 
-      // Direct proof of the repin: B's OWN baseline ref now wraps Tsup (= A's open
-      // tree), not B's plan-time tree.
-      const bRefTree = execFileSync('git', ['rev-parse', `${baselineRefName(bId)}^{tree}`], {
+      const baseline = await readBaselinePublication(repo.path, bId);
+      expect(baseline?.fullRef).toMatch(new RegExp(`^refs/orcaops/baseline/${bId}-[0-9a-f-]{36}$`));
+      expect(baseline?.treeOid).toBe(tsup);
+      const retainedTree = execFileSync('git', ['rev-parse', `${baseline!.fullRef}^{tree}`], {
         cwd: repo.path,
         encoding: 'utf8',
       }).trim();
-      expect(bRefTree).toBe(tsup);
+      expect(retainedTree).toBe(tsup);
 
-      // The override adopted A's pre-work tree (Tsup) as B's recovery
-      // baseline_seed_tree_sha AND repinned B's OWN baseline ref to it (asserted
-      // above), recording A as superseded — so the seed survives even after A's
-      // refs are pruned. Without the repin, the bRefTree assertion above fails;
-      // without the override, the seed below fails. (Recovery FROM a seed is
-      // covered by the SEED scenario above; the repinned ref keeping that tree
-      // reachable through a ref-prune + git gc is the pinBaselineTree unit test in
-      // snapshots.test.ts.)
-      const bJson = JSON.parse(
-        await readFile(path.join(repo.path, '.orcaops', 'artifacts', bId, 'artifact.json'), 'utf8')
-      ) as { baseline_seed_tree_sha: string | null; superseded_artifact_id: string | null };
+      // The exact retained artifact records both the adopted seed and its source.
+      const bJson = (await readArtifactSnapshot(repo.path, bId)).thread.artifactJson!;
       expect(bJson.baseline_seed_tree_sha).toBe(tsup);
       expect(bJson.superseded_artifact_id).toBe(planA.artifact_id);
-    });
-
-    it('a rotted sibling keeps the plan-time baseline (rot never picks the supersession winner)', async () => {
-      const planA = await capturePlan(['step a']);
-      await writeFile(path.join(repo.path, 'a-pre.ts'), body('apre'), 'utf8');
-      parseOk(
-        await openCp({ artifact_id: planA.artifact_id, declared_step_ids: [planA.step_ids[0]] })
-      );
-
-      // Rot A's checkpoint_opened line AND delete its projection: the loss
-      // is unattributable, so the recovery-aware checkpoint scan refuses A.
-      const aDir = path.join(repo.path, '.orcaops', 'artifacts', planA.artifact_id);
-      const aLog = path.join(aDir, 'events.ndjson');
-      const lines = (await readFile(aLog, 'utf8')).split('\n');
-      const i = lines.findIndex((l) => l.includes('"checkpoint_opened"'));
-      lines[i] = lines[i].replace(/"checksum":"[0-9a-f]{64}"/, `"checksum":"${'0'.repeat(64)}"`);
-      await writeFile(aLog, lines.join('\n'), 'utf8');
-      await rm(path.join(aDir, 'checkpoint-1.json'));
-
-      const slicePlan = path.join(repo.path, 'slice-rot.md');
-      await writeFile(slicePlan, '# slice\nstep b\n', 'utf8');
-      const res = await agent.runRaw([
-        'capture',
-        'plan',
-        '--no-llm',
-        '--source-plan',
-        slicePlan,
-        '--input',
-        inputFile(
-          JSON.stringify({
-            idempotency_key: `planB-rot-${randomUUID()}`,
-            task: 'superseding re-capture over a rotted sibling',
-            label: 'supersede-rot-test',
-            plan_steps: [{ text: 'step b', label: 'sb' }],
-            touched_scope: [],
-          })
-        ),
-      ]);
-      const rB = parseOk<OkEnvelope & { artifact_id: string }>(res);
-      expect(res.stderr).toContain('skipping unreadable in-flight artifact');
-
-      // The unreadable sibling counted as ambiguity: no supersession, no
-      // adopted tree — the plan-time baseline stands.
-      const bJson = JSON.parse(
-        await readFile(
-          path.join(repo.path, '.orcaops', 'artifacts', rB.artifact_id, 'artifact.json'),
-          'utf8'
-        )
-      ) as { superseded_artifact_id: string | null };
-      expect(bJson.superseded_artifact_id).toBeNull();
-    });
-
-    it('a containment violation in the sibling scan propagates — and the key is not stranded', async () => {
-      const planA = await capturePlan(['step a']);
-      parseOk(
-        await openCp({ artifact_id: planA.artifact_id, declared_step_ids: [planA.step_ids[0]] })
-      );
-      // A symlinked artifact.json is a containment violation, not
-      // recovery refusal: the scan must NOT relabel it as an unreadable
-      // sibling — the capture fails loudly instead.
-      const aDir = path.join(repo.path, '.orcaops', 'artifacts', planA.artifact_id);
-      await rm(path.join(aDir, 'artifact.json'));
-      await symlink('/etc/hosts', path.join(aDir, 'artifact.json'));
-
-      const slicePlan = path.join(repo.path, 'slice-symlink.md');
-      await writeFile(slicePlan, '# slice\nstep b\n', 'utf8');
-      const key = `planB-symlink-${randomUUID()}`;
-      const args = [
-        'capture',
-        'plan',
-        '--no-llm',
-        '--source-plan',
-        slicePlan,
-        '--input',
-        inputFile(
-          JSON.stringify({
-            idempotency_key: key,
-            task: 'capture beside a symlinked sibling',
-            label: 'symlink-propagation-test',
-            plan_steps: [{ text: 'step b', label: 'sb' }],
-            touched_scope: [],
-          })
-        ),
-      ];
-      const res = await agent.runRaw(args);
-      expect(res.exitCode).not.toBe(0);
-
-      // The reservation was rolled back: after healing the sibling, the
-      // SAME key mints a real, planned artifact — not a planless replay.
-      await rm(path.join(aDir, 'artifact.json'));
-      const retry = parseOk<OkEnvelope & { artifact_id: string }>(await agent.runRaw(args));
-      const bPlan = JSON.parse(
-        await readFile(
-          path.join(repo.path, '.orcaops', 'artifacts', retry.artifact_id, 'plan.json'),
-          'utf8'
-        )
-      ) as { task: string };
-      expect(bPlan.task).toBe('capture beside a symlinked sibling');
-    });
-
-    it('a sibling whose artifact.json read refuses cannot fail the capture or strand its key', async () => {
-      const planA = await capturePlan(['step a']);
-      parseOk(
-        await openCp({ artifact_id: planA.artifact_id, declared_step_ids: [planA.step_ids[0]] })
-      );
-      // Make A's readArtifact itself refuse: delete artifact.json and rot
-      // a line, so the loss is unattributable and the projection absent —
-      // the enumeration guard (not just the checkpoint guard) must catch.
-      const aDir = path.join(repo.path, '.orcaops', 'artifacts', planA.artifact_id);
-      const lines = (await readFile(path.join(aDir, 'events.ndjson'), 'utf8')).split('\n');
-      const i = lines.findIndex((l) => l.includes('"checkpoint_opened"'));
-      lines[i] = lines[i].replace(/"checksum":"[0-9a-f]{64}"/, `"checksum":"${'0'.repeat(64)}"`);
-      await writeFile(path.join(aDir, 'events.ndjson'), lines.join('\n'), 'utf8');
-      await rm(path.join(aDir, 'artifact.json'));
-      await rm(path.join(aDir, 'checkpoint-1.json'));
-
-      const slicePlan = path.join(repo.path, 'slice-rot2.md');
-      await writeFile(slicePlan, '# slice\nstep b\n', 'utf8');
-      const key = `planB-strand-${randomUUID()}`;
-      const args = [
-        'capture',
-        'plan',
-        '--no-llm',
-        '--source-plan',
-        slicePlan,
-        '--input',
-        inputFile(
-          JSON.stringify({
-            idempotency_key: key,
-            task: 'capture beside an unreadable sibling',
-            label: 'strand-test',
-            plan_steps: [{ text: 'step b', label: 'sb' }],
-            touched_scope: [],
-          })
-        ),
-      ];
-      const res = await agent.runRaw(args);
-      const rB = parseOk<OkEnvelope & { artifact_id: string }>(res);
-      expect(res.stderr).toContain('skipping unreadable in-flight artifact');
-
-      // The key maps to a real, planned artifact: a same-key retry replays
-      // the SAME artifact instead of a planless husk.
-      const retry = parseOk<OkEnvelope & { artifact_id: string }>(await agent.runRaw(args));
-      expect(retry.artifact_id).toBe(rB.artifact_id);
-      const bPlan = JSON.parse(
-        await readFile(
-          path.join(repo.path, '.orcaops', 'artifacts', rB.artifact_id, 'plan.json'),
-          'utf8'
-        )
-      ) as { task: string };
-      expect(bPlan.task).toBe('capture beside an unreadable sibling');
     });
 
     it('work-before-open → warning + recovery from the plan-time SEED, then HWM chain', async () => {
@@ -1824,6 +1738,19 @@ describe('checkpoint snapshot + fingerprint capture', () => {
       expect(JSON.stringify(boundary)).not.toMatch(/filter/i);
     }
 
+    async function expectNoRetainedBoundary(
+      artifactId: string,
+      phase: 'open' | 'close' | 'abandon'
+    ): Promise<void> {
+      expect(await readCheckpointPublications(repo.path, artifactId, 1, phase)).toEqual([]);
+      const refs = execFileSync(
+        'git',
+        ['for-each-ref', '--format=%(refname)', `refs/orcaops/snap/${artifactId}/1/${phase}-`],
+        { cwd: repo.path, encoding: 'utf8' }
+      );
+      expect(refs).toBe('');
+    }
+
     async function eventPayloadFor<T>(artifactId: string, type: string, n: number): Promise<T> {
       const events = await readEventLog(repo.path, artifactId);
       for (const e of events.filter((x) => x.type === type)) {
@@ -1861,6 +1788,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         1
       );
       expectBoundaryUnchanged(payload.open_snapshot);
+      await expectNoRetainedBoundary(plan.artifact_id, 'open');
     });
 
     it('close: the git stderr rides out on the response warnings; boundary unchanged', async () => {
@@ -1903,6 +1831,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         1
       );
       expectBoundaryUnchanged(payload.close_snapshot);
+      await expectNoRetainedBoundary(plan.artifact_id, 'close');
     });
 
     it('abandon: the git stderr rides out on the response warnings; boundary unchanged', async () => {
@@ -1924,6 +1853,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         1
       );
       expectBoundaryUnchanged(proj.abandon_snapshot);
+      await expectNoRetainedBoundary(plan.artifact_id, 'abandon');
     });
 
     it('healthy captures stay quiet: no warnings on open, close, or abandon', async () => {
@@ -1959,7 +1889,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
 
   // Cloud-auth independence: snapshots + fingerprints are captured
   // regardless of auth state — `diff_fingerprint.enabled` is the only gate (its
-  // disabled path stays pinned by the baseline describe below and the
+  // disabled path stays covered by the baseline describe below and the
   // fingerprint-show skip tests). These reuse the suite's helpers (and its
   // DISABLE_DRAIN agent); each resets cred state explicitly.
   describe('cloud-auth independence', () => {
@@ -2028,53 +1958,35 @@ describe('checkpoint snapshot + fingerprint capture', () => {
   // checkpoint snapshot capture: `diff_fingerprint.enabled` (cloud auth is
   // deliberately NOT part of the gate). The seed only feeds
   // empty-fence recovery, which itself only runs under that gate — so capturing
-  // it when fingerprinting is disabled would write a full-worktree tree + pin a
-  // lingering `refs/orcaops/baseline/<id>` ref that recovery can never consume.
+  // it when fingerprinting is disabled would retain a full-worktree tree that
+  // recovery can never consume.
   // These pin the gate at the plan boundary.
   describe('plan-time baseline (seed) capture gating', () => {
-    function liveBaselineRefs(): string[] {
-      return execFileSync(
-        'git',
-        ['for-each-ref', '--format=%(refname)', 'refs/orcaops/baseline/'],
-        { cwd: repo.path, encoding: 'utf8' }
-      )
-        .split('\n')
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0);
-    }
-    async function readArtifactJson(
-      artifactId: string
-    ): Promise<{ baseline_seed_tree_sha: string | null; superseded_artifact_id: string | null }> {
-      return JSON.parse(
-        await readFile(
-          path.join(repo.path, '.orcaops', 'artifacts', artifactId, 'artifact.json'),
-          'utf8'
-        )
-      ) as { baseline_seed_tree_sha: string | null; superseded_artifact_id: string | null };
-    }
-
-    it('fingerprint enabled (control) → baseline ref pinned + non-null seed', async () => {
+    it('fingerprint enabled retains a baseline publication and non-null seed', async () => {
       // The default config enables fingerprinting, so the gate is OPEN and the
       // plan-time baseline IS captured — no login required. Proves the disabled
       // case below asserts a real behavior change, not an always-off path.
       const plan = await capturePlan(['step a']);
-      expect(liveBaselineRefs()).toContain(baselineRefName(plan.artifact_id));
-      const aj = await readArtifactJson(plan.artifact_id);
+      const publication = await readBaselinePublication(repo.path, plan.artifact_id);
+      const aj = (await readArtifactSnapshot(repo.path, plan.artifact_id)).thread.artifactJson!;
+      expect(publication?.fullRef).toMatch(
+        new RegExp(`^refs/orcaops/baseline/${plan.artifact_id}-[0-9a-f-]{36}$`)
+      );
+      expect(publication?.treeOid).toBe(aj.baseline_seed_tree_sha);
       expect(aj.baseline_seed_tree_sha).toMatch(/^[0-9a-f]{40,64}$/);
     });
 
-    it('not logged in → baseline ref still pinned + non-null seed', async () => {
+    it('not logged in still retains the baseline publication and seed', async () => {
       clearCloudLogin();
       const plan = await capturePlan(['step a']);
-      // Auth does not gate the plan-time seed: the baseline ref is
-      // minted and the seed recorded exactly as in the enabled control above.
-      expect(liveBaselineRefs()).toContain(baselineRefName(plan.artifact_id));
-      const aj = await readArtifactJson(plan.artifact_id);
+      const publication = await readBaselinePublication(repo.path, plan.artifact_id);
+      const aj = (await readArtifactSnapshot(repo.path, plan.artifact_id)).thread.artifactJson!;
+      expect(publication?.treeOid).toBe(aj.baseline_seed_tree_sha);
       expect(aj.baseline_seed_tree_sha).toMatch(/^[0-9a-f]{40,64}$/);
       expect(aj.superseded_artifact_id).toBeNull();
     });
 
-    it('diff_fingerprint disabled → NO baseline ref pinned + seed null', async () => {
+    it('diff_fingerprint disabled retains no baseline publication and a null seed', async () => {
       // Fingerprinting disabled in config — the one remaining gate (the privacy
       // opt-out). resolveConfig deep-merges with defaults so a partial
       // override suffices; capture re-reads config from disk.
@@ -2102,8 +2014,8 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         ),
       ]);
       const ok = parseOk<OkEnvelope & { artifact_id: string }>(r);
-      expect(liveBaselineRefs()).toEqual([]);
-      const aj = await readArtifactJson(ok.artifact_id);
+      expect(await readBaselinePublication(repo.path, ok.artifact_id)).toBeNull();
+      const aj = (await readArtifactSnapshot(repo.path, ok.artifact_id)).thread.artifactJson!;
       expect(aj.baseline_seed_tree_sha).toBeNull();
     });
   });

@@ -10,6 +10,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./history": {
+      "types": "./dist/history.d.ts",
+      "default": "./dist/history.js"
+    },
+    "./history/database": {
+      "types": "./dist/database.d.ts",
+      "default": "./dist/database.js"
     }
   },
   "files": [
@@ -29,6 +37,7 @@
   },
   "dependencies": {
     "@orcaops/core": "workspace:*",
+    "@orcaops/evaluator-protocol": "workspace:*",
     "@orcaops/storage": "workspace:*"
   },
   "devDependencies": {

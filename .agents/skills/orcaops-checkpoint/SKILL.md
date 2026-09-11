@@ -2,8 +2,8 @@
 name: "Orcaops: capture checkpoint"
 description: "Open, close, or abandon a work checkpoint with scope, evidence, and verification."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "580250e13653"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "6478874058c2"
 ---
 
 # Cadence rule
@@ -354,4 +354,4 @@ is a coordination bug, not a soft policy.
 Every capture command returns a `cloud_sync` object. Branch on `cloud_sync.status`:
 
 - `"ok"` or `"skipped"` — nothing to do. Continue.
-- `"paused"` — this artifact was NOT recorded and it will not fix itself. **STOP and tell the user.** Quote `cloud_sync.message` and `cloud_sync.action` verbatim; `cloud_sync.pending` is how many artifacts are waiting locally. Do NOT re-run the capture hoping it clears: a replay writes nothing new, and the fault needs the remediation in `cloud_sync.action`.
+- `"paused"` — the capture is saved locally, but its current state is NOT confirmed on the cloud. **STOP and tell the user.** Quote `cloud_sync.message` and `cloud_sync.action` verbatim; `cloud_sync.pending` when present is the number of artifacts waiting in the selected project; an omitted count is unknown. Do NOT re-run the capture hoping it clears: replaying a completed capture does not resend it, and the fault needs the remediation in `cloud_sync.action`.

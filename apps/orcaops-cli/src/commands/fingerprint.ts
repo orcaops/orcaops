@@ -2,8 +2,10 @@ import {
   buildDiffFingerprintManifest,
   computeDiffFingerprintManifestHash,
   diffSnapshotTrees,
+  Repo,
   summarizeManifest,
 } from '@orcaops/core';
+import { resolveDatabaseHistoryArtifact } from '@orcaops/project-scope/history/database';
 import {
   type DiffFingerprintManifest,
   replayAttributionDegradedRemovals,
@@ -13,8 +15,10 @@ import {
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../io/output.js';
-import { buildContext } from '../lib/context.js';
-import { readDerivedCache, writeDerivedCache } from '../lib/fingerprint-cache.js';
+import { resolveDatabaseHistoryCommandContext } from '../lib/database-history-context.js';
+import { retainedCheckpointManifest } from '../lib/database-manifest-sources.js';
+import { historyScopeCommandError } from '../lib/history-scope-error.js';
+import { getInvocationEnv } from '../lib/invocation-context.js';
 
 export interface FingerprintShowOptions {
   artifact: string;
@@ -22,33 +26,9 @@ export interface FingerprintShowOptions {
   json?: boolean;
 }
 
-/**
- * `orcaops fingerprint show --artifact <id> --checkpoint <n> [--json]`
- *
- * Read-only inspection of a closed checkpoint's diff-fingerprint:
- * status / counts / algorithm identifiers / manifest_hash / tree SHAs /
- * snapshot refs / per-hunk anchors + hashes.
- *
- * It NEVER prints raw diff / patch / line text — and structurally
- * cannot: the `DiffFingerprintManifest` schema carries only hashes,
- * file paths, line ranges, and counts. An
- * output-guard test asserts the rendered output never contains a
- * unified-diff marker.
- *
- * Strict-manifest integrity:
- *
- *   - `diff_fingerprint_summary.manifest_hash === null` ⇒ benign skip
- *     (the cp's fingerprint was deliberately skipped or capture
- *     failed). Render the summary, exit 0. A non-`skipped` status with
- *     a null hash is itself invalid and is treated as the integrity
- *     error below, not as benign.
- *   - `manifest_hash !== null` but the manifest cannot be loaded ⇒ the
- *     strict-sync missing-manifest condition (corrupt / dropped
- *     sidecar). Surfaced DISTINCTLY as an `EVENT_LOG_CORRUPT` error
- *     with a nonzero exit (never silently rendered as "no manifest"),
- *     pointing at `orcaops resync --force` + `orcaops doctor`.
- */
+/** A declared manifest hash requires retained evidence; absence is never a benign skip. */
 export async function fingerprintShowAction(opts: FingerprintShowOptions): Promise<void> {
+  opts = { ...opts };
   try {
     if (typeof opts.artifact !== 'string' || opts.artifact.length === 0) {
       throw new OrcaopsError(ErrorCodes.INVALID_INPUT, '--artifact <id> is required.', 'artifact');
@@ -61,17 +41,12 @@ export async function fingerprintShowAction(opts: FingerprintShowOptions): Promi
       );
     }
 
-    const ctx = await buildContext({ mintArchiveIdentity: false });
+    const ctx = await resolveDatabaseHistoryCommandContext({ profile: 'exact' });
     try {
-      const artifactRow = ctx.store.store.getArtifact(opts.artifact);
-      if (!artifactRow) {
-        throw new OrcaopsError(
-          ErrorCodes.UNKNOWN_ARTIFACT,
-          `No artifact with id "${opts.artifact}".`
-        );
-      }
-
-      const cp = await ctx.store.readCheckpoint(opts.artifact, opts.checkpoint);
+      const target = resolveDatabaseHistoryArtifact(ctx.scope, opts.artifact);
+      opts.artifact = target.artifactId;
+      const thread = target.artifact.thread;
+      const cp = thread.checkpoints.find((checkpoint) => checkpoint.n === opts.checkpoint) ?? null;
       if (cp === null) {
         throw new OrcaopsError(
           ErrorCodes.INVALID_INPUT,
@@ -88,12 +63,8 @@ export async function fingerprintShowAction(opts: FingerprintShowOptions): Promi
       }
 
       const summary = cp.diff_fingerprint_summary;
-      const manifest = await ctx.store.readCheckpointDiffFingerprint(
-        opts.artifact,
-        opts.checkpoint
-      );
+      const manifest = await retainedCheckpointManifest(thread, cp);
 
-      // ── branch on manifest_hash ────────────────────────────────────
       if (summary.manifest_hash === null) {
         if (summary.status !== 'skipped') {
           // captured/empty/truncated ALWAYS carry a non-null hash; a
@@ -102,7 +73,7 @@ export async function fingerprintShowAction(opts: FingerprintShowOptions): Promi
           throw new OrcaopsError(
             ErrorCodes.EVENT_LOG_CORRUPT,
             `Checkpoint #${opts.checkpoint} has status "${summary.status}" but a null manifest_hash — ` +
-              `corrupt fingerprint state. Run \`orcaops resync --force\` and \`orcaops doctor\`.`,
+              `corrupt fingerprint state. Run \`orcaops doctor\` and preserve the database for explicit repair.`,
             'checkpoint'
           );
         }
@@ -111,23 +82,21 @@ export async function fingerprintShowAction(opts: FingerprintShowOptions): Promi
         return;
       }
 
-      // manifest_hash !== null ⇒ the manifest MUST be loadable.
       if (manifest === null) {
         throw new OrcaopsError(
           ErrorCodes.EVENT_LOG_CORRUPT,
           `Checkpoint #${opts.checkpoint} declares manifest_hash ${summary.manifest_hash} but its ` +
-            `diff-fingerprint manifest could not be loaded (corrupt or dropped sidecar). This is the ` +
-            `strict-sync missing-manifest condition — run \`orcaops resync --force\` after fixing the ` +
-            `underlying disk/permissions issue, or \`orcaops doctor\` to diagnose.`,
+            `diff-fingerprint manifest could not be loaded (missing or inconsistent retained event payload). Run \`orcaops doctor\` and preserve the database for explicit repair.`,
           'checkpoint'
         );
       }
 
       renderManifest(opts, cp.n, cp.open_snapshot, cp.close_snapshot, summary, manifest);
     } finally {
-      ctx.store.close();
+      ctx.scope.close();
     }
-  } catch (err) {
+  } catch (cause) {
+    const err = historyScopeCommandError(cause);
     if (opts.json) emitError(err);
     writeErrorLine(err);
     throw new CliExit(1);
@@ -235,34 +204,9 @@ export interface FingerprintDeriveOptions {
   json?: boolean;
 }
 
-/**
- * `orcaops fingerprint derive --artifact <id> --checkpoint <n> [--json]`
- *
- * Recompute a closed checkpoint's diff-fingerprint manifest from its pinned
- * snapshot trees and compare the recomputed `manifest_hash` to the one
- * recorded at capture time:
- *
- *   - `verified: true`  — recomputation reproduces the stored hash.
- *   - `verified: false` — the hashes differ (content drift, or a
- *     `max_diff_bytes` cap change since capture — see `note`).
- *   - `verified: null`  — nothing stored to compare against (capture was
- *     skipped but both boundary trees exist, e.g. a capture-time
- *     `git_diff_failed`); the derived summary is fresh output.
- *
- * Tree selection: the STORED manifest's `open_tree_sha`/`close_tree_sha` are
- * authoritative when a manifest exists — empty-fence recovery deliberately
- * builds manifests from a baseline open tree that differs from the cp's own
- * open snapshot (checkpoint.ts Phase C.3). Only a manifest-less cp falls back
- * to the checkpoint snapshot boundaries.
- *
- * Persistence: with
- * the archive enabled, each derivation is written to the archive cache
- * (`…/derived/fingerprint-cp<n>.json`) and later derives with identical
- * inputs read through it (`cached: true` in JSON). Archive disabled →
- * output-only. No store writes either way. Same output
- * guard as `show`: hashes/metadata only, never raw diff text.
- */
+/** Stored manifest trees can differ from checkpoint boundaries after recovery. */
 export async function fingerprintDeriveAction(opts: FingerprintDeriveOptions): Promise<void> {
+  opts = { ...opts };
   try {
     if (typeof opts.artifact !== 'string' || opts.artifact.length === 0) {
       throw new OrcaopsError(ErrorCodes.INVALID_INPUT, '--artifact <id> is required.', 'artifact');
@@ -275,17 +219,12 @@ export async function fingerprintDeriveAction(opts: FingerprintDeriveOptions): P
       );
     }
 
-    const ctx = await buildContext({ mintArchiveIdentity: false });
+    const ctx = await resolveDatabaseHistoryCommandContext({ profile: 'exact' });
     try {
-      const artifactRow = ctx.store.store.getArtifact(opts.artifact);
-      if (!artifactRow) {
-        throw new OrcaopsError(
-          ErrorCodes.UNKNOWN_ARTIFACT,
-          `No artifact with id "${opts.artifact}".`
-        );
-      }
-
-      const cp = await ctx.store.readCheckpoint(opts.artifact, opts.checkpoint);
+      const target = resolveDatabaseHistoryArtifact(ctx.scope, opts.artifact);
+      opts.artifact = target.artifactId;
+      const thread = target.artifact.thread;
+      const cp = thread.checkpoints.find((checkpoint) => checkpoint.n === opts.checkpoint) ?? null;
       if (cp === null) {
         throw new OrcaopsError(
           ErrorCodes.INVALID_INPUT,
@@ -303,10 +242,7 @@ export async function fingerprintDeriveAction(opts: FingerprintDeriveOptions): P
       }
 
       const summary = cp.diff_fingerprint_summary;
-      const manifest = await ctx.store.readCheckpointDiffFingerprint(
-        opts.artifact,
-        opts.checkpoint
-      );
+      const manifest = await retainedCheckpointManifest(thread, cp);
 
       // Strict-manifest integrity, mirroring `show`: a non-null
       // stored hash whose manifest cannot load is corrupt state — deriving from
@@ -316,8 +252,8 @@ export async function fingerprintDeriveAction(opts: FingerprintDeriveOptions): P
         throw new OrcaopsError(
           ErrorCodes.EVENT_LOG_CORRUPT,
           `Checkpoint #${opts.checkpoint} declares manifest_hash ${summary.manifest_hash} but its ` +
-            `diff-fingerprint manifest could not be loaded (corrupt or dropped sidecar). Run ` +
-            `\`orcaops resync --force\` after fixing the underlying issue, or \`orcaops doctor\`.`,
+            `diff-fingerprint manifest could not be loaded (missing or inconsistent retained event payload). Run ` +
+            `\`orcaops doctor\` and preserve the database for explicit repair.`,
           'checkpoint'
         );
       }
@@ -325,7 +261,7 @@ export async function fingerprintDeriveAction(opts: FingerprintDeriveOptions): P
         throw new OrcaopsError(
           ErrorCodes.EVENT_LOG_CORRUPT,
           `Checkpoint #${opts.checkpoint} has status "${summary.status}" but a null manifest_hash — ` +
-            `corrupt fingerprint state. Run \`orcaops resync --force\` and \`orcaops doctor\`.`,
+            `corrupt fingerprint state. Run \`orcaops doctor\` and preserve the database for explicit repair.`,
           'checkpoint'
         );
       }
@@ -337,45 +273,6 @@ export async function fingerprintDeriveAction(opts: FingerprintDeriveOptions): P
       const openTreeSha = manifest !== null ? manifest.open_tree_sha : cp.open_snapshot.tree_sha;
       const closeTreeSha = manifest !== null ? manifest.close_tree_sha : cp.close_snapshot.tree_sha;
 
-      // Archive-side read-through cache — derivations persist when the
-      // archive is enabled, and are output-only otherwise. A hit
-      // must match every derivation input; anything else re-derives.
-      if (ctx.archive && openTreeSha !== null && closeTreeSha !== null) {
-        const cached = await readDerivedCache(
-          ctx.archive.projectDir,
-          opts.artifact,
-          opts.checkpoint
-        );
-        if (
-          cached !== null &&
-          cached.source === source &&
-          cached.open_tree_sha === openTreeSha &&
-          cached.close_tree_sha === closeTreeSha &&
-          cached.max_diff_bytes === ctx.config.diff_fingerprint.max_diff_bytes &&
-          cached.manifest_hash_stored === summary.manifest_hash
-        ) {
-          renderDerived(
-            opts,
-            cp.n,
-            {
-              source: cached.source,
-              open_tree_sha: cached.open_tree_sha,
-              close_tree_sha: cached.close_tree_sha,
-              stored: {
-                status: summary.status,
-                manifest_hash: summary.manifest_hash,
-                hunk_count: summary.hunk_count,
-                truncated: summary.truncated,
-              },
-              derived: cached.derived_summary,
-              verified: cached.verified,
-              note: cached.note ?? undefined,
-            },
-            true
-          );
-          return;
-        }
-      }
       if (openTreeSha === null || closeTreeSha === null) {
         throw new OrcaopsError(
           ErrorCodes.INVALID_INPUT,
@@ -388,7 +285,7 @@ export async function fingerprintDeriveAction(opts: FingerprintDeriveOptions): P
 
       const cap = ctx.config.diff_fingerprint.max_diff_bytes;
       const diff = await diffSnapshotTrees({
-        repo: ctx.repo,
+        repo: fingerprintRepository(ctx, target.authority.repositoryInstanceId),
         openTreeSha,
         closeTreeSha,
         maxDiffBytes: cap,
@@ -397,8 +294,7 @@ export async function fingerprintDeriveAction(opts: FingerprintDeriveOptions): P
         throw new OrcaopsError(
           ErrorCodes.INVALID_INPUT,
           `git diff ${openTreeSha.slice(0, 12)}..${closeTreeSha.slice(0, 12)} failed — one or both ` +
-            `trees are unreachable. The snapshot refs pinning them were likely pruned ` +
-            `(\`orcaops snapshots prune\` / \`orcaops gc\`); a pruned checkpoint is no longer derivable.`,
+            `trees are unavailable. Run \`orcaops doctor\` and preserve history for explicit repair.`,
           'checkpoint'
         );
       }
@@ -475,34 +371,6 @@ export async function fingerprintDeriveAction(opts: FingerprintDeriveOptions): P
         }
       }
 
-      // Persist the derivation to the archive cache (best-effort,
-      // fail-open) so later derives read through and consumers can
-      // consume the manifest without re-deriving.
-      if (ctx.archive) {
-        await writeDerivedCache(ctx.archive.projectDir, opts.artifact, opts.checkpoint, {
-          schema_version: 1,
-          artifact_id: opts.artifact,
-          checkpoint_n: opts.checkpoint,
-          source,
-          open_tree_sha: openTreeSha,
-          close_tree_sha: closeTreeSha,
-          max_diff_bytes: cap,
-          manifest_hash_stored: summary.manifest_hash,
-          verified,
-          note: note ?? null,
-          // The REPLAYED manifest (window-overlap removals applied) —
-          // downstream consumers must never see dropped hunks.
-          manifest: derivedManifest,
-          derived_summary: {
-            status: derivedSummary.status,
-            manifest_hash: derivedSummary.manifest_hash,
-            hunk_count: derivedSummary.hunk_count,
-            captured_hunk_count: derivedSummary.captured_hunk_count,
-            truncated: derivedSummary.truncated,
-          },
-        });
-      }
-
       renderDerived(opts, cp.n, {
         source,
         open_tree_sha: openTreeSha,
@@ -524,9 +392,10 @@ export async function fingerprintDeriveAction(opts: FingerprintDeriveOptions): P
         note,
       });
     } finally {
-      ctx.store.close();
+      ctx.scope.close();
     }
-  } catch (err) {
+  } catch (cause) {
+    const err = historyScopeCommandError(cause);
     if (opts.json) emitError(err);
     writeErrorLine(err);
     throw new CliExit(1);
@@ -554,26 +423,19 @@ interface DerivedView {
   note: string | undefined;
 }
 
-function renderDerived(
-  opts: FingerprintDeriveOptions,
-  n: number,
-  view: DerivedView,
-  cached = false
-): void {
+function renderDerived(opts: FingerprintDeriveOptions, n: number, view: DerivedView): void {
   if (opts.json) {
     const { note, ...rest } = view;
     emitOk({
       artifact: opts.artifact,
       checkpoint: n,
       ...rest,
-      ...(cached ? { cached: true } : {}),
       ...(note !== undefined ? { note } : {}),
     });
     return;
   }
   const lines = [
-    `Fingerprint derive — artifact ${opts.artifact} checkpoint #${n}` +
-      (cached ? ' (served from archive cache)' : ''),
+    `Fingerprint derive — artifact ${opts.artifact} checkpoint #${n}`,
     `  verified:        ${view.verified === null ? 'null (nothing stored to compare)' : view.verified}`,
     `  tree source:     ${view.source}`,
     `  open_tree_sha:   ${view.open_tree_sha}`,
@@ -586,4 +448,26 @@ function renderDerived(
     '',
   ];
   writeTerminalSafeStdout(lines.join('\n'));
+}
+
+function fingerprintRepository(
+  context: Awaited<ReturnType<typeof resolveDatabaseHistoryCommandContext>>,
+  repositoryInstanceId: string
+): Repo {
+  const git = context.scope.gitContext;
+  if (!git || git.repositoryInstanceId !== repositoryInstanceId)
+    throw new OrcaopsError(
+      ErrorCodes.INVALID_INPUT,
+      'Open the artifact repository to derive its retained snapshot fingerprint.'
+    );
+  return new Repo(git.worktreeRoot, {
+    env: {
+      ...Object.fromEntries(
+        Object.entries(getInvocationEnv()).filter(([key]) => !key.startsWith('GIT_'))
+      ),
+      GIT_OPTIONAL_LOCKS: '0',
+      GIT_NO_REPLACE_OBJECTS: '1',
+      GIT_NO_LAZY_FETCH: '1',
+    },
+  });
 }

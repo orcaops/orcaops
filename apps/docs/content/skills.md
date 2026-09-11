@@ -66,7 +66,7 @@ window or git range.
 Standups, client updates, and journals use activity windows such as yesterday or
 this week. Changelogs use a git ref range and can surface captured work whose
 commits may have been rebased. Reports can cover the current repository or, when
-the archive is enabled, captured work across projects.
+projects are registered, captured work across those projects.
 
 Use `orcaops-digest` instead when you want the reviewer-facing account of one PR
 or artifact. Use `orcaops-resume` when you want to continue the work rather than
@@ -77,7 +77,7 @@ report on it.
 | Ask your agent                                  | Skill                   | Result                                                                         |
 | ----------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------ |
 | Why does this validator exist?                  | `orcaops-why`           | Traces a file, line, symbol, or concept to its captured checkpoint and reason. |
-| Have we worked on authentication before?        | `orcaops-search`        | Searches captured artifacts across branches and archived projects.             |
+| Have we worked on authentication before?        | `orcaops-search`        | Searches captured artifacts across branches and registered projects.           |
 | Critique this plan against our prior decisions. | `orcaops-plan-critique` | Finds relevant prior art and stress-tests a draft before capture.              |
 | Replay how this feature came together.          | `orcaops-timetravel`    | Replays checkpoints; it can also bisect or salvage a captured attempt.         |
 | Import the existing git history.                | `orcaops-seed`          | Previews, then backfills older commits after explicit approval.                |
@@ -146,34 +146,34 @@ installed name is `<prefix>-<id>`; the table uses the default `orcaops-` prefix.
 requirement is available. “Opt-in” templates appear in `orcaops skills list`
 but are installed only after you enable them.
 
-| Skill                        | State   | Requirement       | Purpose                                                       |
-| ---------------------------- | ------- | ----------------- | ------------------------------------------------------------- |
-| `orcaops-capture`            | Default | None              | Capture or revise a task plan.                                |
-| `orcaops-checkpoint`         | Default | None              | Open, close, or abandon a coherent work checkpoint.           |
-| `orcaops-plan-approval`      | Default | Cloud             | Drive web plan review and preserve the approved version.      |
-| `orcaops-pre-pr`             | Default | None              | Run the final evaluator pass before summary.                  |
-| `orcaops-finish`             | Default | None              | Review and finalize a completed task in one workflow.         |
-| `orcaops-summary`            | Default | None              | Record the task outcome, verification, and open items.        |
-| `orcaops-digest`             | Default | None              | Render a reviewer-facing task account or PR body.             |
-| `orcaops-why`                | Default | None              | Trace a file, line, symbol, or concept to captured rationale. |
-| `orcaops-resume`             | Default | None              | Continue an in-flight captured task.                          |
-| `orcaops-search`             | Default | None              | Search captured artifacts across branches and archives.       |
-| `orcaops-doctor`             | Default | None              | Diagnose installation and runtime health.                     |
-| `orcaops-adversarial-review` | Default | None              | Challenge completion claims and unaccounted changes.          |
-| `orcaops-loose-ends`         | Opt-in  | None              | Sweep everything captured work still owes.                    |
-| `orcaops-decisions`          | Opt-in  | None              | Recall decisions, reasons, and rejected alternatives.         |
-| `orcaops-parallel-dispatch`  | Opt-in  | None              | Run disjoint plan steps through concurrent subagents.         |
-| `orcaops-estimate`           | Opt-in  | None              | Ground estimates in similar captured task shapes and usage.   |
-| `orcaops-lessons`            | Opt-in  | None              | Mine captured outcomes into evidence-linked lessons.          |
-| `orcaops-timetravel`         | Default | Snapshot checkout | Replay, bisect, or salvage checkpoint-boundary trees.         |
-| `orcaops-blame`              | Opt-in  | Matcher           | Export commit-level per-line agent provenance.                |
-| `orcaops-recap`              | Default | None              | Produce standups, changelogs, client updates, or journals.    |
-| `orcaops-plan-critique`      | Default | None              | Critique a draft plan against captured prior art.             |
-| `orcaops-task-review`        | Default | None              | Generate Task Review or address its local comments.           |
-| `orcaops-review`             | Default | Cloud             | Work shared PR review feedback and wait for another pass.     |
-| `orcaops-seed`               | Default | None              | Preview and backfill an existing repository's git history.    |
-| `orcaops-seed-discovery`     | Default | None              | Detect local history-coverage gaps and recommend seeding.     |
-| `orcaops-author-evaluator`   | Default | None              | Guide evaluator implementation through development testing.   |
+| Skill                        | State   | Requirement       | Purpose                                                            |
+| ---------------------------- | ------- | ----------------- | ------------------------------------------------------------------ |
+| `orcaops-capture`            | Default | None              | Capture or revise a task plan.                                     |
+| `orcaops-checkpoint`         | Default | None              | Open, close, or abandon a coherent work checkpoint.                |
+| `orcaops-plan-approval`      | Default | Cloud             | Drive web plan review and preserve the approved version.           |
+| `orcaops-pre-pr`             | Default | None              | Run the final evaluator pass before summary.                       |
+| `orcaops-finish`             | Default | None              | Review and finalize a completed task in one workflow.              |
+| `orcaops-summary`            | Default | None              | Record the task outcome, verification, and open items.             |
+| `orcaops-digest`             | Default | None              | Render a reviewer-facing task account or PR body.                  |
+| `orcaops-why`                | Default | None              | Trace a file, line, symbol, or concept to captured rationale.      |
+| `orcaops-resume`             | Default | None              | Continue an in-flight captured task.                               |
+| `orcaops-search`             | Default | None              | Search captured artifacts across branches and registered projects. |
+| `orcaops-doctor`             | Default | None              | Diagnose installation and runtime health.                          |
+| `orcaops-adversarial-review` | Default | None              | Challenge completion claims and unaccounted changes.               |
+| `orcaops-loose-ends`         | Opt-in  | None              | Sweep everything captured work still owes.                         |
+| `orcaops-decisions`          | Opt-in  | None              | Recall decisions, reasons, and rejected alternatives.              |
+| `orcaops-parallel-dispatch`  | Opt-in  | None              | Run disjoint plan steps through concurrent subagents.              |
+| `orcaops-estimate`           | Opt-in  | None              | Ground estimates in similar captured task shapes and usage.        |
+| `orcaops-lessons`            | Opt-in  | None              | Mine captured outcomes into evidence-linked lessons.               |
+| `orcaops-timetravel`         | Default | Snapshot checkout | Replay, bisect, or salvage checkpoint-boundary trees.              |
+| `orcaops-blame`              | Opt-in  | Matcher           | Export commit-level per-line agent provenance.                     |
+| `orcaops-recap`              | Default | None              | Produce standups, changelogs, client updates, or journals.         |
+| `orcaops-plan-critique`      | Default | None              | Critique a draft plan against captured prior art.                  |
+| `orcaops-task-review`        | Default | None              | Generate Task Review or address its local comments.                |
+| `orcaops-review`             | Default | Cloud             | Work shared PR review feedback and wait for another pass.          |
+| `orcaops-seed`               | Default | None              | Preview and backfill an existing repository's git history.         |
+| `orcaops-seed-discovery`     | Default | None              | Detect local history-coverage gaps and recommend seeding.          |
+| `orcaops-author-evaluator`   | Default | None              | Guide evaluator implementation through development testing.        |
 
 ## If a skill does not trigger
 

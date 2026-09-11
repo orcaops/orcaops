@@ -1262,7 +1262,7 @@ function globalStoryItems(model: StoryReviewModel, ledger: ReviewLedgerV2): Read
       required: finding.required,
       pageKey: null,
       file: finding.file,
-      source: `${finding.lane} · ${finding.severity}`,
+      source: `agent-reported · ${finding.lane} · ${finding.severity}`,
       placementState: finding.file === null ? 'unplaced' : 'file-scope',
       targetCount: 0,
       locationCount: 0,

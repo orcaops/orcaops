@@ -24,10 +24,10 @@ describe('SYNC_SIGNAL_STEERING', () => {
     expect(SYNC_SIGNAL_STEERING).toContain('`"paused"`');
   });
 
-  it('does not claim a replay skips the upload', () => {
-    // A replay skips the eager push, but the same command's drain re-attempts
-    // once the backoff elapses — the advice is right, the mechanism claim was not.
-    expect(SYNC_SIGNAL_STEERING).not.toMatch(/does not resend/i);
+  it('distinguishes saved local history from failed synchronization and completed replay', () => {
+    expect(SYNC_SIGNAL_STEERING).toContain('saved locally');
+    expect(SYNC_SIGNAL_STEERING).toContain('completed capture does not resend it');
+    expect(SYNC_SIGNAL_STEERING).toContain('an omitted count is unknown');
   });
 
   it('names no cloud command and no cloud pin scheme', () => {

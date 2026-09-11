@@ -3,8 +3,8 @@ name: "Orcaops: author an evaluator"
 description: "Create and test an Orcaops evaluator. Use for \"write an evaluator that blocks X\" or \"add a check for Y at checkpoint close\"."
 disable-model-invocation: true
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "be14d9b7b606"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "91f98f621f20"
 ---
 
 # When to use

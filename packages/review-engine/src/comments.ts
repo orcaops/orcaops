@@ -5,27 +5,27 @@
 //   review comment reply   --branch <b> --id <cid> --input '<json>' [--resolve]
 //   review comment resolve --branch <b> --id <cid> [--author <a>]
 //
-// The log is `.orcaops/reviews/<slug>/comments.ndjson`, one event per line
-// (`commentEventSchema`). Writes go through the same per-slug ArtifactLock as
-// the journal, so the TUI and an agent never interleave a line. The read path
-// replays the log into aggregate records and resolves every anchor against the
-// CURRENT floor + diff via the re-anchor ladder, emitting everything an agent
-// needs without the TUI: position, ±context from the pinned diff, the owning
-// checkpoint, and the adjacent captured trail. Missing floor/diff degrades to
-// `position: null` with a disclosure. A malformed sidecar fails closed: no
-// parsed prefix is replayed and no new event is appended over it.
+// A comment is a retained identity with append-only revisions
+// (`commentEventSchema`). Each write pins the floor and membership it was
+// authored against, so the TUI and an agent settle in order rather than
+// interleaving. The read path replays the revisions into aggregate records and
+// resolves every anchor against the CURRENT floor + diff via the re-anchor
+// ladder, emitting everything an agent needs without the TUI: position,
+// ±context from the pinned diff, the owning checkpoint, and the adjacent
+// captured trail. Missing floor/diff degrades to `position: null` with a
+// disclosure. A retained revision that does not decode is an integrity refusal:
+// no parsed prefix is replayed and no new revision is appended over it.
 //
 //   exit 0  records emitted (append, if requested, succeeded)
 //   exit 1  usage / precondition error (no branch, bad input, unknown id)
 
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
 
 import { redactSecretsInUnifiedDiff } from '@orcaops/evaluator-protocol/secrets';
 import {
   type CommentAnchor,
   commentAnchorSchema,
+  type CommentEvent,
   commentEventSchema,
   type CommentRecord,
   contextLineHash,
@@ -34,7 +34,6 @@ import {
   type CurrentDiffIndex,
   type CurrentDiffLine,
   type Floor,
-  floorSchema,
   lineHash,
   memberRefSchema,
   openCommentCount,
@@ -42,157 +41,20 @@ import {
   type ReanchoredPosition,
   replayComments,
   sliceKey,
-  slugifyBranch,
 } from '@orcaops/review-core';
-import { appendDurable, reviewEventIdentity } from '@orcaops/storage';
+import { uuidv7 } from '@orcaops/storage';
 
-import { reviewArchiveMirror, type ReviewArchiveWarning } from './archive.js';
-import { DurableStateReadError, readCommentEventsStrict } from './durableState.js';
+import { applyDatabaseReviewComments } from './database/comment-command.js';
+import { readDatabaseReviewContext } from './database/read-context.js';
 import { runGit } from './git.js';
-import { reviewLock } from './reviewLock.js';
-import { reviewDirPath, reviewEntryPath } from './reviewPaths.js';
-import {
-  ensureReviewStateVersion,
-  REVIEW_STATE_VERSION,
-  ReviewStateHealthError,
-  reviewStateLockKey,
-} from './reviewState.js';
+import { parsePatchHunks, type PatchHunk } from './patchHunks.js';
+import { writeReviewError, writeReviewOutput } from './reviewFiles.js';
 import type { ReviewArgs } from './run.js';
 
-interface CommentPaths {
-  slug: string;
-  dir: string;
-  file: string;
-  floorFile: string;
-  diffFile: string;
-  locksDir: string;
-}
-
-function commentPaths(root: string, branch: string): CommentPaths {
-  const slug = slugifyBranch(branch);
-  const dir = reviewDirPath(root, slug);
-  return {
-    slug,
-    dir,
-    file: path.join(dir, 'comments.ndjson'),
-    floorFile: path.join(dir, 'floor.json'),
-    diffFile: path.join(dir, 'diff.patch'),
-    locksDir: path.join(root, '.orcaops', 'tmp', 'locks'),
-  };
-}
+export { parsePatchHunks, type PatchHunk, type PatchHunkLine } from './patchHunks.js';
 
 function issues(error: { issues: { path: PropertyKey[]; message: string }[] }): string {
   return error.issues.map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`).join('; ');
-}
-
-// ---------------------------------------------------------------------------
-// Current-diff enrichment — parse the pinned diff, hash the anchored files
-// ---------------------------------------------------------------------------
-
-export interface PatchHunkLine {
-  side: 'add' | 'delete' | 'context';
-  /** Old-file line number (deletes + context). */
-  old: number | null;
-  /** New-file line number (adds + context). */
-  new: number | null;
-  /** The raw diff line, sign included. */
-  raw: string;
-  /** The line body without the sign. */
-  body: string;
-}
-
-export interface PatchHunk {
-  file: string;
-  oldStart: number;
-  newStart: number;
-  lines: PatchHunkLine[];
-}
-
-const HUNK_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
-
-function stripPrefix(p: string): string | null {
-  if (p === '/dev/null') return null;
-  if (p.startsWith('a/') || p.startsWith('b/')) return p.slice(2);
-  return p;
-}
-
-/** Parse the pinned unified diff into per-hunk lines, keeping only `files`. */
-export function parsePatchHunks(text: string, files: ReadonlySet<string>): PatchHunk[] {
-  const hunks: PatchHunk[] = [];
-  let fileBefore: string | null = null;
-  let fileAfter: string | null = null;
-  let current: PatchHunk | null = null;
-  let oldLine = 0;
-  let newLine = 0;
-
-  // Inside a hunk every row carries a sign column, so the file-header prefixes
-  // describe the SIGNED row rather than its content: a deleted `-- ` line
-  // renders as `--- ` and an added `++ ` line as `+++ `. Reading those as
-  // headers dropped the row AND everything after it in the same hunk, since the
-  // header arms also clear `current` and stop the line counters — so one SQL or
-  // Lua comment silently truncated a file's attribution.
-  let inHunk = false;
-
-  for (const raw of text.split('\n')) {
-    if (inHunk && !continuesHunkBody(raw)) inHunk = false;
-    if (!inHunk) {
-      if (raw.startsWith('diff --git')) {
-        fileBefore = null;
-        fileAfter = null;
-        current = null;
-        continue;
-      }
-      if (raw.startsWith('--- ')) {
-        fileBefore = stripPrefix(raw.slice(4).trim());
-        current = null;
-        continue;
-      }
-      if (raw.startsWith('+++ ')) {
-        fileAfter = stripPrefix(raw.slice(4).trim());
-        current = null;
-        continue;
-      }
-      const header = HUNK_RE.exec(raw);
-      if (header === null) {
-        current = null;
-        continue;
-      }
-      const file = fileAfter ?? fileBefore;
-      oldLine = Number(header[1]);
-      newLine = Number(header[2]);
-      inHunk = true;
-      if (file !== null && files.has(file)) {
-        current = { file, oldStart: oldLine, newStart: newLine, lines: [] };
-        hunks.push(current);
-      } else {
-        current = null;
-      }
-      continue;
-    }
-    const kind = raw[0];
-    if (kind === '+') {
-      current?.lines.push({ side: 'add', old: null, new: newLine, raw, body: raw.slice(1) });
-      newLine += 1;
-    } else if (kind === '-') {
-      current?.lines.push({ side: 'delete', old: oldLine, new: null, raw, body: raw.slice(1) });
-      oldLine += 1;
-    } else if (kind === ' ') {
-      current?.lines.push({ side: 'context', old: oldLine, new: newLine, raw, body: raw.slice(1) });
-      oldLine += 1;
-      newLine += 1;
-    }
-    // `\` annotates the row before it and is the only other body line.
-  }
-  return hunks;
-}
-
-/**
- * True while `raw` still belongs to the hunk body that precedes it. Git renders
- * an empty context line as a single space, so a bare newline ends the hunk.
- */
-function continuesHunkBody(raw: string): boolean {
-  const sign = raw.charAt(0);
-  return sign === ' ' || sign === '+' || sign === '-' || sign === '\\';
 }
 
 interface CommentOwner {
@@ -446,33 +308,21 @@ export interface CommentsPayload {
   open_count: number;
   disclosure: string[];
   comments: EnrichedComment[];
-  warnings?: ReviewArchiveWarning[];
 }
 
-async function assemblePayload(
-  branch: string,
-  paths: CommentPaths,
-  root: string
-): Promise<CommentsPayload> {
-  const records = replayComments(await readCommentEventsStrict(paths.file));
+async function assemblePayload(branch: string, root: string): Promise<CommentsPayload> {
+  const context = await readDatabaseReviewContext({ branch, cwd: root });
+  const records = replayComments(
+    context.comments.comments.flatMap((comment) =>
+      comment.revisions.map((revision) => revision.event)
+    )
+  );
   const disclosure: string[] = [];
 
-  let floor: Floor | null = null;
-  try {
-    floor = floorSchema.parse(JSON.parse(await readFile(paths.floorFile, 'utf8')));
-  } catch {
-    floor = null;
-  }
-  let diffText: string | null = null;
-  try {
-    diffText = await readFile(paths.diffFile, 'utf8');
-  } catch {
-    diffText = null;
-  }
-  if (floor === null || diffText === null) {
+  if (context.floor === null) {
     if (records.length > 0) {
       disclosure.push(
-        `floor or diff not cached under ${path.dirname(paths.floorFile)} — run \`review data\` for anchored positions`
+        'no selected floor for this review — run `review data` for anchored positions'
       );
     }
     return {
@@ -483,6 +333,8 @@ async function assemblePayload(
       comments: records.map((r) => ({ ...r, position: null, context: [], owner: null, trail: [] })),
     };
   }
+  const floor = context.floor.floor as Floor;
+  const diffText = Buffer.from(context.floor.diffBytes).toString('utf8');
 
   const maps = buildFloorMaps(floor);
   const anchorFiles = new Set(
@@ -521,10 +373,10 @@ async function assemblePayload(
 
 function emitPayload(payload: CommentsPayload, json: boolean): void {
   if (json) {
-    process.stdout.write(`${JSON.stringify(payload)}\n`);
+    writeReviewOutput(`${JSON.stringify(payload)}\n`);
     return;
   }
-  process.stdout.write(
+  writeReviewOutput(
     `comments: ${payload.branch} · ${payload.comments.length} comment(s) · ${payload.open_count} open\n`
   );
   for (const c of payload.comments) {
@@ -538,13 +390,8 @@ function emitPayload(payload: CommentsPayload, json: boolean): void {
             }`
           : (c.position.file ?? c.position.rung);
     const drift = c.position?.drifted === true ? ' · anchor drifted' : '';
-    process.stdout.write(`  ✎ [${c.status}] ${at}${drift} — ${c.body.split('\n')[0]}\n`);
+    writeReviewOutput(`  ✎ [${c.status}] ${at}${drift} — ${c.body.split('\n')[0]}\n`);
   }
-  emitArchiveWarnings(payload.warnings ?? []);
-}
-
-function emitArchiveWarnings(warnings: readonly ReviewArchiveWarning[]): void {
-  for (const warning of warnings) process.stderr.write(`review archive: ${warning.message}\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -554,21 +401,23 @@ function emitArchiveWarnings(warnings: readonly ReviewArchiveWarning[]): void {
 /** Run `review comments` (the enriched read). Returns the process exit code. */
 export async function runComments(args: ReviewArgs, root: string): Promise<number> {
   if (!args.branch) {
-    process.stderr.write('review comments: --branch <branch> is required\n');
+    writeReviewError('review comments: --branch <branch> is required\n');
     return 1;
   }
-  const paths = commentPaths(root, args.branch);
   try {
-    emitPayload(await assemblePayload(args.branch, paths, root), args.json);
+    emitPayload(await assemblePayload(args.branch, root), args.json);
     return 0;
   } catch (error) {
-    if (error instanceof DurableStateReadError || error instanceof ReviewStateHealthError) {
-      if (args.json)
-        process.stdout.write(`${JSON.stringify({ ok: false, health: error.health })}\n`);
-      else process.stderr.write(`review comments: ${error.message}\n`);
-      return 1;
-    }
-    throw error;
+    const failure = error as { code?: string; message?: string };
+    if (args.json)
+      writeReviewOutput(
+        `${JSON.stringify({
+          ok: false,
+          error: { code: failure.code ?? 'HISTORY_INACCESSIBLE', message: failure.message },
+        })}\n`
+      );
+    else writeReviewError(`review comments: ${failure.message ?? String(error)}\n`);
+    return 1;
   }
 }
 
@@ -581,18 +430,18 @@ interface ParsedInput {
 
 function parseInput(raw: string | undefined, verb: string): ParsedInput | null {
   if (raw === undefined) {
-    process.stderr.write(`review comment ${verb}: --input '<json>' is required\n`);
+    writeReviewError(`review comment ${verb}: --input '<json>' is required\n`);
     return null;
   }
   try {
     const parsed: unknown = JSON.parse(raw);
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      process.stderr.write(`review comment ${verb}: --input must be a JSON object\n`);
+      writeReviewError(`review comment ${verb}: --input must be a JSON object\n`);
       return null;
     }
     return parsed as ParsedInput;
   } catch {
-    process.stderr.write(`review comment ${verb}: --input is not valid JSON\n`);
+    writeReviewError(`review comment ${verb}: --input is not valid JSON\n`);
     return null;
   }
 }
@@ -600,103 +449,57 @@ function parseInput(raw: string | undefined, verb: string): ParsedInput | null {
 function coerceAuthor(raw: unknown, fallback: 'reviewer' | 'agent'): 'reviewer' | 'agent' | null {
   if (raw === undefined) return fallback;
   if (raw === 'reviewer' || raw === 'agent') return raw;
-  process.stderr.write(`review comment: author must be 'reviewer' or 'agent'\n`);
+  writeReviewError(`review comment: author must be 'reviewer' or 'agent'\n`);
   return null;
 }
 
 function coerceBody(raw: unknown, verb: string): string | null {
   if (typeof raw === 'string' && raw.trim().length > 0) return raw;
-  process.stderr.write(`review comment ${verb}: a non-empty body is required\n`);
+  writeReviewError(`review comment ${verb}: a non-empty body is required\n`);
   return null;
 }
 
-/** Validate + append events under the per-slug lock, then emit the fresh payload. */
-async function appendAndEmit(
-  args: ReviewArgs,
-  paths: CommentPaths,
-  events: unknown[],
-  root: string,
-  env: NodeJS.ProcessEnv
-): Promise<number> {
-  const rawLines: string[] = [];
+/** Validate the authored batch, settle it in the store, then emit the fresh payload. */
+async function appendAndEmit(args: ReviewArgs, events: unknown[], root: string): Promise<number> {
+  const parsed: CommentEvent[] = [];
   for (const event of events) {
     const result = commentEventSchema.safeParse(event);
     if (!result.success) {
-      process.stderr.write(`review comment: invalid event (${issues(result.error)})\n`);
+      writeReviewError(`review comment: invalid event (${issues(result.error)})\n`);
       return 1;
     }
-    rawLines.push(JSON.stringify(result.data));
+    parsed.push(result.data);
   }
-  const lock = reviewLock(root, paths.locksDir);
-  // Resolve the archive mirror BEFORE the lock (config/git reads must not widen
-  // the critical section).
-  const archive = await reviewArchiveMirror(root, env);
-  const mirror = archive.mirror;
   try {
-    await lock.withLock(reviewStateLockKey(paths.slug), async (stateLease) => {
-      await lock.withLock(paths.slug, async (slugLease) => {
-        await stateLease.verify();
-        await slugLease.verify();
-        await ensureReviewStateVersion(paths.dir, root);
-        await readCommentEventsStrict(paths.file);
-        await stateLease.verify();
-        await slugLease.verify();
-        await appendDurable(
-          reviewEntryPath(root, paths.file, 'review comments'),
-          rawLines.map((l) => `${l}\n`).join(''),
-          root
-        );
-        // Hot first, mirror second, fail-open: the archive copy of each
-        // just-appended line lands under the SAME slug lock (hot-lock →
-        // archive-lock order).
-        if (mirror) {
-          for (const raw of rawLines) {
-            await mirror.mirrorReviewEvent(
-              REVIEW_STATE_VERSION,
-              paths.slug,
-              'comments',
-              raw,
-              reviewEventIdentity(raw)
-            );
-          }
-        }
-      });
+    await applyDatabaseReviewComments({
+      branch: args.branch!,
+      cwd: root,
+      operationId: args.operationId ?? uuidv7(),
+      events: parsed,
+      secretAllow: [],
     });
   } catch (error) {
-    if (error instanceof DurableStateReadError) {
-      if (args.json) {
-        process.stdout.write(
-          `${JSON.stringify({
-            ok: false,
-            health: error.health,
-            ...(archive.warnings.length > 0 ? { warnings: archive.warnings } : {}),
-          })}\n`
-        );
-      } else {
-        process.stderr.write(`review comment: ${error.message} — nothing appended\n`);
-        emitArchiveWarnings(archive.warnings);
-      }
-      return 1;
-    }
-    throw error;
+    const failure = error as { code?: string; message?: string };
+    if (args.json)
+      writeReviewOutput(
+        `${JSON.stringify({
+          ok: false,
+          error: { code: failure.code ?? 'HISTORY_INACCESSIBLE', message: failure.message },
+        })}\n`
+      );
+    else writeReviewError(`review comment: ${failure.message ?? String(error)}\n`);
+    return 1;
   }
-  const payload = await assemblePayload(args.branch!, paths, root);
-  if (archive.warnings.length > 0) payload.warnings = archive.warnings;
-  emitPayload(payload, args.json);
+  emitPayload(await assemblePayload(args.branch!, root), args.json);
   return 0;
 }
 
 /** Run `review comment add|reply|resolve|reopen`. Returns the process exit code. */
-export async function runCommentAction(
-  args: ReviewArgs,
-  root: string,
-  env: NodeJS.ProcessEnv = process.env
-): Promise<number> {
+export async function runCommentAction(args: ReviewArgs, root: string): Promise<number> {
   if (!args.branch) {
-    process.stderr.write('review comment: --branch <branch> is required\n');
+    writeReviewError('review comment: --branch <branch> is required\n');
     return 1;
   }
-  const paths = commentPaths(root, args.branch);
   const now = new Date().toISOString();
 
   if (args.action === 'add') {
@@ -707,38 +510,25 @@ export async function runCommentAction(
     const anchorResult = commentAnchorSchema.safeParse(input.anchor);
     if (author === null || body === null) return 1;
     if (!anchorResult.success) {
-      process.stderr.write(`review comment add: invalid anchor (${issues(anchorResult.error)})\n`);
+      writeReviewError(`review comment add: invalid anchor (${issues(anchorResult.error)})\n`);
       return 1;
     }
     const anchor: CommentAnchor = anchorResult.data;
     return appendAndEmit(
       args,
-      paths,
       [{ type: 'add', comment_id: randomUUID(), ts: now, author, body, anchor }],
-      root,
-      env
+      root
     );
   }
 
   if (args.action === 'reply' || args.action === 'resolve' || args.action === 'reopen') {
     if (args.id === undefined || args.id.length === 0) {
-      process.stderr.write(`review comment ${args.action}: --id <comment_id> is required\n`);
+      writeReviewError(`review comment ${args.action}: --id <comment_id> is required\n`);
       return 1;
     }
-    let existing: CommentRecord[];
-    try {
-      existing = replayComments(await readCommentEventsStrict(paths.file));
-    } catch (error) {
-      if (error instanceof DurableStateReadError) {
-        if (args.json)
-          process.stdout.write(`${JSON.stringify({ ok: false, health: error.health })}\n`);
-        else process.stderr.write(`review comment ${args.action}: ${error.message}\n`);
-        return 1;
-      }
-      throw error;
-    }
+    const existing = (await assemblePayload(args.branch, root)).comments;
     if (!existing.some((r) => r.comment_id === args.id)) {
-      process.stderr.write(`review comment ${args.action}: unknown comment id '${args.id}'\n`);
+      writeReviewError(`review comment ${args.action}: unknown comment id '${args.id}'\n`);
       return 1;
     }
 
@@ -747,7 +537,6 @@ export async function runCommentAction(
       if (author === null) return 1;
       return appendAndEmit(
         args,
-        paths,
         [
           {
             type: 'status',
@@ -757,8 +546,7 @@ export async function runCommentAction(
             status: args.action === 'resolve' ? 'resolved' : 'open',
           },
         ],
-        root,
-        env
+        root
       );
     }
 
@@ -771,7 +559,7 @@ export async function runCommentAction(
     if (input.checkpoint_ref !== undefined) {
       const refResult = memberRefSchema.safeParse(input.checkpoint_ref);
       if (!refResult.success) {
-        process.stderr.write(
+        writeReviewError(
           `review comment reply: invalid checkpoint_ref (${issues(refResult.error)})\n`
         );
         return 1;
@@ -791,9 +579,9 @@ export async function runCommentAction(
     if (args.resolve === true) {
       events.push({ type: 'status', comment_id: args.id, ts: now, author, status: 'resolved' });
     }
-    return appendAndEmit(args, paths, events, root, env);
+    return appendAndEmit(args, events, root);
   }
 
-  process.stderr.write(`review comment: unknown action '${args.action ?? ''}'\n`);
+  writeReviewError(`review comment: unknown action '${args.action ?? ''}'\n`);
   return 2;
 }

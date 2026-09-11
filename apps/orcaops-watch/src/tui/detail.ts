@@ -217,7 +217,7 @@ export function buildDetail(
   }
 
   // Open review comments lead the pane, with the paste-ready prompt for an agent.
-  if (thread.openComments > 0) {
+  if (thread.openComments !== null && thread.openComments > 0) {
     const n = thread.openComments;
     push(`REVIEW COMMENTS · ${n} open`, 'section');
     const prompt = `address the ${n} open review comment${n === 1 ? '' : 's'} on ${thread.branch}`;

@@ -168,7 +168,6 @@ describe('config schema — closed nested sections', () => {
     ['gc.extra', { gc: { extra: true } }],
     ['diff_fingerprint.extra', { diff_fingerprint: { extra: true } }],
     ['review.extra', { review: { extra: true } }],
-    ['archive.extra', { archive: { extra: true } }],
     ['skills.extra', { skills: { extra: true } }],
     ['naming.extra', { naming: { extra: true } }],
     ['workflow.extra', { workflow: { extra: true } }],
@@ -183,24 +182,20 @@ describe('config schema — closed nested sections', () => {
   });
 });
 
-describe('config schema — archive block', () => {
-  it('defaults an omitted archive block to durable mirroring with fidelity', () => {
-    const c = resolveConfig({});
-    expect(c.archive).toEqual({ enabled: true, redact_secrets: false });
+describe('config schema — retired archive block', () => {
+  it('accepts a legacy archive block without retaining runtime authority', () => {
+    const c = resolveConfig({ archive: { enabled: true, redact_secrets: true } });
+    expect(c).not.toHaveProperty('archive');
     expect(c.schema_version).toBe(CONFIG_SCHEMA_VERSION);
   });
 
-  it('accepts explicit overrides', () => {
-    const c = resolveConfig({ archive: { enabled: true, redact_secrets: true } });
-    expect(c.archive).toEqual({ enabled: true, redact_secrets: true });
-  });
-
-  it('rejects non-boolean values', () => {
-    expect(() => resolveConfig({ archive: { enabled: 'yes' } })).toThrow();
-  });
-
-  it('getDefaultConfig carries the block', () => {
-    expect(getDefaultConfig().archive).toEqual({ enabled: true, redact_secrets: false });
+  it('still validates the retired compatibility input', () => {
+    expect(() => resolveConfig({ archive: { enabled: 'yes' } })).toThrowError(
+      expect.objectContaining({ path: 'archive.enabled' })
+    );
+    expect(() => resolveConfig({ archive: { extra: true } })).toThrowError(
+      expect.objectContaining({ path: 'archive.extra' })
+    );
   });
 });
 

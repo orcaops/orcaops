@@ -3,7 +3,6 @@ import path from 'node:path';
 import { configLocationForScope, Repo, resolveConfigSource } from '@orcaops/core';
 import { type HintKey, type SupportedAgentId } from '@orcaops/storage';
 
-import { archiveDisableAction, archiveEnableAction } from './archive.js';
 import { updateAction } from './update.js';
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
@@ -15,7 +14,6 @@ import {
   resolvePersonalConfigForAdoption,
   trackedProjectInstallPaths,
 } from '../lib/config-file.js';
-import { buildContext } from '../lib/context.js';
 import { hooksDirCandidates } from '../lib/git-hooks-dir.js';
 import { INSTALL_MANIFEST_REL } from '../lib/install-manifest.js';
 import { isCi } from '../lib/invocation-context.js';
@@ -28,10 +26,10 @@ import {
   readRepositoryFileOrNull,
   writeMutation,
 } from '../lib/mutations.js';
+import { resolveInstallCommandContext } from '../lib/repository-context.js';
 import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { readUserHooksRecord } from '../lib/session-hooks-user.js';
 import {
-  editArchiveEnabled,
   editBlockChoice,
   editGeneratedFiles,
   editGitHooksConfirm,
@@ -55,10 +53,7 @@ export interface ConfigureOptions {
  * explicitly applies (cancel anywhere is guaranteed write-free, the same
  * abort posture as the init prompts).
  *
- * `archive` and `gitHooks` ride the menu but are NOT config-write-backed:
- * archive toggling must route through the enable/disable machinery (raw
- * `archive.enabled` writes would skip the first-enable backfill), and git
- * hooks are stamp-managed files, not config.
+ * Git hooks are stamp-managed files, not configuration keys.
  */
 interface SettingsDraft {
   agents: SupportedAgentId[];
@@ -72,7 +67,6 @@ interface SettingsDraft {
   generatedFiles: 'commit' | 'ignore';
   hintKeys: HintKey[];
   hintCustom: string[];
-  archive: boolean;
   gitHooks: boolean;
 }
 
@@ -96,35 +90,21 @@ export async function configureAction(opts: ConfigureOptions = {}): Promise<void
     throw new CliExit(1);
   }
 
-  // Snapshot what we need, then release the store immediately — the apply
-  // path delegates to update/archive actions that build their own contexts.
-  const ctx = await buildContext({ cwd: opts.cwd });
-  let repoRoot: string;
-  let original: SettingsDraft;
-  let storedPayload: 'static' | 'state-aware';
-  try {
-    repoRoot = ctx.repoRoot;
-    // The payload preference outlives the off state on disk — keep it
-    // alongside the draft so re-enabling seeds the select with it instead of
-    // silently resetting a stored 'state-aware' back to 'static'.
-    storedPayload = ctx.config.session_hooks.payload;
-    original = {
-      agents: [...ctx.config.install.agents],
-      scope: ctx.config.install.scope,
-      link: ctx.config.install.link,
-      prefix: ctx.config.naming.prefix,
-      bootstrap: ctx.config.bootstrap,
-      sessionHooks: ctx.config.session_hooks.enabled ? ctx.config.session_hooks.payload : 'off',
-      sessionHookEntries: ctx.config.session_hooks.entries,
-      generatedFiles: ctx.config.generated_files,
-      hintKeys: [...ctx.config.workflow.hints.keys],
-      hintCustom: [...ctx.config.workflow.hints.custom],
-      archive: ctx.config.archive.enabled,
-      gitHooks: await gitHooksInstalled(repoRoot),
-    };
-  } finally {
-    ctx.store.close();
-  }
+  const { repoRoot, config } = await resolveInstallCommandContext({ cwd: opts.cwd });
+  const storedPayload = config.session_hooks.payload;
+  const original: SettingsDraft = {
+    agents: [...config.install.agents],
+    scope: config.install.scope,
+    link: config.install.link,
+    prefix: config.naming.prefix,
+    bootstrap: config.bootstrap,
+    sessionHooks: config.session_hooks.enabled ? config.session_hooks.payload : 'off',
+    sessionHookEntries: config.session_hooks.entries,
+    generatedFiles: config.generated_files,
+    hintKeys: [...config.workflow.hints.keys],
+    hintCustom: [...config.workflow.hints.custom],
+    gitHooks: await gitHooksInstalled(repoRoot),
+  };
   const draft: SettingsDraft = structuredClone(original);
 
   const prompts = await import('@clack/prompts');
@@ -148,14 +128,13 @@ export async function configureAction(opts: ConfigureOptions = {}): Promise<void
   const showScope = (v: SettingsDraft): string => `${v.scope} / ${v.link}`;
   const showHints = (v: SettingsDraft): string =>
     `${v.hintKeys.length + v.hintCustom.length} selected`;
-  const showArchive = (v: SettingsDraft): string => (v.archive ? 'on' : 'off');
   const showGitHooks = (v: SettingsDraft): string => (v.gitHooks ? 'installed' : 'not installed');
 
   // HYBRID menu: the frequently-revisited guidance settings stay one
   // keystroke away with visible old → new hints; the four set-once plumbing
   // items (location, prefix, generated files, git hooks) fold into a single
   // "Installation & files…" submenu whose row carries an aggregate `*` and a
-  // draft-value summary, so the top level stays eight rows without hiding a
+  // draft-value summary, so the top level stays short without hiding a
   // pending change from the pre-apply review.
   for (;;) {
     const pending = pendingChanges(original, draft);
@@ -171,7 +150,6 @@ export async function configureAction(opts: ConfigureOptions = {}): Promise<void
       hints:
         JSON.stringify(original.hintKeys) !== JSON.stringify(draft.hintKeys) ||
         JSON.stringify(original.hintCustom) !== JSON.stringify(draft.hintCustom),
-      archive: original.archive !== draft.archive,
       gitHooks: original.gitHooks !== draft.gitHooks,
     };
     const installChanged = changed.scope || changed.prefix || changed.generated || changed.gitHooks;
@@ -204,11 +182,6 @@ export async function configureAction(opts: ConfigureOptions = {}): Promise<void
           value: 'agents',
           label: mark('Installed agents', changed.agents),
           hint: hintFor(changed.agents, showAgents(original), showAgents(draft)),
-        },
-        {
-          value: 'archive',
-          label: mark('Session-history archive', changed.archive),
-          hint: hintFor(changed.archive, showArchive(original), showArchive(draft)),
         },
         {
           value: 'install',
@@ -386,11 +359,6 @@ async function editItem(
       if (custom !== null) draft.hintCustom = custom;
       return;
     }
-    case 'archive': {
-      const enabled = await editArchiveEnabled(draft.archive);
-      if (enabled !== null) draft.archive = enabled;
-      return;
-    }
     case 'git-hooks': {
       const installed = await editGitHooksConfirm(draft.gitHooks);
       if (installed !== null) draft.gitHooks = installed;
@@ -432,11 +400,6 @@ function pendingChanges(o: SettingsDraft, d: SettingsDraft): string[] {
         : `custom reminders: ${o.hintCustom.length} → ${d.hintCustom.length} line(s)`
     );
   }
-  if (o.archive !== d.archive) {
-    lines.push(
-      `archive: ${o.archive ? 'enabled' : 'disabled'} → ${d.archive ? 'enabled' : 'disabled'}`
-    );
-  }
   if (o.gitHooks !== d.gitHooks) {
     lines.push(
       `git hooks: ${o.gitHooks ? 'installed' : 'not installed'} → ${d.gitHooks ? 'installed' : 'not installed'}`
@@ -448,8 +411,7 @@ function pendingChanges(o: SettingsDraft, d: SettingsDraft): string[] {
 /**
  * Apply the draft: persist changed config keys into RAW config.json (a user's
  * minimal config stays minimal), run the update reconcile so every install
- * surface follows, then run the archive and git-hook intents through their
- * own machinery.
+ * surface follows, then apply Git-hook changes through their ownership checks.
  */
 async function applyDraft(
   repoRoot: string,
@@ -609,14 +571,6 @@ async function applyDraft(
     // scope-exit reconcile cannot see a transition and the .gitignore block
     // is stranded.
     await updateAction({ cwd: opts.cwd, previousScope: original.scope });
-  }
-
-  if (original.archive !== draft.archive) {
-    // Archive actions resolve cwd from the invocation frame (like every
-    // command); routing through them keeps the first-enable backfill and
-    // retain-on-disable semantics.
-    if (draft.archive) await archiveEnableAction({});
-    else await archiveDisableAction({});
   }
 
   if (original.gitHooks !== draft.gitHooks) {

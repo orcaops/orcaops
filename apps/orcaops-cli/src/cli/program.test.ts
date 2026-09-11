@@ -73,14 +73,21 @@ describe('orcaops CLI program', () => {
     expect(digest.helpInformation()).not.toContain('in addition to stdout');
   });
 
-  it('documents both why modes and whole-file detail expansion', () => {
+  it('does not register the retired archive surface', () => {
+    const program = buildOfficialProgram();
+
+    expect(program.commands.some((command) => command.name() === 'archive')).toBe(false);
+  });
+
+  it('documents ranked provenance, result limits, and JSON detail expansion', () => {
     const why = buildOfficialProgram().commands.find((command) => command.name() === 'why');
     expect(why).toBeDefined();
-    const help = why!.helpInformation();
-    expect(help).toContain('complete newest-first history for <file>');
+    const help = why!.helpInformation().replace(/\s+/g, ' ');
+    expect(help).toContain('Find ranked provenance for <file>');
     expect(help).toContain('attribute <file>:<line>');
-    expect(help).toContain('Expand whole-file details');
-    expect(help).toContain('list every line candidate');
+    expect(help).toContain('--all Default to 1,000 results; processing budgets still apply');
+    expect(help).toContain('--details Include full JSON candidate evidence');
+    expect(help).toContain('may be large; no effect without --json');
   });
 
   it('has no public cloud-target selector', () => {
@@ -228,21 +235,6 @@ describe('makeCaptureFlagAdapter', () => {
 });
 
 describe('strict numeric option parsing', () => {
-  it('rejects a non-numeric --retention-days instead of coercing to NaN', async () => {
-    const err = await parseExpectingFailure(['gc', '--retention-days', 'abc']);
-    expect(err.code).toBe('commander.invalidArgument');
-  });
-
-  it('rejects trailing garbage on --retention-days', async () => {
-    const err = await parseExpectingFailure(['gc', '--retention-days', '12abc']);
-    expect(err.code).toBe('commander.invalidArgument');
-  });
-
-  it('rejects exponent notation on --retention-days', async () => {
-    const err = await parseExpectingFailure(['gc', '--retention-days', '1e3']);
-    expect(err.code).toBe('commander.invalidArgument');
-  });
-
   it('rejects trailing garbage on eval run --checkpoint', async () => {
     const err = await parseExpectingFailure([
       'eval',
@@ -282,8 +274,6 @@ describe('strict numeric option parsing', () => {
 describe('oversized digit-only literals', () => {
   it('rejects a digit string that would overflow to a non-safe integer', async () => {
     const oversized = '9'.repeat(400);
-    const retention = await parseExpectingFailure(['gc', '--retention-days', oversized]);
-    expect(retention.code).toBe('commander.invalidArgument');
     const checkpoint = await parseExpectingFailure([
       'fingerprint',
       'show',
@@ -293,5 +283,12 @@ describe('oversized digit-only literals', () => {
       oversized,
     ]);
     expect(checkpoint.code).toBe('commander.invalidArgument');
+  });
+});
+
+describe('gc options', () => {
+  it('rejects the retired age-based cleanup option', async () => {
+    const error = await parseExpectingFailure(['gc', '--retention-days', '30']);
+    expect(error.code).toBe('commander.unknownOption');
   });
 });

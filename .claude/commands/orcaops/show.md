@@ -2,8 +2,8 @@
 name: "orcaops:show"
 description: "Render a single artifact thread — plan, checkpoints, summary, evaluator runs."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "ee4d793a3532"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "41737b961e3a"
 tags: ["orcaops", "read-only"]
 ---
 

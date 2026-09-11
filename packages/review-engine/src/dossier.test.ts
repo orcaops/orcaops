@@ -1,7 +1,5 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -11,7 +9,6 @@ import {
   type Floor,
   formatCitationId,
 } from '@orcaops/review-core';
-import { ArtifactLock } from '@orcaops/storage';
 
 import { buildClaimLedger, CLAIM_LEDGER_ENTRY_KIND } from './claimLedger.js';
 import {
@@ -35,12 +32,11 @@ import {
   PROTECTED_ACCOUNT_FIELDS,
   StubPolicyError,
 } from './dossier.js';
-import { buildAndWriteDossier, runDossier } from './dossierCli.js';
-import { FLOOR_PRODUCER_VERSION } from './floor.js';
-import { REVIEW_STATE_VERSION, reviewStateLockKey } from './reviewState.js';
+import { buildBranchDossier, runDossier } from './dossierCli.js';
 import type { ReviewArgs } from './run.js';
 import { renderAccountRoutineMd } from './twolaneRunCli.js';
 import { accountCitableIds } from './twolaneSlice.js';
+import { capturedReviewFixture } from '../tests/capturedReviewFixture.js';
 import { accountPromptAliasMaps, promptCitationAlias } from '../tests/support/accountAlias.js';
 
 const AT = '2026-07-17T00:00:00.000Z';
@@ -680,7 +676,18 @@ describe('dossier — newly-plumbed captured provenance (chains 1-3)', () => {
    * evaluator verdicts and report proof-of-execution that had never been
    * captured.
    */
-  it('CHAIN 3: verification holds verified-close records and evaluatorRuns holds the log', () => {
+  it('retains report and later snapshot wording after a long command', () => {
+    const floor = plumbedFloor();
+    const text = `${'long-command-argument '.repeat(30)} — Agent reports command exited 0. Checkpoint subsequently closed at snapshot later-close.`;
+    const citation = floor.citations.find(
+      (row) => row.kind === CITATION_KIND.CHECKPOINT_VERIFICATION
+    )!;
+    citation.text = text;
+    const built = buildDossier(makeInput({ floor }));
+    expect(built.markdown).toContain(text);
+  });
+
+  it('keeps reported commands separate from evaluator runs', () => {
     const built = buildDossier(makeInput({ floor: plumbedFloor() }));
     const core = built.accountProjection.accountCore;
     expect(core.verification.map((v) => v.citationId)).toEqual([
@@ -688,6 +695,8 @@ describe('dossier — newly-plumbed captured provenance (chains 1-3)', () => {
       cpCite(CITATION_KIND.CHECKPOINT_VERIFICATION, 1),
     ]);
     expect(core.verification[0]!.text).toContain('pnpm test → exit 0');
+    expect(built.markdown).toContain('## Commands the agent reports running');
+    expect(built.markdown).not.toContain('Verified close');
     expect(core.evaluatorRuns.map((r) => r.citationId)).toEqual([
       artifactCite(CITATION_KIND.EVALUATOR_RUN, 0),
     ]);
@@ -1397,108 +1406,65 @@ describe('dossier — account corpus ceiling refuses before anything is written'
     expect(refusal.actualBytes).toBeGreaterThan(ACCOUNT_CORPUS_CEILING_BYTES);
   });
 
-  it('mints no artifact at all: the review dir is untouched and the verb returns a parseable envelope', async () => {
-    // The refusal lands BEFORE the first write. `buildDossier` throws, so
-    // `buildAndWriteDossier`'s five `atomicWriteFile` calls never run, the
-    // composite verb never reaches `runTwolaneRun`, no run is minted, and no
-    // model call is spent. Driven through the real CLI verb rather than the
-    // pure builder, because "nothing is written" is a property of that path.
-    const root = await mkdtemp(path.join(tmpdir(), 'orcaops-account-ceiling-'));
+  it('derives on read: the verb mints no review artifact at all', async () => {
+    // Under derive-on-read there is nothing to leave behind on a refusal,
+    // because there is nothing written on success either. Driven through the
+    // real CLI verb rather than the pure builder, because "nothing is written"
+    // is a property of that path.
+    const f = await capturedReviewFixture();
     const out: string[] = [];
     try {
-      const dir = path.join(root, '.orcaops', 'reviews', 'demo');
-      await mkdir(dir, { recursive: true });
-      await writeFile(path.join(dir, 'floor.json'), JSON.stringify(hugeCorpusFloor()));
-      await writeFile(path.join(dir, 'diff.patch'), DIFF);
-      await writeFile(
-        path.join(dir, 'floor-cache.json'),
-        JSON.stringify({ producerVersion: FLOOR_PRODUCER_VERSION, floorFingerprint: 'fp' })
-      );
-      const before = (await readdir(dir)).sort();
-
+      await f.publishFloor();
+      vi.stubEnv('ORCAOPS_DATA_DIR', f.dataRoot);
       vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
         out.push(String(chunk));
         return true;
       });
       vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       const code = await runDossier(
-        { cmd: 'review', sub: 'dossier', branch: 'demo', json: true } as ReviewArgs,
-        root
+        { cmd: 'review', sub: 'dossier', branch: f.branch, json: true } as ReviewArgs,
+        f.gitRoot
       );
       vi.restoreAllMocks();
-      expect(code).toBe(1);
-      const envelope = JSON.parse(out.join('')) as {
-        ok: boolean;
-        error: { code: string; ceiling_bytes: number; actual_bytes: number; message: string };
-      };
-      expect(envelope.ok).toBe(false);
-      expect(envelope.error.code).toBe('ACCOUNT_CORPUS_CEILING');
-      expect(envelope.error.ceiling_bytes).toBe(ACCOUNT_CORPUS_CEILING_BYTES);
-      expect(envelope.error.actual_bytes).toBeGreaterThan(ACCOUNT_CORPUS_CEILING_BYTES);
-      expect(envelope.error.message).toContain('no payload minted');
-
-      // Nothing was minted: no dossier, no projection, no forensic input, no
-      // coverage snapshot, no run record.
-      expect((await readdir(dir)).sort()).toEqual(before);
-      for (const f of [
-        'dossier-v1.json',
-        'dossier.md',
-        'account-projection-v1.json',
-        'forensic-input-v1.json',
-        'coverage-v1.json',
-        'run-v1.json',
-      ]) {
-        expect(existsSync(path.join(dir, f))).toBe(false);
-      }
+      expect(code).toBe(0);
+      const envelope = JSON.parse(out.join('')) as { ok: boolean; hunks: number };
+      expect(envelope.ok).toBe(true);
+      expect(existsSync(path.join(f.gitRoot, '.orcaops', 'reviews'))).toBe(false);
     } finally {
       vi.restoreAllMocks();
-      await rm(root, { recursive: true, force: true });
+      vi.unstubAllEnvs();
+      await f.cleanup();
     }
-  });
+  }, 180_000);
 });
 
 describe('dossier — the configured exclude set reaches the CLI entry point', () => {
-  const setupReviewDir = async (): Promise<{ root: string; branch: string }> => {
-    const root = await mkdtemp(path.join(tmpdir(), 'orcaops-dossier-exclude-'));
-    const fixture = buildReviewFloorFixture('clean').floor;
-    const branch = fixture.scope.branch;
-    const dir = path.join(root, '.orcaops', 'reviews', fixture.scope.branch_slug);
-    await mkdir(dir, { recursive: true });
-    await writeFile(
-      path.join(dir, 'review-state.json'),
-      `${JSON.stringify({ review_state_version: REVIEW_STATE_VERSION })}\n`
-    );
-    await writeFile(path.join(dir, 'floor.json'), JSON.stringify(fixture));
-    await writeFile(
-      path.join(dir, 'diff.patch'),
-      [
-        'diff --git a/src/fixture.ts b/src/fixture.ts',
-        '--- a/src/fixture.ts',
-        '+++ b/src/fixture.ts',
-        '@@ -1,0 +1 @@',
-        '+stable fixture row',
-        'diff --git a/.env b/.env',
-        '--- a/.env',
-        '+++ b/.env',
-        '@@ -1,0 +1 @@',
-        '+DEPLOY_SECRET=must-not-reach-the-reviewer',
-        '',
-      ].join('\n')
-    );
-    await writeFile(
-      path.join(dir, 'floor-cache.json'),
-      JSON.stringify({ producerVersion: FLOOR_PRODUCER_VERSION, floorFingerprint: 'original' })
-    );
-    return { root, branch };
-  };
-
   it('withholds a built-in excluded path from the dossier the CLI produces', async () => {
-    // Asserted through buildAndWriteDossier on purpose: buildDossier accepts
-    // excludePaths, so an entry point that never passes it leaves the exclusion
-    // dead in production while a buildDossier-level test still passes.
-    const { root, branch } = await setupReviewDir();
+    // Asserted through the CLI-facing derivation on purpose: buildDossier
+    // accepts excludePaths, so an entry point that never passes it leaves the
+    // exclusion dead in production while a buildDossier-level test still passes.
+    const f = await capturedReviewFixture({
+      artifacts: [
+        {
+          label: 'Add the deploy env',
+          task: 'Wire the deploy environment',
+          checkpoints: [
+            {
+              summary: 'Added the ordinary source and the environment file.',
+              changes: {
+                'src/fixture.ts': 'export const stable = "stable fixture row";\n',
+                '.env': 'DEPLOY_SECRET=must-not-reach-the-reviewer\n',
+              },
+              completedSteps: [0],
+            },
+          ],
+        },
+      ],
+    });
     try {
-      const result = await buildAndWriteDossier(root, branch, 'routine');
+      vi.stubEnv('ORCAOPS_DATA_DIR', f.dataRoot);
+      await f.publishFloor();
+      const result = await buildBranchDossier(f.gitRoot, f.branch, 'routine');
       expect(result.forensicInput.diff).toContain('stable fixture row');
       // EVERY payload, not just the forensic diff. Applied at the
       // eligible-diff sink alone, the exclusion leaves dossier-v1.json and the
@@ -1518,52 +1484,43 @@ describe('dossier — the configured exclude set reaches the CLI entry point', (
         );
       }
     } finally {
-      await rm(root, { recursive: true, force: true });
+      vi.unstubAllEnvs();
+      await f.cleanup();
     }
-  });
+  }, 180_000);
 
-  it('redacts a credential in a NON-excluded file from every payload', async () => {
-    // The scrub shares the exclusion's single-sink hazard: a recognized secret
-    // in an ordinary file can leave the forensic diff and still sit in
-    // code_index and the account projection.
-    const TOKEN = 'ghp_ABCDEF1234567890abcdef1234567890ABCDEF';
-    const root = await mkdtemp(path.join(tmpdir(), 'orcaops-dossier-scrub-'));
-    const fixture = buildReviewFloorFixture('clean').floor;
-    const dir = path.join(root, '.orcaops', 'reviews', fixture.scope.branch_slug);
+  it('never retains a floor whose diff quotes a credential in a NON-excluded file', async () => {
+    // The scrub shared the exclusion's single-sink hazard: a recognized secret
+    // in an ordinary file could leave the forensic diff and still sit in
+    // code_index and the account projection. Under the canonical publication
+    // the refusal moved earlier — the floor is never retained at all, so no
+    // payload derived from it can carry the credential.
+    const f = await capturedReviewFixture({
+      baseFiles: { '.gitignore': '.orcaops/\n', 'src/deploy.ts': 'export const key = null;\n' },
+      artifacts: [
+        {
+          label: 'Wire the deploy key',
+          task: 'Read the deploy key at start-up',
+          checkpoints: [
+            {
+              summary: 'Read the deploy key at start-up.',
+              changes: {
+                'src/deploy.ts': `const apiKey = 'ghp_ABCDEF1234567890abcdef1234567890ABCDEF';\n`,
+              },
+              completedSteps: [0],
+            },
+          ],
+        },
+      ],
+    });
     try {
-      await mkdir(dir, { recursive: true });
-      await writeFile(
-        path.join(dir, 'review-state.json'),
-        `${JSON.stringify({ review_state_version: REVIEW_STATE_VERSION })}\n`
-      );
-      await writeFile(path.join(dir, 'floor.json'), JSON.stringify(fixture));
-      await writeFile(
-        path.join(dir, 'diff.patch'),
-        [
-          'diff --git a/src/deploy.ts b/src/deploy.ts',
-          '--- a/src/deploy.ts',
-          '+++ b/src/deploy.ts',
-          '@@ -1,0 +1 @@',
-          `+const apiKey = '${TOKEN}';`,
-          '',
-        ].join('\n')
-      );
-      await writeFile(
-        path.join(dir, 'floor-cache.json'),
-        JSON.stringify({ producerVersion: FLOOR_PRODUCER_VERSION, floorFingerprint: 'original' })
-      );
-      const result = await buildAndWriteDossier(root, fixture.scope.branch, 'routine');
-      for (const [name, payload] of Object.entries({
-        'forensicInput.diff': result.forensicInput.diff,
-        'dossier-v1.json': result.dossier,
-        'account projection': result.accountProjection,
-      })) {
-        expect(JSON.stringify(payload) ?? '', `${name} carries the token`).not.toContain(TOKEN);
-      }
+      vi.stubEnv('ORCAOPS_DATA_DIR', f.dataRoot);
+      await expect(f.publishFloor()).rejects.toMatchObject({ code: 'SECRET_IN_PAYLOAD' });
     } finally {
-      await rm(root, { recursive: true, force: true });
+      vi.unstubAllEnvs();
+      await f.cleanup();
     }
-  });
+  }, 180_000);
 
   it('refuses to mint a payload when the exclude policy is malformed', () => {
     // Reachable only defensively: the config schema types capture.exclude as
@@ -1577,78 +1534,6 @@ describe('dossier — the configured exclude set reaches the CLI entry point', (
     expect(err.invalidPatterns).toEqual(['']);
     expect(err.message).toContain('capture.exclude');
     expect(err.message).toContain('no payload minted');
-  });
-});
-
-describe('dossier publication', () => {
-  it('refuses to publish when the floor changes while waiting for review state', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'orcaops-dossier-lock-'));
-    const fixture = buildReviewFloorFixture('clean').floor;
-    const branch = fixture.scope.branch;
-    const slug = fixture.scope.branch_slug;
-    const dir = path.join(root, '.orcaops', 'reviews', slug);
-    const locksDir = path.join(root, '.orcaops', 'tmp', 'locks');
-    const lock = new ArtifactLock({ locksDir, containmentRoot: root });
-    let markAcquired!: () => void;
-    let release!: () => void;
-    const acquired = new Promise<void>((resolve) => {
-      markAcquired = resolve;
-    });
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    try {
-      await mkdir(dir, { recursive: true });
-      await writeFile(
-        path.join(dir, 'review-state.json'),
-        `${JSON.stringify({ review_state_version: REVIEW_STATE_VERSION })}\n`
-      );
-      await writeFile(path.join(dir, 'floor.json'), JSON.stringify(fixture));
-      await writeFile(
-        path.join(dir, 'diff.patch'),
-        [
-          'diff --git a/src/fixture.ts b/src/fixture.ts',
-          '--- a/src/fixture.ts',
-          '+++ b/src/fixture.ts',
-          '@@ -1,0 +1 @@',
-          '+stable fixture row',
-          '',
-        ].join('\n')
-      );
-      await writeFile(
-        path.join(dir, 'floor-cache.json'),
-        JSON.stringify({ producerVersion: FLOOR_PRODUCER_VERSION, floorFingerprint: 'original' })
-      );
-
-      const held = lock.withLock(reviewStateLockKey(slug), async () => {
-        markAcquired();
-        await blocked;
-      });
-      await acquired;
-      const pending = buildAndWriteDossier(root, branch, 'routine');
-      const state = await Promise.race([
-        pending.then(
-          () => 'completed' as const,
-          () => 'completed' as const
-        ),
-        new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 100)),
-      ]);
-      expect(state).toBe('waiting');
-      await writeFile(
-        path.join(dir, 'floor-cache.json'),
-        JSON.stringify({ producerVersion: FLOOR_PRODUCER_VERSION, floorFingerprint: 'changed' })
-      );
-      release();
-      await held;
-
-      await expect(pending).rejects.toThrow(
-        'review floor changed while the dossier was being built'
-      );
-      expect(existsSync(path.join(dir, 'dossier-v1.json'))).toBe(false);
-    } finally {
-      release();
-      await rm(root, { recursive: true, force: true });
-    }
   });
 });
 

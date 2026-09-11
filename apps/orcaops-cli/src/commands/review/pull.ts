@@ -5,10 +5,9 @@ import type {
   OssReviewFeedbackPull,
   OssReviewFeedbackTranscript,
 } from '@orcaops/sdk';
-// storage re-exports crypto (`export * from './crypto.js'`), so sha256Hex is public.
-import { sha256Hex, stripControlChars, writeReviewFeedbackPullRecord } from '@orcaops/storage';
+import { stripControlChars } from '@orcaops/storage';
 
-import { reviewFeedbackCacheDir, withReviewCloud } from './shared.js';
+import { withReviewCloud } from './shared.js';
 import { toCloudErrorEnvelope } from '../../io/cloud-error-envelope.js';
 import { ErrorCodes, OrcaopsError } from '../../io/errors.js';
 import { emitError, emitOk, writePipeFriendlyStdout } from '../../io/output.js';
@@ -155,22 +154,6 @@ export async function reviewFeedbackPullAction(
           taskNumber,
           pullRequestId: opts.pr ?? null,
         });
-        const transcriptJson = JSON.stringify(t);
-        await writeReviewFeedbackPullRecord(
-          reviewFeedbackCacheDir(ctx.repoRoot),
-          {
-            schema_version: 1,
-            pull_request_id: t.subject.pull_request_id,
-            task_number: t.subject.task_number,
-            activity_cursor: t.activity.last_human_activity_at,
-            transcript_json: transcriptJson,
-            content_hash: sha256Hex(transcriptJson),
-            base_url: ctx.baseUrl,
-            org_id: ctx.orgId,
-            pulled_at: new Date().toISOString(),
-          },
-          ctx.repoRoot
-        );
         return { transcript: t, markdown: renderTranscriptMarkdown(t) };
       }
     );

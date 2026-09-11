@@ -6,6 +6,8 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { Repo } from '@orcaops/core';
+import { setupProjectDatabase } from '@orcaops/core/history/database-setup';
+import { projectDatabasePath } from '@orcaops/storage/history/database';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { withRepositoryInstallLock } from '../../src/lib/repository-install-lock.js';
@@ -30,6 +32,7 @@ interface UninstallJson {
   hooks_unverified: string[];
   gitignore_removed: string[];
   data_purged: boolean;
+  canonical_data_preserved: string[];
   global: { removed: string[]; skipped_version_mismatch: boolean; root: string } | null;
   warnings: string[];
 }
@@ -480,6 +483,121 @@ describe('orcaops uninstall', () => {
     expect(gi).not.toContain('install.local.json');
   });
 
+  it('does not initialize missing history while removing the install footprint', async () => {
+    const dataRoot = p('.orcaops', 'canonical-history');
+    const a = makeAgent({
+      cwd: repo.path,
+      env: { CLAUDE_SESSION_ID: 'test-uninstall-missing-history', ORCAOPS_DATA_DIR: dataRoot },
+    });
+    await a.runRaw(['init', '--scope', 'project', '--no-llm', '--agents-md']);
+    await rm(dataRoot, { recursive: true, force: true });
+    await rm(p('.orcaops', 'cache'), { recursive: true, force: true });
+
+    const res = await a.runRaw(['uninstall', '--json']);
+    expect(res.exitCode, res.stdout + res.stderr).toBe(0);
+    expect(await exists(dataRoot)).toBe(false);
+    expect(await exists(p('.orcaops', 'cache'))).toBe(false);
+    expect(await lexists(p('AGENTS.md'))).toBe(false);
+  });
+
+  it.each(['configured', 'registered'] as const)(
+    'preserves a %s canonical history root nested under .orcaops during purge',
+    async (authoritySource) => {
+      const dataRoot = p('.orcaops', 'canonical-history');
+      const setupAgent = makeAgent({
+        cwd: repo.path,
+        env: { CLAUDE_SESSION_ID: 'test-uninstall-nested-history', ORCAOPS_DATA_DIR: dataRoot },
+      });
+      const setup = await setupProjectDatabase({
+        cwd: repo.path,
+        root: dataRoot,
+        authoredPayloads: [],
+        secretAllow: [],
+      });
+      expect(setup.status).toBe('complete');
+      if (setup.status !== 'complete') return;
+      await setupAgent.runRaw(['init', '--scope', 'project', '--no-llm', '--agents-md']);
+      const databasePath = projectDatabasePath(setup.initialization.authority);
+      const commonDir = await new Repo(repo.path).getCommonDirAbsolute();
+      const gitDir = await new Repo(repo.path).getGitDirAbsolute();
+      const registrationPath = path.join(commonDir, 'orcaops', 'registration.json');
+      const worktreeRegistrationPath = path.join(gitDir, 'orcaops', 'worktree.json');
+      const registration = await readFile(registrationPath);
+      const worktreeRegistration = await readFile(worktreeRegistrationPath);
+      const projectId = execFileSync('git', ['config', '--local', '--get', 'orcaops.projectid'], {
+        cwd: repo.path,
+        encoding: 'utf8',
+      }).trim();
+      await mkdir(p('.orcaops', 'artifacts'), { recursive: true });
+      await writeFile(p('.orcaops', 'artifacts', 'legacy.json'), '{}\n');
+      if (authoritySource === 'configured') await rm(registrationPath);
+      const uninstallAgent =
+        authoritySource === 'configured'
+          ? setupAgent
+          : makeAgent({
+              cwd: repo.path,
+              env: {
+                CLAUDE_SESSION_ID: 'test-uninstall-registered-history',
+                ORCAOPS_DATA_DIR: p('other-history-root'),
+              },
+            });
+
+      const preview = await uninstallAgent.runRaw([
+        'uninstall',
+        '--purge-data',
+        '--dry-run',
+        '--json',
+      ]);
+      expect(preview.exitCode, preview.stdout + preview.stderr).toBe(0);
+      expect((JSON.parse(preview.stdout) as UninstallJson).canonical_data_preserved).toEqual([
+        path.join('.orcaops', 'canonical-history'),
+      ]);
+      expect(await exists(databasePath)).toBe(true);
+      expect(await exists(p('.orcaops', 'artifacts', 'legacy.json'))).toBe(true);
+      expect(await exists(await effectiveConfigPath(repo.path))).toBe(true);
+
+      const result = await uninstallAgent.runRaw(['uninstall', '--purge-data', '--json']);
+      expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+      expect((JSON.parse(result.stdout) as UninstallJson).canonical_data_preserved).toEqual([
+        path.join('.orcaops', 'canonical-history'),
+      ]);
+      expect(await exists(databasePath)).toBe(true);
+      expect(await exists(p('.orcaops', 'artifacts'))).toBe(false);
+      expect(await exists(await effectiveConfigPath(repo.path))).toBe(false);
+      expect(
+        execFileSync('git', ['config', '--local', '--get', 'orcaops.projectid'], {
+          cwd: repo.path,
+          encoding: 'utf8',
+        }).trim()
+      ).toBe(projectId);
+      if (authoritySource === 'registered')
+        expect(await readFile(registrationPath)).toEqual(registration);
+      expect(await readFile(worktreeRegistrationPath)).toEqual(worktreeRegistration);
+    }
+  );
+
+  it('refuses an invalid history registration before purging owned files', async () => {
+    const dataRoot = p('.orcaops', 'canonical-history');
+    const a = makeAgent({
+      cwd: repo.path,
+      env: { CLAUDE_SESSION_ID: 'test-uninstall-unknown-history', ORCAOPS_DATA_DIR: dataRoot },
+    });
+    await a.runRaw(['init', '--scope', 'project', '--no-llm', '--agents-md']);
+    await mkdir(p('.orcaops', 'artifacts'), { recursive: true });
+    await writeFile(p('.orcaops', 'artifacts', 'retained.json'), '{}\n');
+    const commonDir = await new Repo(repo.path).getCommonDirAbsolute();
+    const registrationPath = path.join(commonDir, 'orcaops', 'registration.json');
+    await mkdir(path.dirname(registrationPath), { recursive: true });
+    await writeFile(registrationPath, '{"schema_version":1}\n');
+
+    const res = await a.runRaw(['uninstall', '--purge-data', '--json']);
+    expect(res.exitCode).toBe(1);
+    expect(JSON.parse(res.stdout).error.code).toBe('ACTIVATION_PENDING');
+    expect(await exists(p('.orcaops', 'artifacts', 'retained.json'))).toBe(true);
+    expect(await exists(await effectiveConfigPath(repo.path))).toBe(true);
+    expect(await lexists(p('AGENTS.md'))).toBe(true);
+  });
+
   it.each([[['uninstall', '--json']], [['uninstall', '--force', '--json']]])(
     'preserves an ahead-stamped skill whose newer manifest hash matches (%s)',
     async (cmd) => {
@@ -633,7 +751,8 @@ describe('orcaops uninstall', () => {
 
   it('finishes a purge when only an empty .orcaops directory remains', async () => {
     await agent.runRaw(['init', '--no-llm']);
-    expect((await agent.runRaw(['uninstall', '--purge-data'])).exitCode).toBe(0);
+    const first = await agent.runRaw(['uninstall', '--purge-data']);
+    expect(first.exitCode, first.stdout + first.stderr).toBe(0);
     await mkdir(p('.orcaops'));
 
     const res = await agent.runRaw(['uninstall', '--purge-data', '--json']);
@@ -1148,7 +1267,7 @@ describe('orcaops uninstall — personal (invisible) scope round-trip', () => {
   it('--purge-data deletes this store but retains shared exclusion ownership', async () => {
     await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
     const r = await agent.runRaw(['uninstall', '--purge-data', '--json']);
-    expect(r.exitCode).toBe(0);
+    expect(r.exitCode, r.stdout + r.stderr).toBe(0);
     expect(await exists(path.join(repo.path, '.orcaops'))).toBe(false);
     const exclude = await readFile(path.join(repo.path, '.git', 'info', 'exclude'), 'utf8').catch(
       () => ''

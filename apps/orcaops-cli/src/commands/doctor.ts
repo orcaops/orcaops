@@ -1,12 +1,5 @@
 import { run } from 'effection';
-import {
-  access,
-  constants as fsConstants,
-  readdir,
-  readFile,
-  realpath,
-  stat,
-} from 'node:fs/promises';
+import { access, constants as fsConstants, readdir, readFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -28,24 +21,15 @@ import {
   skillRef,
 } from '@orcaops/adapters';
 import {
-  type ArtifactSnapshot,
-  collectBaselineRefsForArtifact,
-  collectPrunableRefsForArtifact,
   commonConfigLocation,
-  computeArtifactHash,
-  computeUnresolvedBlocks,
-  listRawBaselineRefNames,
-  listRawSnapshotRefNames,
-  listSnapshotRefs,
   loadConfig,
-  materializeArtifactUsage,
-  parseBaselineRefName,
   Repo,
   resolveCloudTarget,
   resolveCredentialStore,
   scrubAndBound,
   worktreeState,
 } from '@orcaops/core';
+import { requireDatabaseExecutionContext } from '@orcaops/core/history/database-retention';
 import { runBoundedSubprocess } from '@orcaops/evaluator-protocol/subprocess';
 import {
   computeEvaluatorFingerprint,
@@ -64,62 +48,29 @@ import {
   type ProviderProbeSnapshot,
   selectDefaultProvider,
 } from '@orcaops/llm';
-import {
-  ensureProjectId,
-  ProjectIdentityError,
-  projectIdentityRecoveryGuidance,
-  readProjectId,
-} from '@orcaops/project-scope';
 import { type CredentialStore, getAuthState } from '@orcaops/sdk';
 import {
-  archiveProjectDir,
-  archiveRoot,
-  artifactPathsFor,
-  artifactsRoot,
-  ArtifactStore,
-  cacheDbPath,
   checkoutsRoot,
-  computeMirrorLag,
   type Config,
   ConfigValidationError,
-  type CorruptEntry,
-  CURRENT_VERSION,
-  DETERMINISTIC_CLOUD_SYNC_KINDS,
-  EMPTY_PROJECTION_DB,
-  hasArtifactEventLogs,
-  hasDurableCacheSources,
-  indexRoot,
-  inspectArtifactDeletionStaging,
-  inspectArtifactSources,
+  getDefaultConfig,
   listPinsForRepo,
-  loadRegistry,
-  parseCacheSchemaVersion,
   type Pin,
-  PLAN_IDEMPOTENCY_PENDING_REMEDY,
-  probeHotState,
-  readEventLog,
-  RecoveryRefusedError,
-  registryPath,
   resolveShellKey,
-  scanReviewPullRecordsForIntegrity,
-  sha256Hex,
-  sourcePlanCacheDir,
-  Store,
-  usageBlockedMissing,
 } from '@orcaops/storage';
+import { normalizeHistoryRoot } from '@orcaops/storage/history/authority';
+import { openProjectDatabase, ProjectDatabaseError } from '@orcaops/storage/history/database';
 
-import { archiveResolutionCommands } from './archive.js';
 import { inspectSeedClone, repairSeed } from './seed/index.js';
-import { readSeedState } from './seed/journal.js';
 import { CliExit } from '../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../io/output.js';
 import { CLI_VERSION } from '../lib/cli-version.js';
 import { resolveAgentSession } from '../lib/coding-session.js';
 import { displayConfigPath, resolvePersonalConfigForAdoption } from '../lib/config-file.js';
+import { type DatabaseDoctorResult, inspectDatabaseDoctorHistory } from '../lib/database-doctor.js';
 import { discoverEvaluatorsForCli } from '../lib/evaluator-discovery.js';
 import { computePackTrustDecisions, type PackTrustDecision } from '../lib/evaluator-grants.js';
 import { CLI_ROOT } from '../lib/evaluators-config.js';
-import { readDerivedCache } from '../lib/fingerprint-cache.js';
 import { hooksDirCandidates } from '../lib/git-hooks-dir.js';
 import { reconcileInfoExclude } from '../lib/git-info-exclude.js';
 import {
@@ -175,7 +126,6 @@ import {
   type SettingsSpec,
   settingsSpecs,
 } from '../lib/session-hooks.js';
-import { STALE_CHECKPOINT_HOURS } from '../lib/session-start-state.js';
 import {
   CLOUD_GATED_SKILL_IDS,
   enabledSkillTemplates,
@@ -189,25 +139,6 @@ import {
   liveCompanionInputs,
   resolveWatchCompanion,
 } from '../lib/watch-companion.js';
-
-// Shared with the session-start hook guidance so "stale open checkpoint"
-// means the same thing in doctor and in the hook's nudge.
-const STALE_HOURS = STALE_CHECKPOINT_HOURS;
-
-/**
- * Days threshold for the `aged-pin` check. Pin >7 days old on an
- * `active` artifact suggests the work has been parked or forgotten.
- */
-const PIN_AGE_DAYS_WARN = 7;
-
-/**
- * Per-evaluator dismiss-rate thresholds for the `evaluator-dismiss-rate`
- * check. We only flag evaluators with enough signal to be meaningful
- * (≥ MIN_RUNS) and a dismiss share that's high enough to look
- * systemic rather than incidental (≥ DISMISS_RATE_WARN).
- */
-const DISMISS_RATE_MIN_RUNS = 3;
-const DISMISS_RATE_WARN = 0.5;
 
 export type DoctorStatus = 'pass' | 'warn' | 'fail';
 
@@ -237,9 +168,8 @@ export interface DoctorOptions {
 }
 
 /**
- * `orcaops doctor` — diagnose adapter health, env, evaluator validity, cache
- * integrity, git repo state, and watchdog signals (stale active artifacts,
- * unresolved block-severity violations).
+ * `orcaops doctor` — diagnose adapter health, env, evaluator validity, registered
+ * database history, git repo state, and watchdog signals.
  *
  * Each check returns one of pass/warn/fail. Overall is the worst of any
  * check; exit code is 1 only on `fail` (warn does not block CI). The
@@ -313,7 +243,15 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
     }
   }
 
-  let store: Store | null = null;
+  let databaseHistory: DatabaseDoctorResult | null = null;
+  const appendDatabaseHistory = async (dispositionTtlDays: number) => {
+    try {
+      databaseHistory = await readCanonicalDoctorHistory(repoRoot, dispositionTtlDays);
+      checks.push(...databaseHistory.checks);
+    } catch (error) {
+      checks.push(databaseHistoryFailure(error));
+    }
+  };
   if (config) {
     const providerSnapshot =
       config.llm.tool === 'none'
@@ -325,39 +263,6 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
             })
           );
     defaultLlmProvider = selectDefaultProvider(config.llm.tool, providerSnapshot);
-    // Plain doctor is a read: a governed worktree that has captured nothing
-    // is inspected through an in-memory projection, because opening the real
-    // cache (or the deletion-recovery lock) would create it. `--fix` is a
-    // repair and opens the real store it may write to.
-    const emptyRead = probeHotState(repoRoot, config).empty && !opts.fix;
-    try {
-      if (emptyRead) {
-        store = new Store(EMPTY_PROJECTION_DB);
-        checks.push({
-          name: 'cache',
-          status: 'pass',
-          summary:
-            'no local hot state yet — nothing captured in this worktree; the cache is created by the first capture',
-        });
-      } else {
-        store = new Store(cacheDbPath(repoRoot, config), {
-          containmentRoot: repoRoot,
-          rebuildFreshProjection: hasDurableCacheSources(repoRoot, config),
-        });
-        checks.push(checkCacheSchema(store, hasArtifactEventLogs(repoRoot, config)));
-        const deletionRecovery = await checkArtifactDeletionRecovery(repoRoot, store);
-        if (deletionRecovery) checks.push(deletionRecovery);
-      }
-    } catch (err) {
-      store?.close();
-      store = null;
-      checks.push({
-        name: 'cache',
-        status: 'fail',
-        summary: `cannot open SQLite cache: ${(err as Error).message}`,
-        details: ['Try `orcaops rebuild` to drop and re-populate from JSON.'],
-      });
-    }
     checks.push(await guardRepositoryCheck('evaluators', () => checkEvaluators(repoRoot, config)));
     checks.push(checkLlmTool(config, providerSnapshot));
     checks.push(await guardRepositoryCheck('watch-companion', () => checkWatchCompanion()));
@@ -377,6 +282,11 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
     checks.push(
       await guardRepositoryCheck('command-evaluator-trust', async () =>
         checkCommandEvaluatorTrust(repoRoot, await resolvedDiscovery, defaultLlmProvider)
+      )
+    );
+    checks.push(
+      await guardRepositoryCheck('fingerprint-zero-match', () =>
+        checkFingerprintZeroMatch(repoRoot)
       )
     );
     checks.push(
@@ -407,85 +317,13 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
     checks.push(await checkGitHooks(repoRoot));
     checks.push(await checkSessionHooks(repoRoot, config));
     checks.push(await checkInfoExclude(repoRoot, config));
-  }
-
-  if (store) {
-    try {
-      checks.push(checkStaleArtifacts(store));
-      if (config) {
-        checks.push(await guardRepositoryCheck('seed', () => checkSeed(repoRoot, config, store)));
-      }
-      checks.push(checkPlanIdempotency(store));
-      checks.push(checkOpenCheckpointStale(store));
-      checks.push(checkUnresolvedBlocks(store));
-      // A local fault with a local remedy, so it runs on every machine — and it
-      // owns `content-invalid` now that `cloud-sync-pending` is gated.
-      const integrity = checkArtifactContentIntegrity(store);
-      if (integrity) checks.push(integrity);
-      checks.push(await checkUsageSourceHealth(store, config));
-      // Omitted, not passed: the check NAMES are themselves a trace, and every
-      // remediation they print names a command the gate hides.
-      if (gates.cloud) {
-        checks.push(checkCloudSyncPending(store));
-        checks.push(await checkCloudAuth());
-      }
-      checks.push(await checkLineageOrphans(repoRoot, store));
-      // Snapshot/fingerprint health. Both need `config` (for
-      // ArtifactStore + projection paths); config is non-null whenever
-      // store exists, but TS doesn't narrow across the `if (store)`
-      // boundary — mirror the `if (config)` guard at checkStaleDispositions.
-      if (config) {
-        checks.push(
-          await guardRepositoryCheck('stale-snapshot-refs', () =>
-            checkStaleSnapshotRefs(repoRoot, config, store)
-          )
-        );
-        checks.push(
-          await guardRepositoryCheck('stale-baseline-refs', () =>
-            checkStaleBaselineRefs(repoRoot, config, store)
-          )
-        );
-        checks.push(await checkScratchCheckouts(repoRoot));
-        checks.push(await checkSourcePlanPinIntegrity(repoRoot, config, store));
-        checks.push(await checkSkippedFingerprintRate(repoRoot, config, store));
-        checks.push(
-          await guardRepositoryCheck('stale-projection', () =>
-            checkStaleProjection(repoRoot, config, store)
-          )
-        );
-        checks.push(
-          await guardRepositoryCheck('event-log-corruption', () =>
-            checkEventLogCorruption(repoRoot, config, store)
-          )
-        );
-        // Archive health — mirror lag, identity drift, perms,
-        // index classification, and manifest derivability.
-        checks.push(...(await archiveChecks(repoRoot, config, store)));
-      }
-      // Local-only (needs just repoRoot): re-hash the review-pull cache.
-      checks.push(await checkReviewCacheIntegrity(repoRoot));
-      checks.push(checkEvaluatorDismissRates(store));
-      // Evaluator-health checks. Each is a
-      // bounded SQL query (no full-scan); see individual docblocks.
-      checks.push(await checkFingerprintZeroMatch(repoRoot));
-      checks.push(checkPersistentEvaluatorErrors(store));
-      if (config) checks.push(checkStaleDispositions(store, config));
-      checks.push(checkSkippedRunAnalytics(store));
-      checks.push(checkMaterializedDispositionConsistency(store));
-      // Pin-related doctor checks. All bounded by the
-      // per-repo pin set + per-artifact event log; OSS scale.
-      checks.push(checkShellKey());
-      const pinCtx = await loadPinContext(repoRoot, config);
-      if (pinCtx && config) {
-        checks.push(checkStalePins(pinCtx, store));
-        checks.push(checkAgedPins(pinCtx, store));
-        checks.push(checkPinOrphans(pinCtx, store));
-        checks.push(await checkSameSessionMultiActive(repoRoot, config, store));
-        checks.push(await checkPinDisplaced(repoRoot, config, store));
-      }
-    } finally {
-      store.close();
-    }
+    await appendDatabaseHistory(config.evaluators.disposition_ttl_days);
+    checks.push(await guardRepositoryCheck('usage-source', () => checkUsageSourceHealth()));
+    checks.push(await checkScratchCheckouts(repoRoot));
+    checks.push(checkShellKey());
+    if (gates.cloud) checks.push(await checkCloudAuth());
+  } else {
+    await appendDatabaseHistory(getDefaultConfig().evaluators.disposition_ttl_days);
   }
 
   // `--fix`: repair missing/stale skills, commands, and (unless bootstrap=manual)
@@ -543,20 +381,6 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
         const exec = await executeMutations(publishInstallManifestsLast(mutations), mode);
         const repaired = exec.changed.map((m) => m.path);
         if (!opts.dryRun) {
-          // Eager identity for repos without a minted id (fresh clones and
-          // worktrees lack the git-local config): --fix is
-          // a repair verb, so ensure `orcaops.projectid` here too (idempotent;
-          // plain doctor stays read-only). Best-effort — a failure never sinks
-          // the fix, and an INVALID stored id is refused by ensureProjectId
-          // (never replaced) so the archive-identity check keeps reporting it.
-          try {
-            const identity = await ensureProjectId(new Repo(repoRoot));
-            if (identity.minted) repaired.push('git config orcaops.projectid');
-          } catch {
-            // degraded or refused repo — the archive/identity checks already report it
-          }
-        }
-        if (!opts.dryRun) {
           // Repairs landed → re-run the install checks so the report reflects the
           // post-fix state and `overall` recomputes (green) below.
           replaceCheck(
@@ -587,7 +411,7 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
           replaceCheck(checks, await checkInfoExclude(repoRoot, currentConfig));
           replaceCheck(checks, await checkGitHooks(repoRoot));
         }
-        const seedNeedsRepair = checks.find((check) => check.name === 'seed')?.status === 'warn';
+        const seedNeedsRepair = databaseHistory?.seedNeedsRepair === true;
         let seedRepair: string | null = null;
         if (seedNeedsRepair) {
           if (opts.dryRun) {
@@ -595,19 +419,14 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
           } else {
             await repairSeed(repoRoot);
             seedRepair = 'resumed `orcaops seed --yes`';
-            const refreshedStore = new Store(cacheDbPath(repoRoot, currentConfig), {
-              containmentRoot: repoRoot,
-              rebuildFreshProjection: hasDurableCacheSources(repoRoot, currentConfig),
-            });
             try {
-              replaceCheck(
-                checks,
-                await guardRepositoryCheck('seed', () =>
-                  checkSeed(repoRoot, currentConfig, refreshedStore)
-                )
+              databaseHistory = await readCanonicalDoctorHistory(
+                repoRoot,
+                currentConfig.evaluators.disposition_ttl_days
               );
-            } finally {
-              refreshedStore.close();
+              for (const check of databaseHistory.checks) replaceCheck(checks, check);
+            } catch (error) {
+              replaceCheck(checks, databaseHistoryFailure(error));
             }
           }
         }
@@ -664,58 +483,68 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
   };
 }
 
-export async function checkSeed(
+async function readCanonicalDoctorHistory(
   repoRoot: string,
-  config: Config,
-  store: Store
-): Promise<DoctorCheck> {
-  const name = 'seed';
-  const { precious, journal } = await readSeedState(
-    new Repo(repoRoot),
-    getInvocationEnv(),
-    repoRoot,
-    config
-  );
-  const artifacts = store.listArtifacts();
-  const imported = artifacts.filter((artifact) => artifact.origin_kind === 'git-import').length;
-  const live = artifacts.length - imported;
-  const partial =
-    precious?.pending_importance === true ||
-    (journal !== null &&
-      Object.values(journal.clusters).some((cluster) =>
-        ['pending', 'writing', 'failed'].includes(cluster.status)
-      ));
+  dispositionTtlDays: number
+): Promise<DatabaseDoctorResult> {
+  const env = getInvocationEnv();
+  const root = await normalizeHistoryRoot({ env, cwd: repoRoot });
+  const context = await requireDatabaseExecutionContext({
+    cwd: repoRoot,
+    root: root.resolvedRoot,
+  });
+  const database = await openProjectDatabase({ authority: context.authority, mode: 'reader' });
+  try {
+    const pinContext = await loadPinContext(repoRoot);
+    const history = await inspectSeedClone(new Repo(repoRoot));
+    return await inspectDatabaseDoctorHistory({
+      database,
+      context,
+      pins: pinContext?.pins ?? [],
+      shellKey: resolveShellKey({ env }),
+      historyCommitCount: history.historyCommitCount,
+      dispositionTtlDays,
+    });
+  } finally {
+    database.close();
+  }
+}
 
-  if (partial) {
-    return {
-      name,
-      status: 'warn',
-      summary: `git-history import is partial (${imported} imported artifact(s))`,
-      details: ['Resume with `orcaops seed --yes` or run `orcaops doctor --fix`.'],
-    };
+function findProjectDatabaseError(error: unknown): ProjectDatabaseError | null {
+  const pending = [error];
+  const seen = new Set<unknown>();
+  while (pending.length) {
+    const current = pending.shift();
+    if (seen.has(current)) continue;
+    seen.add(current);
+    if (current instanceof ProjectDatabaseError) return current;
+    if (current instanceof AggregateError) pending.push(...current.errors);
+    if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
   }
-  if (artifacts.length > 0) {
-    return {
-      name,
-      status: 'pass',
-      summary: `${live} live and ${imported} imported artifact(s) available`,
-    };
-  }
-  const history = await inspectSeedClone(new Repo(repoRoot));
-  if (journal === null && history.historyCommitCount > 0) {
-    return {
-      name,
-      status: 'warn',
-      summary: 'git history exists but Orcaops has never been seeded',
-      details: [
-        'Preview with `orcaops seed --dry-run`; apply with `orcaops seed --yes` or `orcaops doctor --fix`.',
-      ],
-    };
-  }
+  return null;
+}
+
+export function databaseHistoryFailure(error: unknown): DoctorCheck {
+  const failure = findProjectDatabaseError(error);
+  const code = failure?.code ?? 'HISTORY_INACCESSIBLE';
+  const message =
+    failure?.message ??
+    (error instanceof Error ? error.message : 'Registered project history is unavailable');
+  const guidance =
+    code === 'HISTORY_MISSING'
+      ? 'Preserve the registration, SQLite companion files and retained evidence. Restore the original registered database from a verified backup if available; otherwise report this Doctor output for investigation. Setup cannot replace missing history.'
+      : code === 'HISTORY_INTEGRITY_REQUIRED'
+        ? 'Preserve the database, SQLite companion files, registration and retained evidence. Restore a verified backup if available; otherwise report this Doctor output for investigation. Doctor cannot reconstruct authoritative history.'
+        : code === 'STALE_CONTEXT'
+          ? 'History advanced during diagnosis; rerun doctor against the current registered state.'
+          : ['AUTHORITY_MISMATCH', 'HISTORY_UNEXPECTED_OWNER'].includes(code)
+            ? 'Use the exact registered project database and original repository authority.'
+            : 'Preserve the database and registration, correct the reported boundary, then run doctor again.';
   return {
-    name,
-    status: 'pass',
-    summary: journal === null ? 'no git history to seed' : 'seed completed with no imports',
+    name: 'history-database',
+    status: 'fail',
+    summary: `${code}: ${message}`,
+    details: [guidance],
   };
 }
 
@@ -752,36 +581,6 @@ async function guardRepositoryCheck(
       details: [(err as Error).message],
     };
   }
-}
-
-/**
- * Settle the per-artifact reads for a ref scan. Promise.all's
- * first-rejection race could let a recovery refusal mask a co-occurring
- * containment or programming failure on the same artifact — so every read
- * settles, any non-refusal rejection rethrows (surfacing as the call-site
- * guard's failing check), and the artifact is skipped (disclosed, refs
- * kept) only when every rejection is a recovery refusal.
- */
-async function settleRefScanReads<T extends readonly unknown[]>(
-  artifactId: string,
-  skipped: Array<{ id: string; reason: string }>,
-  reads: { [K in keyof T]: Promise<T[K]> }
-): Promise<T | null> {
-  const settled = await Promise.allSettled(reads);
-  const rejected = settled.filter(
-    (entry): entry is PromiseRejectedResult => entry.status === 'rejected'
-  );
-  for (const entry of rejected) {
-    if (!(entry.reason instanceof RecoveryRefusedError)) throw entry.reason;
-  }
-  if (rejected.length > 0) {
-    skipped.push({
-      id: artifactId,
-      reason: (rejected[0].reason as RecoveryRefusedError).message,
-    });
-    return null;
-  }
-  return settled.map((entry) => (entry as PromiseFulfilledResult<unknown>).value) as unknown as T;
 }
 
 /**
@@ -886,8 +685,7 @@ async function checkInit(repoRoot: string): Promise<DoctorCheck> {
 
 /**
  * `personal-scope`: the shared files a personal install depends on, reported
- * apart from the worktree's own hot state (the `cache` check) and from the
- * machine hooks (their own check). Names the effective source, verifies the
+ * apart from database history and the machine hooks. Names the effective source, verifies the
  * common config and ownership manifest are safely contained regular files,
  * and recognises the two residue shapes: an emptied manifest left by
  * uninstall, and a stale one a fresh init would replace.
@@ -977,166 +775,41 @@ async function checkPersonalScope(repoRoot: string): Promise<DoctorCheck> {
   };
 }
 
-function checkCacheSchema(store: Store, artifactEventLogsExist: boolean): DoctorCheck {
-  const versionRow = store.db
-    .prepare("SELECT value FROM schema_meta WHERE key = 'version'")
-    .get() as { value: string } | undefined;
-  const rawVersion = versionRow?.value ?? null;
-  const version = parseCacheSchemaVersion(rawVersion);
-  if (version !== CURRENT_VERSION) {
-    const renderedVersion =
-      version !== null
-        ? `v${version}`
-        : rawVersion === null
-          ? 'missing'
-          : JSON.stringify(rawVersion);
-    return {
-      name: 'cache',
-      status: 'fail',
-      summary: `cache schema ${renderedVersion} != CURRENT_VERSION (v${CURRENT_VERSION})`,
-      details: [
-        'Migrations should auto-apply on Store open; this state suggests a bug.',
-        'Try `orcaops rebuild` to drop and re-populate.',
-      ],
-    };
-  }
-  const counts = store.db
-    .prepare(
-      `SELECT
-         (SELECT COUNT(*) FROM artifacts) AS artifacts,
-         (SELECT COUNT(*) FROM checkpoints) AS checkpoints,
-         (SELECT COUNT(*) FROM evaluator_runs) AS evaluator_runs`
-    )
-    .get() as { artifacts: number; checkpoints: number; evaluator_runs: number };
-  if (store.projectionHealth === 'rebuild_pending') {
-    // Durable-source replay has not completed, so the counts above never
-    // describe a healthy projection.
-    return {
-      name: 'cache',
-      status: 'warn',
-      summary: `schema v${version} • projection rebuild pending`,
-      details: [
-        'The SQLite projection was recreated or wiped but durable-source replay has ' +
-          'not completed. Any orcaops command other than doctor (or ' +
-          '`orcaops rebuild`) will replay it; cache-dependent checks below ' +
-          'describe the unhealed projection.',
-      ],
-    };
-  }
-  if (store.projectionHealth === 'degraded') {
-    const skipped = store.projectionSkippedArtifacts;
-    return {
-      name: 'cache',
-      status: 'warn',
-      summary:
-        `schema v${version} • projection degraded` +
-        (skipped === null ? '' : ` • ${skipped} skipped artifact(s)`),
-      details: [
-        'A rebuild could not derive every artifact from its durable sources. ' +
-          '`orcaops gc --apply` is disabled until the projection is healthy.',
-        'Restore missing or malformed event data from an archive or backup, or move the ' +
-          'affected artifact directory out of `.orcaops/artifacts/` to explicitly accept its loss.',
-        'Then run `orcaops rebuild` followed by `orcaops doctor`.',
-      ],
-    };
-  }
-  if (counts.artifacts === 0 && artifactEventLogsExist) {
-    return {
-      name: 'cache',
-      status: 'warn',
-      summary: `schema v${version} • empty projection despite durable replay sources`,
-      details: [
-        'The cache contains no artifacts while durable event or usage logs remain. ' +
-          'Run `orcaops rebuild`, then `orcaops doctor`, and inspect any skipped artifacts.',
-      ],
-    };
-  }
-  return {
-    name: 'cache',
-    status: 'pass',
-    summary: `schema v${version} • ${counts.artifacts} artifact(s), ${counts.checkpoints} checkpoint(s), ${counts.evaluator_runs} evaluator run(s)`,
-  };
-}
-
-async function checkArtifactDeletionRecovery(
-  repoRoot: string,
-  store: Store
-): Promise<DoctorCheck | null> {
-  const inspection = await inspectArtifactDeletionStaging(repoRoot);
-  if (inspection.entries.length === 0 && inspection.problems.length === 0) return null;
-  if (inspection.problems.length > 0) {
-    return {
-      name: 'artifact-deletion-recovery',
-      status: 'fail',
-      summary: 'protected artifact deletion staging is ambiguous',
-      details: [
-        ...inspection.problems,
-        'Do not delete staged bytes. Correct path ownership or layout, then run `orcaops doctor` again.',
-      ],
-    };
-  }
-  return {
-    name: 'artifact-deletion-recovery',
-    status: 'warn',
-    summary: `${inspection.entries.length} protected artifact deletion(s) require reconciliation`,
-    details: [
-      `projection health is ${store.projectionHealth}`,
-      ...inspection.entries.map(
-        (entry) => `${entry.artifact_id}: ${entry.phase} at ${entry.staging_path}`
-      ),
-      inspection.entries.every((entry) => entry.phase === 'committed')
-        ? 'The deletion committed; correct filesystem access and rerun any orcaops command to finish cleanup and rebuild.'
-        : 'Run `orcaops rebuild`; prepared staged bytes will be restored before durable replay.',
-    ],
-  };
-}
-
-/**
- * Coding-agent usage health: the ledger is readable and, when an agent
- * session resolves (env evidence or invoking-agent discovery), its usage data
- * is locatable. `warn` (never `fail`) when an active session has no usage
- * data — usage tracking is best-effort and must not present as a broken
- * install. Copilot gets a targeted hint: its OTel file export is off by
- * default, so "no data" usually means the export env vars are missing.
- */
-async function checkUsageSourceHealth(store: Store, _config: Config | null): Promise<DoctorCheck> {
-  const sessions = store.listCodingSessions();
-  const totalRecords = sessions.reduce((sum, s) => sum + s.record_count, 0);
-  // Config v3 removed static config.agent; the discovery-fallback hint now
-  // comes from the runtime-resolved invoking agent (no-flag form — a health
-  // check must never throw on a bad --invoked-by-agent value).
+async function checkUsageSourceHealth(): Promise<DoctorCheck> {
   const invokedAgent = resolveInvokingAgent().agent;
   const resolved = await resolveAgentSession({
     env: getInvocationEnv(),
     cwd: getInvocationCwd(),
     invokingAgent: invokedAgent,
   });
-  let status: DoctorStatus = 'pass';
-  let transcriptNote: string;
   if (!resolved) {
-    transcriptNote =
-      'no active agent session (headless run, or no session env var / discovery match)';
-    if (invokedAgent === 'github-copilot') {
-      transcriptNote +=
-        '; Copilot sessions surface only via COPILOT_AGENT_SESSION_ID (CLI ≥ 1.0.29)';
-    }
-  } else {
-    const snap = await resolved.source.readUsage(resolved.sessionId, { cwd: getInvocationCwd() });
-    if (snap) {
-      transcriptNote = `${resolved.agent} usage found for session ${resolved.sessionId.slice(0, 8)}… (${snap.recordCount} record(s), via ${resolved.via})`;
-    } else {
-      transcriptNote = `no usage data found for active ${resolved.agent} session ${resolved.sessionId.slice(0, 8)}…`;
-      if (resolved.agent === 'github-copilot') {
-        transcriptNote +=
-          ' — enable Copilot OTel file export (COPILOT_OTEL_ENABLED=true, COPILOT_OTEL_EXPORTER_TYPE=file, COPILOT_OTEL_FILE_EXPORTER_PATH) before the session starts';
-      }
-      status = 'warn';
-    }
+    return {
+      name: 'usage-source',
+      status: 'pass',
+      summary:
+        invokedAgent === 'github-copilot'
+          ? 'no active agent session; Copilot requires COPILOT_AGENT_SESSION_ID (CLI ≥ 1.0.29)'
+          : 'no active agent session resolved from environment or local discovery',
+    };
+  }
+  const snapshot = await resolved.source.readUsage(resolved.sessionId, {
+    cwd: getInvocationCwd(),
+  });
+  if (snapshot) {
+    return {
+      name: 'usage-source',
+      status: 'pass',
+      summary: `${resolved.agent} usage found for session ${resolved.sessionId.slice(0, 8)}… (${snapshot.recordCount} record(s), via ${resolved.via})`,
+    };
   }
   return {
     name: 'usage-source',
-    status,
-    summary: `${sessions.length} coding session(s), ${totalRecords} usage record(s) in the ledger; ${transcriptNote}`,
+    status: 'warn',
+    summary:
+      `no usage data found for active ${resolved.agent} session ${resolved.sessionId.slice(0, 8)}…` +
+      (resolved.agent === 'github-copilot'
+        ? ' — enable Copilot OTel file export before the session starts'
+        : ''),
   };
 }
 
@@ -2533,673 +2206,6 @@ async function globalCloudResidue(config: Config, gates: SkillGates): Promise<st
   return lines;
 }
 
-function checkStaleArtifacts(store: Store): DoctorCheck {
-  const now = Date.now();
-  const cutoffMs = now - STALE_HOURS * 60 * 60 * 1000;
-  const rows = store.db
-    .prepare(
-      `SELECT a.id, a.branch, a.task, a.started_at,
-              COALESCE(
-                (SELECT MAX(closed_at) FROM checkpoints WHERE artifact_id = a.id),
-                a.started_at
-              ) AS last_activity
-       FROM artifacts a
-       WHERE a.status = 'active'`
-    )
-    .all() as Array<{
-    id: string;
-    branch: string;
-    task: string;
-    started_at: string;
-    last_activity: string;
-  }>;
-  const stale = rows.filter((r) => Date.parse(r.last_activity) < cutoffMs);
-  if (stale.length === 0) {
-    return {
-      name: 'stale-artifacts',
-      status: 'pass',
-      summary: `${rows.length} active artifact(s); none idle >${STALE_HOURS}h`,
-    };
-  }
-  const details = stale.map((r) => {
-    const ageH = Math.round((now - Date.parse(r.last_activity)) / (3600 * 1000));
-    return `  - ${r.id} (${r.branch}): ${ageH}h since last activity — "${truncate(r.task, 60)}"`;
-  });
-  details.push(
-    'Resolve by capturing a summary (`orcaops capture summary --input -`) or amending the artifact.'
-  );
-  return {
-    name: 'stale-artifacts',
-    status: 'warn',
-    summary: `${stale.length} active artifact(s) idle >${STALE_HOURS}h`,
-    details,
-  };
-}
-
-/**
- * `plan-idempotency` — reservations whose artifact never published a
- * plan: capture is refused (IDEMPOTENCY_PENDING) until the projection
- * is rebuilt or the operator confirms that no event was published.
- * Same `latestPlanRevisionN < 0` predicate as the capture-plan refusal,
- * so doctor cannot drift from it. Bounded by the reservation table.
- * pass/warn only.
- */
-function checkPlanIdempotency(store: Store): DoctorCheck {
-  const rows = store.db
-    .prepare(
-      `SELECT idempotency_key, artifact_id, created_at FROM plan_idempotency ORDER BY created_at`
-    )
-    .all() as Array<{ idempotency_key: string; artifact_id: string; created_at: string }>;
-  const planless = rows.filter((r) => store.latestPlanRevisionN(r.artifact_id) < 0);
-  if (planless.length === 0) {
-    return {
-      name: 'plan-idempotency',
-      status: 'pass',
-      summary: `${rows.length} plan reservation(s); all published`,
-    };
-  }
-  return {
-    name: 'plan-idempotency',
-    status: 'warn',
-    summary:
-      `${planless.length} planless plan-idempotency reservation(s) — ` +
-      `capture with these keys refuses (IDEMPOTENCY_PENDING)`,
-    details: [
-      ...planless
-        .slice(0, 5)
-        .map(
-          (r) =>
-            `  - key "${r.idempotency_key}" → artifact ${r.artifact_id} (reserved ${r.created_at})`
-        ),
-      ...(planless.length > 5 ? [`  …and ${planless.length - 5} more`] : []),
-      'A reservation with no cached plan means the winning capture is still in flight, died ' +
-        'before publishing, or published an event whose projections need recovery.',
-      PLAN_IDEMPOTENCY_PENDING_REMEDY,
-    ],
-  };
-}
-
-/**
- * `open-checkpoint-stale`: warn when an open checkpoint hasn't
- * progressed past its open-time threshold. The same `STALE_HOURS`
- * cap as stale-artifacts so a single env knob governs both.
- *
- * Defense-in-depth for the resume / status surfaces — pure-cache
- * doctor signal that surfaces "subagent X hung mid-flight" or
- * "open cp from yesterday's session was never closed".
- */
-function checkOpenCheckpointStale(store: Store): DoctorCheck {
-  const now = Date.now();
-  const cutoffMs = now - STALE_HOURS * 60 * 60 * 1000;
-  const rows = store.db
-    .prepare(
-      `SELECT artifact_id, n, agent_session_id, declared_step_ids, opened_at
-       FROM checkpoints
-       WHERE status = 'open'`
-    )
-    .all() as Array<{
-    artifact_id: string;
-    n: number;
-    agent_session_id: string | null;
-    declared_step_ids: string;
-    opened_at: string;
-  }>;
-  const stale = rows.filter((r) => Date.parse(r.opened_at) < cutoffMs);
-  if (rows.length === 0) {
-    return {
-      name: 'open-checkpoint-stale',
-      status: 'pass',
-      summary: 'no open checkpoints',
-    };
-  }
-  if (stale.length === 0) {
-    return {
-      name: 'open-checkpoint-stale',
-      status: 'pass',
-      summary: `${rows.length} open checkpoint(s); none idle >${STALE_HOURS}h`,
-    };
-  }
-  const details = stale.map((r) => {
-    const ageH = Math.round((now - Date.parse(r.opened_at)) / (3600 * 1000));
-    const declared = JSON.parse(r.declared_step_ids) as string[];
-    const who = r.agent_session_id ? ` (${r.agent_session_id})` : '';
-    return `  - ${r.artifact_id} cp #${r.n}${who}: declared [${declared.join(', ')}], idle ${ageH}h`;
-  });
-  details.push(
-    'Resolve by closing the cp (`orcaops capture checkpoint close`) or abandoning it (`orcaops capture checkpoint abandon`).'
-  );
-  return {
-    name: 'open-checkpoint-stale',
-    status: 'warn',
-    summary: `${stale.length} open checkpoint(s) idle >${STALE_HOURS}h`,
-    details,
-  };
-}
-
-/**
- * `cloud-sync-pending`: warn when the activity-window scan turns up
- * artifacts whose last eager push hasn't reached cloud, with extra
- * detail when one or more is stuck (consecutive_failures > 0). Bounded
- * by the same per-branch / windowed scan the drain helper uses, so it
- * never reads more than `limit` rows.
- *
- * Surface choice: doctor only flags `warn` when there are stuck
- * artifacts (real recorded failures). A backlog of "never synced yet"
- * is normal during an offline session and would be noise here.
- */
-function checkCloudSyncPending(store: Store): DoctorCheck {
-  const pending = store.getCloudSyncPendingArtifacts();
-  if (pending.length === 0) {
-    return {
-      name: 'cloud-sync-pending',
-      status: 'pass',
-      summary: 'no artifacts pending cloud sync',
-    };
-  }
-  const stuck = pending.filter((p) => p.cloud_consecutive_failures > 0);
-  if (stuck.length === 0) {
-    return {
-      name: 'cloud-sync-pending',
-      status: 'pass',
-      summary: `${pending.length} artifact(s) pending sync; none with recorded failures`,
-    };
-  }
-  const now = Date.now();
-  const oldestStuckMs = Math.min(
-    ...stuck
-      .map((p) => (p.cloud_last_push_attempt_at ? Date.parse(p.cloud_last_push_attempt_at) : NaN))
-      .filter((v) => !Number.isNaN(v))
-  );
-  const oldestAgeMin = Number.isFinite(oldestStuckMs)
-    ? Math.round((now - oldestStuckMs) / 60_000)
-    : null;
-  const details = stuck.slice(0, 5).map((p) => {
-    const failures = p.cloud_consecutive_failures;
-    const kind = p.cloud_last_push_error_kind ?? 'unknown';
-    // A `content-invalid` fault is deterministic (a disallowed control byte the
-    // wire assert caught), NOT transient — show the field path + the
-    // scrub+rebuild remediation so it isn't mistaken for something
-    // `resync --force` would clear.
-    // `upgrade-required` is equally deterministic for this binary: the cloud
-    // rejected its version/schema, so the generic resync-retry footer below
-    // would send the user in a circle.
-    if (kind === 'upgrade-required') {
-      return `  - ${p.id} (${p.branch}): upgrade-required (the cloud requires a newer CLI; upgrade your orcaops install, then \`orcaops resync\`)`;
-    }
-    return `  - ${p.id} (${p.branch}): ${failures}× ${kind}`;
-  });
-  if (stuck.length > 5) details.push(`  …and ${stuck.length - 5} more`);
-  // Suppress the force-retry suggestion when nothing stuck can clear with a
-  // bare retry — the per-entry lines above carry the real remediation.
-  const deterministic = new Set<string>(DETERMINISTIC_CLOUD_SYNC_KINDS);
-  const anyRetryable = stuck.some(
-    (p) => p.cloud_last_push_error_kind === null || !deterministic.has(p.cloud_last_push_error_kind)
-  );
-  details.push(
-    anyRetryable
-      ? 'Run `orcaops push-status` for the full list, or `orcaops resync --force` to retry ignoring backoff.'
-      : 'Run `orcaops push-status` for the full list. A bare retry will not clear these — apply the remediation above first, then `orcaops resync`.'
-  );
-  return {
-    name: 'cloud-sync-pending',
-    status: 'warn',
-    summary:
-      `${stuck.length} artifact(s) stuck on cloud sync` +
-      (oldestAgeMin === null ? '' : ` (oldest ${oldestAgeMin}m since last attempt)`),
-    details,
-  };
-}
-
-/**
- * `artifact-integrity` — artifacts carrying a disallowed control byte. A local
- * fault with a local remediation, so it runs regardless of the gate: the
- * credential-less machine is the one that can still fix it. Null when clean.
- */
-function checkArtifactContentIntegrity(store: Store): DoctorCheck | null {
-  const invalid = store
-    .getCloudSyncPendingArtifacts()
-    .filter((p) => p.cloud_last_push_error_kind === 'content-invalid');
-  if (invalid.length === 0) return null;
-  return {
-    name: 'artifact-integrity',
-    status: 'warn',
-    summary: `${invalid.length} artifact(s) contain a disallowed control byte`,
-    details: [
-      ...invalid.slice(0, 5).map((p) => {
-        const where = p.cloud_last_push_error_message
-          ? ` — ${p.cloud_last_push_error_message}`
-          : '';
-        return `  - ${p.id} (${p.branch})${where}`;
-      }),
-      ...(invalid.length > 5 ? [`  …and ${invalid.length - 5} more`] : []),
-      '  Scrub the disallowed byte from the event log + plan.json (recompute its',
-      '  checksum), then run `orcaops rebuild`. This is not transient and will not',
-      '  clear on its own.',
-    ],
-  };
-}
-
-/**
- * `stale-snapshot-refs` — local `refs/orcaops/snap/*` refs that should
- * no longer exist.
- *
- * Three flag classes, encoded to be *definitionally identical* to what
- * auto-prune removes (no drift):
- *
- *   - **orphan / malformed**: a raw namespace ref whose `artifact_id`
- *     is absent from the cache, OR a malformed-but-valid-git ref (no
- *     owning artifact by definition). Both are `prune --orphans`
- *     candidates.
- *   - **should-have-been-pruned**: the artifact has a summary AND its
- *     recorded `cloud_sync_state.hash` equals the hash of the SAME
- *     four projections sync feeds `computeArtifactHash` (the current
- *     fingerprint-bearing state actually synced) AND a surviving ref
- *     is in `collectPrunableRefsForArtifact`. Intentionally-kept refs
- *     (skipped close / abandon / in-flight open) and refs whose state
- *     has not yet synced (hash mismatch) are NEVER flagged.
- *   - An artifact in the strict-sync missing-manifest state (a closed
- *     cp declares a manifest_hash but its manifest is unloadable) has
- *     its refs KEPT — they are the only re-derivation material; that
- *     is `cloud-sync-pending`'s concern, surfaced here for `resync`.
- *
- * Parity is the typed `ArtifactSnapshot` contract — no reach into
- * `cloud/sync.ts`'s private `readSnapshot`, no new public surface. The
- * `ArtifactStore` reuses the doctor's shared cache `store` (the
- * `checkSameSessionMultiActive` precedent), so there is no extra
- * SQLite handle to close. `pass`/`warn` only — a ref leak is
- * recoverable, never `fail`.
- */
-async function checkStaleSnapshotRefs(
-  repoRoot: string,
-  config: Config,
-  store: Store
-): Promise<DoctorCheck> {
-  const repo = new Repo(repoRoot);
-  let rawRefs: string[];
-  let parsed: Awaited<ReturnType<typeof listSnapshotRefs>>;
-  try {
-    rawRefs = await listRawSnapshotRefNames(repo);
-    parsed = await listSnapshotRefs(repo);
-  } catch (err) {
-    return {
-      name: 'stale-snapshot-refs',
-      status: 'warn',
-      summary: `could not enumerate snapshot refs: ${(err as Error).message}`,
-    };
-  }
-  if (rawRefs.length === 0) {
-    return { name: 'stale-snapshot-refs', status: 'pass', summary: 'no snapshot refs' };
-  }
-
-  const parsedRefSet = new Set(parsed.map((e) => e.ref));
-  // Malformed-but-valid-git refs: in the raw set but not parseable →
-  // no owning artifact → orphan candidates (`prune --orphans` acts on
-  // these).
-  const orphanRefs: string[] = rawRefs.filter((r) => !parsedRefSet.has(r));
-
-  const byArtifact = new Map<string, typeof parsed>();
-  for (const e of parsed) {
-    const list = byArtifact.get(e.artifact_id) ?? [];
-    list.push(e);
-    byArtifact.set(e.artifact_id, list);
-  }
-
-  const artifactStore = new ArtifactStore({ repoRoot, config, store });
-  const shouldHaveBeenPruned: Array<{ id: string; count: number }> = [];
-  const missingManifest: string[] = [];
-  // Parseable refs whose checkpoint `n` is absent from the artifact's
-  // recovered checkpoints — a pin-before-append crash orphan (the ref
-  // was pinned but the checkpoint event never committed). The selector
-  // (`collectPrunableRefsForArtifact`) keeps these on purpose so the
-  // sync-layer auto-prune stays conservative; surfacing + cleaning them
-  // is doctor's + `snapshots prune --orphans`'s job. Without this, such a
-  // ref is invisible to every flag class above and the recommended prune
-  // is a dead end.
-  const unmodeledRefs: string[] = [];
-  const skipped: Array<{ id: string; reason: string }> = [];
-
-  for (const [artifactId, entries] of byArtifact) {
-    const row = store.db.prepare(`SELECT status FROM artifacts WHERE id = ?`).get(artifactId) as
-      | { status: string }
-      | undefined;
-    if (!row) {
-      for (const e of entries) orphanRefs.push(e.ref);
-      continue;
-    }
-    // A rot-refused artifact can't be analyzed for stale refs — skip it as a
-    // DISCLOSED row (refs kept) rather than abort the whole doctor run.
-    // Defensive by design: every artifact is read here, not just those
-    // carrying snapshot refs. Only a RecoveryRefusedError degrades —
-    // containment/symlink violations and programming errors propagate to
-    // the call-site guard and surface as this check FAILING, never a
-    // silent skip and never a dead report.
-    const reads = await settleRefScanReads(artifactId, skipped, [
-      artifactStore.readPlan(artifactId),
-      artifactStore.readCheckpointsRecovered(artifactId),
-      artifactStore.readSummary(artifactId),
-      artifactStore.readEvaluatorLog(artifactId),
-      artifactStore.readArtifact(artifactId),
-    ] as const);
-    if (reads === null) continue;
-    const [plan, checkpoints, summary, evaluators, artifact] = reads;
-    if (summary === null) continue; // in-flight — never auto-pruned, not stale
-    // Unmodeled (pin-before-append) refs: flagged BEFORE the
-    // missing-manifest / sync gates (which `continue`) because such a
-    // ref is stale regardless of fingerprint/sync state — its
-    // checkpoint `n` never committed. An in-flight OPEN cp has its `n`
-    // present in recovered checkpoints (status 'open') so it is NOT
-    // flagged here — only an `n` entirely absent from the recovered
-    // set is unmodeled.
-    const modeledN = new Set(checkpoints.map((c) => c.n));
-    for (const e of entries) {
-      if (!modeledN.has(e.n)) unmodeledRefs.push(e.ref);
-    }
-    // Missing-manifest guard: refs are recovery material; never flag.
-    let inMissingManifest = false;
-    for (const cp of checkpoints) {
-      if (cp.status !== 'closed') continue;
-      if (cp.diff_fingerprint_summary.manifest_hash === null) continue;
-      if ((await artifactStore.readCheckpointDiffFingerprint(artifactId, cp.n)) === null) {
-        inMissingManifest = true;
-        break;
-      }
-    }
-    if (inMissingManifest) {
-      missingManifest.push(artifactId);
-      continue;
-    }
-    // A pin whose content no longer hashes to its recorded hash is a drifted
-    // anchor — the push would fail integrity (cloud/sync.ts readSnapshot), so
-    // this artifact's current state cannot have synced and its prune-eligibility
-    // hash is untrustworthy. Skip its ref analysis SILENTLY; the dedicated
-    // `source-plan-pin-integrity` check owns surfacing the drift.
-    const sourcePlan = artifact?.source_plan ?? null;
-    if (sourcePlan && sha256Hex(sourcePlan.content) !== sourcePlan.hash) {
-      continue;
-    }
-    // Skip never-synced artifacts BEFORE building the snapshot — their current
-    // state cannot have synced, so materializing usage (a per-session window CTE)
-    // for them would be pure waste.
-    const syncState = store.getCloudSyncState(artifactId);
-    if (syncState === null) continue;
-    const snapshot: ArtifactSnapshot = {
-      plan,
-      checkpoints,
-      summary,
-      evaluators,
-      // Materialized so the prune-eligibility hash matches the push's stored
-      // hash for pinned artifacts (computeArtifactHash folds in {source_ref,
-      // hash}); null here would mis-flag every pinned artifact as unsynced.
-      source_plan: sourcePlan,
-      // Same parity reason for the usage anchor: the push folds it in,
-      // so doctor must materialize it identically or every usage-bearing artifact
-      // mis-flags as unsynced.
-      usage: materializeArtifactUsage(artifactStore, artifactId),
-      // Required by ArtifactSnapshot but ignored by computeArtifactHash —
-      // empty map keeps parity cast-free.
-      fingerprintByN: new Map(),
-    };
-    if (syncState.hash !== computeArtifactHash(snapshot)) {
-      continue; // current fingerprint-bearing state has not synced
-    }
-    const prunable = new Set(await collectPrunableRefsForArtifact(repo, artifactId, snapshot));
-    const survivors = entries.filter((e) => prunable.has(e.ref));
-    if (survivors.length > 0) {
-      shouldHaveBeenPruned.push({ id: artifactId, count: survivors.length });
-    }
-  }
-
-  const flagged =
-    orphanRefs.length +
-    unmodeledRefs.length +
-    shouldHaveBeenPruned.reduce((a, g) => a + g.count, 0);
-  if (flagged === 0) {
-    return {
-      name: 'stale-snapshot-refs',
-      status: 'pass',
-      summary:
-        `${rawRefs.length} snapshot ref(s); none stale` +
-        (missingManifest.length > 0
-          ? ` (${missingManifest.length} artifact(s) pending resync — refs intentionally kept)`
-          : '') +
-        (skipped.length > 0 ? ` (${skipped.length} artifact(s) unreadable — refs kept)` : ''),
-    };
-  }
-  const details: string[] = [];
-  if (orphanRefs.length > 0) {
-    details.push(`  orphan/malformed (no owning artifact): ${orphanRefs.length}`);
-    for (const r of orphanRefs.slice(0, 5)) details.push(`    - ${r}`);
-    if (orphanRefs.length > 5) details.push(`    …and ${orphanRefs.length - 5} more`);
-  }
-  if (unmodeledRefs.length > 0) {
-    details.push(
-      `  unmodeled (no checkpoint for that n — pin-before-append orphan): ${unmodeledRefs.length}`
-    );
-    for (const r of unmodeledRefs.slice(0, 5)) details.push(`    - ${r}`);
-    if (unmodeledRefs.length > 5) details.push(`    …and ${unmodeledRefs.length - 5} more`);
-  }
-  for (const g of shouldHaveBeenPruned) {
-    details.push(`  - ${g.id}: ${g.count} ref(s) synced but not auto-pruned`);
-  }
-  if (missingManifest.length > 0) {
-    details.push(
-      `  ${missingManifest.length} artifact(s) have an unloadable manifest — refs KEPT; ` +
-        'run `orcaops resync --force` after fixing the disk/permissions issue.'
-    );
-  }
-  if (skipped.length > 0) {
-    details.push(`  ${skipped.length} artifact(s) unreadable — refs KEPT:`);
-    for (const s of skipped.slice(0, 5)) details.push(`    - ${s.id}: ${s.reason}`);
-    if (skipped.length > 5) details.push(`    …and ${skipped.length - 5} more`);
-  }
-  details.push(
-    'Remediation: `orcaops snapshots prune --orphans --apply` (orphan/malformed/unmodeled); ' +
-      '`orcaops resync --force` then re-run doctor for synced-but-not-pruned.'
-  );
-  return {
-    name: 'stale-snapshot-refs',
-    status: 'warn',
-    summary: `${flagged} stale snapshot ref(s)`,
-    details,
-  };
-}
-
-/**
- * `stale-baseline-refs` — local `refs/orcaops/baseline/*` refs (the
- * plan-time baseline seed) that should no longer exist. The baseline
- * sibling of `stale-snapshot-refs`,
- * encoded to mirror what auto-prune removes (no drift):
- *
- *   - **orphan / malformed**: a raw baseline ref that does not
- *     `parseBaselineRefName` (a `…/<id>/garbage` malformed entry), OR whose
- *     parsed `artifact_id` is absent from the cache. Both are
- *     orphan/`prune`-candidate refs with no owning artifact.
- *   - **should-have-been-pruned**: the artifact has a summary AND its recorded
- *     `cloud_sync_state.hash` equals the hash of the SAME projections sync
- *     feeds `computeArtifactHash` (so its state actually synced) AND
- *     `collectBaselineRefsForArtifact` returns the surviving baseline ref (the
- *     artifact is finalized-and-accounted, so empty-fence recovery no longer
- *     needs the seed). In-flight / unsynced / kept-baseline artifacts are
- *     NEVER flagged — same gating as `stale-snapshot-refs`.
- *   - Missing-manifest / drifted-pin artifacts have their baseline ref KEPT
- *     and SILENTLY skipped, exactly as the snapshot check does.
- *
- * Per-artifact analysis is bounded by the (at most one-per-artifact) baseline
- * refs, themselves bounded by the repo artifact set. `pass`/`warn` only — a
- * ref leak is recoverable, never `fail`.
- */
-async function checkStaleBaselineRefs(
-  repoRoot: string,
-  config: Config,
-  store: Store
-): Promise<DoctorCheck> {
-  const repo = new Repo(repoRoot);
-  let rawRefs: string[];
-  try {
-    rawRefs = await listRawBaselineRefNames(repo);
-  } catch (err) {
-    return {
-      name: 'stale-baseline-refs',
-      status: 'warn',
-      summary: `could not enumerate baseline refs: ${(err as Error).message}`,
-    };
-  }
-  if (rawRefs.length === 0) {
-    return { name: 'stale-baseline-refs', status: 'pass', summary: 'no baseline refs' };
-  }
-
-  const artifactStore = new ArtifactStore({ repoRoot, config, store });
-  // Orphan/malformed: unparseable refs, plus parseable refs whose artifact has
-  // no cache row. Group the parseable ones by artifact_id for per-artifact
-  // analysis (a baseline namespace has at most one ref per artifact, but the
-  // unfiltered list can carry a malformed `…/<id>/garbage` sibling too).
-  const orphanRefs: string[] = [];
-  const byArtifact = new Map<string, string>();
-  for (const ref of rawRefs) {
-    const parsed = parseBaselineRefName(ref);
-    if (parsed === null) {
-      orphanRefs.push(ref); // malformed-but-valid-git — no owning artifact
-      continue;
-    }
-    byArtifact.set(parsed.artifact_id, ref);
-  }
-
-  const shouldHaveBeenPruned: string[] = [];
-  const missingManifest: string[] = [];
-  const skipped: Array<{ id: string; reason: string }> = [];
-
-  for (const [artifactId, ref] of byArtifact) {
-    const row = store.db.prepare(`SELECT status FROM artifacts WHERE id = ?`).get(artifactId) as
-      | { status: string }
-      | undefined;
-    if (!row) {
-      orphanRefs.push(ref); // parsed id has no owning artifact → orphan
-      continue;
-    }
-    // Rot-refused artifact: disclosed skip, refs kept (mirror
-    // checkStaleSnapshotRefs). Only a RecoveryRefusedError degrades —
-    // anything else propagates to the call-site guard and surfaces as
-    // this check FAILING.
-    const reads = await settleRefScanReads(artifactId, skipped, [
-      artifactStore.readPlan(artifactId),
-      artifactStore.readCheckpointsRecovered(artifactId),
-      artifactStore.readSummary(artifactId),
-      artifactStore.readEvaluatorLog(artifactId),
-      artifactStore.readArtifact(artifactId),
-    ] as const);
-    if (reads === null) continue;
-    const [plan, checkpoints, summary, evaluators, artifact] = reads;
-    if (summary === null) continue; // in-flight — baseline never auto-pruned, not stale
-    // Missing-manifest guard: refs are recovery material; never flag (parity
-    // with the snapshot check).
-    let inMissingManifest = false;
-    for (const cp of checkpoints) {
-      if (cp.status !== 'closed') continue;
-      if (cp.diff_fingerprint_summary.manifest_hash === null) continue;
-      if ((await artifactStore.readCheckpointDiffFingerprint(artifactId, cp.n)) === null) {
-        inMissingManifest = true;
-        break;
-      }
-    }
-    if (inMissingManifest) {
-      missingManifest.push(artifactId);
-      continue;
-    }
-    // Drifted-pin: its hash is untrustworthy, the push could not have synced —
-    // skip SILENTLY (source-plan-pin-integrity owns the surfacing).
-    const sourcePlan = artifact?.source_plan ?? null;
-    if (sourcePlan && sha256Hex(sourcePlan.content) !== sourcePlan.hash) {
-      continue;
-    }
-    // Skip never-synced artifacts before materializing usage (parity with the
-    // snapshot-staleness check above).
-    const syncState = store.getCloudSyncState(artifactId);
-    if (syncState === null) continue;
-    const snapshot: ArtifactSnapshot = {
-      plan,
-      checkpoints,
-      summary,
-      evaluators,
-      source_plan: sourcePlan,
-      // Usage materialized for hash parity with the push (see the
-      // snapshot-staleness check above).
-      usage: materializeArtifactUsage(artifactStore, artifactId),
-      fingerprintByN: new Map(),
-    };
-    if (syncState.hash !== computeArtifactHash(snapshot)) {
-      continue; // current fingerprint-bearing state has not synced
-    }
-    const prunable = await collectBaselineRefsForArtifact(repo, artifactId, snapshot);
-    if (prunable.includes(ref)) {
-      shouldHaveBeenPruned.push(artifactId);
-    }
-  }
-
-  const flagged = orphanRefs.length + shouldHaveBeenPruned.length;
-  if (flagged === 0) {
-    return {
-      name: 'stale-baseline-refs',
-      status: 'pass',
-      summary:
-        `${rawRefs.length} baseline ref(s); none stale` +
-        (missingManifest.length > 0
-          ? ` (${missingManifest.length} artifact(s) pending resync — refs intentionally kept)`
-          : '') +
-        (skipped.length > 0 ? ` (${skipped.length} artifact(s) unreadable — refs kept)` : ''),
-    };
-  }
-  const details: string[] = [];
-  if (orphanRefs.length > 0) {
-    details.push(`  orphan/malformed (no owning artifact): ${orphanRefs.length}`);
-    for (const r of orphanRefs.slice(0, 5)) details.push(`    - ${r}`);
-    if (orphanRefs.length > 5) details.push(`    …and ${orphanRefs.length - 5} more`);
-  }
-  for (const id of shouldHaveBeenPruned) {
-    details.push(`  - ${id}: baseline ref synced + accounted but not auto-pruned`);
-  }
-  if (missingManifest.length > 0) {
-    details.push(
-      `  ${missingManifest.length} artifact(s) have an unloadable manifest — refs KEPT; ` +
-        'run `orcaops resync --force` after fixing the disk/permissions issue.'
-    );
-  }
-  if (skipped.length > 0) {
-    details.push(`  ${skipped.length} artifact(s) unreadable — refs KEPT:`);
-    for (const s of skipped.slice(0, 5)) details.push(`    - ${s.id}: ${s.reason}`);
-    if (skipped.length > 5) details.push(`    …and ${skipped.length - 5} more`);
-  }
-  details.push(
-    'Remediation: `orcaops gc --apply` total-wipes a deleted artifact’s baseline ref; ' +
-      '`orcaops resync --force` then re-run doctor for synced-but-not-pruned.'
-  );
-  return {
-    name: 'stale-baseline-refs',
-    status: 'warn',
-    summary: `${flagged} stale baseline ref(s)`,
-    details,
-  };
-}
-
-/**
- * `scratch-checkouts` — scratch checkouts from `snapshots checkout` are
- * detached worktrees under the disposable checkouts cache root, and users
- * are told `rm -rf` is
- * fine — which leaves a stale worktree REGISTRATION in the repo's common dir
- * until `git worktree prune` runs. Heavy timetravel use accumulates them.
- * Reports registrations pointing under checkoutsRoot whose directory is gone.
- * Scoped strictly to THIS repo's registrations under the checkouts root: a
- * user's own worktrees (however broken) are never flagged, and dirs other
- * projects parked under the shared cache root are never counted or offered
- * for deletion. Fail-open like every doctor check.
- */
-/**
- * Live unmerged-index probe. While conflicts are unresolved, checkpoint
- * snapshots still capture but the conflicted paths are excluded from
- * per-line attribution — a warn keeps that visible on every doctor run
- * until the index is clean (non-pass checks always print, even without
- * --verbose). A null probe (git unavailable) passes with a skip summary:
- * unknown must never masquerade as clean OR as a conflict.
- */
 async function checkIndexConflicts(repoRoot: string): Promise<DoctorCheck> {
   const name = 'index-conflicts';
   try {
@@ -3289,476 +2295,6 @@ async function checkScratchCheckouts(repoRoot: string): Promise<DoctorCheck> {
   }
 }
 
-/**
- * `source-plan-pin-integrity` — a pinned source plan whose stored content no
- * longer hashes to its recorded hash. A drifted anchor: the push throws
- * `SourcePlanIntegrityError` (cloud/sync.ts readSnapshot) and the conformance
- * grade would be meaningless, so it must be re-pulled / re-pinned. This is a
- * distinct integrity failure from stale snapshot refs, so it stands as its own
- * check — `checkStaleSnapshotRefs` therefore SILENTLY skips a drifted-pin
- * artifact's prune analysis (its hash is untrustworthy) and leaves the surfacing
- * here. Reads `source_plan` off each artifact projection; bounded by the
- * per-repo artifact set (doctor is a cold path, and several checks already
- * iterate artifacts independently). `pass`/`warn` only — a drifted pin is
- * recoverable, never `fail`.
- */
-async function checkSourcePlanPinIntegrity(
-  repoRoot: string,
-  config: Config,
-  store: Store
-): Promise<DoctorCheck> {
-  const name = 'source-plan-pin-integrity';
-  const artifactStore = new ArtifactStore({ repoRoot, config, store });
-  const rows = store.db.prepare(`SELECT id FROM artifacts`).all() as Array<{ id: string }>;
-  let pinned = 0;
-  let unreadable = 0;
-  const drifted: string[] = [];
-  for (const { id } of rows) {
-    // readArtifact parse-throws on a corrupt/partial projection (and the rebuild
-    // path throws the "no plan_captured" invariant). This check reads EVERY
-    // artifact, so one bad projection would otherwise propagate out of runDoctor's
-    // catch-less if(store) block and replace the entire report with an error
-    // envelope — the worst case for the tool you run to FIND a broken artifact.
-    // Skip + count instead (surface the count; never swallow silently — corruption
-    // is otherwise invisible here, as checkCacheSchema inspects only the SQLite cache).
-    let artifact: Awaited<ReturnType<typeof artifactStore.readArtifact>>;
-    try {
-      artifact = await artifactStore.readArtifact(id);
-    } catch {
-      unreadable++;
-      continue;
-    }
-    const pin = artifact?.source_plan ?? null;
-    if (!pin) continue;
-    pinned++;
-    if (sha256Hex(pin.content) !== pin.hash) drifted.push(id);
-  }
-  const unreadableNote = unreadable > 0 ? ` (${unreadable} artifact(s) unreadable, skipped)` : '';
-  if (drifted.length === 0) {
-    return {
-      name,
-      status: 'pass',
-      summary:
-        (pinned === 0
-          ? 'no pinned source plans'
-          : `${pinned} pinned source plan(s); all content hashes match`) + unreadableNote,
-    };
-  }
-  const details = drifted.slice(0, 5).map((id) => `  - ${id}`);
-  if (drifted.length > 5) details.push(`  …and ${drifted.length - 5} more`);
-  details.push(
-    'A push would fail integrity for these. Re-pull the approved version ' +
-      '(`orcaops plan pull`) and re-pin via `capture plan --source-plan`, or re-capture the artifact.'
-  );
-  return {
-    name,
-    status: 'warn',
-    summary:
-      `${drifted.length} of ${pinned} pinned source plan(s) drifted from their content hash` +
-      unreadableNote,
-    details,
-  };
-}
-
-/**
- * `review-cache-integrity` — re-hash `sha256(body) === content_hash` over every
- * review-pull cache record (`plan review pull`'s candidates + proposals).
- * Sibling to `source-plan-pin-integrity` but over the OTHER cache: a drifted
- * review body means a `push --input` off that record could publish a body the
- * user never reviewed. LOCAL ONLY — no cloud reach, needs just repoRoot.
- * Readable cache content is `pass`/`warn` only because drift is recoverable by
- * re-pulling. An uninspectable or uncontained cache is `fail`; corrupt
- * (unparseable) files are surfaced in the summary rather than thrown.
- */
-async function checkReviewCacheIntegrity(repoRoot: string): Promise<DoctorCheck> {
-  const name = 'review-cache-integrity';
-  let scan: Awaited<ReturnType<typeof scanReviewPullRecordsForIntegrity>>;
-  try {
-    scan = await scanReviewPullRecordsForIntegrity(sourcePlanCacheDir(repoRoot), repoRoot);
-  } catch (err) {
-    return {
-      name,
-      status: 'fail',
-      summary: `cannot inspect review-pull cache: ${(err as Error).message}`,
-      details: [
-        'Restore `.orcaops/cache/source-plan` as an inspectable directory inside the repository, ' +
-          'then re-run `orcaops plan review pull`.',
-      ],
-    };
-  }
-  const { records, corrupt } = scan;
-  const corruptNote = corrupt > 0 ? ` (${corrupt} unparseable record(s), skipped)` : '';
-  const drifted = records.filter(({ record }) => sha256Hex(record.body) !== record.content_hash);
-  if (drifted.length === 0) {
-    return {
-      name,
-      status: corrupt > 0 ? 'warn' : 'pass',
-      summary:
-        (records.length === 0
-          ? 'no review-pull records'
-          : `${records.length} review-pull record(s); all content hashes match`) + corruptNote,
-    };
-  }
-  const label = ({ record }: (typeof drifted)[number]): string =>
-    record.target === 'proposal'
-      ? `  - proposal ${record.proposal_id} on ${record.external_id}`
-      : `  - candidate of ${record.external_id} (v${record.version_number})`;
-  const details = drifted.slice(0, 5).map(label);
-  if (drifted.length > 5) details.push(`  …and ${drifted.length - 5} more`);
-  details.push(
-    'A push/propose off these records could publish a body you never reviewed. ' +
-      'Re-run `orcaops plan review pull <ref>` to refresh them.'
-  );
-  return {
-    name,
-    status: 'warn',
-    summary:
-      `${drifted.length} of ${records.length} review-pull record(s) drifted from their content hash` +
-      corruptNote,
-    details,
-  };
-}
-
-/**
- * `skipped-fingerprint-rate` — fraction of recent closed checkpoints
- * whose diff-fingerprint capture was skipped. A high rate points at a
- * systemic problem (disk space, permissions, frequent unborn-repo,
- * parser failures) rather than incidental skips.
- *
- * The `checkpoints` cache table has no `diff_fingerprint_summary`
- * column, so this reads the
- * projection JSON. Bounded to the last 20 closed cps by `closed_at`
- * (the same bounded-scan shape as `checkPinDisplaced`). `warn` when
- * skipped exceeds 20%.
- */
-async function checkSkippedFingerprintRate(
-  repoRoot: string,
-  config: Config,
-  store: Store
-): Promise<DoctorCheck> {
-  const rows = store.db
-    .prepare(
-      `SELECT artifact_id, n FROM checkpoints
-       WHERE status = 'closed' AND closed_at IS NOT NULL
-       ORDER BY closed_at DESC LIMIT 20`
-    )
-    .all() as Array<{ artifact_id: string; n: number }>;
-  if (rows.length === 0) {
-    return {
-      name: 'skipped-fingerprint-rate',
-      status: 'pass',
-      summary: 'no closed checkpoints to sample',
-    };
-  }
-  let total = 0;
-  let skipped = 0;
-  const reasons = new Map<string, number>();
-  for (const r of rows) {
-    const projPath = artifactPathsFor(repoRoot, config, r.artifact_id).checkpointJson(r.n);
-    let proj: {
-      diff_fingerprint_summary?: { status?: string; error_reason?: string | null };
-    };
-    try {
-      proj = JSON.parse(await readFile(projPath, 'utf8')) as typeof proj;
-    } catch {
-      continue; // projection missing/unreadable — not counted
-    }
-    const fp = proj.diff_fingerprint_summary;
-    if (!fp || typeof fp.status !== 'string') continue;
-    total++;
-    if (fp.status === 'skipped') {
-      skipped++;
-      const reason = fp.error_reason ?? 'null (deliberate skip / disabled)';
-      reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
-    }
-  }
-  if (total === 0) {
-    return {
-      name: 'skipped-fingerprint-rate',
-      status: 'pass',
-      summary: 'no closed checkpoints carry a fingerprint summary',
-    };
-  }
-  const rate = skipped / total;
-  const pct = Math.round(rate * 100);
-  if (rate <= 0.2) {
-    return {
-      name: 'skipped-fingerprint-rate',
-      status: 'pass',
-      summary: `${skipped}/${total} recent closed cps skipped fingerprint (${pct}%)`,
-    };
-  }
-  const details = [...reasons.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([reason, n]) => `  - ${n}× ${reason}`);
-  details.push(
-    'Investigate error_reason patterns (disk space, permissions, frequent unborn-repo). ' +
-      'Use `orcaops fingerprint show --artifact <id> --checkpoint <n>` to inspect one.'
-  );
-  return {
-    name: 'skipped-fingerprint-rate',
-    status: 'warn',
-    summary: `${skipped}/${total} recent closed cps skipped fingerprint (${pct}% > 20%)`,
-    details,
-  };
-}
-
-function checkUnresolvedBlocks(store: Store): DoctorCheck {
-  const blockers = store.listArtifacts({}).flatMap((artifact) =>
-    computeUnresolvedBlocks(store.listEvaluatorRuns(artifact.id)).map((block) => ({
-      artifact_id: artifact.id,
-      ...block,
-    }))
-  );
-  if (blockers.length === 0) {
-    return {
-      name: 'unresolved-blocks',
-      status: 'pass',
-      summary: 'no unresolved block-severity evaluator failures',
-    };
-  }
-  const details = blockers.map(
-    (block) =>
-      `  - ${block.artifact_id} blocked by ${block.evaluator_ref} ` +
-      `(${block.kind}, run ${block.run_id})`
-  );
-  details.push(
-    'Policy violations can be acknowledged or dismissed. Evaluator errors must be rerun successfully.'
-  );
-  return {
-    name: 'unresolved-blocks',
-    status: 'warn',
-    summary: `${blockers.length} unresolved block-severity evaluator failure(s)`,
-    details,
-  };
-}
-
-/**
- * `lineage-orphan` — flag artifacts whose latest lineage SHA isn't
- * reachable from any local branch tip. The remediation is `orcaops
- * sync` from the branch where the artifact's work currently lives,
- * which appends a fresh lineage entry pointing at a reachable SHA.
- *
- * O(N artifacts × M branch tips) `git merge-base --is-ancestor`
- * invocations with short-circuit on the first reaching tip. Doctor
- * is not on the hot path, so this is fine for OSS-grade repo
- * sizes.
- */
-async function checkLineageOrphans(repoRoot: string, store: Store): Promise<DoctorCheck> {
-  const repo = new Repo(repoRoot);
-  let tips: string[];
-  try {
-    tips = await repo.listLocalBranchTips();
-  } catch (err) {
-    return {
-      name: 'lineage-orphan',
-      status: 'warn',
-      summary: `could not enumerate branch tips: ${(err as Error).message}`,
-    };
-  }
-  if (tips.length === 0) {
-    return {
-      name: 'lineage-orphan',
-      status: 'pass',
-      summary: 'no local branches — nothing to check',
-    };
-  }
-  const rows = store.db
-    .prepare(
-      `SELECT lbls.artifact_id, lbls.latest_lineage_sha, lbls.branch_name, a.task
-       FROM lineage_by_latest_sha lbls
-       LEFT JOIN artifacts a ON a.id = lbls.artifact_id`
-    )
-    .all() as Array<{
-    artifact_id: string;
-    latest_lineage_sha: string;
-    branch_name: string;
-    task: string | null;
-  }>;
-  if (rows.length === 0) {
-    return {
-      name: 'lineage-orphan',
-      status: 'pass',
-      summary: 'no captured artifacts to check',
-    };
-  }
-
-  const orphans: Array<{ id: string; branch_name: string; sha: string; task: string | null }> = [];
-  for (const row of rows) {
-    let reachable = false;
-    for (const tip of tips) {
-      if (await repo.isAncestor(row.latest_lineage_sha, tip)) {
-        reachable = true;
-        break;
-      }
-    }
-    if (!reachable) {
-      orphans.push({
-        id: row.artifact_id,
-        branch_name: row.branch_name,
-        sha: row.latest_lineage_sha,
-        task: row.task,
-      });
-    }
-  }
-
-  if (orphans.length === 0) {
-    return {
-      name: 'lineage-orphan',
-      status: 'pass',
-      summary: `${rows.length} artifact(s); all latest lineage SHAs reachable from a local branch`,
-    };
-  }
-  const details = orphans.map(
-    (o) =>
-      `  - ${o.id} (last on ${o.branch_name} @ ${o.sha.slice(0, 8)}): ` +
-      `"${truncate(o.task ?? '<unknown>', 60)}"`
-  );
-  details.push(
-    'Run `orcaops lineage` on the branch where this work lives to append a reachable lineage entry.'
-  );
-  return {
-    name: 'lineage-orphan',
-    status: 'warn',
-    summary: `${orphans.length} of ${rows.length} artifact(s) have unreachable latest lineage SHAs`,
-    details,
-  };
-}
-
-/**
- * `evaluator-dismiss-rate` — surface evaluators that get
- * persistently dismissed. Per the architecture's evaluator-revision
- * feedback loop ("persistently-dismissed evaluators get flagged for
- * revision rather than silently ignored"), an evaluator the agent
- * keeps overriding is signalling that the evaluator itself needs
- * work — either the prompt, the threshold, or removal.
- *
- * The denominator is *resolutions* (pass / dismissed /
- * acknowledged), not total runs — a violation is a transient input
- * state, not a resolution outcome. The rate "dismissed / resolved"
- * answers: of the times the evaluator's verdict was actually
- * resolved, what fraction was the agent rejecting it entirely?
- * Acks (formal breaking-change accepts via `on_block` opt-in) are
- * signal-not-noise and stay outside the dismissed numerator.
- *
- * Warns on any evaluator with ≥ MIN_RUNS resolutions AND ≥ WARN
- * dismiss share. The MIN_RUNS gate keeps "dismissed once out of
- * one run" from triggering immediately.
- */
-function checkEvaluatorDismissRates(store: Store): DoctorCheck {
-  // Two sources of "agent rejected an evaluator's verdict":
-  //   1. evaluator_runs with status='dismissed' (post-hoc dismiss
-  //      via `block dismiss`).
-  //   2. policy_exceptions[] applied at checkpoint-open time
-  //      (compile-time bypass via `policy_exceptions` payload).
-  //
-  // Both reflect the same signal: the evaluator's verdict was
-  // overridden. A single denominator unioning both sources keeps the
-  // dismiss-rate metric honest — without it, an evaluator that's
-  // routinely bypassed via policy_exceptions[] would never show up
-  // even if its block rate is uniformly overridden.
-  //
-  // SQLite's `json_each` parses the JSON array column inline.
-  //
-  // Outer aliases distinct from inner subquery columns (`total_resolved`
-  // / `total_dismissed`) — SQLite's UNION ALL alias-resolution rules
-  // bind `HAVING resolved` to the inner column, not the outer
-  // `SUM(resolved) AS resolved`, which silently drops aggregated rows
-  // whose inner per-source resolved happens to be < threshold.
-  const rawRows = store.db
-    .prepare(
-      // A resolution is anything that clears blocking: a pass run,
-      // OR a disposition event (acknowledged / dismissed /
-      // policy-excepted). The dismiss rate is dismissed / resolved
-      // by evaluator_ref.
-      `SELECT evaluator_ref AS evaluator,
-              SUM(resolved) AS total_resolved,
-              SUM(dismissed) AS total_dismissed
-       FROM (
-         SELECT evaluator_ref,
-                SUM(CASE WHEN run_status = 'completed' AND verdict = 'pass' THEN 1 ELSE 0 END)
-                  AS resolved,
-                0 AS dismissed
-         FROM evaluator_runs
-         GROUP BY evaluator_ref
-         UNION ALL
-         SELECT evaluator_ref,
-                COUNT(*) AS resolved,
-                SUM(CASE WHEN disposition IN ('dismissed', 'policy-excepted') THEN 1 ELSE 0 END) AS dismissed
-         FROM evaluator_dispositions
-         GROUP BY evaluator_ref
-       )
-       GROUP BY evaluator_ref
-       HAVING total_resolved >= ?
-       ORDER BY (CAST(total_dismissed AS REAL) / total_resolved) DESC, evaluator_ref ASC`
-    )
-    .all(DISMISS_RATE_MIN_RUNS) as Array<{
-    evaluator: string;
-    total_resolved: number;
-    total_dismissed: number;
-  }>;
-  const rows = rawRows.map((r) => ({
-    evaluator: r.evaluator,
-    resolved: r.total_resolved,
-    dismissed: r.total_dismissed,
-  }));
-
-  const flagged = rows.filter((r) => r.dismissed / r.resolved >= DISMISS_RATE_WARN);
-
-  if (rows.length === 0) {
-    return {
-      name: 'evaluator-dismiss-rate',
-      status: 'pass',
-      summary: `no evaluators with ≥ ${DISMISS_RATE_MIN_RUNS} resolutions yet — not enough signal`,
-    };
-  }
-  if (flagged.length === 0) {
-    return {
-      name: 'evaluator-dismiss-rate',
-      status: 'pass',
-      summary:
-        `${rows.length} evaluator(s) tracked; none above ` +
-        `${Math.round(DISMISS_RATE_WARN * 100)}% dismiss rate`,
-    };
-  }
-  const details = flagged.map((r) => {
-    const pct = Math.round((r.dismissed / r.resolved) * 100);
-    return `  - ${r.evaluator}: ${r.dismissed}/${r.resolved} resolutions dismissed (${pct}%)`;
-  });
-  details.push(
-    'Persistent dismissal usually means the evaluator needs revision (prompt, ' +
-      'threshold, watch_paths) — not silent compliance. Edit the spec inside its ' +
-      'pack (`<pack-root>/evaluators/<id>.eval.yaml`) or remove it from ' +
-      '`.orcaops/evaluators.yaml` via `orcaops eval disable`.'
-  );
-  return {
-    name: 'evaluator-dismiss-rate',
-    status: 'warn',
-    summary:
-      `${flagged.length} of ${rows.length} evaluator(s) above ${Math.round(
-        DISMISS_RATE_WARN * 100
-      )}% dismiss rate ` + `(min ${DISMISS_RATE_MIN_RUNS} resolutions)`,
-    details,
-  };
-}
-
-// ─── Pin-related checks ───────────────────────────────────────────────
-
-/**
- * `shell-key` — surface whether the current shell can mint a pin at all.
- *
- * `resolveShellKey()` walks the precedence chain (CLAUDE_SESSION_ID →
- * CLAUDE_CODE_SESSION_ID → CODEX_SESSION_ID → TMUX_PANE → STY+WINDOW →
- * TTY+ppid). When NONE of those env vars are present the shell silently
- * can't auto-pin, and `orcaops capture plan` no-ops the pin step without
- * surfacing why.
- *
- * Claude Code documents CLAUDE_CODE_SESSION_ID, which the chain now
- * consumes for the claude_session kind. Nuance worth keeping in mind:
- * implicit `--continue`/`--resume` may expose the STARTUP session id while
- * an explicit `--resume <id>` receives the resumed id — so a resumed
- * conversation's pin slot can differ from the original session's.
- */
 function checkShellKey(): DoctorCheck {
   const key = resolveShellKey({ env: getInvocationEnv() });
   if (key.kind === 'none') {
@@ -3791,7 +2327,6 @@ function checkShellKey(): DoctorCheck {
 }
 
 interface PinContext {
-  repoId: string;
   pins: Pin[];
 }
 
@@ -3801,455 +2336,15 @@ interface PinContext {
  * git-repo check, so doctor's report stays useful even if pins are
  * unreadable).
  */
-async function loadPinContext(
-  repoRoot: string,
-  _config: Config | null
-): Promise<PinContext | null> {
+async function loadPinContext(repoRoot: string): Promise<PinContext | null> {
   try {
     const repoId = await resolveRepoKey(new Repo(repoRoot));
     if (repoId === null) return null; // no identity → no pin store for this repo
     const pins = await listPinsForRepo({ repoId, env: getInvocationEnv() });
-    return { repoId, pins };
+    return { pins };
   } catch {
     return null;
   }
-}
-
-/**
- * `stale-pin` — pin pointing at a summarized, deleted, or missing
- * artifact. The picker treats these as stale and falls through to
- * branch-active resolution; doctor surfaces them so the user can
- * `orcaops checkout --clear` (in the offending shell).
- */
-function checkStalePins(ctx: PinContext, store: Store): DoctorCheck {
-  if (ctx.pins.length === 0) {
-    return { name: 'stale-pin', status: 'pass', summary: 'no pins to check' };
-  }
-  const stale: Array<{ pin: Pin; reason: string }> = [];
-  for (const pin of ctx.pins) {
-    const row = store.getArtifact(pin.artifact_id);
-    if (!row) {
-      stale.push({ pin, reason: 'artifact missing from index' });
-      continue;
-    }
-    if (row.status === 'complete') {
-      stale.push({ pin, reason: 'artifact summarized (work shipped)' });
-    }
-  }
-  if (stale.length === 0) {
-    return {
-      name: 'stale-pin',
-      status: 'pass',
-      summary: `${ctx.pins.length} pin(s); all targets are still in-flight`,
-    };
-  }
-  const details = stale.map(
-    (s) => `  - ${s.pin.artifact_id} (${s.pin.shell_key.kind}, branch=${s.pin.branch}): ${s.reason}`
-  );
-  details.push('Run `orcaops checkout --clear` from the affected shell to remove the stale pin.');
-  return {
-    name: 'stale-pin',
-    status: 'warn',
-    summary: `${stale.length} of ${ctx.pins.length} pin(s) point at non-in-flight artifacts`,
-    details,
-  };
-}
-
-/**
- * `aged-pin` — pin >7 days old whose target is still active. Suggests
- * the work has been parked or forgotten; user should confirm or
- * summarize.
- */
-function checkAgedPins(ctx: PinContext, store: Store): DoctorCheck {
-  if (ctx.pins.length === 0) {
-    return { name: 'aged-pin', status: 'pass', summary: 'no pins to check' };
-  }
-  const cutoffMs = Date.now() - PIN_AGE_DAYS_WARN * 24 * 60 * 60 * 1000;
-  const aged: Pin[] = [];
-  for (const pin of ctx.pins) {
-    const row = store.getArtifact(pin.artifact_id);
-    if (!row || row.status !== 'active') continue;
-    const pinnedMs = Date.parse(pin.pinned_at);
-    if (Number.isNaN(pinnedMs)) continue;
-    if (pinnedMs < cutoffMs) aged.push(pin);
-  }
-  if (aged.length === 0) {
-    return {
-      name: 'aged-pin',
-      status: 'pass',
-      summary: `no pins older than ${PIN_AGE_DAYS_WARN}d on active artifacts`,
-    };
-  }
-  const details = aged.map((pin) => {
-    const ageDays = Math.floor((Date.now() - Date.parse(pin.pinned_at)) / 86_400_000);
-    return `  - ${pin.artifact_id} (${pin.shell_key.kind}): pinned ${ageDays}d ago`;
-  });
-  details.push(
-    'Forgotten work? Either `orcaops capture summary` to ship, or ' +
-      '`orcaops checkout --clear` to release the pin.'
-  );
-  return {
-    name: 'aged-pin',
-    status: 'warn',
-    summary: `${aged.length} pin(s) older than ${PIN_AGE_DAYS_WARN}d on active artifact(s)`,
-    details,
-  };
-}
-
-/**
- * `pin-orphan` — active artifacts with no pin from any shell.
- * Informational only ("orphan; expected if you cleaned up shells"
- * per spec). Helps surface "I forgot which shell I was working in"
- * scenarios without flagging them as warnings.
- */
-function checkPinOrphans(ctx: PinContext, store: Store): DoctorCheck {
-  const pinnedIds = new Set(ctx.pins.map((p) => p.artifact_id));
-  const activeRows = store.db
-    .prepare(`SELECT id, branch, task FROM artifacts WHERE status = 'active'`)
-    .all() as Array<{ id: string; branch: string; task: string }>;
-  const orphans = activeRows.filter((r) => !pinnedIds.has(r.id));
-  if (orphans.length === 0) {
-    return {
-      name: 'pin-orphan',
-      status: 'pass',
-      summary: `${activeRows.length} active artifact(s); all pinned by some shell`,
-    };
-  }
-  const details = orphans.map((r) => `  - ${r.id} (${r.branch}): "${truncate(r.task, 60)}"`);
-  details.push(
-    'Active without a pin is fine if you cleaned up the shell. Run ' +
-      '`orcaops checkout <id>` from the shell that owns the work.'
-  );
-  return {
-    name: 'pin-orphan',
-    // Informational per spec: never warn/fail on orphan-pin alone.
-    status: 'pass',
-    summary: `${orphans.length} of ${activeRows.length} active artifact(s) have no pin`,
-    details,
-  };
-}
-
-/**
- * `same-session-multi-active` — multiple in-flight artifacts on the
- * same branch from the same `created_by_session_id`. Informational
- * only. Helps surface the "I forgot I was already working on this"
- * pattern without forcing action.
- *
- * `created_by_session_id` lives in artifact.json (not SQLite), so
- * each active artifact gets one filesystem read. Bounded by the
- * active-set size; OSS scale.
- */
-async function checkSameSessionMultiActive(
-  repoRoot: string,
-  config: Config,
-  store: Store
-): Promise<DoctorCheck> {
-  const activeRows = store.db
-    .prepare(`SELECT id, branch, task FROM artifacts WHERE status = 'active'`)
-    .all() as Array<{ id: string; branch: string; task: string }>;
-  if (activeRows.length === 0) {
-    return {
-      name: 'same-session-multi-active',
-      status: 'pass',
-      summary: 'no active artifacts to check',
-    };
-  }
-  // Read session_id from each artifact's artifact.json. Reusing
-  // ArtifactStore here is the safe path — recovery-on-read handles
-  // any transient inconsistency.
-  const artifactStore = new ArtifactStore({ repoRoot, config, store });
-  type Row = { id: string; branch: string; task: string; session_id: string };
-  const enriched: Row[] = [];
-  for (const r of activeRows) {
-    // Guard the per-artifact read: a corrupt/partial projection must not abort
-    // the whole doctor run (source-plan-pin-integrity reads + counts every
-    // artifact, so the unreadable total is surfaced there).
-    let json: Awaited<ReturnType<typeof artifactStore.readArtifact>>;
-    try {
-      json = await artifactStore.readArtifact(r.id);
-    } catch {
-      continue;
-    }
-    if (!json?.created_by_session_id) continue;
-    enriched.push({ ...r, session_id: json.created_by_session_id });
-  }
-  if (enriched.length === 0) {
-    return {
-      name: 'same-session-multi-active',
-      status: 'pass',
-      summary: 'no active artifacts have session_id metadata',
-    };
-  }
-  // Group by (branch, session_id).
-  const groups = new Map<string, Row[]>();
-  for (const r of enriched) {
-    const key = `${r.branch}::${r.session_id}`;
-    const list = groups.get(key) ?? [];
-    list.push(r);
-    groups.set(key, list);
-  }
-  const flagged = [...groups.values()].filter((g) => g.length > 1);
-  if (flagged.length === 0) {
-    return {
-      name: 'same-session-multi-active',
-      status: 'pass',
-      summary: `${enriched.length} active artifact(s); each unique (branch, session_id)`,
-    };
-  }
-  const details: string[] = [];
-  for (const g of flagged) {
-    const session = g[0].session_id;
-    const branch = g[0].branch;
-    details.push(`  - branch=${branch} session=${session.slice(0, 12)}…: ${g.length} active`);
-    for (const r of g) details.push(`      ${r.id}: "${truncate(r.task, 50)}"`);
-  }
-  return {
-    name: 'same-session-multi-active',
-    // Informational per spec: parallel feature work in the same shell
-    // is plausible (worktrees, etc.); doctor reports without warning.
-    status: 'pass',
-    summary: `${flagged.length} (branch, session) group(s) have >1 active artifact`,
-    details,
-  };
-}
-
-/**
- * `event-log-corruption` — artifacts whose `events.ndjson` carries
- * acknowledged-then-lost lines. This is the operator surface behind
- * recovery's fail-closed refusals: a read over a rotted log throws and
- * points here, and this check names the artifact, the line, and the
- * failure kind. Deliberately NOT gated on `archive.enabled` — hot-log
- * rot must surface in the default configuration. `fail` because a lost
- * line is data loss until the user restores the log or accepts it.
- * Truncated tails (crash mid-write, never acknowledged) are excluded
- * from the loss count but reported as `fail` details, since they block
- * captures until the partial line is removed.
- */
-async function checkEventLogCorruption(
-  repoRoot: string,
-  config: Config,
-  store: Store
-): Promise<DoctorCheck> {
-  // Union SQLite rows with on-disk artifact directories: rebuild skips an
-  // artifact whose plan.json is missing or malformed, leaving it row-less —
-  // exactly the artifact most likely to be corrupt, and this check is its
-  // only surface.
-  const ids = new Set<string>(store.listArtifacts({}).map((row) => row.id));
-  try {
-    for (const entry of await readdir(artifactsRoot(repoRoot, config), { withFileTypes: true })) {
-      if (entry.isDirectory()) ids.add(entry.name);
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-  }
-  if (ids.size === 0) {
-    return { name: 'event-log-corruption', status: 'pass', summary: 'no artifacts to check' };
-  }
-  const flagged: Array<{ id: string; entries: CorruptEntry[] }> = [];
-  const tails: string[] = [];
-  const uninspectable: string[] = [];
-  for (const id of [...ids].sort()) {
-    // Per-artifact containment: one symlinked or unreadable log must not
-    // abort the scan and mask every other artifact's findings.
-    let result;
-    try {
-      const paths = artifactPathsFor(repoRoot, config, id);
-      result = await readEventLog({
-        eventLogPath: paths.eventsNdjson,
-        sidecarsDir: paths.sidecarsDir,
-        containmentRoot: repoRoot,
-      });
-    } catch (err) {
-      uninspectable.push(
-        `  - ${id}: could not inspect events.ndjson — ${err instanceof Error ? err.message : String(err)}`
-      );
-      continue;
-    }
-    const lost = result.corrupt.filter((c) => c.kind !== 'truncated_tail');
-    if (lost.length > 0) flagged.push({ id, entries: lost });
-    for (const t of result.corrupt.filter((c) => c.kind === 'truncated_tail')) {
-      tails.push(
-        `  - ${id}: line ${t.line} is an unterminated partial write (crash residue, never acknowledged) — benign to read, but captures refuse until it is removed`
-      );
-    }
-  }
-  if (flagged.length === 0 && uninspectable.length === 0) {
-    return {
-      name: 'event-log-corruption',
-      // Crash tails BLOCK captures (appendAndMirror refuses), so a green
-      // doctor followed by a hard-failing capture would be a lie: fail.
-      status: tails.length > 0 ? 'fail' : 'pass',
-      summary:
-        tails.length > 0
-          ? `${ids.size} artifact(s); no lost lines, but ${tails.length} crash-truncated tail(s) block captures`
-          : `${ids.size} artifact(s); every event log verifies clean`,
-      ...(tails.length > 0 ? { details: tails } : {}),
-    };
-  }
-  const details = flagged.flatMap((f) =>
-    f.entries.map((e) => `  - ${f.id}: line ${e.line} (${e.kind}) — ${e.reason}`)
-  );
-  // Crash tails and uninspectable artifacts stay visible even when other
-  // artifacts have lost lines — each blocks or hides work regardless.
-  details.push(...tails);
-  details.push(...uninspectable);
-  if (flagged.length > 0) {
-    details.push(
-      'Reads that depend on the lost lines fail closed. Restore events.ndjson from a ' +
-        'backup or the archive mirror, or delete the artifact to accept the loss.'
-    );
-  }
-  // An uninspectable-only result is NOT "0 corrupt lines" — no loss was
-  // established either way; say what actually happened.
-  const summary =
-    flagged.length > 0
-      ? `${flagged.length} artifact(s) have corrupt event-log lines — dependent reads fail closed`
-      : `${uninspectable.length} artifact(s) could not be inspected — resolve access/containment and re-run` +
-        (tails.length > 0 ? `; ${tails.length} crash-truncated tail(s) block captures` : '');
-  return {
-    name: 'event-log-corruption',
-    status: 'fail',
-    summary,
-    details,
-  };
-}
-
-/**
- * `pin-displaced` — pin_displaced events on still-active or blocked
- * artifacts. The pin moved away from these artifacts while they were
- * still in flight; the user may have abandoned them. Surface so they
- * can run `capture summary` or `block dismiss`.
- */
-async function checkPinDisplaced(
-  repoRoot: string,
-  config: Config,
-  store: Store
-): Promise<DoctorCheck> {
-  const inFlight = store.db
-    .prepare(`SELECT id, branch, task FROM artifacts WHERE status IN ('active')`)
-    .all() as Array<{ id: string; branch: string; task: string }>;
-  if (inFlight.length === 0) {
-    return {
-      name: 'pin-displaced',
-      status: 'pass',
-      summary: 'no active artifacts to check',
-    };
-  }
-  const flagged: Array<{ id: string; task: string; count: number; lastDisplacedAt: string }> = [];
-  for (const row of inFlight) {
-    const paths = artifactPathsFor(repoRoot, config, row.id);
-    const result = await readEventLog({
-      eventLogPath: paths.eventsNdjson,
-      sidecarsDir: paths.sidecarsDir,
-      containmentRoot: repoRoot,
-    });
-    const displaced = result.events.filter((e) => e.type === 'pin_displaced');
-    if (displaced.length === 0) continue;
-    const last = displaced[displaced.length - 1];
-    flagged.push({ id: row.id, task: row.task, count: displaced.length, lastDisplacedAt: last.ts });
-  }
-  if (flagged.length === 0) {
-    return {
-      name: 'pin-displaced',
-      status: 'pass',
-      summary: `${inFlight.length} active artifact(s); none have pin_displaced events`,
-    };
-  }
-  const details = flagged.map(
-    (f) =>
-      `  - ${f.id}: ${f.count} pin_displaced event(s); last at ${f.lastDisplacedAt}; ` +
-      `task="${truncate(f.task, 40)}"`
-  );
-  details.push(
-    'A still-active artifact whose pin moved away is often abandoned work. ' +
-      'Run `orcaops capture summary` to ship it, or ' +
-      '`orcaops block dismiss` if it was a false alarm.'
-  );
-  return {
-    name: 'pin-displaced',
-    status: 'warn',
-    summary: `${flagged.length} active artifact(s) had their pin displaced — work parked?`,
-    details,
-  };
-}
-
-/**
- * `stale-projection` — the SQLite `plan_steps` projection is empty for an
- * artifact whose event log DOES contain a `plan_captured` event. That is the
- * signature of a schema migration that DROP+recreated `plan_steps` (e.g.
- * migration 015/016) without a following `orcaops rebuild`:
- * `getLatestPlanRevision` then returns zero steps, so `orcaops status` renders
- * the artifact plan-less even though the event log (source of truth) is intact.
- * `warn` — the data is recoverable via `orcaops rebuild`; this is refresh
- * hygiene, not corruption. (Bounded scan: one cheap plan-row read per artifact,
- * event-log read only for the already-empty ones — same shape as
- * `checkPinDisplaced`.)
- */
-async function checkStaleProjection(
-  repoRoot: string,
-  config: Config,
-  store: Store
-): Promise<DoctorCheck> {
-  const artifacts = store.listArtifacts({});
-  if (artifacts.length === 0) {
-    return { name: 'stale-projection', status: 'pass', summary: 'no artifacts to check' };
-  }
-  const flagged: Array<{ id: string; task: string; lag: string }> = [];
-  for (const row of artifacts) {
-    // "Empty" = no plan row OR a plan row with zero steps. A captured plan
-    // always has >=1 step, so zero means the projection was dropped by a
-    // migration and not yet rebuilt.
-    const latest = store.getLatestPlanRevision(row.id);
-    const planProjectionEmpty = latest === null || latest.steps.length === 0;
-    // A summary row missing while the log carries summary_captured is a crash
-    // between the durable append and the cache write. It strands one artifact
-    // rather than the whole projection, so it gets its own reason string.
-    const summaryProjectionMissing = store.getSummary(row.id) === null;
-    if (!planProjectionEmpty && !summaryProjectionMissing) continue;
-    // Confirm the events actually exist in the log — otherwise the artifact is
-    // legitimately plan-less or unsummarized, not stale.
-    const paths = artifactPathsFor(repoRoot, config, row.id);
-    const result = await readEventLog({
-      eventLogPath: paths.eventsNdjson,
-      sidecarsDir: paths.sidecarsDir,
-      containmentRoot: repoRoot,
-    });
-    const reasons: string[] = [];
-    if (planProjectionEmpty && result.events.some((e) => e.type === 'plan_captured')) {
-      reasons.push('plan_steps projection empty but the event log has a plan_captured event');
-    }
-    if (summaryProjectionMissing && result.events.some((e) => e.type === 'summary_captured')) {
-      reasons.push('no summaries row but the event log has a summary_captured event');
-    }
-    if (reasons.length > 0) {
-      flagged.push({ id: row.id, task: row.task, lag: reasons.join('; ') });
-    }
-  }
-  if (flagged.length === 0) {
-    return {
-      name: 'stale-projection',
-      status: 'pass',
-      summary: `${artifacts.length} artifact(s); projections in sync with the event log`,
-    };
-  }
-  const details = flagged.map((f) => `  - ${f.id}: ${f.lag}; task="${truncate(f.task, 40)}"`);
-  details.push(
-    'A schema migration that DROP+recreates a projection, or a crash between a ' +
-      'durable event append and the cache write, leaves the projection behind the ' +
-      'log until rebuilt. Run `orcaops rebuild` to re-project from the event log. ' +
-      'Do not delete the artifact directory or the project archive — the cache ' +
-      'outlives both, and removing them makes the disagreement worse.'
-  );
-  return {
-    name: 'stale-projection',
-    status: 'warn',
-    summary: `${flagged.length} artifact(s) have a projection behind the event log — run \`orcaops rebuild\``,
-    details,
-  };
-}
-
-function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
 
 const DOCTOR_SECTIONS = [
@@ -4261,7 +2356,6 @@ const DOCTOR_SECTIONS = [
       'init',
       'personal-scope',
       'config',
-      'cache',
       'llm-tool',
       'watch-companion',
     ]),
@@ -4283,23 +2377,25 @@ const DOCTOR_SECTIONS = [
   {
     name: 'artifact state',
     checks: new Set([
-      'archive',
+      'artifact-integrity',
       'cloud-auth',
-      'event-log-corruption',
-      'plan-idempotency',
       'cloud-sync-pending',
+      'execution-history',
+      'focus',
+      'git-publications',
+      'history-database',
+      'lineage-identity',
       'lineage-orphan',
       'open-checkpoint-stale',
-      'review-cache-integrity',
+      'plan-idempotency',
+      'session-history',
       'seed',
       'scratch-checkouts',
-      'skipped-fingerprint-rate',
+      'source-plan-history',
       'source-plan-pin-integrity',
       'stale-artifacts',
-      'stale-baseline-refs',
-      'stale-projection',
-      'stale-snapshot-refs',
       'unresolved-blocks',
+      'usage-history',
       'usage-source',
     ]),
   },
@@ -4311,8 +2407,9 @@ const DOCTOR_SECTIONS = [
       'evaluator-dismiss-rate',
       'evaluators',
       'fingerprint-zero-match',
-      'materialized-disposition-consistency',
       'persistent-evaluator-errors',
+      'materialized-disposition-consistency',
+      'skipped-fingerprint-rate',
       'skipped-run-analytics',
       'stale-dispositions',
     ]),
@@ -4332,7 +2429,6 @@ const DOCTOR_SECTIONS = [
 ] as const;
 
 function doctorSection(checkName: string): string {
-  if (checkName.startsWith('archive-')) return 'artifact state';
   return DOCTOR_SECTIONS.find((section) => section.checks.has(checkName))?.name ?? 'other';
 }
 
@@ -4392,82 +2488,51 @@ function formatHumanReport(report: DoctorReport, verbose: boolean): string {
 // Evaluator-health doctor checks.
 // =====================================================================
 
-/**
- * `fingerprint-zero-match` — flag evaluators whose `fingerprint.include`
- * patterns expand to zero files in the current repo. Such evaluators
- * are running blind: their soft-block replay key has no inputs, so
- * the runner cannot tell when the bytes-they-care-about have changed.
- * Usually means the pattern is stale or the user moved the watched
- * directory.
- *
- * Live re-compute via `computeEvaluatorFingerprint` for each configured
- * evaluator — no storage path, the data is not persisted.
- */
 async function checkFingerprintZeroMatch(repoRoot: string): Promise<DoctorCheck> {
   try {
     const { evaluators, errors } = await discoverEvaluatorsForCli(repoRoot);
-    // A failed pack load shrinks the set this check reasons over, so a clean
-    // result would otherwise read as "all fingerprints fine" over a
-    // truncated world.
     if (errors.length > 0) {
       return {
         name: 'fingerprint-zero-match',
         status: 'warn',
-        summary:
-          `${errors.length} evaluator discovery problem(s); fingerprint coverage was checked over ` +
-          `${evaluators.length} evaluator(s) only`,
-        details: errors.map((err) => `${err.source_path}: ${err.message}`),
+        summary: `${errors.length} evaluator discovery problem(s); checked ${evaluators.length} available evaluator(s)`,
+        details: errors.map((error) => `${error.source_path}: ${error.message}`),
       };
     }
     const offenders: Array<{ ref: string; empty: string[] }> = [];
-    for (const ev of evaluators) {
+    for (const evaluator of evaluators) {
       try {
-        const fp = await computeEvaluatorFingerprint(ev);
-        if (fp.empty_patterns.length > 0) {
-          offenders.push({ ref: ev.ref, empty: fp.empty_patterns });
-        }
+        const fingerprint = await computeEvaluatorFingerprint(evaluator);
+        if (fingerprint.empty_patterns.length)
+          offenders.push({ ref: evaluator.ref, empty: fingerprint.empty_patterns });
       } catch {
-        // Individual fingerprint failures don't block the check; the
-        // evaluator's own discovery already surfaced any structural
-        // issues.
+        continue;
       }
     }
-    if (offenders.length === 0) {
-      return {
-        name: 'fingerprint-zero-match',
-        status: 'pass',
-        summary: `${evaluators.length} evaluator(s) checked; all fingerprint.include patterns matched at least one file`,
-      };
-    }
+    return offenders.length
+      ? {
+          name: 'fingerprint-zero-match',
+          status: 'warn',
+          summary: `${offenders.length} evaluator(s) have fingerprint patterns that match no files`,
+          details: offenders.flatMap(({ ref, empty }) => [
+            `  - ${ref}:`,
+            ...empty.map((pattern) => `      - ${pattern}`),
+          ]),
+        }
+      : {
+          name: 'fingerprint-zero-match',
+          status: 'pass',
+          summary: `${evaluators.length} evaluator(s) checked; all fingerprint patterns matched files`,
+        };
+  } catch (error) {
     return {
       name: 'fingerprint-zero-match',
       status: 'warn',
-      summary: `${offenders.length} evaluator(s) have fingerprint.include patterns that match no files`,
-      details: offenders.flatMap((o) => [`  - ${o.ref}:`, ...o.empty.map((p) => `      - ${p}`)]),
-    };
-  } catch (err) {
-    return {
-      name: 'fingerprint-zero-match',
-      status: 'warn',
-      summary: `discovery failed: ${(err as Error).message}`,
+      summary: `discovery failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }
 
-/**
- * `command-evaluator-trust` — flag packs whose capability-requiring
- * evaluators dispatch would refuse. The detail text is the shared
- * decision/gate reason, not a parallel offender taxonomy.
- */
-/**
- * Report per-pack consent status by running the SAME gate dispatch
- * enforces — the shared trust decisions AND the per-evaluator capability
- * coverage check, under the provider the config resolves for evaluators
- * that declare none. Anything less disagrees with enforcement: a
- * verdict-only read passes a capability-short grant dispatch refuses,
- * and classifying without the effective provider skips an ungranted
- * implicit-codex pack as "not gated".
- */
 async function checkCommandEvaluatorTrust(
   repoRoot: string,
   discovery: Awaited<ReturnType<typeof discoverEvaluators>>,
@@ -4549,488 +2614,4 @@ async function checkCommandEvaluatorTrust(
     summary: `${offenders.length} pack(s) need trust attention`,
     details,
   };
-}
-
-/**
- * `persistent-evaluator-errors` — flag evaluator_refs whose last N
- * runs were all `run_status='error'`. Persistent errors mean the
- * evaluator can't even produce a verdict — needs investigation
- * (broken runtime, missing env, params drift).
- */
-function checkPersistentEvaluatorErrors(store: Store): DoctorCheck {
-  const MIN_CONSECUTIVE = 3;
-  // Per-ref: count of consecutive error rows in trailing window,
-  // bounded by total runs to avoid degenerate "1 error of 1 run"
-  // false positives.
-  const rows = store.db
-    .prepare(
-      `WITH ranked AS (
-         SELECT
-           evaluator_ref,
-           run_status,
-           ROW_NUMBER() OVER (PARTITION BY evaluator_ref ORDER BY ts DESC) AS rn
-         FROM evaluator_runs
-       )
-       SELECT evaluator_ref,
-              SUM(CASE WHEN rn <= ? AND run_status = 'error' THEN 1 ELSE 0 END) AS trailing_errors,
-              COUNT(*) AS total_runs
-       FROM ranked
-       GROUP BY evaluator_ref
-       HAVING trailing_errors >= ? AND total_runs >= ?`
-    )
-    .all(MIN_CONSECUTIVE, MIN_CONSECUTIVE, MIN_CONSECUTIVE) as Array<{
-    evaluator_ref: string;
-    trailing_errors: number;
-    total_runs: number;
-  }>;
-  if (rows.length === 0) {
-    return {
-      name: 'persistent-evaluator-errors',
-      status: 'pass',
-      summary: `no evaluator has ≥${MIN_CONSECUTIVE} consecutive errors in its trailing runs`,
-    };
-  }
-  return {
-    name: 'persistent-evaluator-errors',
-    status: 'warn',
-    summary: `${rows.length} evaluator(s) with persistent errors (≥${MIN_CONSECUTIVE} consecutive in trailing runs)`,
-    details: rows.map(
-      (r) => `  - ${r.evaluator_ref}: ${r.trailing_errors}/${r.total_runs} trailing runs errored`
-    ),
-  };
-}
-
-/**
- * `stale-dispositions` — flag dispositions older than
- * `evaluators.disposition_ttl_days`. Old dispositions accumulate as
- * the underlying issue evolves; reviewers should revisit them
- * periodically rather than treating an ack from 6 months ago as
- * still-applicable.
- */
-function checkStaleDispositions(store: Store, config: Config): DoctorCheck {
-  const ttlDays = config.evaluators.disposition_ttl_days;
-  const cutoff = `-${ttlDays} days`;
-  const rows = store.db
-    .prepare(
-      `SELECT evaluator_ref, disposition, ts
-       FROM evaluator_dispositions
-       WHERE ts < datetime('now', ?)
-       ORDER BY ts ASC`
-    )
-    .all(cutoff) as Array<{
-    evaluator_ref: string;
-    disposition: string;
-    ts: string;
-  }>;
-  if (rows.length === 0) {
-    return {
-      name: 'stale-dispositions',
-      status: 'pass',
-      summary: `no disposition older than ${ttlDays} days`,
-    };
-  }
-  return {
-    name: 'stale-dispositions',
-    status: 'warn',
-    summary: `${rows.length} disposition(s) older than ${ttlDays} days`,
-    details: rows.slice(0, 10).map((r) => `  - ${r.evaluator_ref} [${r.disposition}] from ${r.ts}`),
-  };
-}
-
-/**
- * `skipped-run-analytics` — flag evaluators with unusually high skip
- * rates. A high skip rate often means the runner's filter is too
- * eager (paths/scopes mismatch), causing the evaluator to never fire
- * when it should.
- */
-function checkSkippedRunAnalytics(store: Store): DoctorCheck {
-  const SKIP_RATE_WARN = 0.7;
-  const MIN_RUNS = 5;
-  const rows = store.db
-    .prepare(
-      `SELECT evaluator_ref,
-              SUM(CASE WHEN run_status = 'skipped' THEN 1 ELSE 0 END) AS skipped,
-              COUNT(*) AS total
-       FROM evaluator_runs
-       GROUP BY evaluator_ref
-       HAVING total >= ? AND (CAST(skipped AS REAL) / total) >= ?`
-    )
-    .all(MIN_RUNS, SKIP_RATE_WARN) as Array<{
-    evaluator_ref: string;
-    skipped: number;
-    total: number;
-  }>;
-  if (rows.length === 0) {
-    return {
-      name: 'skipped-run-analytics',
-      status: 'pass',
-      summary: `no evaluator has a skip rate ≥${Math.round(SKIP_RATE_WARN * 100)}% with ≥${MIN_RUNS} runs`,
-    };
-  }
-  return {
-    name: 'skipped-run-analytics',
-    status: 'warn',
-    summary: `${rows.length} evaluator(s) with high skip rates`,
-    details: rows.map(
-      (r) =>
-        `  - ${r.evaluator_ref}: ${r.skipped}/${r.total} skipped (${Math.round(
-          (r.skipped / r.total) * 100
-        )}%)`
-    ),
-  };
-}
-
-/**
- * `materialized-disposition-consistency` — verify the
- * `evaluator_runs.disposition` materialized column matches the latest
- * disposition event in `evaluator_dispositions` for each run_id.
- * Catches projection drift bugs that would let the runner think
- * a violation was unresolved when an ack/dismiss/policy-except is on
- * file (or vice versa).
- */
-function checkMaterializedDispositionConsistency(store: Store): DoctorCheck {
-  const rows = store.db
-    .prepare(
-      `WITH latest AS (
-         SELECT run_id, disposition,
-                ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY ts DESC) AS rn
-         FROM evaluator_dispositions
-       )
-       SELECT r.evaluator_ref, r.run_id, r.disposition AS materialized, l.disposition AS latest_event
-       FROM evaluator_runs r
-       JOIN latest l ON l.run_id = r.run_id AND l.rn = 1
-       WHERE r.disposition IS NOT NULL
-         AND r.disposition != 'unresolved'
-         AND r.disposition != l.disposition`
-    )
-    .all() as Array<{
-    evaluator_ref: string;
-    run_id: string;
-    materialized: string;
-    latest_event: string;
-  }>;
-  if (rows.length === 0) {
-    return {
-      name: 'materialized-disposition-consistency',
-      status: 'pass',
-      summary: 'all materialized dispositions match the latest disposition events',
-    };
-  }
-  return {
-    name: 'materialized-disposition-consistency',
-    status: 'fail',
-    summary: `${rows.length} run(s) have materialized disposition drift`,
-    details: rows
-      .slice(0, 10)
-      .map(
-        (r) =>
-          `  - ${r.evaluator_ref} run=${r.run_id.slice(0, 8)}: materialized=${r.materialized}, latest_event=${r.latest_event}`
-      ),
-  };
-}
-
-// ── archive health checks ───────────────────────────────────────────
-
-/**
- * Archive health. Disabled repos get one pass check, including the retained
- * history location when one exists (identity alone is not drift, since init
- * mints it eagerly);
- * enabled repos get mirror-lag / identity / perms / index / manifest-
- * derivation checks. Everything here is bounded by the hot store size
- * and never throws — doctor reports, it does not break.
- */
-async function archiveChecks(
-  repoRoot: string,
-  config: Config,
-  store: Store
-): Promise<DoctorCheck[]> {
-  const checks: DoctorCheck[] = [];
-  const env = getInvocationEnv();
-  const dataRoot = archiveRoot(env);
-  const idxRoot = indexRoot(env);
-  let projectId: string | null = null;
-  try {
-    projectId = await readProjectId(new Repo(repoRoot));
-  } catch (error) {
-    const summary =
-      error instanceof ProjectIdentityError
-        ? error.message
-        : 'could not read git config orcaops.projectid';
-    checks.push({
-      name: 'archive-identity',
-      status: 'fail',
-      summary,
-    });
-    return checks;
-  }
-
-  if (!config.archive.enabled) {
-    // Init mints identity eagerly; only a project directory proves there is
-    // archived history to tell the user about while mirroring is disabled.
-    let retainedPath: string | null = null;
-    if (projectId !== null) {
-      const projectDir = archiveProjectDir(dataRoot, projectId);
-      try {
-        await access(projectDir);
-        retainedPath = projectDir;
-      } catch {
-        retainedPath = null;
-      }
-    }
-    if (retainedPath !== null) {
-      checks.push({
-        name: 'archive',
-        status: 'pass',
-        summary: `archive disabled; archived data retained at ${retainedPath}`,
-        details: [
-          'Re-enable with `orcaops archive enable`, or delete that directory to reclaim space.',
-        ],
-      });
-    } else {
-      checks.push({
-        name: 'archive',
-        status: 'pass',
-        summary:
-          'archive disabled for this worktree; set archive.enabled: true to mirror captured history',
-      });
-    }
-    return checks;
-  }
-
-  if (projectId === null) {
-    const recovery = await projectIdentityRecoveryGuidance(
-      new Repo(repoRoot),
-      await loadRegistry(registryPath(dataRoot))
-    );
-    checks.push({
-      name: 'archive-identity',
-      status: 'warn',
-      summary: 'archive.enabled is true but no project identity is minted yet',
-      details: [recovery],
-    });
-    return checks;
-  }
-  checks.push({
-    name: 'archive-identity',
-    status: 'pass',
-    summary: `project ${projectId} (git config orcaops.projectid, shared across worktrees)`,
-  });
-
-  // The mirror lives outside the repository, outside .gitignore, and survives
-  // deleting the worktree. Verbatim is the DEFAULT and stays the default —
-  // resume restores captured work from this copy in a fresh checkout, and a
-  // redacted mirror is a lossy restore. What was missing is anyone saying so.
-  checks.push(
-    config.archive.redact_secrets
-      ? {
-          name: 'archive-redaction',
-          status: 'pass',
-          summary: 'archive mirror is redacted at write (archive.redact_secrets: true)',
-          details: [
-            'A cold-start `orcaops resume` restores the redacted text; the in-repo event ' +
-              'log still holds what was captured.',
-          ],
-        }
-      : {
-          // `pass`, not `warn`: this is the default and a deliberate one, and a
-          // row that is yellow on every healthy install teaches people to skip
-          // the report. The gap this closes is that nothing said it at all.
-          name: 'archive-redaction',
-          status: 'pass',
-          summary: 'archive mirror stores event text verbatim (archive.redact_secrets: false)',
-          details: [
-            'The mirror is outside the repository and outside .gitignore, and survives ' +
-              'deleting the worktree. Set archive.redact_secrets: true to redact the copy — ' +
-              'a cold-start `orcaops resume` then restores the redacted text.',
-          ],
-        }
-  );
-
-  const projectDir = archiveProjectDir(dataRoot, projectId);
-  try {
-    const lag = await computeMirrorLag({ repoRoot, config, projectDir });
-    const corrupt = lag.artifacts.reduce((n, a) => n + a.archive_corrupt_lines, 0);
-    const quarantinedUsageEvents = usageBlockedMissing(lag);
-    if (
-      lag.total_missing === 0 &&
-      lag.artifacts_requiring_rebuild === 0 &&
-      lag.blocked_artifacts === 0 &&
-      corrupt === 0
-    ) {
-      checks.push({
-        name: 'archive-mirror-lag',
-        status: 'pass',
-        summary: `${lag.artifacts.length} artifact(s) fully mirrored; usage ledger in sync`,
-      });
-    } else {
-      const details: string[] = [];
-      for (const a of lag.artifacts) {
-        if (a.missing_event_ids.length > 0) {
-          details.push(`  - ${a.artifact_id}: ${a.missing_event_ids.length} event(s) missing`);
-        }
-        if (a.repair_mode === 'canonical_rebuild') {
-          details.push(`  - ${a.artifact_id}: non-tail gap requires canonical rebuild`);
-        }
-        if (a.repair_mode === 'blocked') {
-          details.push(
-            `  - ${a.artifact_id}: ${a.block_reason ?? 'blocked'} — ` +
-              `${a.block_message ?? 'automatic repair is unavailable'}`
-          );
-          const sources = await inspectArtifactSources({
-            repoRoot,
-            config,
-            projectDir,
-            artifactId: a.artifact_id,
-          });
-          const commands = archiveResolutionCommands(a.artifact_id, sources);
-          if (commands.length === 0) {
-            details.push('    no automated resolution: neither source strictly reconstructs');
-          } else {
-            details.push(...commands.map((command) => `    resolve: ${command}`));
-          }
-        }
-        if (a.archive_corrupt_lines > 0) {
-          details.push(
-            `  - ${a.artifact_id}: ${a.archive_corrupt_lines} corrupt archive line(s) ` +
-              '(surfaced; prior copy retained if a canonical rebuild is required)'
-          );
-        }
-      }
-      if (lag.usage.missing_event_ids.length > 0) {
-        details.push(
-          `  - usage ledger: ${lag.usage.missing_event_ids.length} event(s) missing` +
-            (quarantinedUsageEvents > 0
-              ? `; ${quarantinedUsageEvents} invalid event(s) are quarantined in the hot ` +
-                'ledger without archive-readable content and do not block archive activation'
-              : '')
-        );
-      }
-      if (lag.repairable_missing > 0 || lag.artifacts_requiring_rebuild > 0) {
-        details.push('Run `orcaops archive repair` to backfill repairable missing events.');
-      }
-      checks.push({
-        name: 'archive-mirror-lag',
-        status: 'warn',
-        summary:
-          `${lag.total_missing} event(s) not yet mirrored, ` +
-          `${lag.artifacts_requiring_rebuild} artifact(s) require rebuild, ` +
-          `${lag.blocked_artifacts} artifact(s) blocked` +
-          `${corrupt > 0 ? `, ${corrupt} corrupt archive line(s)` : ''}`,
-        details,
-      });
-    }
-  } catch (err) {
-    checks.push({
-      name: 'archive-mirror-lag',
-      status: 'warn',
-      summary: `could not compute mirror lag: ${(err as Error).message}`,
-    });
-  }
-
-  if (process.platform !== 'win32') {
-    const loose: string[] = [];
-    for (const dir of [dataRoot, projectDir]) {
-      try {
-        const mode = (await stat(dir)).mode;
-        if ((mode & 0o077) !== 0) loose.push(dir);
-      } catch {
-        // not created yet — nothing to grade
-      }
-    }
-    checks.push(
-      loose.length === 0
-        ? { name: 'archive-perms', status: 'pass', summary: 'archive dirs are 0700' }
-        : {
-            name: 'archive-perms',
-            status: 'warn',
-            summary: `${loose.length} archive dir(s) group/other-accessible`,
-            details: loose.map((d) => `  - chmod 700 ${d}`),
-          }
-    );
-  }
-
-  // Index classification: CACHEDIR.TAG must exist at the DISPOSABLE index
-  // root (backup tools skip it) and must NEVER appear in the precious
-  // archive tree (backup tools would skip user data).
-  const tagAtIndex = await fileExists(path.join(idxRoot, 'CACHEDIR.TAG'));
-  const tagAtData = await fileExists(path.join(dataRoot, 'CACHEDIR.TAG'));
-  const idxRootExists = await fileExists(idxRoot);
-  if (tagAtData) {
-    checks.push({
-      name: 'archive-index',
-      status: 'warn',
-      summary: `CACHEDIR.TAG found in the PRECIOUS archive root (${dataRoot}) — backup tools will skip your captured history`,
-      details: [`Delete ${path.join(dataRoot, 'CACHEDIR.TAG')}; only the index root may carry it.`],
-    });
-  } else if (idxRootExists && !tagAtIndex) {
-    checks.push({
-      name: 'archive-index',
-      status: 'warn',
-      summary: 'index root exists but is missing its CACHEDIR.TAG',
-      details: [
-        'Any `--all-projects` query rewrites it; or delete the index dir (fully disposable).',
-      ],
-    });
-  } else {
-    checks.push({
-      name: 'archive-index',
-      status: 'pass',
-      summary: idxRootExists
-        ? 'index root is cache-classified (CACHEDIR.TAG present)'
-        : 'no index built yet (created on first --all-projects query)',
-    });
-  }
-
-  // Manifest derivability: closed checkpoints whose snapshot trees are
-  // pinned but which have neither a stored manifest nor a cached derived
-  // one — snapshot-ref pruning would strand them (the prune gate is the
-  // enforcement; this is the early warning).
-  try {
-    const artifactStore = new ArtifactStore({ repoRoot, config, store });
-    const offenders: string[] = [];
-    for (const row of store.listArtifacts()) {
-      for (const cp of await artifactStore.readCheckpointsRecovered(row.id)) {
-        if (cp.status !== 'closed') continue;
-        if (cp.diff_fingerprint_summary.manifest_hash !== null) continue;
-        if (cp.open_snapshot.tree_sha === null || cp.close_snapshot.tree_sha === null) continue;
-        const cached = await readDerivedCache(projectDir, row.id, cp.n);
-        if (cached === null) offenders.push(`  - ${row.id} checkpoint #${cp.n}`);
-      }
-    }
-    checks.push(
-      offenders.length === 0
-        ? {
-            name: 'archive-manifest-derivation',
-            status: 'pass',
-            summary:
-              'every closed checkpoint has a stored or cached (or underivable-by-design) manifest',
-          }
-        : {
-            name: 'archive-manifest-derivation',
-            status: 'warn',
-            summary: `${offenders.length} checkpoint(s) derivable only while their snapshot refs live`,
-            details: [
-              ...offenders,
-              'Run `orcaops fingerprint derive --artifact <id> --checkpoint <n>` to cache each before pruning refs.',
-            ],
-          }
-    );
-  } catch (err) {
-    checks.push({
-      name: 'archive-manifest-derivation',
-      status: 'warn',
-      summary: `could not scan manifests: ${(err as Error).message}`,
-    });
-  }
-
-  return checks;
-}
-
-async function fileExists(p: string): Promise<boolean> {
-  try {
-    await access(p);
-    return true;
-  } catch {
-    return false;
-  }
 }

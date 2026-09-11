@@ -1,0 +1,98 @@
+{
+  "source_revision": "9cb6e606cebed31a3e22bb928119c04cb041bfc3",
+  "sources": [
+    {
+      "source_path": "apps/orcaops-cli/src/lib/fingerprint-cache.ts",
+      "source_sha256": "590a8b3c16325549fb5a05aea4bdbad891f11a8b990e1484ba6212a0d27bd38b",
+      "output_path": "src/legacy-operations/cli/fingerprint-cache.ts",
+      "output_sha256": "28523d92364486bd42fb9ae861632932b06159e9dc8adcbdeaf493deb08e4b06",
+      "selected_symbols": ["DerivedFingerprintCacheEntry", "computeChecksum"],
+      "transformation": "Retain referenced declarations; export requested validator roots; remove comments and redundant ZodType variable annotations; resolve/prune imports into private pinned declarations. Runtime validators are unchanged."
+    },
+    {
+      "source_path": "apps/orcaops-cli/src/commands/plan/upload.ts",
+      "source_sha256": "e5b6f803bd60b9054e85438904efb33d8e18737d284eb048d24ff9b2fa8773cd",
+      "output_path": "src/legacy-operations/plan/upload.ts",
+      "output_sha256": "f9c5d7b90f21d5afe55dbe3692aa0c5153ff054073f5626f24c6c921e60f7065",
+      "selected_symbols": ["UploadsIndexEntrySchema"],
+      "transformation": "Retain referenced declarations; export requested validator roots; remove comments and redundant ZodType variable annotations; resolve/prune imports into private pinned declarations. Runtime validators are unchanged."
+    },
+    {
+      "source_path": "apps/orcaops-cli/src/commands/seed/enrichment.ts",
+      "source_sha256": "8ee48631bbb1cd88a7de9d7542d49e3680de3b3ec57eee7644bc407ea7966f55",
+      "output_path": "src/legacy-operations/seed/enrichment.ts",
+      "output_sha256": "cab865c4b0d6d6c4103149e1d69eef2146e1d0852ad2f685dcfcda00dd0c5f7c",
+      "selected_symbols": [
+        "EnrichmentDecisionSchema",
+        "NominationDispositionSchema",
+        "PersistedSeedEnrichmentSchema",
+        "SeedEnrichmentBundleManifestEntrySchema",
+        "SeedEnrichmentManifestSchema",
+        "SeedEnrichmentSchema",
+        "SeedSelectionRecordSchema"
+      ],
+      "transformation": "Retain referenced declarations; export requested validator roots; remove comments and redundant ZodType variable annotations; resolve/prune imports into private pinned declarations. Runtime validators are unchanged."
+    },
+    {
+      "source_path": "apps/orcaops-cli/src/commands/seed/journal.ts",
+      "source_sha256": "8f45b35ef6b948b585b6e12f6890d9e0c34198130d8b5f17dd55b5842983d8df",
+      "output_path": "src/legacy-operations/seed/journal.ts",
+      "output_sha256": "0b77dba85ef52e61ee751860ceb7141344c3ae646b1e6e53acee770956bdd6a0",
+      "selected_symbols": [
+        "SeedCoverageDirectorySchema",
+        "SeedCoverageReportSchema",
+        "SeedDiscoveryAreaSchema",
+        "SeedJobRecordSchema",
+        "SeedJournalClusterSchema",
+        "SeedJournalSchema",
+        "SeedJournalV1Schema",
+        "SeedPreciousStateSchema"
+      ],
+      "transformation": "Retain referenced declarations; export requested validator roots; remove comments and redundant ZodType variable annotations; resolve/prune imports into private pinned declarations. Runtime validators are unchanged."
+    },
+    {
+      "source_path": "packages/storage/src/schema/plan.ts",
+      "source_sha256": "f2b3bff5005bedd7b2b27ed9a4c77a9f01f4a7a72f60547941b6968b507c81f5",
+      "output_path": "src/legacy-operations/storage/schema/plan.ts",
+      "output_sha256": "16d248b027b9c4755b2d0b7e7d95b08aa66bfd149ad9b11d5a351da9c11dd594",
+      "selected_symbols": ["ARTIFACT_LABEL_MAX"],
+      "transformation": "Retain referenced declarations; export requested validator roots; remove comments and redundant ZodType variable annotations; resolve/prune imports into private pinned declarations. Runtime validators are unchanged."
+    },
+    {
+      "source_path": "packages/storage/src/source-plan/canonical-base-url.ts",
+      "source_sha256": "c580ba525e3f6da95ac0d9db06424b98229407c1145427016dd0acefe281b308",
+      "output_path": "src/legacy-operations/storage/source-plan/canonical-base-url.ts",
+      "output_sha256": "b9c0f68f4792d5401caa7a76130e4ff6bb42b6cd8880509db25c04b0ea87cbb9",
+      "selected_symbols": ["canonicalizeBaseUrl"],
+      "transformation": "Retain referenced declarations; export requested validator roots; remove comments and redundant ZodType variable annotations; resolve/prune imports into private pinned declarations. Runtime validators are unchanged."
+    },
+    {
+      "source_path": "packages/storage/src/source-plan/pull-cache.ts",
+      "source_sha256": "cfe0083e348fd0d5d5a6c6f6de645c7e35e3af597dd84d590696c86d4b954e13",
+      "output_path": "src/legacy-operations/storage/source-plan/pull-cache.ts",
+      "output_sha256": "ef6f6888b496212d73a5bb760969d231b2785e1a8c806eb1da432e269b341212",
+      "selected_symbols": [
+        "PULL_CACHE_SCHEMA_VERSION",
+        "PathPointerSchema",
+        "PullCacheRecordSchema"
+      ],
+      "transformation": "Retain referenced declarations; export requested validator roots; remove comments and redundant ZodType variable annotations; resolve/prune imports into private pinned declarations. Runtime validators are unchanged."
+    },
+    {
+      "source_path": "packages/storage/src/source-plan/review-pull-cache.ts",
+      "source_sha256": "2a6c43a3994398091088f7e0931a14bf99059454ec77882da187c21b29392365",
+      "output_path": "src/legacy-operations/storage/source-plan/review-pull-cache.ts",
+      "output_sha256": "1968762b5875b7f7d8bed59db5bf6ac997e233bc372c1717b9fdd3285383c9c3",
+      "selected_symbols": ["REVIEW_PULL_CACHE_SCHEMA_VERSION", "ReviewPullRecordSchema"],
+      "transformation": "Retain referenced declarations; export requested validator roots; remove comments and redundant ZodType variable annotations; resolve/prune imports into private pinned declarations. Runtime validators are unchanged."
+    },
+    {
+      "source_path": "packages/storage/src/store/migrations/025-baseline.ts",
+      "source_sha256": "c7727975fa321386ba3e58081bfa4169d775e1104cf746809318ddba1581c8da",
+      "output_path": "src/legacy-operations/storage/store/migrations/025-baseline.ts",
+      "output_sha256": "81dfaaa827e2ce198a6506132c293f6685fc1ba764aa7d36b349f4066f09b44d",
+      "selected_symbols": ["BASELINE_SCHEMA", "BASELINE_VERSION"],
+      "transformation": "Retain referenced declarations; export requested validator roots; remove comments and redundant ZodType variable annotations; resolve/prune imports into private pinned declarations. Runtime validators are unchanged."
+    }
+  ]
+}

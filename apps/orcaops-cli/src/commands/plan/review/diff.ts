@@ -69,8 +69,8 @@ function verifyBody(externalId: string, label: string, body: string, contentHash
 
 /**
  * I/O-light core, rendered LOCALLY off direct SDK fetches — deliberately NOT
- * `runReviewPull`: diff is a read and must never write the review cache (a
- * cache write would clobber an in-flight edit's CAS token). Three renderable
+ * `runReviewPull`: diff is a read and must never publish a review record (that
+ * would clobber an in-flight edit's CAS token). Three renderable
  * comparisons:
  *
  *   default       approved → candidate   ("what changed since the pin source")
@@ -214,7 +214,7 @@ export async function runReviewDiff(args: RunReviewDiffArgs): Promise<ReviewDiff
  * candidate; --proposal compares the candidate to that proposal (most useful
  * when it needs a rebase); --from compares a sealed version to the candidate
  * (or to --to's sealed version) — the "what changed since I reviewed vN?"
- * read. Read-only — never writes the review cache.
+ * read. Read-only — never writes project history.
  */
 export async function reviewDiffAction(ref: string, opts: ReviewDiffOptions = {}): Promise<void> {
   try {

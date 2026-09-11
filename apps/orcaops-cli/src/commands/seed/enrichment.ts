@@ -15,103 +15,24 @@ import {
   type Config,
   PlanInputSchema,
 } from '@orcaops/storage';
+import {
+  type PersistedSeedEnrichment,
+  PersistedSeedEnrichmentSchema,
+  type SeedEnrichment,
+  SeedEnrichmentBundleManifestEntrySchema,
+  type SeedEnrichmentManifest,
+  SeedEnrichmentManifestSchema,
+  SeedEnrichmentSchema,
+  type SeedSelectionRecord,
+} from '@orcaops/storage/history/seed-schema';
+export type {
+  SeedSelectionRecord,
+  SeedEnrichmentManifest,
+} from '@orcaops/storage/history/seed-schema';
 
-import { seedStateDir } from './journal.js';
+import { seedStateDir } from './state.js';
 import type { SeedClusterSynthesis } from './synthesize.js';
 import { ErrorCodes, OrcaopsError } from '../../io/errors.js';
-
-const EnrichmentDecisionSchema = z.strictObject({
-  decision: z.string().min(1),
-  reason: z.string().min(1),
-  alternatives_considered: z
-    .array(
-      z.strictObject({
-        option: z.string().min(1),
-        rejected_because: z.string().min(1),
-      })
-    )
-    .optional(),
-});
-
-const NominationDispositionSchema = z
-  .strictObject({
-    nomination_id: z.string().regex(/^[0-9a-f]{64}$/u),
-    disposition: z.enum(['decision', 'skipped']),
-    reason: z.string().min(1).optional(),
-  })
-  .refine((value) => value.disposition !== 'skipped' || value.reason !== undefined, {
-    message: 'a skipped nomination requires a reason',
-  });
-
-const SeedEnrichmentSchema = z.strictObject({
-  schema_version: z.literal(2),
-  cluster_key: z.string().min(1),
-  options_hash: z.string().min(1),
-  used_pr_context: z.boolean(),
-  label: z.string().min(1).max(ARTIFACT_LABEL_MAX),
-  task: z.string().min(1),
-  steps: z.array(
-    z.strictObject({
-      label: z.string().min(1).max(ARTIFACT_LABEL_MAX),
-      text: z.string().min(1),
-    })
-  ),
-  checkpoint_summaries: z.array(z.string().min(1)),
-  outcome: z.string().min(1),
-  decisions: z.array(EnrichmentDecisionSchema),
-  nomination_dispositions: z.array(NominationDispositionSchema).optional(),
-});
-
-const PersistedSeedEnrichmentSchema = SeedEnrichmentSchema.extend({
-  enriched_at: z.string().datetime(),
-});
-
-type SeedEnrichment = z.infer<typeof SeedEnrichmentSchema>;
-type PersistedSeedEnrichment = z.infer<typeof PersistedSeedEnrichmentSchema>;
-
-const SeedSelectionRecordSchema = z.strictObject({
-  since: z.string().min(1),
-  since_explicit: z.boolean(),
-  max_commits: z.number().int().positive(),
-  author: z.string().nullable(),
-  include_bots: z.boolean(),
-  path: z.string().nullable(),
-  commit: z.string().nullable(),
-  importance: z.boolean(),
-});
-
-const SeedEnrichmentBundleManifestEntrySchema = z.strictObject({
-  filename: z.string().min(1),
-  artifact_id: z.string().min(1),
-  cluster_key: z.string().min(1),
-  kind: z.enum(['merge', 'squash', 'run', 'release']),
-  label: z.string().min(1),
-  date: z.string().datetime(),
-  commit_count: z.number().int().positive(),
-  checkpoint_count: z.number().int().positive(),
-  warnings: z.array(z.string()),
-  nomination_count: z.number().int().nonnegative(),
-  distinct_task_count: z.number().int().positive(),
-});
-
-const SeedEnrichmentManifestSchema = z.strictObject({
-  schema_version: z.literal(2),
-  options_hash: z.string().min(1),
-  selection: SeedSelectionRecordSchema.optional(),
-  amendment: z
-    .strictObject({
-      artifact_id: z.string().min(1),
-      prior_enrichment_event_id: z.string().min(1).nullable(),
-      member_shas_hash: z.string().regex(/^[0-9a-f]{64}$/u),
-      decision_mode: z.enum(['preserve', 'replace']),
-      pr_context_consented: z.boolean(),
-    })
-    .optional(),
-  bundles: z.array(SeedEnrichmentBundleManifestEntrySchema),
-});
-
-export type SeedSelectionRecord = z.infer<typeof SeedSelectionRecordSchema>;
-export type SeedEnrichmentManifest = z.infer<typeof SeedEnrichmentManifestSchema>;
 
 interface BundleDiffStats {
   files: number;
@@ -354,7 +275,7 @@ function bundleStem(clusterKey: string): string {
   return encodeURIComponent(clusterKey);
 }
 
-function pendingDir(repoRoot: string, config: Pick<Config, 'cache'>): string {
+export function pendingSeedEnrichmentDir(repoRoot: string, config: Pick<Config, 'cache'>): string {
   return path.join(seedStateDir(repoRoot, config), 'pending');
 }
 
@@ -684,8 +605,10 @@ function renderBundle(
 export async function readSeedEnrichmentManifest(
   repoRoot: string,
   config: Pick<Config, 'cache'>,
-  directory = pendingDir(repoRoot, config)
+  directory = pendingSeedEnrichmentDir(repoRoot, config),
+  persistence?: Pick<SeedBundlePersistence, 'readManifest'>
 ): Promise<SeedEnrichmentManifest | null> {
+  if (persistence) return persistence.readManifest();
   try {
     return SeedEnrichmentManifestSchema.parse(
       JSON.parse(await readFile(path.join(directory, BUNDLE_MANIFEST_FILENAME), 'utf8'))
@@ -695,6 +618,28 @@ export async function readSeedEnrichmentManifest(
     // resolves its own selection and mismatches reject loudly.
     return null;
   }
+}
+
+export interface SeedBundlePreparationInput {
+  syntheses: readonly SeedClusterSynthesis[];
+  optionsHash: string;
+  prContextConsented: boolean;
+  selection?: SeedSelectionRecord;
+  amendment?: NonNullable<SeedEnrichmentManifest['amendment']>;
+}
+export interface SeedBundleWriteResult {
+  directory: string;
+  count: number;
+  cueBearingCount: number;
+  cueFreeCount: number;
+  candidateCueCount: number;
+  estimatedReadingTasks: number;
+}
+export interface SeedBundlePersistence {
+  readonly directory: string;
+  preflight(input: SeedBundlePreparationInput): Promise<SeedBundleWriteResult | null>;
+  publish(files: readonly { filename: string; bytes: Buffer }[]): Promise<SeedBundleWriteResult>;
+  readManifest(): Promise<SeedEnrichmentManifest | null>;
 }
 
 export async function writeSeedEnrichmentBundles(
@@ -707,103 +652,130 @@ export async function writeSeedEnrichmentBundles(
     selection?: SeedSelectionRecord;
     directory?: string;
     amendment?: NonNullable<SeedEnrichmentManifest['amendment']>;
+    persistence?: SeedBundlePersistence;
   }
-): Promise<{
-  directory: string;
-  count: number;
-  cueBearingCount: number;
-  cueFreeCount: number;
-  candidateCueCount: number;
-  estimatedReadingTasks: number;
-}> {
-  const directory = input.directory ?? pendingDir(repoRoot, config);
-  const directoryRecovery =
-    input.directory === undefined
-      ? `Move or remove the managed bundle directory ${JSON.stringify(directory)}, then retry.`
-      : 'Choose another enrichment directory.';
-  await mkdir(directory, { recursive: true });
-  const existingEntries = await readdir(directory, { withFileTypes: true });
-  const existingByName = new Map(existingEntries.map((entry) => [entry.name, entry]));
-  const manifestEntry = existingByName.get(BUNDLE_MANIFEST_FILENAME);
-  let priorManifest: SeedEnrichmentManifest | null = null;
-  if (manifestEntry) {
-    if (!manifestEntry.isFile()) {
+): Promise<SeedBundleWriteResult> {
+  const persistence = input.persistence
+    ? {
+        directory: input.persistence.directory,
+        preflight: input.persistence.preflight.bind(input.persistence),
+        publish: input.persistence.publish.bind(input.persistence),
+      }
+    : undefined;
+  input = {
+    ...input,
+    selection: input.selection ? structuredClone(input.selection) : undefined,
+    amendment: input.amendment ? structuredClone(input.amendment) : undefined,
+  };
+  syntheses = structuredClone(syntheses);
+  if (persistence) {
+    if (input.directory !== undefined && input.directory !== persistence.directory)
       throw new OrcaopsError(
         ErrorCodes.INVALID_INPUT,
-        `${path.join(directory, BUNDLE_MANIFEST_FILENAME)} is not a regular file. ` +
-          directoryRecovery
+        'Canonical seed bundles require their reserved workspace directory'
       );
-    }
-    let raw: unknown;
-    try {
-      raw = JSON.parse(await readFile(path.join(directory, BUNDLE_MANIFEST_FILENAME), 'utf8'));
-    } catch (error) {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        `Cannot replace unrecognized enrichment manifest in ${directory}: ` +
-          `${error instanceof Error ? error.message : String(error)}. ${directoryRecovery}`
-      );
-    }
-    const parsed = SeedEnrichmentManifestSchema.safeParse(raw);
-    if (!parsed.success) {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        `Cannot replace unrecognized enrichment manifest in ${directory}: ` +
-          `${humanSchemaReason(parsed.error, raw)}. ${directoryRecovery}`
-      );
-    }
-    priorManifest = parsed.data;
-    const sameUse = input.amendment
-      ? priorManifest.amendment?.artifact_id === input.amendment.artifact_id
-      : priorManifest.amendment === undefined;
-    if (!sameUse) {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        `The enrichment manifest in ${directory} belongs to a different seed workflow; ` +
-          directoryRecovery
-      );
-    }
+    const restored = await persistence.preflight({
+      syntheses,
+      optionsHash: input.optionsHash,
+      prContextConsented: input.prContextConsented,
+      selection: input.selection,
+      amendment: input.amendment,
+    });
+    if (restored) return restored;
   }
+  const directory =
+    persistence?.directory ?? input.directory ?? pendingSeedEnrichmentDir(repoRoot, config);
+  if (!persistence) {
+    const directoryRecovery =
+      input.directory === undefined
+        ? `Move or remove the managed bundle directory ${JSON.stringify(directory)}, then retry.`
+        : 'Choose another enrichment directory.';
+    await mkdir(directory, { recursive: true });
+    const existingEntries = await readdir(directory, { withFileTypes: true });
+    const existingByName = new Map(existingEntries.map((entry) => [entry.name, entry]));
+    const manifestEntry = existingByName.get(BUNDLE_MANIFEST_FILENAME);
+    let priorManifest: SeedEnrichmentManifest | null = null;
+    if (manifestEntry) {
+      if (!manifestEntry.isFile()) {
+        throw new OrcaopsError(
+          ErrorCodes.INVALID_INPUT,
+          `${path.join(directory, BUNDLE_MANIFEST_FILENAME)} is not a regular file. ` +
+            directoryRecovery
+        );
+      }
+      let raw: unknown;
+      try {
+        raw = JSON.parse(await readFile(path.join(directory, BUNDLE_MANIFEST_FILENAME), 'utf8'));
+      } catch (error) {
+        throw new OrcaopsError(
+          ErrorCodes.INVALID_INPUT,
+          `Cannot replace unrecognized enrichment manifest in ${directory}: ` +
+            `${error instanceof Error ? error.message : String(error)}. ${directoryRecovery}`
+        );
+      }
+      const parsed = SeedEnrichmentManifestSchema.safeParse(raw);
+      if (!parsed.success) {
+        throw new OrcaopsError(
+          ErrorCodes.INVALID_INPUT,
+          `Cannot replace unrecognized enrichment manifest in ${directory}: ` +
+            `${humanSchemaReason(parsed.error, raw)}. ${directoryRecovery}`
+        );
+      }
+      priorManifest = parsed.data;
+      const sameUse = input.amendment
+        ? priorManifest.amendment?.artifact_id === input.amendment.artifact_id
+        : priorManifest.amendment === undefined;
+      if (!sameUse) {
+        throw new OrcaopsError(
+          ErrorCodes.INVALID_INPUT,
+          `The enrichment manifest in ${directory} belongs to a different seed workflow; ` +
+            directoryRecovery
+        );
+      }
+    }
 
-  const owned = new Set<string>();
-  for (const bundle of priorManifest?.bundles ?? []) {
-    const filename = bundle.filename;
-    if (
-      path.isAbsolute(filename) ||
-      path.basename(filename) !== filename ||
-      !filename.endsWith('.md') ||
-      filename === BUNDLE_MANIFEST_FILENAME
-    ) {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        `The enrichment manifest in ${directory} contains an unsafe bundle filename: ` +
-          `${JSON.stringify(filename)}. ${directoryRecovery}`
-      );
+    const owned = new Set<string>();
+    for (const bundle of priorManifest?.bundles ?? []) {
+      const filename = bundle.filename;
+      if (
+        path.isAbsolute(filename) ||
+        path.basename(filename) !== filename ||
+        !filename.endsWith('.md') ||
+        filename === BUNDLE_MANIFEST_FILENAME
+      ) {
+        throw new OrcaopsError(
+          ErrorCodes.INVALID_INPUT,
+          `The enrichment manifest in ${directory} contains an unsafe bundle filename: ` +
+            `${JSON.stringify(filename)}. ${directoryRecovery}`
+        );
+      }
+      if (owned.has(filename)) {
+        throw new OrcaopsError(
+          ErrorCodes.INVALID_INPUT,
+          `The enrichment manifest in ${directory} repeats bundle filename ` +
+            `${JSON.stringify(filename)}. ${directoryRecovery}`
+        );
+      }
+      owned.add(filename);
     }
-    if (owned.has(filename)) {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        `The enrichment manifest in ${directory} repeats bundle filename ` +
-          `${JSON.stringify(filename)}. ${directoryRecovery}`
-      );
-    }
-    owned.add(filename);
-  }
 
-  const nextBundleNames = syntheses.map((synthesis) => `${bundleStem(synthesis.cluster.key)}.md`);
-  for (const filename of nextBundleNames) {
-    if (existingByName.has(filename) && !owned.has(filename)) {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        `Refusing to overwrite unowned file ${path.join(directory, filename)}; ` + directoryRecovery
-      );
+    const nextBundleNames = syntheses.map((synthesis) => `${bundleStem(synthesis.cluster.key)}.md`);
+    for (const filename of nextBundleNames) {
+      if (existingByName.has(filename) && !owned.has(filename)) {
+        throw new OrcaopsError(
+          ErrorCodes.INVALID_INPUT,
+          `Refusing to overwrite unowned file ${path.join(directory, filename)}; ` +
+            directoryRecovery
+        );
+      }
     }
+    await Promise.all(
+      [...owned, ...(manifestEntry ? [BUNDLE_MANIFEST_FILENAME] : [])]
+        .filter((filename) => existingByName.get(filename)?.isFile())
+        .map((filename) => unlink(path.join(directory, filename)))
+    );
   }
-  await Promise.all(
-    [...owned, ...(manifestEntry ? [BUNDLE_MANIFEST_FILENAME] : [])]
-      .filter((filename) => existingByName.get(filename)?.isFile())
-      .map((filename) => unlink(path.join(directory, filename)))
-  );
+  const files: { filename: string; bytes: Buffer }[] = [];
   const bundles: z.infer<typeof SeedEnrichmentBundleManifestEntrySchema>[] = [];
   let cueBearingCount = 0;
   let candidateCueCount = 0;
@@ -838,11 +810,12 @@ export async function writeSeedEnrichmentBundles(
     candidateCueCount += candidateCount;
     estimatedReadingTasks += distinctTaskCount;
     const filename = `${bundleStem(synthesis.cluster.key)}.md`;
-    await atomicWriteFile(
-      path.join(directory, filename),
-      renderBundle(synthesis, { ...input, diffStats: stats[index] ?? null, directory }),
-      repoRoot
-    );
+    files.push({
+      filename,
+      bytes: Buffer.from(
+        renderBundle(synthesis, { ...input, diffStats: stats[index] ?? null, directory })
+      ),
+    });
     bundles.push({
       filename,
       artifact_id: synthesis.artifactId,
@@ -857,21 +830,25 @@ export async function writeSeedEnrichmentBundles(
       distinct_task_count: distinctTaskCount,
     });
   }
-  await atomicWriteFile(
-    path.join(directory, BUNDLE_MANIFEST_FILENAME),
-    `${JSON.stringify(
-      {
-        schema_version: 2,
-        options_hash: input.optionsHash,
-        ...(input.selection ? { selection: input.selection } : {}),
-        ...(input.amendment ? { amendment: input.amendment } : {}),
-        bundles,
-      },
-      null,
-      2
-    )}\n`,
-    repoRoot
-  );
+  files.push({
+    filename: BUNDLE_MANIFEST_FILENAME,
+    bytes: Buffer.from(
+      `${JSON.stringify(
+        {
+          schema_version: 2,
+          options_hash: input.optionsHash,
+          ...(input.selection ? { selection: input.selection } : {}),
+          ...(input.amendment ? { amendment: input.amendment } : {}),
+          bundles,
+        },
+        null,
+        2
+      )}\n`
+    ),
+  });
+  if (persistence) return persistence.publish(files);
+  for (const file of files)
+    await atomicWriteFile(path.join(directory, file.filename), file.bytes, repoRoot);
   return {
     directory,
     count: syntheses.length,
@@ -910,15 +887,36 @@ function applyEnrichment(
   };
 }
 
+export interface SeedEnrichmentPersistence {
+  preflight(): Promise<void>;
+  readAuthored?(
+    directory: string
+  ): Promise<readonly { originalPath: string; bytes: Buffer | null; readError: string | null }[]>;
+  readAccepted(artifactId: string): Promise<Buffer | null>;
+  readOriginalAccepted?(
+    artifactId: string
+  ): Promise<{ bytes: Buffer; originalPath: string } | null>;
+  writeAccepted(input: {
+    artifactId: string;
+    bytes: Buffer;
+    source: { bytes: Buffer; originalPath: string };
+  }): Promise<Buffer>;
+}
+
 async function readPersisted(
   repoRoot: string,
   config: Pick<Config, 'cache'>,
-  artifactId: string
+  artifactId: string,
+  persistence?: SeedEnrichmentPersistence
 ): Promise<
   { enrichment: PersistedSeedEnrichment } | { reason: string; issues?: unknown[] } | null
 > {
   try {
-    const raw = JSON.parse(await readFile(persistedPath(repoRoot, config, artifactId), 'utf8'));
+    const bytes = persistence
+      ? await persistence.readAccepted(artifactId)
+      : await readFile(persistedPath(repoRoot, config, artifactId));
+    if (!bytes) return null;
+    const raw = JSON.parse(bytes.toString('utf8'));
     const parsed = PersistedSeedEnrichmentSchema.safeParse(raw);
     if (parsed.success) return { enrichment: parsed.data };
     return {
@@ -949,28 +947,80 @@ export async function resolveSeedEnrichment(
     coveredClusters?: ReadonlyMap<string, 'already-imported' | 'covered-by-captured-work'>;
     usePersisted?: boolean;
     persistAccepted?: boolean;
+    persistence?: SeedEnrichmentPersistence;
   }
 ): Promise<ResolvedSeedEnrichment> {
+  const persistence = input.persistence;
+  input = {
+    ...input,
+    coveredClusters: input.coveredClusters ? new Map(input.coveredClusters) : undefined,
+    persistence: persistence
+      ? {
+          preflight: persistence.preflight.bind(persistence),
+          readAuthored: persistence.readAuthored?.bind(persistence),
+          readAccepted: persistence.readAccepted.bind(persistence),
+          readOriginalAccepted: persistence.readOriginalAccepted?.bind(persistence),
+          writeAccepted: persistence.writeAccepted.bind(persistence),
+        }
+      : undefined,
+  };
+  syntheses = structuredClone(syntheses);
+  await input.persistence?.preflight();
   const byCluster = new Map(syntheses.map((synthesis) => [synthesis.cluster.key, synthesis]));
   const accepted = new Map<string, PersistedSeedEnrichment>();
+  const acceptedSources = new Map<string, { bytes: Buffer; originalPath: string }>();
   const invalidClusterKeys = new Set<string>();
   const invalid: SeedEnrichmentReport['invalid'] = [];
   const unmatched: SeedEnrichmentReport['unmatched'] = [];
   const warnings: SeedEnrichmentReport['warnings'] = [];
-  if (input.enrichmentDir) {
-    const entries = (await readdir(input.enrichmentDir, { withFileTypes: true }))
-      // `manifest.json` is this directory's own bundle manifest, not an
-      // enrichment file. Writing enrichment beside the bundles is the
-      // sanctioned layout, so reading it back as a cluster payload would
-      // report a spurious invalid file on the recommended path.
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-      .filter((entry) => entry.name !== BUNDLE_MANIFEST_FILENAME)
-      .sort((left, right) => (left.name < right.name ? -1 : 1));
-    for (const entry of entries) {
-      const file = path.join(input.enrichmentDir, entry.name);
+  const restoredSources = new Map<string, string>();
+  for (const synthesis of syntheses) {
+    const original = await input.persistence?.readOriginalAccepted?.(synthesis.artifactId);
+    if (!original) continue;
+    const enrichment = PersistedSeedEnrichmentSchema.parse(
+      JSON.parse(original.bytes.toString('utf8'))
+    );
+    const evidenceError = validateEvidence(synthesis, enrichment, input);
+    if (
+      evidenceError ||
+      (input.enrichmentDir &&
+        path.resolve(input.enrichmentDir) !== path.dirname(original.originalPath))
+    )
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        'Seed enrichment retry differs from its original accepted inputs'
+      );
+    accepted.set(synthesis.cluster.key, enrichment);
+    restoredSources.set(synthesis.cluster.key, original.originalPath);
+  }
+  if (
+    input.enrichmentDir &&
+    (restoredSources.size === 0 || restoredSources.size !== syntheses.length)
+  ) {
+    const authored = input.persistence?.readAuthored
+      ? await input.persistence.readAuthored(input.enrichmentDir)
+      : (await readdir(input.enrichmentDir, { withFileTypes: true }))
+          // `manifest.json` is this directory's own bundle manifest, not an
+          // enrichment file. Writing enrichment beside the bundles is the
+          // sanctioned layout, so reading it back as a cluster payload would
+          // report a spurious invalid file on the recommended path.
+          .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+          .filter((entry) => entry.name !== BUNDLE_MANIFEST_FILENAME)
+          .sort((left, right) => (left.name < right.name ? -1 : 1))
+          .map((entry) => ({
+            originalPath: path.join(input.enrichmentDir!, entry.name),
+            bytes: null,
+            readError: null,
+          }));
+    for (const authoredSource of authored) {
+      const file = authoredSource.originalPath;
+      if ([...restoredSources.values()].includes(path.resolve(file))) continue;
       let raw: unknown;
+      let sourceBytes: Buffer;
       try {
-        raw = JSON.parse(await readFile(file, 'utf8'));
+        if (authoredSource.readError) throw new Error(authoredSource.readError);
+        sourceBytes = authoredSource.bytes ?? (await readFile(file));
+        raw = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(sourceBytes));
       } catch (error) {
         invalid.push({
           file,
@@ -1039,11 +1089,25 @@ export async function resolveSeedEnrichment(
         enriched_at: new Date().toISOString(),
       });
       accepted.set(parsed.data.cluster_key, persisted);
+      acceptedSources.set(parsed.data.cluster_key, { bytes: sourceBytes, originalPath: file });
     }
     for (const [clusterKey, persisted] of accepted) {
+      if (restoredSources.has(clusterKey)) continue;
       if (input.persistAccepted === false) continue;
       if (invalidClusterKeys.has(clusterKey)) continue;
       const synthesis = byCluster.get(clusterKey)!;
+      if (input.persistence) {
+        const original = await input.persistence.writeAccepted({
+          artifactId: synthesis.artifactId,
+          bytes: Buffer.from(`${JSON.stringify(persisted, null, 2)}\n`),
+          source: acceptedSources.get(clusterKey)!,
+        });
+        accepted.set(
+          clusterKey,
+          PersistedSeedEnrichmentSchema.parse(JSON.parse(original.toString('utf8')))
+        );
+        continue;
+      }
       await atomicWriteFile(
         persistedPath(repoRoot, config, synthesis.artifactId),
         `${JSON.stringify(persisted, null, 2)}\n`,
@@ -1062,7 +1126,12 @@ export async function resolveSeedEnrichment(
       !enrichment &&
       !invalidClusterKeys.has(synthesis.cluster.key)
     ) {
-      const persisted = await readPersisted(repoRoot, config, synthesis.artifactId);
+      const persisted = await readPersisted(
+        repoRoot,
+        config,
+        synthesis.artifactId,
+        input.persistence
+      );
       if (persisted && 'reason' in persisted) {
         const file = persistedPath(repoRoot, config, synthesis.artifactId);
         invalid.push({

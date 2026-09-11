@@ -386,7 +386,7 @@ export const ConfigSchema = z.strictObject({
       /**
        * Literal repo-relative files or directories whose non-ignored untracked
        * contents are intentional review evidence. Untracked files are excluded
-       * by default so local reports and archives cannot consume the review cap.
+       * by default so local reports cannot consume the review cap.
        */
       include_untracked: z.array(z.string().min(1)).default([]),
       /**
@@ -408,24 +408,6 @@ export const ConfigSchema = z.strictObject({
       stub_paths: z.array(z.string()).default([]),
     })
     .default({ max_diff_bytes: 10_000_000, include_untracked: [], stub_paths: [] }),
-  /**
-   * Home-dir archive knobs. `enabled` turns on write-through
-   * mirroring of the hot store (events + usage ledger) into
-   * `~/.orcaops/projects/<project-id>/` — enabled by default and explicitly
-   * disableable per worktree (identity itself lives in git local config and is
-   * shared across worktrees).
-   * `redact_secrets` opts the ARCHIVE COPY into write-time redaction; the
-   * hot store is never mutated and defaults preserve byte fidelity so
-   * repair stays a pure event-id replay. Fully defaulted when omitted from a
-   * current-shape config. Fail-open is not a knob: archive failure never
-   * blocks capture.
-   */
-  archive: z
-    .strictObject({
-      enabled: z.boolean().default(true),
-      redact_secrets: z.boolean().default(false),
-    })
-    .default({ enabled: true, redact_secrets: false }),
   /**
    * Skill enable/disable overrides. Keyed by bare-verb skill id
    * (`digest`, `standup`, ...): `false` disables a default-on skill, `true`
@@ -523,6 +505,11 @@ export const ConfigSchema = z.strictObject({
     .default({ hints: { keys: [], custom: [] } }),
 });
 
+const RetiredArchiveConfigSchema = z.strictObject({
+  enabled: z.boolean().optional(),
+  redact_secrets: z.boolean().optional(),
+});
+
 export type Config = z.infer<typeof ConfigSchema>;
 
 /**
@@ -586,10 +573,6 @@ export const DEFAULT_CONFIG: Config = {
     // No diff-stub policy by default: zero-config behavior is byte-identical.
     stub_paths: [],
   },
-  archive: {
-    enabled: true,
-    redact_secrets: false,
-  },
   skills: {
     enabled: {},
   },
@@ -636,7 +619,7 @@ export function resolveConfig(partial: unknown): Config {
   // An accepted predecessor loads to the CURRENT shape — its delta is purely
   // additive and defaulted. Normalize before the merge, which would otherwise
   // overwrite the default version with the older literal and fail the schema.
-  const normalized =
+  const normalizedVersion =
     typeof partial === 'object' &&
     partial !== null &&
     !Array.isArray(partial) &&
@@ -645,6 +628,29 @@ export function resolveConfig(partial: unknown): Config {
     )
       ? { ...(partial as Record<string, unknown>), schema_version: CONFIG_SCHEMA_VERSION }
       : partial;
+  let normalized = normalizedVersion;
+  if (
+    typeof normalizedVersion === 'object' &&
+    normalizedVersion !== null &&
+    !Array.isArray(normalizedVersion) &&
+    Object.prototype.hasOwnProperty.call(normalizedVersion, 'archive')
+  ) {
+    const input = normalizedVersion as Record<string, unknown>;
+    const legacy = RetiredArchiveConfigSchema.safeParse(input.archive);
+    if (!legacy.success) {
+      const issue = legacy.error.issues[0];
+      const unknownKeys = issue?.code === 'unrecognized_keys' ? issue.keys : [];
+      const issuePath = ['archive', ...(issue?.path ?? []), ...unknownKeys.slice(0, 1)]
+        .map(String)
+        .join('.');
+      throw new ConfigValidationError(
+        `orcaops configuration is invalid at ${issuePath}: ${issue?.message ?? 'invalid value'}.`,
+        issuePath
+      );
+    }
+    const { archive: _archive, ...current } = input;
+    normalized = current;
+  }
   const merged = deepMergeInto(structuredClone(DEFAULT_CONFIG), normalized);
   const parsed = ConfigSchema.safeParse(merged);
   if (parsed.success) return parsed.data;

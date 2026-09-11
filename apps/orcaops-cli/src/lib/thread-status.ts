@@ -1,5 +1,4 @@
 import { computeUnresolvedBlocks } from '@orcaops/core';
-import type { ArtifactStore } from '@orcaops/storage';
 
 export type ThreadStateName =
   | 'plan'
@@ -32,23 +31,19 @@ export interface ArtifactThreadStatus {
   capture_health: 'ok' | 'no-summary' | 'incomplete-checkpoints';
 }
 
-/**
- * Derive the thread state for one artifact.
- * Reads from SQLite only (no disk I/O) so this is cheap and synchronous.
- */
-export function deriveArtifactThreadStatus(
-  store: ArtifactStore,
-  artifactId: string
-): ArtifactThreadStatus | null {
-  const artifact = store.store.getArtifact(artifactId);
-  if (!artifact) return null;
-
-  const planRev = store.store.getLatestPlanRevision(artifactId);
-  const planSteps = planRev ? planRev.steps : [];
-  const checkpoints = store.store.getCheckpoints(artifactId);
-  const summaryRow = store.store.getSummary(artifactId);
-  const lifecycles = store.store.listLifecycles(artifactId);
-
+export function deriveThreadStatus(input: {
+  artifact: Pick<
+    ArtifactThreadStatus,
+    'task' | 'branch' | 'status' | 'started_at' | 'completed_at'
+  > & { id: string };
+  planStepCount: number;
+  checkpoints: readonly { n: number; status: string }[];
+  hasSummary: boolean;
+  lifecycles: readonly { fires_at: string; cp_n: number | null }[];
+  evaluatorRuns: Parameters<typeof computeUnresolvedBlocks>[0];
+}): ArtifactThreadStatus {
+  const { artifact, checkpoints, lifecycles } = input;
+  const summaryRow = input.hasSummary;
   const hasPostPlan = lifecycles.some((l) => l.fires_at === 'post-plan');
   const hasPrePr = lifecycles.some((l) => l.fires_at === 'pre-pr');
 
@@ -71,7 +66,7 @@ export function deriveArtifactThreadStatus(
   // `disposition === 'unresolved'` filter would have no supersession and could
   // disagree with next_actions in the same `status --json` payload. Shape
   // is preserved (`severity` is always 'block' here, by construction).
-  const unresolvedBlocks = computeUnresolvedBlocks(store.store.listEvaluatorRuns(artifactId));
+  const unresolvedBlocks = computeUnresolvedBlocks(input.evaluatorRuns);
   const blockingEvaluators = unresolvedBlocks.map((b) => ({
     evaluator_ref: b.evaluator_ref,
     severity: 'block' as const,
@@ -90,7 +85,7 @@ export function deriveArtifactThreadStatus(
   };
 
   const thread: Record<ThreadStateName, ThreadEntry> = {
-    plan: planSteps.length > 0 ? { status: 'done' } : { status: 'ready', blocked_by: [] },
+    plan: input.planStepCount > 0 ? { status: 'done' } : { status: 'ready', blocked_by: [] },
     'eval-plan': hasPostPlan ? { status: 'done' } : { status: 'ready', blocked_by: [] },
     checkpoint:
       // Only closed cps count toward checkpoint progress. Open cps

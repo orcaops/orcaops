@@ -1,16 +1,11 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type SourcePlanGetResult, TrpcRequestError } from '@orcaops/sdk';
-import {
-  sourcePlanCacheDir,
-  type SourcePlanPin,
-  writePullCachePathPointer,
-  writePullCacheRecord,
-} from '@orcaops/storage';
+import { type SourcePlanPin } from '@orcaops/storage';
 
 import {
   type AttachClient,
@@ -107,6 +102,26 @@ describe('Branch-B builder', () => {
   afterEach(async () => {
     await rm(repoRoot, { recursive: true, force: true });
   });
+  it('uses an explicit canonical lineage reader for the unchanged born-pin wire identity', async () => {
+    const sourcePlanLookup = vi.fn(async () => ({
+      external_id: 'retained-plan',
+      version_number: 4,
+    }));
+    const pin = localPin('docs/plan.md');
+    const payload = await buildBranchBPin({
+      ...ATTACH_BASE,
+      sourcePlan: pin,
+      repoRoot,
+      sourcePlanLookup,
+    });
+    expect(sourcePlanLookup).toHaveBeenCalledWith(path.resolve(repoRoot, 'docs/plan.md'));
+    expect(payload).toMatchObject({
+      external_id: bornPinExternalId(ATTACH_BASE.artifactId),
+      body: pin.content,
+      content_hash: pin.hash,
+      derived_from: { source_plan_external_id: 'retained-plan', version_number: 4 },
+    });
+  });
 
   it('seals version_number 1 with the deterministic born id; derived_from null without repoRoot', async () => {
     const pin = localPin('docs/plan.md');
@@ -132,67 +147,9 @@ describe('Branch-B builder', () => {
     expect(payload.baseline).toEqual(BASELINE);
   });
 
-  it('resolves org-scoped derived_from when the local file traces to a prior pull', async () => {
-    const outPath = path.join(repoRoot, 'docs', 'plan.md');
-    await mkdir(path.dirname(outPath), { recursive: true });
-    await writeFile(outPath, 'pulled body', 'utf8');
-    await writePullCacheRecord(sourcePlanCacheDir(repoRoot), {
-      schema_version: 1,
-      external_id: 'src-ext',
-      slug: 'src',
-      version_number: 7,
-      title: 'Source',
-      body: 'pulled body',
-      content_hash: sha('pulled body'),
-      source_ref: null,
-      base_url: 'https://cloud.example',
-      org_id: 'org_1',
-      pulled_at: '2026-06-08T00:00:00.000Z',
-    });
-    await writePullCachePathPointer(sourcePlanCacheDir(repoRoot), {
-      baseUrl: 'https://cloud.example',
-      orgId: 'org_1',
-      realPath: outPath,
-      externalId: 'src-ext',
-      versionNumber: 7,
-    });
-
+  it('does not derive lineage without an injected project history lookup', async () => {
     const payload = await buildBranchBPin({
       ...ATTACH_BASE,
-      sourcePlan: localPin('docs/plan.md'),
-      repoRoot,
-    });
-    expect(payload.derived_from).toEqual({ source_plan_external_id: 'src-ext', version_number: 7 });
-  });
-
-  it('degrades derived_from to null under a different org (org-scoped lineage)', async () => {
-    const outPath = path.join(repoRoot, 'docs', 'plan.md');
-    await mkdir(path.dirname(outPath), { recursive: true });
-    await writeFile(outPath, 'pulled body', 'utf8');
-    await writePullCacheRecord(sourcePlanCacheDir(repoRoot), {
-      schema_version: 1,
-      external_id: 'src-ext',
-      slug: 'src',
-      version_number: 7,
-      title: 'Source',
-      body: 'pulled body',
-      content_hash: sha('pulled body'),
-      source_ref: null,
-      base_url: 'https://cloud.example',
-      org_id: 'org_1',
-      pulled_at: '2026-06-08T00:00:00.000Z',
-    });
-    await writePullCachePathPointer(sourcePlanCacheDir(repoRoot), {
-      baseUrl: 'https://cloud.example',
-      orgId: 'org_1',
-      realPath: outPath,
-      externalId: 'src-ext',
-      versionNumber: 7,
-    });
-
-    const payload = await buildBranchBPin({
-      ...ATTACH_BASE,
-      currentOrgId: 'other-org',
       sourcePlan: localPin('docs/plan.md'),
       repoRoot,
     });

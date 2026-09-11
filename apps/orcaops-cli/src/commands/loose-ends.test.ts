@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { collectLooseEnds, type LooseEndsInput } from './loose-ends.js';
+import { collectLooseEnds, type LooseEndsInput } from '../lib/history-views.js';
 
 const NOW = '2026-07-01T12:00:00.000Z';
 

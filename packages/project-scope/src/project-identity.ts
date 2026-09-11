@@ -22,8 +22,8 @@ export class InvalidProjectIdentityError extends ProjectIdentityError {
   constructor() {
     super(
       `git config ${PROJECT_ID_CONFIG_KEY} is not a canonical UUIDv7 project id. ` +
-        `Fix it or remove it with \`git config --local --unset ${PROJECT_ID_CONFIG_KEY}\` ` +
-        `before archive operations continue.`,
+        'Preserve the stored value and run `orcaops doctor` to inspect registered history. ' +
+        'Restore only the verified original project id; do not unset or remint it.',
       'InvalidProjectIdentityError'
     );
   }
@@ -60,6 +60,15 @@ const DEFAULT_TIMING = {
   configAcquireMs: 2_000,
   configRetryMs: 50,
 };
+
+function assertMatchingProjectId(existing: string, expected: string): void {
+  if (existing !== expected) {
+    throw new ProjectIdentityError(
+      `Git config ${PROJECT_ID_CONFIG_KEY} identifies ${existing}, but retained project history ` +
+        `identifies ${expected}. Preserve both identities and repair the association explicitly.`
+    );
+  }
+}
 
 /**
  * Read the minted project id, or null when the repo has none yet. The stored
@@ -122,17 +131,16 @@ async function setProjectIdWithRetry(
   }
 }
 
-/**
- * Read the project id, minting one on first use. Mint-on-first-use is a
- * superset of "mint on first capture": any archive-enabled invocation that
- * needs the identity may create it.
- */
-export async function ensureProjectId(
+async function claimProjectId(
   repo: Repo,
+  expected: string | null,
   timing: ProjectIdentityTiming = {}
 ): Promise<EnsuredProjectId> {
   const existing = await readProjectId(repo);
-  if (existing) return { projectId: existing, minted: false };
+  if (existing) {
+    if (expected) assertMatchingProjectId(existing, expected);
+    return { projectId: existing, minted: false };
+  }
 
   const commonDir = await repo.getCommonDirAbsolute();
   // Identity is shared by every worktree, so its initialization lock must be too.
@@ -142,8 +150,11 @@ export async function ensureProjectId(
   });
   return lock.withLock('project-identity', async () => {
     const raced = await readProjectId(repo);
-    if (raced) return { projectId: raced, minted: false };
-    const projectId = uuidv7();
+    if (raced) {
+      if (expected) assertMatchingProjectId(raced, expected);
+      return { projectId: raced, minted: false };
+    }
+    const projectId = expected ?? uuidv7();
     await setProjectIdWithRetry(repo, projectId, timing);
     const persisted = await readProjectId(repo);
     if (persisted !== projectId) {
@@ -153,4 +164,28 @@ export async function ensureProjectId(
     }
     return { projectId, minted: true };
   });
+}
+
+/**
+ * Read the project id, minting one on first use. Mint-on-first-use is a
+ * superset of "mint on first capture": any archive-enabled invocation that
+ * needs the identity may create it.
+ */
+export async function ensureProjectId(
+  repo: Repo,
+  timing: ProjectIdentityTiming = {}
+): Promise<EnsuredProjectId> {
+  return claimProjectId(repo, null, timing);
+}
+
+/** Persist one already-validated canonical project id without reminting it. */
+export async function adoptProjectId(
+  repo: Repo,
+  projectId: string,
+  timing: ProjectIdentityTiming = {}
+): Promise<EnsuredProjectId> {
+  if (!isUuidV7(projectId)) {
+    throw new ProjectIdentityError('Retained project history has a non-canonical project id.');
+  }
+  return claimProjectId(repo, projectId, timing);
 }

@@ -72,9 +72,8 @@ async function projectEntryStatus(
  * than silence: uninitialized repos, non-git directories, unreadable configs,
  * and corrupt caches all degrade to empty stdout. (Session-start hooks are
  * non-blocking in every target agent, so even a crash would not break the
- * session — this contract is about noise, not safety.) Read-MOSTLY, not
- * strictly read-only: see readSessionStartState's contract for the
- * narrow `.orcaops/` write-backs it can perform.
+ * session — this contract is about noise, not safety.) The state read is
+ * passive: it opens only retained project history in reader mode.
  *
  * Output shapes (overlay `sessionHooks.payload`): plain text for
  * claude-code/opencode (stdout is added to context verbatim);

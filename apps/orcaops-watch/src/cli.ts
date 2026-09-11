@@ -20,10 +20,18 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     } else if (arg === '--probe') {
       opts.probe = true;
     } else if (arg === '--root') {
-      opts.root = argv[++i];
+      const root = argv[++i];
+      if (!root || root.startsWith('--')) throw new Error('--root requires a path');
+      opts.root = root;
     } else if (arg === '--interval') {
       const ms = Number(argv[++i]);
-      if (Number.isFinite(ms) && ms > 0) opts.intervalMs = ms;
+      if (!Number.isFinite(ms) || ms <= 0)
+        throw new Error('--interval requires a finite positive number of milliseconds');
+      opts.intervalMs = ms;
+    } else {
+      throw new Error(
+        'Unknown Watch argument; use --root, --interval, --probe, --selfcheck or --version'
+      );
     }
   }
   return opts;

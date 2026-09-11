@@ -4,7 +4,7 @@ import {
   collectArtifactDecisions,
   type CollectDecisionsInput,
   recordWindowFromFlags,
-} from './decisions.js';
+} from '../lib/history-views.js';
 
 const BASE: CollectDecisionsInput = {
   planDecisions: [

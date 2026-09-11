@@ -5,13 +5,7 @@ import {
   OssSourcePlanPinPayload,
   type SourcePlanGetResult,
 } from '@orcaops/sdk';
-import {
-  canonicalizeBaseUrl,
-  findByPath,
-  sha256Hex,
-  sourcePlanCacheDir,
-  type SourcePlanPin,
-} from '@orcaops/storage';
+import { canonicalizeBaseUrl, sha256Hex, type SourcePlanPin } from '@orcaops/storage';
 
 import { isMissingProcedureError, isNotFoundError } from './trpc-errors.js';
 
@@ -217,6 +211,9 @@ export interface AttachSourcePlanPinArgs {
   /** OPTIONAL — only Branch-B `derived_from` consumes it; absent → no lineage. */
   repoRoot?: string;
   authoredAt: string;
+  sourcePlanLookup?: (
+    filePath: string
+  ) => Promise<{ external_id: string; version_number: number } | null>;
 }
 
 /** Branch A (cloud): echo version/hash/body from the frozen self-contained pin. */
@@ -301,10 +298,9 @@ export async function buildBranchBPin(
 
 /**
  * Best-effort Branch-B lineage: if the local pin file traces to a prior
- * `plan pull --out` in the push org namespace, set `derived_from`. `repoRoot`
- * is the ONLY push-side consumer of `repoRoot` — absent (unthreaded call path),
- * wrong-org, or no record → null (a lost breadcrumb, never a wrong id, never a
- * broken pin). The cloud resolves the sent ref only within the current org.
+ * `plan pull --out` in registered project history, set `derived_from`.
+ * Missing repository context, missing database lookup, or no retained locator
+ * returns null: lineage is optional and must never fall back to file state.
  */
 export async function resolveDerivedFrom(
   args: AttachSourcePlanPinArgs
@@ -314,13 +310,7 @@ export async function resolveDerivedFrom(
   const filePath = path.isAbsolute(ref.locator)
     ? ref.locator
     : path.resolve(args.repoRoot, ref.locator);
-  const hit = await findByPath(
-    sourcePlanCacheDir(args.repoRoot),
-    args.baseUrl,
-    args.currentOrgId,
-    filePath,
-    args.repoRoot
-  );
+  const hit = args.sourcePlanLookup ? await args.sourcePlanLookup(filePath) : null;
   return hit
     ? { source_plan_external_id: hit.external_id, version_number: hit.version_number }
     : null;

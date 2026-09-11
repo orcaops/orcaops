@@ -3,7 +3,7 @@ import { lineHash, normalizeLineBody } from '../diff-fingerprint/adapter.js';
 
 /**
  * Line-membership check: is this exact source line's content among a
- * checkpoint manifest's `added_line_hashes`? Powers the `resolveWhy`
+ * checkpoint manifest's `added_line_hashes`? Powers provenance
  * line-hash confidence tier and the agent-trace exporter's per-line
  * ranges.
  *

@@ -2,8 +2,8 @@
 name: "Orcaops: timetravel"
 description: "Bisect, recover, or replay checkpoint boundaries. Use for \"which checkpoint broke this test?\", \"recover the abandoned attempt\", or \"replay how this came together\"."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "9bad64825c83"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "4006077f0bc4"
 tags: ["orcaops", "insight", "timetravel"]
 ---
 

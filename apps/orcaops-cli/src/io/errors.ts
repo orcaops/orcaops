@@ -1,4 +1,5 @@
 import type { GateAuditPayload } from '@orcaops/evaluator-protocol';
+import type { ProjectDatabaseFailureReason } from '@orcaops/storage/history/database';
 
 /**
  * One in-flight artifact offered as a disambiguation choice when a capture
@@ -18,6 +19,12 @@ export interface ArtifactCandidate {
   created_by_session_id: string | null;
 }
 
+export interface HistoryArtifactCandidate {
+  id: string;
+  project_id: string;
+  command: string;
+}
+
 /**
  * One open checkpoint offered as a disambiguation choice when `checkpoint
  * close` is called with `n` omitted and more than one checkpoint is open.
@@ -33,15 +40,30 @@ export interface OpenCheckpointCandidate {
 export interface GcApplyProgress {
   state: 'refused' | 'partial_completion' | 'recoverable_in_progress';
   completed: {
-    stale_pins: number;
-    abandoned_summarized: number;
-    snapshot_refs: number;
-    baseline_refs: number;
-    stale_review_dirs: number;
-    review_refs: number;
+    git_publications: number;
+    operations: number;
+    removed: number;
+    absent: number;
+    replayed: number;
+  };
+  recoverability?: 'pending' | 'settled' | 'unknown';
+  failed_candidate: {
+    kind: 'pending_reclamation' | 'git_publication' | 'inspection';
+    id: string;
+  };
+}
+
+export interface SnapshotPruneProgress {
+  state: 'refused' | 'partial_completion' | 'recoverable_in_progress';
+  completed: {
+    publications: number;
+    operations: number;
+    removed: number;
+    absent: number;
+    replayed: number;
   };
   failed_candidate: {
-    kind: 'stale_pin' | 'abandoned_summarized' | 'stale_review_dir';
+    kind: 'pending_reclamation' | 'git_publication' | 'inspection';
     id: string;
   };
 }
@@ -98,6 +120,7 @@ export interface ErrorEnvelope {
   error: {
     code: string;
     message: string;
+    reason?: ProjectDatabaseFailureReason;
     /** Dotted path into the input where the error occurred, when applicable. */
     path?: string;
     /**
@@ -112,6 +135,8 @@ export interface ErrorEnvelope {
      * call naming one `id`.
      */
     candidates?: ArtifactCandidate[];
+    history_candidates?: HistoryArtifactCandidate[];
+    truncated?: boolean;
     /**
      * Open checkpoints for `AMBIGUOUS_CHECKPOINT` — the agent re-issues
      * `checkpoint close` naming one `n`.
@@ -125,6 +150,13 @@ export interface ErrorEnvelope {
     current_version_number?: number;
     /** Truthful per-candidate progress when destructive GC stops early. */
     gc_progress?: GcApplyProgress;
+    snapshot_prune_progress?: SnapshotPruneProgress;
+    conversion_retry?: {
+      operation_id: string;
+      cwd: string;
+      resolved_root: string;
+      command: string;
+    };
     /**
      * Every secret-shaped field found in the payload, carried on
      * `SECRET_IN_PAYLOAD`. All of them, not just the first: the remedy is an
@@ -144,7 +176,16 @@ export interface ErrorEnvelope {
  */
 export type ErrorEnvelopeExtras = Pick<
   ErrorEnvelope['error'],
-  'candidates' | 'open_checkpoints' | 'current_version_number' | 'gc_progress' | 'secret_findings'
+  | 'candidates'
+  | 'history_candidates'
+  | 'truncated'
+  | 'open_checkpoints'
+  | 'current_version_number'
+  | 'reason'
+  | 'gc_progress'
+  | 'snapshot_prune_progress'
+  | 'conversion_retry'
+  | 'secret_findings'
 >;
 
 /**
@@ -225,21 +266,20 @@ export const ErrorCodes = {
    * agents can tell a containment refusal from a transport failure.
    */
   IMPORTED_ARTIFACT_LOCAL_ONLY: 'IMPORTED_ARTIFACT_LOCAL_ONLY',
-  MISSING_GIT_REMOTE: 'MISSING_GIT_REMOTE',
   /**
-   * Destructive GC could not prove Git branch enumeration or reachability.
-   * The candidate report remains available as a dry-run, but `--apply`
-   * refuses before deleting refs, files, pins, or database rows.
+   * `push` / `resync` cannot run against the project database yet. The accepted
+   * grouped-push dispatcher (`dispatchProjectArtifactPush`) settles an
+   * already-admitted push, but the two pieces that feed it — a builder from a
+   * project-database thread to the admission input, and the real nine-method
+   * transport — are not built (the push-terminal unit dispatches over a fake
+   * client, "no real sends", and the successor handoff reserves the public push
+   * composition for the coordinator). The refusal is typed so a caller can tell
+   * "not implemented on the new store yet" from a transport failure (`CLOUD_ERROR`).
    */
-  GC_GIT_UNCERTAIN: 'GC_GIT_UNCERTAIN',
-  /** Durable hot/archive state could not support a safe stale-pin classification. */
-  GC_STORAGE_UNCERTAIN: 'GC_STORAGE_UNCERTAIN',
-  /** Destructive GC requires a complete, current SQLite projection. */
-  GC_PROJECTION_UNHEALTHY: 'GC_PROJECTION_UNHEALTHY',
+  CLOUD_PUSH_UNAVAILABLE: 'CLOUD_PUSH_UNAVAILABLE',
+  MISSING_GIT_REMOTE: 'MISSING_GIT_REMOTE',
   /** Protected local state needs operator-visible reconciliation before commands continue. */
   RECOVERY_REQUIRED: 'RECOVERY_REQUIRED',
-  /** GC's exact destructive candidate/ref set changed during validation. */
-  GC_CANDIDATES_CHANGED: 'GC_CANDIDATES_CHANGED',
   /** A per-candidate GC mutation stopped; inspect `gc_progress` before retrying. */
   GC_APPLY_FAILED: 'GC_APPLY_FAILED',
   /**

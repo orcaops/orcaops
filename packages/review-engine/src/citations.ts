@@ -265,9 +265,6 @@ export function buildCitations(artifacts: readonly ReviewArtifact[]): CitationTa
         });
         pushCp(ref, id);
       });
-      // Verified-close evidence: the command, its exit code, and any digest or
-      // note. A non-zero exit is honest evidence and is carried verbatim — the
-      // floor never filters proof by whether it passed.
       cp.verification.forEach((v, i) => {
         const id = formatCitationId({
           artifact: a.id,
@@ -275,15 +272,19 @@ export function buildCitations(artifacts: readonly ReviewArtifact[]): CitationTa
           kind: CITATION_KIND.CHECKPOINT_VERIFICATION,
           index: i,
         });
-        const head = `${v.command} → exit ${v.exitCode}${
-          v.outputDigest !== null ? ` · ${v.outputDigest}` : ''
+        const close =
+          cp.closeTreeSha === null
+            ? 'Checkpoint subsequently closed; snapshot unavailable.'
+            : `Checkpoint subsequently closed at snapshot ${cp.closeTreeSha}.`;
+        const head = `${v.command} — Agent reports command exited ${v.exitCode}. ${close}${
+          v.outputDigest !== null ? ` Agent-supplied output: ${v.outputDigest}` : ''
         }`;
         citations.push({
           id,
           kind: CITATION_KIND.CHECKPOINT_VERIFICATION,
           artifact: a.id,
           cp: cp.n,
-          text: v.note !== null ? `${head}\n↳ ${v.note}` : head,
+          text: v.note !== null ? `${head}\nAgent-supplied note: ${v.note}` : head,
         });
         pushCp(ref, id);
       });

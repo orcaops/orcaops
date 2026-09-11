@@ -85,7 +85,7 @@ export function isUuidV7(s: string): boolean {
 /**
  * The shared record-ID schema: every artifact-event and usage-ledger ID is a
  * canonical UUIDv7, at read AND at every override/import ingress. IDs become
- * filesystem path segments (`sidecars/<event_id>.json`, archive mirrors), so
+ * retained sidecar and evidence path segments, so
  * shape validation here is what keeps a stored ID from carrying traversal.
  */
 export const UuidV7Schema = z

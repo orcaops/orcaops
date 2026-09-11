@@ -79,6 +79,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # Legacy conversion provenance tests read their pinned original commit.
+          fetch-depth: 0
       - run: corepack enable
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -107,8 +110,7 @@ jobs:
         if: always()
         run: pnpm --filter @orcaops/watch perf:review-cap
 
-  # Every release artifact from one host: only a mac can re-sign and verify the
-  # darwin executables, and Bun cross-compiles the linux targets from there.
+  # Darwin signing and Bun executable cross-compilation require a Mac.
   watch-compile:
     runs-on: macos-15
     steps:

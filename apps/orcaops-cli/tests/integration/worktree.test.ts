@@ -172,7 +172,7 @@ describe('orcaops in a linked worktree', () => {
     }
   });
 
-  it('read verbs in an enabled sibling with no data serve an empty source and create nothing', async () => {
+  it('sibling reads stay passive and first-use setup records worktree-scoped writes', async () => {
     // Personal init in the MAIN checkout enables the worktree through the
     // shared config; the worktree itself has never captured anything.
     await mainAgent.runRaw(['init', '--personal', '--no-llm', '--json']);
@@ -191,7 +191,9 @@ describe('orcaops in a linked worktree', () => {
     await expect(stat(path.join(wt.path, '.orcaops'))).rejects.toThrow();
     expect(gitStatus(wt.path)).toBe('');
 
-    // A write creates exactly this worktree's data; the sibling stays empty.
+    // A write requires explicit first-use setup for this worktree.
+    const setup = await wtAgent.runRaw(['init', '--personal', '--force', '--no-llm', '--json']);
+    expect(setup.exitCode, `${setup.stdout}\n${setup.stderr}`).toBe(0);
     const plan = await wtAgent.runRaw([
       'capture',
       'plan',
@@ -206,14 +208,20 @@ describe('orcaops in a linked worktree', () => {
         })
       ),
     ]);
-    expect(plan.exitCode).toBe(0);
-    await expect(stat(path.join(wt.path, '.orcaops', 'artifacts'))).resolves.toBeDefined();
+    expect(plan.exitCode, `${plan.stdout}\n${plan.stderr}`).toBe(0);
+    const artifactId = (JSON.parse(plan.stdout) as { artifact_id: string }).artifact_id;
+    await expect(stat(path.join(wt.path, '.orcaops'))).rejects.toThrow();
     await expect(stat(path.join(main.path, '.orcaops'))).rejects.toThrow();
-    // The main checkout still reads as an empty source and lists nothing.
-    const mainList = JSON.parse((await mainAgent.runRaw(['list', '--json'])).stdout) as {
-      artifacts: unknown[];
+    const mainList = JSON.parse(
+      (await mainAgent.runRaw(['list', '--scope', 'worktree', '--json'])).stdout
+    ) as {
+      results: unknown[];
     };
-    expect(mainList.artifacts).toEqual([]);
+    expect(mainList.results).toEqual([]);
+    const worktreeList = JSON.parse(
+      (await wtAgent.runRaw(['list', '--scope', 'worktree', '--json'])).stdout
+    ) as { results: Array<{ id: string }> };
+    expect(worktreeList.results.map((row) => row.id)).toContain(artifactId);
   });
 
   it('doctor from the worktree resolves hooks and global refs correctly', async () => {

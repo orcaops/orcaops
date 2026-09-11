@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -52,23 +54,29 @@ async function runCli(
  */
 describe('orcaops resume picker (smoke)', () => {
   let repo: TempRepo;
+  let dataRoot: string;
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-resume-smoke-history-'));
     // Run init headless so the lifecycle's auto-pin path stays a no-op
     // and the picker can see two un-pinned artifacts later.
     await runCli(['init', '--json', '--no-llm'], {
       cwd: repo.path,
-      env: { ...process.env, ...withCleanSession({}) },
+      env: { ...process.env, ...withCleanSession({ ORCAOPS_DATA_DIR: dataRoot }) },
     });
   });
 
   afterEach(async () => {
     await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
   });
 
   it('two un-pinned artifacts on the branch: ok:true + resolved:false + exit 1', async () => {
-    const headless: NodeJS.ProcessEnv = { ...process.env, ...withCleanSession({}) };
+    const headless: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...withCleanSession({ ORCAOPS_DATA_DIR: dataRoot }),
+    };
     for (const i of [1, 2]) {
       const planRes = await runCli(
         [
@@ -96,11 +104,11 @@ describe('orcaops resume picker (smoke)', () => {
       ok: boolean;
       resolved: boolean;
       reason?: string;
-      candidates?: Array<{ id: string }>;
+      candidates?: Array<{ artifact_id: string }>;
     };
     expect(env.ok).toBe(true);
     expect(env.resolved).toBe(false);
-    expect(env.reason).toBe('multiple-active-no-pin');
+    expect(env.reason).toBe('AMBIGUOUS_ARTIFACT');
     expect(env.candidates?.length).toBe(2);
   });
 });

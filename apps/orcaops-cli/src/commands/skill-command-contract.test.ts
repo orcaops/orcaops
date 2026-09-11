@@ -34,15 +34,15 @@ const examples = [
   },
   {
     skill: 'resume',
-    text: 'orcaops resume --accept-default --no-pin',
+    text: 'orcaops resume --artifact <id>',
     path: ['resume'],
-    flags: ['--accept-default', '--no-pin'],
+    flags: ['--artifact'],
   },
   {
     skill: 'plan-critique',
-    text: 'orcaops decisions --all-branches --json',
+    text: 'orcaops decisions --scope project --json',
     path: ['decisions'],
-    flags: ['--all-branches', '--json'],
+    flags: ['--scope', '--json'],
   },
   {
     skill: 'digest',

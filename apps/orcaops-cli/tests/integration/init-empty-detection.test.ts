@@ -68,7 +68,7 @@ describe('interactive init with no detected agents', () => {
     expect(promptState.initialAgents).toEqual([]);
     expect(output.install_agents).toEqual([]);
     expect(output.global).toBeNull();
-    expect(await readdir(homeRoot)).toEqual([]);
+    expect(await readdir(homeRoot)).toEqual(['data']);
     await expect(access(path.join(repo.path, 'CLAUDE.local.md'))).rejects.toMatchObject({
       code: 'ENOENT',
     });

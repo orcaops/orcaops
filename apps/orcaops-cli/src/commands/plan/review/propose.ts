@@ -4,15 +4,15 @@ import {
   resolveReviewBaseline,
 } from '@orcaops/core';
 import type { OssSourcePlanReviewPropose, SourcePlanReviewProposeResponse } from '@orcaops/sdk';
-import {
-  firstForbiddenControlChar,
-  readReviewCandidate,
-  sha256Hex,
-  sourcePlanCacheDir,
-  writeReviewPullRecord,
-} from '@orcaops/storage';
+import { firstForbiddenControlChar, sha256Hex } from '@orcaops/storage';
 
-import { mapReviewAuthzError, requireRef, withReviewCloud } from './shared.js';
+import type { PlanReviewPersistence } from './persistence.js';
+import {
+  createReviewMutation,
+  mapReviewAuthzError,
+  requireRef,
+  withReviewCloud,
+} from './shared.js';
 import { readBodyInput } from '../../../io/body-input.js';
 import { toCloudErrorEnvelope } from '../../../io/cloud-error-envelope.js';
 import { ErrorCodes, OrcaopsError } from '../../../io/errors.js';
@@ -24,7 +24,7 @@ import {
   writeSecretWarnings,
 } from '../../../lib/cloud-secret-gate.js';
 import { loadSecretAllowlist } from '../../../lib/run-capture.js';
-import { reviewUsageStamp, stampPlanReviewUsage } from '../../../lib/usage-stamp.js';
+import { reviewUsageStamp } from '../../../lib/usage-stamp.js';
 
 export interface ReviewProposeOptions {
   input?: string;
@@ -53,13 +53,14 @@ export interface ReviewProposeResult {
 }
 
 export interface RunReviewProposeArgs {
+  persistence: PlanReviewPersistence;
   client: ReviewProposeClient;
   repoRoot: string;
   baseUrl: string;
   orgId: string;
   externalId: string;
   body: string;
-  /** `--base-version-id` escape hatch: take it verbatim, SKIP the cache read. */
+  /** `--base-version-id` escape hatch: take it verbatim, skip the retained read. */
   baseVersionIdOverride?: string;
   supersedesProposalId?: string;
   summary?: string;
@@ -69,16 +70,10 @@ export interface RunReviewProposeArgs {
   pulledAt: string;
 }
 
-/** Resolve the base candidate version id from the local cache, or hard-error. */
+/** Resolve the base candidate version id from project history, or hard-error. */
 async function resolveBaseVersionId(args: RunReviewProposeArgs): Promise<string> {
   if (args.baseVersionIdOverride !== undefined) return args.baseVersionIdOverride;
-  const rec = await readReviewCandidate(
-    sourcePlanCacheDir(args.repoRoot),
-    args.baseUrl,
-    args.orgId,
-    args.externalId,
-    args.repoRoot
-  );
+  const rec = await args.persistence.readCandidate(args.externalId);
   if (!rec || rec.version_id === null) {
     throw new OrcaopsError(
       ErrorCodes.NO_INPUT,
@@ -123,6 +118,7 @@ export async function runReviewPropose(
       'plan-review-propose'
     );
   }
+  await args.persistence.preflight();
   const baseVersionId = await resolveBaseVersionId(args);
   const contentHash = sha256Hex(args.body);
 
@@ -148,8 +144,7 @@ export async function runReviewPropose(
 
   // Persist the new proposal (version_id/version_number null — propose's response
   // has neither; proposal_id + the local body/hash are what `comment` needs).
-  await writeReviewPullRecord(
-    sourcePlanCacheDir(args.repoRoot),
+  await args.persistence.writeRecord(
     {
       schema_version: 1,
       target: 'proposal',
@@ -164,7 +159,7 @@ export async function runReviewPropose(
       org_id: args.orgId,
       pulled_at: args.pulledAt,
     },
-    args.repoRoot
+    { preserveEquivalent: true }
   );
 
   return withSecretWarnings(
@@ -215,8 +210,13 @@ export async function reviewProposeAction(
     assertNoSecretsOutbound(
       'plan-review-propose',
       [
+        ['external_id', ref],
         ['body', body],
+        ['base_version_id', opts.baseVersionId],
+        ['supersedes_proposal_id', opts.supersedes],
         ['summary', opts.summary],
+        ['source_ref', opts.sourceRef],
+        ['base_url', opts.baseUrl],
       ],
       await loadSecretAllowlist()
     );
@@ -227,9 +227,23 @@ export async function reviewProposeAction(
         requires: [ORCAOPS_CAPABILITIES.SOURCE_PLAN_REVIEW],
         operation: 'plan review propose',
       },
-      async (ctx) =>
-        runReviewPropose({
-          client: ctx.client,
+      async (ctx) => {
+        const pulledAt = new Date().toISOString();
+        const mutation = createReviewMutation(
+          ctx,
+          {
+            verb: 'propose',
+            externalId: ref,
+            body,
+            baseVersionId: opts.baseVersionId ?? null,
+            supersedes: opts.supersedes ?? null,
+            summary: opts.summary ?? null,
+            sourceRef: opts.sourceRef ?? null,
+          },
+          { publicationAt: pulledAt }
+        );
+        const result = await runReviewPropose({
+          client: mutation.client,
           repoRoot: ctx.repoRoot,
           baseUrl: ctx.baseUrl,
           orgId: ctx.orgId,
@@ -240,11 +254,14 @@ export async function reviewProposeAction(
           ...(opts.summary ? { summary: opts.summary } : {}),
           ...(opts.sourceRef ? { sourceRef: opts.sourceRef } : {}),
           baseline: await resolveReviewBaseline(ctx.repo),
-          pulledAt: new Date().toISOString(),
-        })
+          pulledAt,
+          persistence: mutation.persistence,
+        });
+        if (mutation.didDispatch())
+          await ctx.stampUsage(reviewUsageStamp('propose', result.external_id, result.proposal_id));
+        return result;
+      }
     );
-
-    await stampPlanReviewUsage(reviewUsageStamp('propose', result.external_id, result.proposal_id));
 
     writeSecretWarnings(result.secret_warnings);
     if (opts.json) {

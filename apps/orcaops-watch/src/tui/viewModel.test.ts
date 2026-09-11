@@ -7,6 +7,7 @@ import {
   navRows,
   railGroups,
   railSelectionAnchor,
+  repositoryOptions,
   resolveRailSelection,
   statusCounts,
 } from './viewModel';
@@ -15,7 +16,6 @@ function thread(id: string, state: AgentState, lastWriteMs = 1000): WatchThread 
   return {
     artifactId: id,
     artifactStatus: 'active' as WatchThread['artifactStatus'],
-    source: 'archive',
     branch: `branch-${id}`,
     openComments: 0,
     isCurrentCheckout: false,
@@ -35,6 +35,9 @@ function thread(id: string, state: AgentState, lastWriteMs = 1000): WatchThread 
     planDecisions: [],
     nonGoals: [],
     recentEvents: [],
+    version: '1:retained',
+    omittedEvents: 0,
+    activityWindowComplete: true,
   };
 }
 
@@ -43,17 +46,27 @@ function snapshot(): WatchSnapshot {
     generated_at: '2026-07-05T00:00:00.000Z',
     generatedAtMs: 10_000,
     dataRoot: '/x',
-    archiveEnabled: true,
-    totals: { activeThreads: 2, openCheckpoints: 1, sessionTokens: 0 },
+    rootKey: 'root',
+    state: 'current',
+    completeness: { complete: true, issues: [] },
+    totals: { activeThreads: 2, openCheckpoints: 1, sessionTokens: 0, usageStatus: 'unavailable' },
     projects: [
       {
         projectId: 'A',
         displayName: 'alpha',
+        authorityKey: 'store-a',
+        writeSequence: 1,
+        state: 'current',
+        completeness: { complete: true, issues: [] },
         threads: [thread('a1', 'stalled', 100), thread('a2', 'working')],
       },
       {
         projectId: 'B',
         displayName: 'beta',
+        authorityKey: 'store-b',
+        writeSequence: 1,
+        state: 'current',
+        completeness: { complete: true, issues: [] },
         threads: [thread('b1', 'ready', 200), thread('b2', 'idle')],
       },
     ],
@@ -93,6 +106,10 @@ describe('railGroups', () => {
         {
           projectId: 'A',
           displayName: 'alpha',
+          authorityKey: 'store-a',
+          writeSequence: 1,
+          state: 'current',
+          completeness: { complete: true, issues: [] },
           threads: [
             t('w1', 'working', 'feat/x'),
             t('w2', 'idle', 'feat/x'),
@@ -124,6 +141,10 @@ describe('railGroups', () => {
         {
           projectId: 'A',
           displayName: 'alpha',
+          authorityKey: 'store-a',
+          writeSequence: 1,
+          state: 'current',
+          completeness: { complete: true, issues: [] },
           threads: [ready, working],
         },
       ],
@@ -147,6 +168,10 @@ describe('railGroups', () => {
         {
           projectId: 'A',
           displayName: 'alpha',
+          authorityKey: 'store-a',
+          writeSequence: 1,
+          state: 'current',
+          completeness: { complete: true, issues: [] },
           threads: [only],
         },
       ],
@@ -168,6 +193,10 @@ describe('railGroups', () => {
         {
           projectId: 'A',
           displayName: 'alpha',
+          authorityKey: 'store-a',
+          writeSequence: 1,
+          state: 'current',
+          completeness: { complete: true, issues: [] },
           threads: [t('a', 'feat/a'), t('b', 'feat/a'), t('c', 'feat/c')],
         },
       ],
@@ -189,7 +218,7 @@ describe('railGroups', () => {
   });
 
   it('filters by repo', () => {
-    const groups = railGroups(snapshot(), { repo: 'beta' });
+    const groups = railGroups(snapshot(), { repo: 'B' });
     expect(groups.every((g) => g.tone === 'attention' || g.title === 'beta')).toBe(true);
     expect(navOrder(groups)).toContain('b1');
     expect(navOrder(groups)).not.toContain('a2');
@@ -215,4 +244,22 @@ describe('statusCounts', () => {
     expect(counts.working).toBe(1); // a2 (b1 ready is not 'working')
     expect(counts.idle).toBe(1);
   });
+});
+
+it('keeps duplicate repository names separately selectable by project id', () => {
+  const snap = snapshot();
+  for (const project of snap.projects) project.displayName = 'api';
+  expect(repositoryOptions(snap)).toEqual([
+    { name: 'api (A)', value: 'A' },
+    { name: 'api (B)', value: 'B' },
+  ]);
+  for (const groupBy of ['none', 'project', 'task'] as const) {
+    const rows = navRows(railGroups(snap, { repo: 'B', groupBy }));
+    expect(rows.length).toBeGreaterThan(0);
+    expect(
+      rows.every((row) =>
+        row.kind === 'thread' ? row.projectId === 'B' : row.task.projectId === 'B'
+      )
+    ).toBe(true);
+  }
 });

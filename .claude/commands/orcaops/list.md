@@ -2,8 +2,8 @@
 name: "orcaops:list"
 description: "List captured artifacts in the repo (optionally filtered by branch)."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "f16bb5ba92a7"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "91c6aaafd217"
 tags: ["orcaops", "read-only"]
 ---
 

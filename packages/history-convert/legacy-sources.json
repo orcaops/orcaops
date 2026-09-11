@@ -1,0 +1,394 @@
+{
+  "schema_version": 1,
+  "source_revision": "9cb6e606cebed31a3e22bb928119c04cb041bfc3",
+  "entries": [
+    {
+      "source_path": "packages/evaluator-protocol/src/capture-exclude.ts",
+      "source_sha256": "fd9b0bbf5f662f4d31cfdaa9833ae28fea0095dc8cdb0fef668546eff9d97ee8",
+      "output_path": "src/legacy/protocol/capture-exclude.ts",
+      "output_sha256": "229d5eb53df1fd67b4c3ed7d94dd58f5b087a9bb117c6f4c0fdf98cca6a53a6e",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/evaluator-protocol/src/containment.ts",
+      "source_sha256": "27be7344792b9c3d34f631136a32315d57e77b2ea34fdfc7644a0ef8772927c7",
+      "output_path": "src/legacy/protocol/containment.ts",
+      "output_sha256": "fc1180092602ee7ea0315c740a884aace539b4a255f185cff6fbad450f95f224",
+      "selected_symbols": ["PathContainmentError", "assertSafeRelativePath"],
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/evaluator-protocol/src/normalize.ts",
+      "source_sha256": "766ba885f776c8bd59312d6756325f0a69df8af54c56b14b9e59c5da7c0108a0",
+      "output_path": "src/legacy/protocol/normalize.ts",
+      "output_sha256": "41be4bae15c776123bb801754975f672899046e8b1ac8ee7805599790d87cef7",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/evaluator-protocol/src/schemas/common.ts",
+      "source_sha256": "8a3633198f9fe57d7fbb5f2f67d3ccf11663e44981386dc747bceb67d882ad4e",
+      "output_path": "src/legacy/protocol/schemas/common.ts",
+      "output_sha256": "d29f0643479a4ffc6db80b1e842049664c764b7d8194f03e5c91c0411341dc93",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/evaluator-protocol/src/schemas/disposition.ts",
+      "source_sha256": "1d9622d149b6b3544bfc73583c60f6851d38a17c0114ab1821518b6e0b037155",
+      "output_path": "src/legacy/protocol/schemas/disposition.ts",
+      "output_sha256": "41547e19b5da17f9c2d45b62a62ccf8a7980dd2fbce61c03db2d897c03090953",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/evaluator-protocol/src/schemas/gate-audit.ts",
+      "source_sha256": "4dafa611e4851565973161d54de1cd4e5cf9eb119eeb4ac8e42f8858d72edf80",
+      "output_path": "src/legacy/protocol/schemas/gate-audit.ts",
+      "output_sha256": "3f2c8629820401ad1ca276717d2549c177ab871c92101c74bd8c08aaafa6e51c",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/evaluator-protocol/src/schemas/run.ts",
+      "source_sha256": "e71cd85a9a28b2649893bd6bc1eba903f0b17974f9cc05367fef0481e6813f19",
+      "output_path": "src/legacy/protocol/schemas/run.ts",
+      "output_sha256": "88c2cf27d78bb7074c6adf31ebf7dd7c3dfadfbd056696221e0da6e9fc4131fd",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/evaluator-protocol/src/secrets.ts",
+      "source_sha256": "9639b52333b30dd348661f6137b247f18919669c480136ae4f138d43cfd72a85",
+      "output_path": "src/legacy/protocol/secrets.ts",
+      "output_sha256": "0619b452b4907b54b3874e076897feb8e41f099b245b779447ff5b28e133ab01",
+      "selected_symbols": [
+        "PADDING_RUN",
+        "PEM_BASE64_CHAR",
+        "PEM_BASE64_RUN",
+        "PEM_BASE64_RUNS",
+        "PEM_BASE64_RUN_LINE",
+        "PEM_BASE64_TAIL",
+        "PEM_BODY_TOKEN_LINE",
+        "PEM_ENCAPSULATED_HEADER",
+        "PEM_HEADER_VALUE_AT",
+        "PEM_MARKER_LINE",
+        "PEM_MAX_ANCHOR_WIDTH",
+        "PEM_MAX_DRY_LINES",
+        "PEM_MAX_ENCAPSULATED_HEADERS",
+        "PEM_MAX_HEADER_GAP",
+        "PEM_MAX_HEADER_LINES",
+        "PRIVATE_KEY_BEGIN",
+        "PRIVATE_KEY_END",
+        "PRIVATE_KEY_HEADER_SUFFIXES",
+        "PRIVATE_KEY_PATTERN_NAME",
+        "PemMaterialShape",
+        "PrivateKeyHeader",
+        "PrivateKeyRange",
+        "REDACTION_MARKER",
+        "RedactionRange",
+        "SECRET_PATTERNS",
+        "SOLID_ALNUM_RUN",
+        "STRONG_ASSIGNMENT_PATTERN_NAME",
+        "SecretPattern",
+        "characterClassCount",
+        "collectPatternRanges",
+        "collectRedactionRanges",
+        "endsWithEscapedLineBreak",
+        "isCredentialShapedValue",
+        "isPemContinuationLine",
+        "isPemHeaderValueRun",
+        "isPlainJsonObject",
+        "isPrivateKeyBody",
+        "isPrivateKeyTerminatorLine",
+        "mapNormalizedRanges",
+        "maskFoundRanges",
+        "mergeRedactionRanges",
+        "parsePrivateKeyHeader",
+        "pemBodyLines",
+        "pemDryBudget",
+        "pemMaterialDominates",
+        "pemMaterialShape",
+        "pemRunAt",
+        "privateKeyBodyRunEnd",
+        "privateKeyRanges",
+        "redactBothPasses",
+        "redactRanges",
+        "redactSecrets",
+        "redactSecretsInValue",
+        "scrubEvaluatorOutput",
+        "secretRanges",
+        "shannonEntropy",
+        "startsWithEscapedLineBreak",
+        "uniqueOutputKey",
+        "walkRedact"
+      ],
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/evaluator-protocol/src/terminal.ts",
+      "source_sha256": "e7530fd21e9f751655f29a4043afe6719bbc315e39c45c94732eac9e8073bbea",
+      "output_path": "src/legacy/protocol/terminal.ts",
+      "output_sha256": "800e896c144929172b4117a7a27a7a30ae2041cd4cfae151fe6102143d430eda",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/artifacts/errors.ts",
+      "source_sha256": "d68c435f6f4fbae98e2081d483edda2ea17f85e6d41abe29ce4e06a03b822c36",
+      "output_path": "src/legacy/storage/artifacts/errors.ts",
+      "output_sha256": "32db0c7bf1ff6b9b6a8266db8fd6c586b068888a0b3cbf56e907b2d5aa164ef3",
+      "selected_symbols": ["RecoveryRefusedError"],
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/artifacts/store.ts",
+      "source_sha256": "9085e24de25fed770fa04f550a4eca4439de2011cf295400effb405c0fb6e089",
+      "output_path": "src/legacy/storage/artifacts/store.ts",
+      "output_sha256": "ad8c57eccdbd8011738f85d5d08565ef284d605327c31cc3dfa1a7e631204b87",
+      "selected_symbols": ["planMarkdown", "checkpointMarkdown", "summaryMarkdown"],
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/events/canonical-json.ts",
+      "source_sha256": "ad012a4962d0716fc4b24dec229ddadbc54128e1b34bd50c9873473bde7b8ea8",
+      "output_path": "src/legacy/storage/events/canonical-json.ts",
+      "output_sha256": "963ac4f0111fc9c61c258ac1a83697eec2d91c772c375e4ff5d85f215637896e",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/events/event-log.ts",
+      "source_sha256": "2add4075489692198162472ea78de3ca6d405341c4141f776147fc7c9e837a66",
+      "output_path": "src/legacy/storage/events/event-log.ts",
+      "output_sha256": "88e29b96eded8f1308d5dc11e70c4131795f45805fc476253dee814a6a39c4af",
+      "selected_symbols": [
+        "EventTypeSchema",
+        "EventType",
+        "InlineEventRecordSchema",
+        "SidecarEventRecordSchema",
+        "EventRecordSchema",
+        "EventRecord",
+        "InlineEventRecord",
+        "SidecarEventRecord"
+      ],
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/events/rebuilders.ts",
+      "source_sha256": "58f11aa4855ec46f7f7ea32d3d047b88e42d848804391753cf90109a2ad56858",
+      "output_path": "src/legacy/storage/events/rebuilders.ts",
+      "output_sha256": "4b0fc0beadbfbc8367b503c2448624278cc70b3edbdde96829088224ddddef19",
+      "selected_symbols": null,
+      "omitted_symbols": ["loadEventsWithPayloads"],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/ids/uuidv7.ts",
+      "source_sha256": "6273da48f5f0f685747fda8acc913a165579fd8aee035bc2df39516beead986c",
+      "output_path": "src/legacy/storage/ids/uuidv7.ts",
+      "output_sha256": "3e9df1e9d448cc77a00e84d1b94e4c83a609fcc96a79ae1b71e8f27c9a9a1f6a",
+      "selected_symbols": ["UUID_V7_REGEX", "isUuidV7", "UuidV7Schema"],
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/markdown/serialize.ts",
+      "source_sha256": "81a108a5fa78307a31ed29c0a31f1218d89e272601b451a8b9e7e52c7d45634b",
+      "output_path": "src/legacy/storage/markdown/serialize.ts",
+      "output_sha256": "f18e59d261ea2ccdfa0f94f979ecf45234d7aca513e99facae904ab24ebd9b67",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/paths/containment.ts",
+      "source_sha256": "393106ff190736f3522edd806c6bb6f94dc5c78adbe8939c8f31426c188fec8b",
+      "output_path": "src/legacy/storage/paths/containment.ts",
+      "output_sha256": "e7fbfd86b1898578ad2677acf0e9a9644d57998d82aa72148a7cc2671f65ef45",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/artifact-json.ts",
+      "source_sha256": "88e71f2e6ccc901e28ddc13665f08cca1596f08bb018c27bfc90d831ac9589da",
+      "output_path": "src/legacy/storage/schema/artifact-json.ts",
+      "output_sha256": "aa92792377292a9936e61031323904ff7365063c7c4a8c244d7213b0706d86eb",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/checkpoint.ts",
+      "source_sha256": "21a78852624e429ffd84ff438eacdccda0dfaf01864b241bd48880d66c6c64e4",
+      "output_path": "src/legacy/storage/schema/checkpoint.ts",
+      "output_sha256": "c8dede22915a576bc4b29ad9f315b7759c4430558a9addacc90cbe62430b3be1",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/config.ts",
+      "source_sha256": "fa3ea56c9f8a1d68d2cb6b787245f81b6d2ae3156c38db37c383819643d5275b",
+      "output_path": "src/legacy/storage/schema/config.ts",
+      "output_sha256": "4a0897af0241c1d5b62c9a5e7e42610ef54c62a5be8b3135f76ddeaa367905ad",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/decision.ts",
+      "source_sha256": "5c94e545fa3e65d1ec03df21fb7c9980ed4eecd0125c116c4557c413e8072c09",
+      "output_path": "src/legacy/storage/schema/decision.ts",
+      "output_sha256": "1c93bfdcf583834bcade5af94f6ea8d62d077c300531274e9bebed280e4485c3",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/diff-fingerprint.ts",
+      "source_sha256": "6c13aac413345f0adb204d9c5f368c84d85f2ad804610818dd8c50ebe572d4eb",
+      "output_path": "src/legacy/storage/schema/diff-fingerprint.ts",
+      "output_sha256": "7978f58373063cbcd8d2d507024dd53d5c1b511c0c663083a639e701fe532dc3",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/evaluator-run.ts",
+      "source_sha256": "8515caa0c639d421ac107dab7f092fac5fea8a46aa554aafb718d3cc710723e8",
+      "output_path": "src/legacy/storage/schema/evaluator-run.ts",
+      "output_sha256": "3b616b41c09e65144fb32669b1f9c9373a0b511b215ea17ea06a0ba4e160d711",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/git-import-enrichment.ts",
+      "source_sha256": "29c4636cdfebac2e8a9a9ef2e6c864bd24aa42efcb51eb39a41de1d4fa209923",
+      "output_path": "src/legacy/storage/schema/git-import-enrichment.ts",
+      "output_sha256": "ccaddb702ed54e012b75a3d56b1bad822f925d46d770e1b0597c2f03e340323b",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/origin.ts",
+      "source_sha256": "3f1aef8605df5ae5e9f7278fdc32708edfebf43d629acc8b65b9998530a37fa7",
+      "output_path": "src/legacy/storage/schema/origin.ts",
+      "output_sha256": "fb736c2c38d9f557a72ccdb023fd6cde351cc09d187cd1fdac5bb5229117daef",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/plan.ts",
+      "source_sha256": "f2b3bff5005bedd7b2b27ed9a4c77a9f01f4a7a72f60547941b6968b507c81f5",
+      "output_path": "src/legacy/storage/schema/plan.ts",
+      "output_sha256": "3abc2b63118e4a5c2bcf6bef7c00d08c1ac100892c4dd13506880f33d0cbda59",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/pre-pr-checked.ts",
+      "source_sha256": "afedc27996c6702b238076f7a4c31db7156e8c0fcb45c3f86add1d7b5ae2007e",
+      "output_path": "src/legacy/storage/schema/pre-pr-checked.ts",
+      "output_sha256": "f0c1d2f574eb315ffb3d13bff959bcf09ee5f758abd70652dcdc2f600c6898b3",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/source-plan.ts",
+      "source_sha256": "cf4be61b85e99778dd7db23b09e4380175f29a5a692feef9e0fa23b9cfdaaa85",
+      "output_path": "src/legacy/storage/schema/source-plan.ts",
+      "output_sha256": "ed9e2b1df86b75f0528d494090497ae18fec4ef31f88c9e7284843dc70a60566",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/summary.ts",
+      "source_sha256": "4b1b6bf21cf471895bb0f8bfad1b46672ccc90b312d3582243eb7b2486eb7b30",
+      "output_path": "src/legacy/storage/schema/summary.ts",
+      "output_sha256": "dde7f77e42a7dc82af7b69c41b84d9f830f1e4fd50c631973451532f8c45a34b",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/usage-ledger.ts",
+      "source_sha256": "369ad4fa07ae3510964a5323abcf1f8a62b641a5955a814a34f7934bd9be7f70",
+      "output_path": "src/legacy/storage/schema/usage-ledger.ts",
+      "output_sha256": "c068d958f5b928216ac77328db884cb0edb37934491edd322cd78cbcafabdb82",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/schema/validation.ts",
+      "source_sha256": "40570bf3b33d04a62ce74dc1aa65cd6fd924a3ba8991625c272a89f96289159a",
+      "output_path": "src/legacy/storage/schema/validation.ts",
+      "output_sha256": "a363c98dc30047fc59c72931039aabc0f4267ff32d07e61fb1d7f8db9693249b",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/store/sqlite.ts",
+      "source_sha256": "4287d6b4272bfd5793140429badd9949506704014f1a806886f73ffd616bfb45",
+      "output_path": "src/legacy/storage/store/sqlite.ts",
+      "output_sha256": "85a9f3648ec8ac6cc6a29a70d064cafb810396a1d6449427960997a4e7d228d3",
+      "selected_symbols": ["UsageSnapshotRow", "SourcePlanLinkRow"],
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/text/control-chars.ts",
+      "source_sha256": "b5c0f9f5ee431340047e88c6f9c7f0981b8947decb524764adf2b55acc20eca0",
+      "output_path": "src/legacy/storage/text/control-chars.ts",
+      "output_sha256": "2d6b89562132109093570481bad487b5a75b9adc996fe5d4eee80b43f77ac4f9",
+      "selected_symbols": null,
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/usage/ledger-log.ts",
+      "source_sha256": "31333307d52472124b5d31c7d1f816be0dddfa6e1cbd81601f2aef71a1bc8edc",
+      "output_path": "src/legacy/storage/usage/ledger-log.ts",
+      "output_sha256": "44841d8b09878642600285d3c3f819402f4fca743f005d66f0ef1a38367ea6b7",
+      "selected_symbols": ["LoadedUsageEvent", "isValidUsagePayload", "usageRecordContentIdentity"],
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    },
+    {
+      "source_path": "packages/storage/src/usage/ledger.ts",
+      "source_sha256": "881672f95e248cc7d360e115127f3cb29028a424ae8055aa9d85e682eda86103",
+      "output_path": "src/legacy/storage/usage/ledger.ts",
+      "output_sha256": "833c83280688da5df1e296f5eedf794dbf8f1c9a691b2e2aa4db3a762f07d379",
+      "selected_symbols": [
+        "RebuildUsageLedgerResult",
+        "replayUsageEventsIntoStore",
+        "payloadToRow"
+      ],
+      "omitted_symbols": [],
+      "transformation": "Remove comments; retain selected declarations when listed; export selected pure Markdown renderers and usage validators with their exact dependencies; replace the usage projector Store type with its two-method structural sink, preserving replay bodies and row types; rewrite protocol imports to private frozen dependencies; remove event payload I/O from pure replay."
+    }
+  ]
+}

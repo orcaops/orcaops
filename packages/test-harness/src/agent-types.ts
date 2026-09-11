@@ -155,7 +155,7 @@ export interface StatusOk extends OkEnvelope {
 }
 
 export interface ListOk extends OkEnvelope {
-  artifacts: Array<{ id: string; branch: string; task: string; state: string }>;
+  results: Array<{ id: string; branch: string; task: string; state: string }>;
 }
 
 export interface ShowOk extends OkEnvelope {

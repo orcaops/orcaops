@@ -16,10 +16,10 @@ afterAll(() => {
   }
 });
 
-// Hermeticity: the snapshot layer resolves the archive through ORCAOPS_DATA_DIR
-// → XDG_DATA_HOME → ~/.orcaops and the index through XDG_CACHE_HOME, so a leaked
-// ambient var would read the developer's real archive. Scrub every ORCAOPS_*
-// override, then point the archive and caches at throwaway dirs.
+// Hermeticity: the history root resolves through ORCAOPS_DATA_DIR →
+// XDG_DATA_HOME → ~/.orcaops and caches through XDG_CACHE_HOME, so a leaked
+// ambient var would read the developer's real project databases. Scrub every
+// ORCAOPS_* override, then point the data root and caches at throwaway dirs.
 for (const key of Object.keys(process.env)) {
   if (key.startsWith('ORCAOPS_')) delete process.env[key];
 }

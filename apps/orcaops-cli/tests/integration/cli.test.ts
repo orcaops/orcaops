@@ -1,11 +1,25 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { ArtifactStore, Store } from '@orcaops/storage';
+import { captureDatabasePlan } from '@orcaops/core/history/database-capture';
+import { CapturePlanInputSchema } from '@orcaops/storage';
+import {
+  readProjectArtifact,
+  readProjectLifecycleCompletions,
+} from '@orcaops/storage/history/database';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
+import { fixture } from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
+
+type DatabaseFixture = Awaited<ReturnType<typeof fixture>>;
+function databaseAgent(f: DatabaseFixture) {
+  return makeAgent({
+    cwd: f.main,
+    env: { ORCAOPS_ROOT: f.main, ORCAOPS_DATA_DIR: f.root, ORCAOPS_DISABLE_DRAIN: '1' },
+  });
+}
 
 describe('orcaops CLI (in-process)', () => {
   let repo: TempRepo;
@@ -18,22 +32,6 @@ describe('orcaops CLI (in-process)', () => {
 
   afterEach(async () => {
     await repo.cleanup();
-  });
-
-  it('returns UNINITIALIZED envelope when run before init', async () => {
-    const result = await agent.runRaw([
-      'capture',
-      'plan',
-      '--input',
-      inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
-    ]);
-    expect(result.exitCode).toBe(1);
-    const err = JSON.parse(result.stdout) as {
-      ok: boolean;
-      error: { code: string };
-    };
-    expect(err.ok).toBe(false);
-    expect(err.error.code).toBe('UNINITIALIZED');
   });
 
   it('Zod validation surfaces a structured error with a field path', async () => {
@@ -271,79 +269,6 @@ describe('orcaops CLI (in-process)', () => {
     const err = JSON.parse(ackRes.stdout) as { ok: boolean; error: { code: string } };
     expect(err.ok).toBe(false);
     expect(err.error.code).toBe('BLOCK_NOT_ACKNOWLEDGEABLE');
-  });
-
-  it('rebuild repopulates SQLite from disk artifacts when the cache is wiped', async () => {
-    const fs = await import('node:fs/promises');
-    const nodePath = await import('node:path');
-
-    await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
-    const planRes = await agent.runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(
-        JSON.stringify({ task: 't', plan_steps: [{ text: 's1', label: 's1' }], touched_scope: [] })
-      ),
-    ]);
-    const planEnv = JSON.parse(planRes.stdout) as {
-      artifact_id: string;
-      plan_steps: Array<{ step_id: string }>;
-    };
-    const artifactId = planEnv.artifact_id;
-    const stepOneId = planEnv.plan_steps[0].step_id;
-
-    // Wipe the cache directory.
-    await fs.rm(nodePath.join(repo.path, '.orcaops', 'cache'), { recursive: true, force: true });
-
-    // Without rebuild: capture checkpoint would fail with UNKNOWN_ARTIFACT
-    // because the SQLite row is gone but the JSON files on disk remain.
-    const rebuildRes = await agent.runRaw(['rebuild', '--json']);
-    expect(rebuildRes.exitCode).toBe(0);
-    const r = JSON.parse(rebuildRes.stdout) as {
-      ok: boolean;
-      artifacts: number;
-      checkpoints: number;
-      summaries: number;
-    };
-    expect(r.ok).toBe(true);
-    expect(r.artifacts).toBe(1);
-    expect(r.checkpoints).toBe(0);
-
-    // Now the artifact is back; capture checkpoint should succeed
-    // (open + close lifecycle).
-    const cpOpen = await agent.runRaw([
-      'capture',
-      'checkpoint',
-      'open',
-      '--no-llm',
-      '--input',
-      inputFile(
-        JSON.stringify({
-          artifact_id: artifactId,
-          declared_step_ids: [stepOneId],
-        })
-      ),
-    ]);
-    expect(cpOpen.exitCode).toBe(0);
-    const cpRes = await agent.runRaw([
-      'capture',
-      'checkpoint',
-      'close',
-      '--no-llm',
-      '--input',
-      inputFile(
-        JSON.stringify({
-          artifact_id: artifactId,
-          n: 1,
-          summary: 'cp post-rebuild',
-          verification: [{ command: 'test fixture', exit_code: 0 }],
-          completed_step_ids: [stepOneId],
-        })
-      ),
-    ]);
-    expect(cpRes.exitCode).toBe(0);
   });
 
   it('init reports skills and commands in the right groups', async () => {
@@ -912,67 +837,51 @@ describe('orcaops CLI (in-process)', () => {
     expect(secondParsed.artifact_id).toBe(firstArtifactId);
   });
 
-  it('same-key plan replay resumes when its completion row is missing', async () => {
-    await agent.runRaw(['init', '--json', '--no-llm']);
+  it('same-key plan replay resumes a missing post-plan lifecycle', async () => {
+    const f = await fixture();
     const payload = {
-      idempotency_key: 'plan-resume-deleted-completion',
-      task: 'resume deleted evaluator completion',
-      label: 'resume-deleted-completion',
+      idempotency_key: 'plan-resume-missing-lifecycle',
+      task: 'resume missing evaluator lifecycle',
+      label: 'resume-missing-lifecycle',
       plan_steps: [{ text: 'one', label: 's1' }],
       touched_scope: [],
     };
-    const first = await agent.runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(JSON.stringify(payload)),
-    ]);
-    const artifactId = (JSON.parse(first.stdout) as { artifact_id: string }).artifact_id;
-    const cache = new Store(path.join(repo.path, '.orcaops', 'cache', 'orcaops.db'));
-    try {
-      cache.db
-        .prepare(
-          `DELETE FROM evaluator_lifecycles
-           WHERE artifact_id = ? AND fires_at = 'post-plan'`
-        )
-        .run(artifactId);
-    } finally {
-      cache.close();
-    }
+    const retained = await captureDatabasePlan(f.writer, f.registeredContext, {
+      authored: CapturePlanInputSchema.parse(payload),
+      sourcePlan: null,
+      agent: 'codex',
+      snapshot: { enabled: false, excludePatterns: [] },
+      secretAllow: [],
+    });
+    expect(readProjectLifecycleCompletions(f.writer, retained.artifactId).records).toEqual([]);
 
-    const replay = await agent.runRaw([
+    const replay = await databaseAgent(f).runRaw([
       'capture',
       'plan',
       '--no-llm',
       '--input',
       inputFile(JSON.stringify(payload)),
     ]);
-    expect(replay.exitCode).toBe(0);
-    expect((JSON.parse(replay.stdout) as { message: string }).message).toContain(
-      'missing post-event evaluator work was resumed'
-    );
+    expect(replay.exitCode, replay.stdout + replay.stderr).toBe(0);
+    expect(JSON.parse(replay.stdout)).toMatchObject({
+      artifact_id: retained.artifactId,
+      plan_event_id: retained.planEventId,
+      idempotency_status: 'replay',
+      message: expect.stringContaining('missing post-event evaluator work was resumed'),
+      lifecycle: { status: 'complete' },
+    });
+    expect(
+      readProjectLifecycleCompletions(f.writer, retained.artifactId).records.map(({ record }) => ({
+        firesAt: record.fires_at,
+        checkpointN: record.cp_n,
+      }))
+    ).toEqual([{ firesAt: 'post-plan', checkpointN: 0 }]);
   });
 
   it('ignores checkpoint_n for a non-checkpoint evaluator phase', async () => {
-    await agent.runRaw(['init', '--json', '--no-llm']);
-    const created = await agent.runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(
-        JSON.stringify({
-          idempotency_key: 'manual-post-plan-sequence',
-          task: 'manual post-plan sequence',
-          label: 'manual-post-plan-sequence',
-          plan_steps: [{ text: 'one', label: 's1' }],
-          touched_scope: [],
-        })
-      ),
-    ]);
-    const artifactId = (JSON.parse(created.stdout) as { artifact_id: string }).artifact_id;
-    const rerun = await agent.runRaw([
+    const f = await fixture();
+    const artifactId = await f.capture();
+    const rerun = await databaseAgent(f).runRaw([
       'capture',
       'run-evaluators',
       '--no-llm',
@@ -985,124 +894,101 @@ describe('orcaops CLI (in-process)', () => {
         })
       ),
     ]);
-    expect(rerun.exitCode).toBe(0);
-
-    const cache = new Store(path.join(repo.path, '.orcaops', 'cache', 'orcaops.db'));
-    try {
-      const rows = cache.listLifecycles(artifactId).filter((row) => row.fires_at === 'post-plan');
-      expect(rows).toHaveLength(1);
-      expect(rows[0].cp_n).toBe(0);
-    } finally {
-      cache.close();
-    }
-  });
-
-  it('recovers a post-append plan failure by rebuild and same-key replay', async () => {
-    await agent.runRaw(['init', '--json', '--no-llm']);
-    const payload = {
-      idempotency_key: 'plan-post-append-failure',
-      task: 'recover the original plan identity',
-      label: 'recover-original-plan',
-      plan_steps: [{ text: 'one', label: 's1' }],
-      touched_scope: [],
-    };
-    const upsert = vi.spyOn(Store.prototype, 'upsertArtifact').mockImplementationOnce(() => {
-      throw new Error('injected projection failure');
+    expect(rerun.exitCode, rerun.stdout + rerun.stderr).toBe(0);
+    expect(JSON.parse(rerun.stdout)).toMatchObject({
+      artifact_id: artifactId,
+      fires_at: 'post-plan',
+      lifecycle: { status: 'published' },
     });
-    const failed = await agent.runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(JSON.stringify(payload)),
-    ]);
-    upsert.mockRestore();
-    expect(failed.exitCode).toBe(1);
-    const failure = JSON.parse(failed.stdout) as {
-      error: { code: string; message: string };
-    };
-    expect(failure.error.code).toBe('IDEMPOTENCY_PENDING');
-    expect(failure.error.message).toContain(
-      'Run `orcaops rebuild`, then retry `orcaops capture plan` with the same idempotency key.'
-    );
-
-    const cache = new Store(path.join(repo.path, '.orcaops', 'cache', 'orcaops.db'));
-    const artifactId = cache.lookupPlanIdempotency(payload.idempotency_key)?.artifact_id;
-    cache.close();
-    expect(artifactId).toBeDefined();
-
-    const rebuilt = await agent.runRaw(['rebuild', '--json']);
-    expect(rebuilt.exitCode).toBe(0);
-    const replay = await agent.runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(JSON.stringify(payload)),
-    ]);
-    expect(replay.exitCode).toBe(0);
-    const replayEnv = JSON.parse(replay.stdout) as {
-      artifact_id: string;
-      idempotency_status: string;
-    };
-    expect(replayEnv.artifact_id).toBe(artifactId);
-    expect(replayEnv.idempotency_status).toBe('replay');
-
-    const rawEvents = await readFile(
-      path.join(repo.path, '.orcaops', 'artifacts', artifactId!, 'events.ndjson'),
-      'utf8'
-    );
     expect(
-      rawEvents
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line) as { type: string })
-        .filter((event) => event.type === 'plan_captured')
-    ).toHaveLength(1);
+      readProjectLifecycleCompletions(f.writer, artifactId).records.map(({ record }) => ({
+        firesAt: record.fires_at,
+        checkpointN: record.cp_n,
+      }))
+    ).toEqual([{ firesAt: 'post-plan', checkpointN: 0 }]);
   });
 
-  it('rolls back a plan reservation when the durable append is proven absent', async () => {
-    await agent.runRaw(['init', '--json', '--no-llm']);
-    const payload = {
-      idempotency_key: 'plan-pre-append-failure',
-      task: 'retry a failed append',
-      label: 'retry-failed-append',
-      plan_steps: [{ text: 'one', label: 's1' }],
-      touched_scope: [],
-    };
-    const writePlan = vi
-      .spyOn(ArtifactStore.prototype, 'writePlan')
-      .mockRejectedValueOnce(new Error('injected pre-append failure'));
-    const failed = await agent.runRaw([
+  it('retains checkpoint_n for a checkpoint evaluator phase', async () => {
+    const f = await fixture();
+    const artifactId = await f.capture();
+    const stepId = readProjectArtifact(f.writer, artifactId)!.thread.plan!.plan_steps[0].step_id;
+    const opened = await databaseAgent(f).runRaw([
       'capture',
-      'plan',
+      'checkpoint',
+      'open',
       '--no-llm',
       '--input',
-      inputFile(JSON.stringify(payload)),
+      inputFile(
+        JSON.stringify({
+          artifact_id: artifactId,
+          declared_step_ids: [stepId],
+        })
+      ),
     ]);
-    writePlan.mockRestore();
-    expect(failed.exitCode).toBe(1);
-    expect((JSON.parse(failed.stdout) as { error: { message: string } }).error.message).toContain(
-      'injected pre-append failure'
-    );
-
-    const cache = new Store(path.join(repo.path, '.orcaops', 'cache', 'orcaops.db'));
-    try {
-      expect(cache.lookupPlanIdempotency(payload.idempotency_key)).toBeNull();
-    } finally {
-      cache.close();
-    }
-
-    const retry = await agent.runRaw([
+    expect(opened.exitCode, opened.stdout + opened.stderr).toBe(0);
+    const rerun = await databaseAgent(f).runRaw([
       'capture',
-      'plan',
+      'run-evaluators',
       '--no-llm',
       '--input',
-      inputFile(JSON.stringify(payload)),
+      inputFile(
+        JSON.stringify({
+          artifact_id: artifactId,
+          fires_at: 'checkpoint-open',
+          checkpoint_n: 1,
+        })
+      ),
     ]);
-    expect(retry.exitCode).toBe(0);
-    expect((JSON.parse(retry.stdout) as { idempotency_status: string }).idempotency_status).toBe(
-      'created'
-    );
+    expect(rerun.exitCode, rerun.stdout + rerun.stderr).toBe(0);
+    expect(
+      readProjectLifecycleCompletions(f.writer, artifactId)
+        .records.filter(({ record }) => record.fires_at === 'checkpoint-open')
+        .map(({ record }) => record.cp_n)
+    ).toEqual([1]);
+  });
+
+  it('uses the retained revision for a post-plan-revision evaluator phase', async () => {
+    const f = await fixture();
+    const artifactId = await f.capture();
+    const plan = readProjectArtifact(f.writer, artifactId)!.thread.plan!;
+    const revised = await databaseAgent(f).runRaw([
+      'capture',
+      'plan',
+      'revise',
+      '--no-llm',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          artifact_id: artifactId,
+          label: plan.label,
+          rationale: 'Exercise revision lifecycle numbering',
+          prior_plan_event_id: plan.source_event_id,
+          plan_steps: plan.plan_steps,
+          touched_scope: [],
+          non_goals: [],
+        })
+      ),
+    ]);
+    expect(revised.exitCode, revised.stdout + revised.stderr).toBe(0);
+    expect(JSON.parse(revised.stdout)).toMatchObject({ revision_n: 1 });
+    const rerun = await databaseAgent(f).runRaw([
+      'capture',
+      'run-evaluators',
+      '--no-llm',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          artifact_id: artifactId,
+          fires_at: 'post-plan-revision',
+          checkpoint_n: 9,
+        })
+      ),
+    ]);
+    expect(rerun.exitCode, rerun.stdout + rerun.stderr).toBe(0);
+    expect(
+      readProjectLifecycleCompletions(f.writer, artifactId)
+        .records.filter(({ record }) => record.fires_at === 'post-plan-revision')
+        .map(({ record }) => record.cp_n)
+    ).toEqual([1]);
   });
 });

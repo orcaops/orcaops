@@ -1,4 +1,3 @@
-import { access } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
@@ -8,11 +7,13 @@ import {
   resolveConfigSource,
   type WorktreeProbe,
 } from '@orcaops/core';
-import { ArtifactStore } from '@orcaops/storage';
+import { resolveDatabaseHistoryScope } from '@orcaops/project-scope/history/database';
+import { inspectHistoryPath } from '@orcaops/storage/history/authority';
+import { projectDatabasePath, readProjectTaskContext } from '@orcaops/storage/history/database';
 
-import { deriveLabel, loadInFlightOnBranch } from './active-artifact.js';
-import { getInvocationCwd } from './invocation-context.js';
+import { getInvocationCwd, getInvocationEnv } from './invocation-context.js';
 import { resolveExplicitOverride } from './resolve-root.js';
+import { deriveThreadStatus } from './thread-status.js';
 
 /**
  * Idle threshold after which an open checkpoint reads as "left over from a
@@ -40,7 +41,7 @@ export type SessionStartState =
   | { kind: 'uninitialized' }
   /**
    * `session_hooks.payload: 'static'` (the default): the hook emits a fixed
-   * prefix-aware nudge with ZERO state reads — no git call, no SQLite open.
+   * prefix-aware nudge without opening project history.
    */
   | { kind: 'static'; prefix: string }
   | {
@@ -91,15 +92,9 @@ export async function resolveSessionStartRoot(cwd?: string): Promise<string | nu
  *  - **Fast** — no LLM, no network, no archive wiring. Deliberately NOT
  *    `buildContext` (which wires the archive mirror and maps errors for
  *    interactive commands).
- *  - **Zero writes on the fresh-repo path** — when the SQLite cache file does
- *    not exist yet, report that cached state is unavailable WITHOUT
- *    constructing ArtifactStore, whose constructor would create the cache
- *    file. A read-only nudge must not materialize state in a repo the user
- *    hasn't captured in.
- *    The claim is deliberately NARROW: on already-materialized state the
- *    canonical loaders are used as-is (accepted over raw reads, which would
- *    silently diverge from them), and any writes they perform are idempotent
- *    and confined to `.orcaops/`.
+ *  - **No application writes** — the canonical history scope opens only existing project
+ *    databases in reader mode. Missing history stays missing; this hook never
+ *    initializes, migrates, repairs, adopts, observes, or focuses anything.
  */
 export async function readSessionStartState(
   cwd?: string,
@@ -148,50 +143,85 @@ export async function readSessionStartState(
     }
     if (branch === 'HEAD') branch = 'detached HEAD';
 
-    const cacheDb = path.join(repoRoot, config.cache.path);
+    let scope: Awaited<ReturnType<typeof resolveDatabaseHistoryScope>>;
     try {
-      await access(cacheDb);
+      scope = await resolveDatabaseHistoryScope({
+        cwd: repoRoot,
+        profile: 'status',
+        selector: { scope: 'project' },
+        env: getInvocationEnv(),
+      });
     } catch {
       return { kind: 'ready', branch, prefix, cacheStatus: 'missing', inFlight: [] };
     }
-
-    // A store that cannot open must not silence the hook: degrade to the
-    // static nudge, the same visible fallback branch resolution uses. This
-    // arm is reachable in a healthy repo — the ArtifactStore constructor
-    // dlopens better-sqlite3, and a hook environment whose `node` ABI
-    // differs from the one the addon was built for throws right here.
-    let store: ArtifactStore;
     try {
-      store = new ArtifactStore({ repoRoot, config, archive: null });
-    } catch {
-      return { kind: 'static', prefix };
-    }
-    try {
-      const rows = await loadInFlightOnBranch({ store }, branch);
+      if (scope.projects.length === 0)
+        return { kind: 'ready', branch, prefix, cacheStatus: 'missing', inFlight: [] };
+      const project = scope.projects[0];
+      if (scope.projects.length !== 1 || !project) return { kind: 'static', prefix };
+      if (!project.database) {
+        const exists = project.authority
+          ? await inspectHistoryPath(
+              scope.root.resolvedRoot,
+              projectDatabasePath(project.authority)
+            )
+          : null;
+        return exists === null
+          ? { kind: 'ready', branch, prefix, cacheStatus: 'missing', inFlight: [] }
+          : { kind: 'static', prefix };
+      }
+      const snapshot = readProjectTaskContext(project.database, { branch });
       const nowMs = Date.now();
-      const inFlight: SessionStartArtifact[] = rows.map(({ row, json }) => ({
-        id: row.id,
-        label: deriveLabel(row),
-        state: json.state,
-        checkpointCount: json.checkpoint_count,
-        openCheckpoints: store.store.getOpenCheckpoints(row.id).map((cp) => {
-          const openedMs = new Date(cp.opened_at).getTime();
-          return {
-            n: cp.n,
-            openedAt: cp.opened_at,
-            idleHours: Number.isFinite(openedMs)
-              ? Math.max(0, (nowMs - openedMs) / 3_600_000)
-              : null,
-          };
-        }),
-      }));
+      const inFlight: SessionStartArtifact[] = snapshot.artifacts.flatMap(
+        ({ row, details, lifecycles }) => {
+          const thread = deriveThreadStatus({
+            artifact: {
+              id: row.artifactId,
+              task: details.task,
+              branch: row.branch,
+              status: row.completedAt === null ? 'active' : 'complete',
+              started_at: row.startedAt,
+              completed_at: row.completedAt,
+            },
+            planStepCount: details.planStepIds.length,
+            checkpoints: [
+              ...details.closedCheckpoints.map((checkpoint) => ({
+                ...checkpoint,
+                status: 'closed',
+              })),
+              ...details.openCheckpoints,
+            ],
+            hasSummary: row.completedAt !== null,
+            lifecycles: lifecycles.map((entry) => entry.record),
+            evaluatorRuns: details.evaluatorRuns,
+          });
+          if (thread.status === 'complete' || row.state === 'summarized') return [];
+          return [
+            {
+              id: row.artifactId,
+              label:
+                row.label && row.label !== 'unlabelled' ? row.label : (row.task ?? row.artifactId),
+              state: row.state,
+              checkpointCount: row.checkpointCount,
+              openCheckpoints: details.openCheckpoints.map((checkpoint) => {
+                const openedMs = new Date(checkpoint.opened_at).getTime();
+                return {
+                  n: checkpoint.n,
+                  openedAt: checkpoint.opened_at,
+                  idleHours: Number.isFinite(openedMs)
+                    ? Math.max(0, (nowMs - openedMs) / 3_600_000)
+                    : null,
+                };
+              }),
+            },
+          ];
+        }
+      );
       return { kind: 'ready', branch, prefix, cacheStatus: 'available', inFlight };
     } catch {
-      // Same contract as the constructor guard: a failed read degrades
-      // visibly, never to silence.
       return { kind: 'static', prefix };
     } finally {
-      store.close();
+      scope.close();
     }
   } catch {
     return { kind: 'uninitialized' };

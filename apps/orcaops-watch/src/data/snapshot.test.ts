@@ -6,9 +6,21 @@ const VALID = JSON.stringify({
   generated_at: '2026-07-05T22:00:00.000Z',
   generatedAtMs: 1,
   dataRoot: '/x/.orcaops',
-  archiveEnabled: true,
-  totals: { activeThreads: 2, openCheckpoints: 1, sessionTokens: 1234 },
-  projects: [{ projectId: 'p', displayName: 'p', threads: [] }],
+  rootKey: 'root',
+  state: 'current',
+  completeness: { complete: true, issues: [] },
+  totals: { activeThreads: 2, openCheckpoints: 1, sessionTokens: 1234, usageStatus: 'exact' },
+  projects: [
+    {
+      projectId: 'p',
+      displayName: 'p',
+      authorityKey: 'store',
+      writeSequence: 1,
+      state: 'current',
+      completeness: { complete: true, issues: [] },
+      threads: [],
+    },
+  ],
   ticker: [],
 });
 

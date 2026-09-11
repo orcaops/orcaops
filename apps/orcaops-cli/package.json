@@ -1,6 +1,6 @@
 {
   "name": "@orcaops/cli",
-  "version": "0.2.0-rc.2",
+  "version": "0.2.0",
   "license": "FSL-1.1-ALv2",
   "private": true,
   "type": "module",
@@ -34,6 +34,7 @@
     "@orcaops/evaluator-pack": "workspace:*",
     "@orcaops/evaluator-protocol": "workspace:*",
     "@orcaops/evaluator-runner": "workspace:*",
+    "@orcaops/history-convert": "workspace:*",
     "@orcaops/llm": "workspace:*",
     "@orcaops/project-scope": "workspace:*",
     "@orcaops/review-engine": "workspace:*",

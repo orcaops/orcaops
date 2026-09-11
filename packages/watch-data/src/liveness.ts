@@ -19,8 +19,10 @@ export const DEFAULT_THRESHOLDS: Thresholds = {
 /** The classification-relevant slice of a WatchThread. */
 export type ClassifyInputs = Pick<
   WatchThread,
-  'artifactStatus' | 'openCheckpoints' | 'lastWriteMs' | 'lastClosed'
->;
+  'artifactStatus' | 'openCheckpoints' | 'lastWriteMs'
+> & {
+  lastClosed: WatchThread['lastClosed'] | { uncertaintyCount: number; hasSummary: boolean };
+};
 
 /**
  * Pure liveness classification over (inputs, now, thresholds). "artifact still
@@ -64,7 +66,9 @@ export function classifyAgent(
     inputs.artifactStatus === 'active' &&
     inputs.lastClosed !== null &&
     inputs.lastClosed.uncertaintyCount > 0 &&
-    inputs.lastClosed.summary.trim().length > 0
+    ('hasSummary' in inputs.lastClosed
+      ? inputs.lastClosed.hasSummary
+      : inputs.lastClosed.summary.trim().length > 0)
   ) {
     return 'ready';
   }

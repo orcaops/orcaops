@@ -5,11 +5,12 @@ Notable changes to the Orcaops CLI. Format follows
 [SemVer](https://semver.org/spec/v2.0.0.html). Below 1.0.0, minor releases
 may change behaviour. Anything needing action on upgrade is called out.
 
-## [0.2.0] - 2026-09-04
+## [0.2.0] - 2026-09-10
 
-Four things to check on upgrade: move to Node 22.14.0 or newer, uninstall
-`@orcaops/watch`, use WSL2 on Windows if you open the Task Review UI, and
-regenerate any unapplied enrichment bundles produced by `0.2.0-rc.1`.
+Five things to check on upgrade: move to Node 22.14.0 or newer, uninstall
+`@orcaops/watch`, convert your existing local history, move any
+`orcaops why --json` consumer to schema 4, and use WSL2 on Windows if you open
+the Task Review UI.
 
 ### Breaking changes
 
@@ -27,11 +28,43 @@ regenerate any unapplied enrichment bundles produced by `0.2.0-rc.1`.
 - That prebuilt UI covers macOS and Linux on x64 and arm64. On Windows it runs
   under WSL2. The rest of the CLI is unaffected, and anywhere without a build
   `orcaops watch` lists the platforms it supports and exits.
+- Captured history is one SQLite database per project, shared by that
+  repository's worktrees. Convert existing history from its original repository
+  before you run other commands:
+
+  ```
+  orcaops history convert
+  orcaops history convert --apply --offline
+  ```
+
+  The preview writes nothing. Apply prints an operation ID; if it is
+  interrupted, retry from the same checkout with `--operation-id <id>`. Task
+  Review history from earlier versions is not carried over.
+
+- The home-dir archive mirror is removed, with the `orcaops archive` command
+  and the `archive.enabled` and `archive.redact_secrets` settings. Keep your
+  own backup of the project database if you want a second copy of captured
+  history.
+- `orcaops why --json` returns schema 4. Candidates are compact; add
+  `--details` for the full candidate bodies. Human output is unchanged.
 - Regenerate any enrichment bundles produced by `0.2.0-rc.1` before applying
   them with this release.
 
 ### Added
 
+- `orcaops history convert` imports a repository's pre-database history into
+  its project database.
+- `orcaops rebuild` rebuilds derived query and search metadata from retained
+  database rows.
+- `orcaops gc` reports retained Git publications. `--apply` reclaims refs
+  already recorded as retired and unreferenced.
+- `orcaops snapshots prune` previews retired snapshot publications and reclaims
+  them with `--apply`.
+- `orcaops status`, `list`, `decisions`, `loose-ends` and `stats` take
+  `--scope worktree|project|all-projects`, and `--project <id>` reads one
+  project by its UUID.
+- `ORCAOPS_DATA_DIR` selects the history data root, ahead of `XDG_DATA_HOME`
+  and `~/.orcaops`.
 - `orcaops doctor` names the Task Review build it found, or tells you your
   platform has none.
 - Imported decisions now carry structured evidence linking each decision to its
@@ -50,6 +83,12 @@ regenerate any unapplied enrichment bundles produced by `0.2.0-rc.1`.
 - `orcaops init` registers Codex hooks in `hooks.json`. An existing orcaops
   block in your Codex `config.toml` moves there for you and keeps the approval
   Codex already holds, so you are not asked to approve the hook again.
+- `orcaops watch` opens project history through a read-only connection. It does
+  not migrate a database or rebuild indexes.
+- Deleting a worktree leaves its project database in place.
+- Pointing `ORCAOPS_DATA_DIR` somewhere else does not move a registered
+  project. Orcaops reports the mismatch, and `orcaops doctor` names the action
+  to take.
 - Seed previews disclose checked-out commits omitted from the selected history,
   the evidence available for proposed decisions, and the enrichment scope
   before you approve an import.
@@ -61,8 +100,15 @@ regenerate any unapplied enrichment bundles produced by `0.2.0-rc.1`.
   the capture store then failed.
 - Two orcaops commands running at once no longer fail while the search index
   is being updated.
+- Two commands that both create a project database at once settle on one of
+  them instead of failing.
 - When the capture store cannot be opened, the error shows the command that
   fixes it; previously the message was cut off before it.
+- `orcaops watch` shuts down cleanly when it is closed before its first
+  snapshot is ready.
+- `orcaops watch` labels repositories by identity, so worktrees of the same
+  repository read correctly and an issue is counted once.
+- Projects keep their readable names in listings.
 - Enriched imports retain their labels, summaries, outcomes, and decisions
   after cache and archive rebuilds.
 - Commit-message metadata no longer becomes an imported artifact's label.

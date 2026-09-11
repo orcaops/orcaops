@@ -40,8 +40,8 @@ describe('skill command accuracy', () => {
 
   it('keeps repo-wide planning queries branch-wide and labels prior states honestly', () => {
     const critique = bodyText(orcaopsPlanCritiqueSkill);
-    expect(critique).toContain('orcaops decisions --all-branches --json');
-    expect(critique).toContain('orcaops loose-ends --all-branches --json');
+    expect(critique).toContain('orcaops decisions --scope project --json');
+    expect(critique).toContain('orcaops loose-ends --scope project --json');
     expect(critique).toContain('distinguish active, interrupted, abandoned, and unsummarized work');
     expect(critique).not.toContain('attempts that DIED');
     expect(critique).toContain('draft section');

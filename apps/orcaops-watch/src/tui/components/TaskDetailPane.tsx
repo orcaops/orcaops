@@ -1,6 +1,11 @@
 import type { WatchTask, WatchThread } from '@orcaops/watch-data/ui';
 
-import { ago, fmtTokens } from '../../core/format';
+import {
+  ago,
+  fmtSessionTokenValue,
+  type SessionTokenSummary,
+  summarizeSessionTokens,
+} from '../../core/format';
 import { useCockpitTheme } from '../ThemeProvider';
 import type { TaskDetailModel, TaskMemberPresentation } from '../detail';
 import { EmptyState, Rule, useHit } from '../kit';
@@ -8,18 +13,8 @@ import { displayLen, truncate } from '../layout';
 import type { ScrollRef } from '../scroll';
 import { GLYPH, STATE_LABEL, UI_GLYPH } from '../theme';
 
-function taskSessionTokens(task: WatchTask): { tokens: number; sessions: number } {
-  const sessions = new Map<string, number>();
-  for (const thread of task.threads) {
-    for (const session of thread.sessions) {
-      const key = `${session.agent}:${session.session_id}`;
-      sessions.set(key, Math.max(sessions.get(key) ?? 0, session.tokens));
-    }
-  }
-  return {
-    tokens: [...sessions.values()].reduce((total, tokens) => total + tokens, 0),
-    sessions: sessions.size,
-  };
+function taskSessionTokens(task: WatchTask): SessionTokenSummary {
+  return summarizeSessionTokens(task.threads.flatMap((thread) => thread.sessions));
 }
 
 /**
@@ -34,7 +29,10 @@ function memberMetrics(thread: WatchThread, width: number): string {
   const openSuffix =
     thread.openCheckpoints > 0 && width >= 40 ? `/${thread.openCheckpoints} open` : '';
   const checkpoints = `${checkpointCount}cp${openSuffix}`;
-  const comments = thread.openComments > 0 && width >= 34 ? ` · ✎${thread.openComments}` : '';
+  const comments =
+    width >= 34 && (thread.openComments === null || thread.openComments > 0)
+      ? ` · ✎${thread.openComments ?? '?'}`
+      : '';
   if (width < 46) return `${steps} · ${checkpoints}${comments}`;
   return `${steps} steps · ${checkpoints}${comments}`;
 }
@@ -48,7 +46,8 @@ function memberMetrics(thread: WatchThread, width: number): string {
  */
 function fitCaptureMeta(input: {
   sessions: number;
-  tokens: number;
+  tokenStatus: SessionTokenSummary['status'];
+  tokens: number | null;
   checkpoints: number;
   openComments: number;
   width: number;
@@ -60,8 +59,27 @@ function fitCaptureMeta(input: {
       dropPriority: 3,
     });
   }
-  if (input.tokens > 0) {
-    segments.push({ text: `${fmtTokens(input.tokens)} session tokens`, dropPriority: 1 });
+  if (input.tokenStatus === 'exact' && input.tokens !== null && input.tokens > 0) {
+    segments.push({
+      text: `${fmtSessionTokenValue({
+        status: input.tokenStatus,
+        tokens: input.tokens,
+        sessions: input.sessions,
+      })} session tokens`,
+      dropPriority: 1,
+    });
+  } else if (input.tokenStatus === 'incomplete') {
+    segments.push({
+      text:
+        input.tokens !== 0
+          ? `${fmtSessionTokenValue({
+              status: input.tokenStatus,
+              tokens: input.tokens,
+              sessions: input.sessions,
+            })} observed session tokens`
+          : 'session token total unavailable',
+      dropPriority: 1,
+    });
   }
   if (input.checkpoints > 0) {
     segments.push({
@@ -119,7 +137,7 @@ function TaskMemberCard({
   const metrics = memberMetrics(thread, bodyWidth);
   const metricsWidth = Math.min(displayLen(metrics), Math.max(3, bodyWidth - 5));
   const metricsText = truncate(metrics, metricsWidth);
-  const location = `${thread.isCurrentCheckout ? '● here · ' : ''}${thread.agent} · ${thread.source}`;
+  const location = `${thread.isCurrentCheckout ? '● here · ' : ''}${thread.agent}`;
   const locationWidth = Math.max(3, bodyWidth - metricsWidth - 2);
 
   return (
@@ -152,7 +170,7 @@ function TaskMemberCard({
             {truncate(location, locationWidth)}
           </text>
           <box flexGrow={1} />
-          <text fg={thread.openComments > 0 ? AMBER : DIMMER}>{metricsText}</text>
+          <text fg={(thread.openComments ?? 0) > 0 ? AMBER : DIMMER}>{metricsText}</text>
         </box>
       </box>
     </box>
@@ -202,7 +220,7 @@ export function TaskDetailPane({
   const attention = task.threads.filter((thread) =>
     ['stalled', 'ready'].includes(thread.state)
   ).length;
-  const openComments = Math.max(0, ...task.threads.map((thread) => thread.openComments));
+  const openComments = Math.max(0, ...task.threads.map((thread) => thread.openComments ?? 0));
   const checkpoints = task.threads.reduce(
     (total, thread) => total + Math.max(thread.checkpoints.length, thread.openCheckpoints),
     0
@@ -215,6 +233,7 @@ export function TaskDetailPane({
   }${attention > 0 ? `${attention} need attention · ` : ''}${ago(lastWriteMs, nowMs)}`;
   const captureMeta = fitCaptureMeta({
     sessions: session.sessions,
+    tokenStatus: session.status,
     tokens: session.tokens,
     checkpoints,
     openComments,

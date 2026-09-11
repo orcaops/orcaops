@@ -9,15 +9,19 @@ import { runReviewComment } from '../../src/commands/plan/review/comment.js';
 import { runReviewDecline } from '../../src/commands/plan/review/decline.js';
 import { runReviewPropose } from '../../src/commands/plan/review/propose.js';
 import { runReviewPush } from '../../src/commands/plan/review/push.js';
-import { seedCandidate } from '../../src/commands/plan/review/test-helpers.js';
 import { runReviewVerdict } from '../../src/commands/plan/review/verdict.js';
-import { runPlanUpload } from '../../src/commands/plan/upload.js';
 import { runReviewFeedbackReply } from '../../src/commands/review/reply.js';
 import { toCloudErrorEnvelope } from '../../src/io/cloud-error-envelope.js';
 import { OrcaopsError } from '../../src/io/errors.js';
 import { toSecretWarningReports } from '../../src/lib/cloud-secret-gate.js';
+import { runDatabaseSourcePlanUpload } from '../../src/lib/database-source-plan-upload.js';
 import { resolveSourcePlan } from '../../src/lib/source-plan-resolver.js';
 import { gatedVerbs } from '../support/cloud-write-surface.js';
+import {
+  createMemoryPlanReviewPersistence,
+  seedCandidate,
+} from '../support/plan-review-persistence.js';
+import { sourcePlanDatabaseFixture } from '../support/source-plan-test-helpers.js';
 
 /**
  * Behavioural proof that every gated outbound verb refuses a credential.
@@ -105,20 +109,29 @@ const DRIVERS: Record<string, GatedVerbDriver> = {
       const listReviewers = vi.fn(async () => ({ members: [], scope: 'org' }));
       const file = path.join(ctx.repoRoot, 'plan.md');
       return {
-        run: () =>
-          runPlanUpload({
-            client: { sourcePlan: { create, listReviewers } },
-            repoRoot: ctx.repoRoot,
-            baseUrl: BASE_URL,
-            orgId: ORG_ID,
-            absPath: file,
-            fileRealpath: file,
-            body: at(ctx, 'body', CLEAN_BODY),
-            title: at(ctx, 'title', 'Rotate the deploy credential'),
-            reviewers: [at(ctx, 'reviewer[0]', 'alice')],
-            reviewNote: at(ctx, 'review_note', 'please skim the rollout order'),
-            authoredAt: AT,
-          }),
+        run: async () => {
+          const database = await sourcePlanDatabaseFixture();
+          try {
+            return await runDatabaseSourcePlanUpload({
+              reader: database.reader,
+              openWriter: database.openWriter,
+              client: { sourcePlan: { create, listReviewers } },
+              repoRoot: ctx.repoRoot,
+              target: database.target,
+              absPath: file,
+              fileRealpath: file,
+              body: at(ctx, 'body', CLEAN_BODY),
+              title: at(ctx, 'title', 'Rotate the deploy credential'),
+              reviewers: [at(ctx, 'reviewer[0]', 'alice')],
+              reviewNote: at(ctx, 'review_note', 'please skim the rollout order'),
+              secretAllow: [],
+              resolveBaseline: async () => null,
+              now: () => AT,
+            });
+          } finally {
+            await database.cleanup();
+          }
+        },
         escaped: () => create.mock.calls.length + listReviewers.mock.calls.length,
       };
     },
@@ -143,6 +156,7 @@ const DRIVERS: Record<string, GatedVerbDriver> = {
       return {
         run: () =>
           runReviewPush({
+            persistence: createMemoryPlanReviewPersistence(),
             client: { sourcePlan: { reviewPush, reviewPropose } },
             repoRoot: ctx.repoRoot,
             baseUrl: BASE_URL,
@@ -170,6 +184,7 @@ const DRIVERS: Record<string, GatedVerbDriver> = {
       return {
         run: () =>
           runReviewPropose({
+            persistence: createMemoryPlanReviewPersistence(),
             client: { sourcePlan: { reviewPropose } },
             repoRoot: ctx.repoRoot,
             baseUrl: BASE_URL,
@@ -194,9 +209,10 @@ const DRIVERS: Record<string, GatedVerbDriver> = {
         commentId: 'cmt_1',
       }));
       const quoted = 'Rotate the deploy credential';
+      const persistence = createMemoryPlanReviewPersistence();
       return {
         run: async () => {
-          await seedCandidate(ctx.repoRoot, {
+          await seedCandidate(persistence, {
             versionId: BASE_VERSION_ID,
             versionNumber: 4,
             baseUrl: BASE_URL,
@@ -205,6 +221,7 @@ const DRIVERS: Record<string, GatedVerbDriver> = {
             body: CLEAN_BODY,
           });
           return runReviewComment({
+            persistence,
             kind: 'root',
             client: { sourcePlan: { reviewComment } },
             repoRoot: ctx.repoRoot,

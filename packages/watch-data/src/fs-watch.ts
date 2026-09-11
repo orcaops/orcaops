@@ -32,8 +32,10 @@ export function createDebouncer(
 }
 
 export interface FsWatchOptions {
-  /** Directories to watch recursively (dataRoot/projects + the hot artifacts dir). */
+  /** Directories to watch recursively (the data root's projects directory). */
   roots: string[];
+  /** Individual files to watch (each project database and its write-ahead log). */
+  files?: string[];
   /** Trailing-debounce window before a burst coalesces into one tick (default 250ms). */
   debounceMs?: number;
   /** Fired (debounced) on any change under a watched root. */
@@ -43,19 +45,26 @@ export interface FsWatchOptions {
 }
 
 /**
- * Recursive fs.watch over the archive projects dir + the hot artifacts dir,
- * debounced into `onTick` (→ engine.tick()). A new top-level project dir simply
- * fires a tick, which the engine turns into a scope rescan. Watchers drop events
- * and meta needs periodic refresh, so the caller KEEPS a (slower) poll tick as a
- * heartbeat; on a watcher error we warn once via onDegrade and rely on the poll.
+ * Recursive fs.watch over the data root's projects directory, plus a direct
+ * watch on each project database file and its write-ahead log, debounced into
+ * `onTick` (→ engine.tick()). Both halves are needed: the recursive watch sees a
+ * project appear or disappear, but on macOS a commit into an existing database
+ * writes only the -wal file and raises no notification on any enclosing
+ * directory — a file watch on the log itself is what makes a landed capture
+ * visible before the caller's heartbeat. Watchers still drop events, so the
+ * caller KEEPS a (slower) poll tick; on a directory watcher error we warn once
+ * via onDegrade and rely on the poll.
  */
 export class FsWatch {
   private readonly watchers: FSWatcher[] = [];
+  private readonly files = new Map<string, FSWatcher>();
+  private wanted: string[];
   private readonly debouncer: ReturnType<typeof createDebouncer>;
   private closed = false;
   private degraded = false;
 
   constructor(private readonly opts: FsWatchOptions) {
+    this.wanted = [...(opts.files ?? [])];
     this.debouncer = createDebouncer(() => {
       if (!this.closed) this.opts.onTick();
     }, opts.debounceMs ?? 250);
@@ -76,7 +85,61 @@ export class FsWatch {
         this.degrade(err as Error);
       }
     }
-    return this.watchers.length > 0 && !this.degraded;
+    this.arm();
+    return (this.watchers.length > 0 || this.files.size > 0) && !this.degraded;
+  }
+
+  /**
+   * Replace the watched file set — the caller passes the engine's current files
+   * after each tick, so a project that appeared gets watched and one that is
+   * gone stops being. A file that does not exist yet is remembered and armed by
+   * a later refresh rather than treated as a fault.
+   */
+  refresh(files: string[]): void {
+    if (this.closed) return;
+    this.wanted = [...files];
+    const keep = new Set(this.wanted);
+    for (const [file, watcher] of this.files)
+      if (!keep.has(file)) {
+        this.files.delete(file);
+        try {
+          watcher.close();
+        } catch {
+          // already gone with the project
+        }
+      }
+    this.arm();
+  }
+
+  private arm(): void {
+    for (const file of this.wanted) {
+      if (this.closed || this.files.has(file)) continue;
+      try {
+        const watcher = watch(file, (event) => {
+          // macOS reports the log being replaced or truncated as `rename`, and
+          // the kqueue watch stays bound to the old inode: re-arm before the
+          // next commit, and still tick, because the replacement is a change.
+          if (event === 'rename') this.rearm(file);
+          this.debouncer.trigger();
+        });
+        watcher.on('error', () => this.rearm(file));
+        this.files.set(file, watcher);
+      } catch {
+        // The database or its log may not exist yet; a later refresh arms it.
+      }
+    }
+  }
+
+  private rearm(file: string): void {
+    const watcher = this.files.get(file);
+    if (!watcher) return;
+    this.files.delete(file);
+    try {
+      watcher.close();
+    } catch {
+      // already invalid
+    }
+    if (!this.closed) this.arm();
   }
 
   private degrade(err: Error): void {
@@ -96,5 +159,14 @@ export class FsWatch {
       }
     }
     this.watchers.length = 0;
+    for (const watcher of this.files.values()) {
+      try {
+        watcher.close();
+      } catch {
+        // already closed / never opened
+      }
+    }
+    this.files.clear();
+    this.wanted = [];
   }
 }

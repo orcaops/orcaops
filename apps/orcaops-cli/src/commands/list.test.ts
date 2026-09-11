@@ -21,8 +21,8 @@ describe('resolveListLimit', () => {
     expect(resolveListLimit({ json: true })).toBe(50);
     expect(resolveListLimit({ since: '2026-01-01' })).toBeUndefined();
     expect(resolveListLimit({ between: 'a..b' })).toBeUndefined();
-    expect(resolveListLimit({ allProjects: true })).toBeUndefined();
-    expect(resolveListLimit({ imported: true })).toBeUndefined();
+    expect(resolveListLimit({ scope: 'all-projects' })).toBeUndefined();
+    expect(resolveListLimit({ origin: 'imported' })).toBeUndefined();
     expect(resolveListLimit({ limit: 7 })).toBe(7);
   });
 });

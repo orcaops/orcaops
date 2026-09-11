@@ -35,7 +35,7 @@ export interface RunReviewViewArgs {
 /**
  * I/O-light core: one `reviewDetail` wire call, result decorated with the
  * computed pin ref. TRIAGE, not checkout — no bodies come back and NOTHING is
- * written to the review cache (the core takes no repoRoot at all), so a view
+ * written to project history (the core takes no persistence), so a view
  * sweep can never clobber an in-flight edit's CAS token.
  */
 export async function runReviewView(args: RunReviewViewArgs): Promise<ReviewViewResult> {
@@ -303,7 +303,7 @@ function nextHint(result: ReviewViewResult): string | null {
 /**
  * `plan review view <ref>` — the triage surface: full review state (candidate,
  * reviewer verdicts, proposals, comments) in one read-only call. Bodies stay on
- * `plan review pull` (checkout); this verb never writes the review cache.
+ * `plan review pull` (checkout); this verb never writes project history.
  */
 export async function reviewViewAction(ref: string, opts: ReviewViewOptions = {}): Promise<void> {
   try {

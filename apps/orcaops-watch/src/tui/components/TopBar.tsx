@@ -34,6 +34,18 @@ function Tile({
   );
 }
 
+/**
+ * The session-tokens value with its accounting completeness. The engine sums
+ * only the sessions that accounted exactly, so a bare number reads a partial
+ * subtotal as the whole and unaccountable usage as zero: partial is marked as
+ * the lower bound it is, and unavailable shows no number at all.
+ */
+export function formatSessionTokens(totals: WatchSnapshot['totals']): string {
+  if (totals.usageStatus === 'unavailable') return '—';
+  const value = fmtTokens(totals.sessionTokens);
+  return totals.usageStatus === 'partial' ? `≥${value}` : value;
+}
+
 export interface TopBarLayoutItem {
   id: 'threads' | 'tasks' | 'checkpoints' | 'attention' | 'tokens' | 'clock';
   label: string;
@@ -59,7 +71,7 @@ export function selectTopBarLayout(
     tasks: String(totalTasks(snapshot)),
     checkpoints: String(snapshot.totals.openCheckpoints),
     attention: String(attentionRows(snapshot).length),
-    tokens: fmtTokens(snapshot.totals.sessionTokens),
+    tokens: formatSessionTokens(snapshot.totals),
     clock: '',
   } as const;
   const definitions = [
@@ -137,6 +149,12 @@ export function TopBar({
 }) {
   const { AMBER, BRIGHT, DIMMER, FG, LIVE } = useCockpitTheme();
   const attention = attentionRows(snapshot).length;
+  const usageStatus = snapshot.totals.usageStatus;
+  const tileAccent = (id: TopBarLayoutItem['id']): string | undefined => {
+    if (id === 'attention') return attention > 0 ? AMBER : undefined;
+    if (id !== 'tokens' || usageStatus === 'exact') return undefined;
+    return usageStatus === 'partial' ? AMBER : DIMMER;
+  };
   const logo = pickLogo(railWidth);
   const compactHeight = rows < 6;
   const chromeWidth = Math.max(1, width - (compactHeight ? 0 : railWidth) - 2);
@@ -176,7 +194,7 @@ export function TopBar({
                   label={item.label}
                   value={item.value}
                   width={item.width}
-                  accent={item.id === 'attention' && attention > 0 ? AMBER : undefined}
+                  accent={tileAccent(item.id)}
                 />
               )
             )}

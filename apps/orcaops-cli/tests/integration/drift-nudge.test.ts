@@ -40,7 +40,7 @@ async function setConfig(
 
 /**
  * Curated drift nudge. `status` and `resume` surface a stale install
- * (skills/commands/block vs the running CLI): a stderr line in human mode + a
+ * (skills/commands/block vs the running CLI): a report line in human mode + a
  * `drift` field in --json. Skill/command staleness always nudges; the block nudge
  * is suppressed under bootstrap=manual. --json stdout stays a clean envelope.
  */
@@ -66,7 +66,7 @@ describe('orcaops drift nudge', () => {
     expect((JSON.parse(json.stdout) as StatusJson).drift).toBeUndefined();
   });
 
-  it('a stale skill nudges to stderr (human) and carries drift in --json on a clean stdout', async () => {
+  it('a stale skill nudges in human output and carries drift in --json', async () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
     await staleStamp(
       path.join(repo.path, '.claude', 'skills', 'orcaops-checkpoint', 'SKILL.md'),
@@ -76,13 +76,13 @@ describe('orcaops drift nudge', () => {
 
     const human = await agent.runRaw(['status']);
     expect(human.exitCode).toBe(0);
-    expect(human.stderr).toMatch(/orcaops update/);
-    expect(human.stdout).toMatch(/Branch:/); // the report still renders to stdout
+    expect(human.stdout).toMatch(/orcaops update/);
+    expect(human.stdout).toMatch(/Branch:/);
 
     const json = await agent.runRaw(['status', '--json']);
     const parsed = JSON.parse(json.stdout) as StatusJson; // stdout is clean JSON
     expect(parsed.drift?.staleSkills.length).toBeGreaterThan(0);
-    expect(json.stderr).not.toMatch(/out of date/); // --json puts drift in stdout, not stderr
+    expect(json.stderr).not.toMatch(/out of date/);
   });
 
   it('agent="other" never nudges (no managed install)', async () => {
@@ -165,8 +165,8 @@ describe('orcaops drift nudge', () => {
 
     const human = await agent.runRaw(['status']);
     expect(human.exitCode).toBe(0);
-    expect(human.stderr).toMatch(/NEWER orcaops.*upgrade orcaops/);
-    expect(human.stderr).not.toMatch(/out of date/);
+    expect(human.stdout).toMatch(/NEWER orcaops.*upgrade orcaops/);
+    expect(human.stdout).not.toMatch(/out of date/);
 
     const json = JSON.parse((await agent.runRaw(['status', '--json'])).stdout) as StatusJson;
     expect(json.drift?.aheadSkills.length).toBeGreaterThan(0);
@@ -251,8 +251,8 @@ describe('orcaops drift nudge', () => {
     );
 
     const human = await agent.runRaw(['status']);
-    expect(human.stderr).toMatch(/out of date/);
-    expect(human.stderr).toMatch(/upgrade orcaops/);
+    expect(human.stdout).toMatch(/out of date/);
+    expect(human.stdout).toMatch(/upgrade orcaops/);
   });
 
   it('a personal repo with stripped info/exclude lines nudges staleInfoExclude (both directions)', async () => {
@@ -309,7 +309,7 @@ describe('orcaops drift nudge', () => {
     await rm(path.join(repo.path, '.claude', 'skills', 'orcaops-digest', 'SKILL.md'));
 
     const human = await agent.runRaw(['resume']);
-    expect(human.stderr).toMatch(/orcaops update/);
+    expect(human.stdout).toMatch(/orcaops update/);
     const json = JSON.parse((await agent.runRaw(['resume', '--json'])).stdout) as StatusJson;
     expect(json.drift?.staleSkills.length).toBeGreaterThan(0);
   });

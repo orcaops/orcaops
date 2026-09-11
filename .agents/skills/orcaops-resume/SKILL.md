@@ -2,8 +2,8 @@
 name: "Orcaops: resume an artifact"
 description: "Resume one in-flight artifact with a paste-ready continuation prompt, or cold-start it in a fresh worktree or clone. Use for \"where was I?\", \"pick up where we left off\", or \"continue artifact <id> here\"; a broad branch-status survey is `orcaops status`."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "dafe08d5ab01"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "69c0d3ede995"
 ---
 
 # When to use
@@ -34,21 +34,18 @@ continuation prompt.
 # How to invoke
 
 ```bash
-orcaops resume                          # latest active artifact on current branch
+orcaops resume                          # contextual focus or the single eligible task
 orcaops resume --branch feat/x          # specific branch
 orcaops resume --artifact <id>          # specific artifact
-orcaops resume --accept-default         # choose and pin the newest active candidate
-orcaops resume --accept-default --no-pin # choose it once without saving the choice
 orcaops resume --json                   # machine-readable
 orcaops resume --copy                   # also copy the suggested prompt to clipboard
 ```
 
-When more than one artifact is active and no pin selects one, resume returns an
-ambiguous picker instead of guessing. In JSON, inspect `candidates` and
-`default_candidate_id`. Use `orcaops checkout <id>` to save an explicit
-choice, `orcaops resume --artifact <id>` to use one only this time, or
-`--accept-default` to choose the most recently active candidate and save that
-choice. Add `--no-pin` when accepting the default should be one-time only.
+Resume is passive: it never changes focus, restores files, or binds a task.
+When selection is ambiguous, inspect the returned `reason`, labelled
+`candidates`, and their eligibility. Use `orcaops resume --artifact <id>`
+to read one exact artifact, or `orcaops checkout <id>` to explicitly change
+focus. Resume never chooses the newest candidate merely because it is newest.
 
 # Interpreting the output
 
@@ -96,54 +93,40 @@ older quoted warning.
 
 # Cold-start in a fresh worktree (the handoff mechanic)
 
-`orcaops resume --artifact <id>` also cold-starts work this worktree
-has never seen — **if the archive is enabled** (`archive.enabled:
-true`; without it this path simply doesn't exist and resume reads the
-local hot store only). When the hot store lacks the artifact, resume
-restores it from the home-dir archive first — the response carries
-`restored_from_archive: true` — then the thread continues normally
-(checkpoint open → work → close) and new events mirror back to the same
-archive automatically.
+`orcaops resume --artifact <id>` can continue work in a fresh worktree from
+the canonical project history database. It reads the retained artifact
+passively. Follow the returned execution-context guidance before opening a new
+checkpoint; reading a resume does not move a task between worktrees.
 
-1. Find the artifact id if unknown — search the archive from anywhere
-   (archive-enabled installs only). From inside a repo or linked worktree,
-   these commands include both hot and retained archive history for the
-   current project; duplicate artifact IDs use the freshest projection
-   (archive only when strictly newer, tie to hot):
+1. Find the artifact id if unknown by searching canonical history:
 
    ```bash
-   orcaops list --all-projects --json
-   orcaops search "<task terms>" --all-projects --json
+   orcaops list --scope all-projects --json
+   orcaops search "<task terms>" --scope all-projects --json
    ```
 
-2. In the TARGET worktree (init'd, `archive.enabled: true`, same
-   project identity — worktrees share it automatically via git config):
+2. In the TARGET worktree (initialized with the same project identity):
 
    ```bash
    orcaops resume --artifact <id> --json
    ```
 
-Failure modes:
+If the artifact is unknown, check `orcaops list --scope all-projects --json` for
+the right project and verify that this worktree resolves to that project.
 
-- `INVALID_INPUT` mentioning divergence: this worktree holds LOCAL
-  events the archive lacks — run `orcaops archive repair` here first
-  (mirror the local work), then retry. Handoff is a move, not a fork.
-- `UNKNOWN_ARTIFACT`: not in this project's archive — check
-  `orcaops list --all-projects --json` for the right project, and that
-  this repo shares the source project's identity
-  (`git config --local orcaops.projectid`).
+# When implicit selection has no eligible artifact
 
-# When there are no in-flight artifacts
+A `NO_ELIGIBLE_ARTIFACT` result means no task is eligible for implicit
+selection in this context. It does not mean the project has no retained history;
+an exact artifact can still be read with `--artifact`. Read the returned reason
+and execution guidance before deciding whether new work is needed.
 
-`orcaops resume` will report "No in-flight artifacts on branch <name>"
-(or equivalent) when every artifact on the branch has either a captured
-summary or no plan at all.
+Do not repeatedly run the same selection looking for a different result.
+If the requested task is complete and the user has not already specified what
+comes next, ask which outcome they want.
 
-**Stop. Do NOT re-run the same command, do NOT loop through
-`orcaops status` / `show` / `git log` looking for hidden state.**
-The runtime is authoritative — there genuinely is no thread to resume.
-
-Instead, present 2-3 options to the user and ask which they want:
+Only after confirming the requested task is complete, present these options if
+the user has not already chosen what comes next:
 
 1. **Open the PR** for the most recently summarized artifact
    (run `orcaops digest --artifact <id>` first if missing).

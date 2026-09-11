@@ -32,7 +32,7 @@ Skip when:
 # How to invoke
 
 \`\`\`bash
-orcaops list --all-branches --json          # candidate priors (state, checkpoint_count)
+orcaops list --scope project --json          # candidate priors (state, checkpoint_count)
 orcaops show <id> --json                    # a prior's plan shape: steps, revisions, checkpoints
 orcaops usage --artifact <id> --json        # that prior's attributed cost (ESTIMATE)
 orcaops stats --json                        # repo-wide revision churn + duration percentiles

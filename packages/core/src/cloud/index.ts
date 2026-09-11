@@ -3,15 +3,14 @@
 export { setDefaultCliVersion } from './cli-version.js';
 export * from './client.js';
 export * from './cloud-access.js';
-export * from './cloud-sync.js';
 export * from './errors.js';
 export * from './handshake.js';
 export * from './hardened-fetch.js';
 export * from './hash.js';
 export * from './scrub-error.js';
-// repo-url.js stays module-private (sync.ts and source-plan-baseline.ts import
-// it relatively); only the baseline resolver is part of the public surface.
 export * from './source-plan-baseline.js';
-export * from './sync.js';
+export { toWireEvaluators, toWireUsage } from './sync-wire.js';
 export * from './trpc-errors.js';
 export * from './url.js';
+
+export { classifyCloudSyncFailure } from './cloud-sync-failure.js';

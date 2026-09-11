@@ -16,7 +16,7 @@
  *  - dropped `sibling_pending`: resolves to sibling-claimed or
  *    unclaimed at finalization.
  *
- * Pure fold — no I/O. `ArtifactStore.adjudicateWindowOverlap` loads the
+ * Pure fold — no I/O. The caller loads the
  * inputs (including cross-artifact sibling checkpoints named by the
  * pending records) and calls this.
  */

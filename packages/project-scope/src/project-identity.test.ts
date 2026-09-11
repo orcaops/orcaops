@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Repo } from '@orcaops/core';
 
 import {
+  adoptProjectId,
   ensureProjectId,
   PROJECT_ID_CONFIG_KEY,
   ProjectIdentityConfigLockTimeoutError,
@@ -88,5 +89,26 @@ describe('project identity minting', () => {
     await expect(
       ensureProjectId(repo, { configAcquireMs: 20, configRetryMs: 5 })
     ).rejects.toBeInstanceOf(ProjectIdentityConfigLockTimeoutError);
+  });
+
+  it('adopts the exact retained project identity and reuses it', async () => {
+    const state: FakeRepoState = { value: null };
+    const projectId = '01900000-0000-7000-8000-000000000001';
+    const repo = fakeRepo(commonDir, state);
+
+    expect(await adoptProjectId(repo, projectId)).toEqual({ projectId, minted: true });
+    expect(await adoptProjectId(repo, projectId)).toEqual({ projectId, minted: false });
+    expect(state.value).toBe(projectId);
+  });
+
+  it('refuses to replace a different configured identity', async () => {
+    const configured = '01900000-0000-7000-8000-000000000001';
+    const retained = '01900000-0000-7000-8000-000000000002';
+    const state: FakeRepoState = { value: configured };
+
+    await expect(adoptProjectId(fakeRepo(commonDir, state), retained)).rejects.toThrow(
+      'Preserve both identities'
+    );
+    expect(state.value).toBe(configured);
   });
 });

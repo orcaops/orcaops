@@ -40,7 +40,6 @@ describe('buildConfigDelta', () => {
     config.install.scope = 'personal';
     config.install.agents = ['claude-code', 'codex'];
     config.naming.prefix = 'oo';
-    config.archive = { ...config.archive, enabled: true };
     const delta = buildConfigDelta(config);
     const resolved = resolveConfig(JSON.parse(JSON.stringify(delta)));
     expect(resolved).toEqual(config);

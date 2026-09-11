@@ -117,9 +117,7 @@ export class SourcePlanIntegrityError extends Error {
 
 /**
  * Why a done-criterion's open-time `text` could not be resolved. Each value
- * maps to a distinct disposition (transient → retry, invariant break →
- * report), so the failure self-diagnoses instead of hiding behind a generic
- * message.
+ * identifies the retained-history invariant that failed.
  */
 export type DoneCriterionTextUnresolvableKind =
   | 'open-revision-not-in-cache'
@@ -127,7 +125,7 @@ export type DoneCriterionTextUnresolvableKind =
 
 const DONE_CRITERION_REMEDIATION: Record<DoneCriterionTextUnresolvableKind, string> = {
   'open-revision-not-in-cache':
-    'The open-time plan revision is missing from the local projection — run `orcaops rebuild` and retry the push.',
+    'The open-time plan revision is missing from retained history. Preserve the registered database and its companion files, run `orcaops doctor`, and report the missing revision; `orcaops rebuild` cannot recreate it.',
   'criterion-absent-in-open-revision':
     'The open-time revision resolved but does not contain this criterion — an invariant break (close-time validation should have rejected it). Report this.',
 };

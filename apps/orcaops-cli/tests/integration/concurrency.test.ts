@@ -6,6 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { CliExit } from '../../src/io/exit.js';
+import {
+  fixture as databaseFixture,
+  inventory as databaseInventory,
+} from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
 
 // Permanent regression guard: exercises the
@@ -95,7 +99,7 @@ describe('InProcessAgent concurrency (stress test)', () => {
       const results = await Promise.all(setups.map((s) => s.agent.list()));
 
       setups.forEach((s, i) => {
-        const ids = results[i].artifacts.map((a) => a.id);
+        const ids = results[i].results.map((a) => a.id);
         expect(ids, `agent ${i} should see exactly its own artifact`).toEqual([
           s.expectedArtifactId,
         ]);
@@ -146,83 +150,86 @@ describe('InProcessAgent concurrency (stress test)', () => {
       // Cross-verify: each agent's list() sees its own artifact only.
       const lists = await Promise.all(agents.map((a) => a.list()));
       lists.forEach((listResult, i) => {
-        expect(listResult.artifacts.map((a) => a.id)).toEqual([ids[i]]);
+        expect(listResult.results.map((a) => a.id)).toEqual([ids[i]]);
       });
     },
     STRESS_TIMEOUT_MS
   );
 
   it(
-    'parallel pin operations with distinct CLAUDE_SESSION_IDs land in distinct shell-key dirs',
+    'isolates concurrent database focus by original project and session',
     async () => {
-      // Each agent runs in its OWN repo (separate repoId) AND its own
-      // CLAUDE_SESSION_ID. Both axes contribute to pin file path
-      // isolation; this test confirms neither axis is collapsed by a
-      // global mutation.
-      const N = 6;
-      const xdgRoot = await makeXdgState();
-      const agents = await Promise.all(
-        Array.from({ length: N }, async (_, i) => {
-          const repo = await spinUpRepo();
-          // One shared XDG root on purpose — this test's subject is that repo id
-          // and session id are what separate the pin paths. The global root is
-          // still per-agent: the install lock under it is not what is being
-          // measured, and sharing it serializes the agents against a ten-second
-          // acquire budget.
-          const agent = makeAgent({
-            cwd: repo.path,
-            env: {
-              CLAUDE_SESSION_ID: `concurrency-pin-${i}`,
-              XDG_STATE_HOME: xdgRoot,
-              ORCAOPS_GLOBAL_ROOT: await makeGlobalRoot(),
-            },
+      const { readProjectExecutionFocus } =
+        await import('../../../../packages/storage/dist/history/database/execution-focus.js');
+      const projects = [await databaseFixture(), await databaseFixture()];
+      const tasks: Array<{
+        f: Awaited<ReturnType<typeof databaseFixture>>;
+        session: string;
+        artifactId: string;
+        agent: ReturnType<typeof makeAgent>;
+      }> = [];
+      for (const f of projects) {
+        for (const session of ['session-a', 'session-b']) {
+          const artifactId = await f.capture();
+          tasks.push({
+            f,
+            session,
+            artifactId,
+            agent: makeAgent({
+              cwd: f.main,
+              env: {
+                ORCAOPS_ROOT: f.main,
+                ORCAOPS_DATA_DIR: f.root,
+                ORCAOPS_DISABLE_DRAIN: '1',
+                CLAUDE_SESSION_ID: '',
+                CLAUDE_CODE_SESSION_ID: '',
+                CODEX_SESSION_ID: session,
+                TMUX_PANE: '',
+                STY: '',
+                WINDOW: '',
+                TTY: '',
+                XDG_STATE_HOME: f.temporary + '/unused-state',
+              },
+            }),
           });
-          await agent.init({ noLlm: true });
-          const plan = await agent.capturePlan(
-            {
-              task: `pin-task-${i}`,
-              label: `pin-${i}`,
-              plan_steps: [{ text: 's', label: 's' }],
-              touched_scope: [],
-            },
-            { noLlm: true }
-          );
-          return { agent, repoPath: repo.path, artifactId: plan.artifact_id, idx: i };
+        }
+      }
+      const outputs = await Promise.all(
+        tasks.map(async ({ agent, artifactId }) => {
+          const raw = await agent.runRaw(['checkout', artifactId, '--json']);
+          expect(raw.exitCode, raw.stdout + raw.stderr).toBe(0);
+          return JSON.parse(raw.stdout);
         })
       );
-
-      // Drive a pin write on each agent in parallel (explicit checkout).
-      const pinResults = await Promise.all(
-        agents.map((s) =>
-          s.agent.run<{
-            ok: true;
-            pin_file: string;
-            shell_key: { kind: string; value: string };
-          }>(['checkout', s.artifactId, '--json'])
-        )
+      expect(new Set(outputs.map((x) => x.operation_id)).size).toBe(tasks.length);
+      for (const { f, session, artifactId } of tasks) {
+        expect(
+          readProjectExecutionFocus(f.writer, {
+            rootKey: f.authority.rootKey,
+            projectId: f.authority.projectId,
+            storeInstanceId: f.authority.storeInstanceId,
+            repositoryInstanceId: f.authority.repositoryInstanceId,
+            worktreeId: f.context.worktreeId!,
+            shellKey: { kind: 'codex_session', value: session },
+          })
+        ).toMatchObject({ status: 'present', pin: { artifact_id: artifactId } });
+      }
+      const before = await Promise.all(projects.map((f) => databaseInventory(f.temporary)));
+      const statuses = await Promise.all(
+        tasks.map(({ agent }) => agent.runRaw(['status', '--json']))
       );
-
-      pinResults.forEach((r, i) => {
-        if (r.ok !== true) {
-          throw new Error(
-            `agent ${i}: expected ok:true from checkout, got error envelope: ${JSON.stringify(r)}`
-          );
-        }
-        // Each pin file should embed this agent's session id in its
-        // path (via the shell-key hash). Two pin files must not collide.
-        expect(typeof r.pin_file).toBe('string');
+      statuses.forEach((raw, i) => {
+        expect(raw.exitCode, raw.stdout + raw.stderr).toBe(0);
+        expect(JSON.parse(raw.stdout).focus).toContainEqual(
+          expect.objectContaining({
+            project_id: tasks[i].f.authority.projectId,
+            pin: expect.objectContaining({ artifact_id: tasks[i].artifactId }),
+          })
+        );
       });
-
-      const pinFiles = pinResults.map((r) => (r as { ok: true; pin_file: string }).pin_file);
-      expect(new Set(pinFiles).size, 'all pin files must have distinct paths').toBe(N);
-
-      // Each agent's status() should report its own pin, not anyone else's.
-      const statuses = await Promise.all(agents.map((a) => a.agent.status()));
-      statuses.forEach((s, i) => {
-        const pin = (s as unknown as { current_pin: { artifact_id: string } | null }).current_pin;
-        expect(pin, `agent ${i} status.current_pin must be non-null`).not.toBe(null);
-        expect(pin!.artifact_id).toBe(agents[i].artifactId);
-      });
+      expect(await Promise.all(projects.map((f) => databaseInventory(f.temporary)))).toEqual(
+        before
+      );
     },
     STRESS_TIMEOUT_MS
   );
@@ -272,7 +279,7 @@ describe('InProcessAgent concurrency (stress test)', () => {
       // each. Each agent should still see ITS OWN artifact only.
       const lists = await Promise.all(setups.map((s) => s.agent.list()));
       lists.forEach((listResult, i) => {
-        expect(listResult.artifacts.map((a) => a.id)).toEqual([setups[i].expectedArtifactId]);
+        expect(listResult.results.map((a) => a.id)).toEqual([setups[i].expectedArtifactId]);
       });
     },
     STRESS_TIMEOUT_MS

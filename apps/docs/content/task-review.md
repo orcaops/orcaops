@@ -102,9 +102,10 @@ remain visible so unresolved feedback is not mistaken for finished review. If
 the code has moved and Orcaops cannot safely re-anchor a comment, it keeps the
 comment visibly unresolved instead of silently attaching it to different code.
 
-Comments and generated Task Review artifacts live under
-`.orcaops/reviews/<branch>/`; do not edit those files by hand. This feedback
-loop stays in the repository's local review state. Cloud PR comments are a
+Comments and review workflow history live in the project database. Floor and
+Story evidence are retained as immutable files referenced by that database.
+Use the CLI or Watch to update review state; do not edit the database or evidence
+files by hand. This feedback loop stays local. Cloud PR comments are a
 separate, optional collaboration loop documented in
 [Cloud collaboration](./cloud-collaboration.md#address-web-review-feedback-through-the-agent).
 

@@ -1,10 +1,13 @@
-import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
-import { sourcePlanCacheDir, writePullCacheRecord } from '@orcaops/storage';
-import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
+import type { PullCacheRecord } from '@orcaops/storage';
+import { openProjectDatabase, readProjectArtifact } from '@orcaops/storage/history/database';
+import { gitClient, inputFile } from '@orcaops/test-harness';
 
+import { createDatabasePlanPullPersistence } from '../../src/lib/database-source-plan-pull.js';
+import { fixture, inventory } from '../helpers/database-history.js';
 import { cloudRecord } from '../support/source-plan-test-helpers.js';
 import { makeAgent } from '../support/test-agent.js';
 import { effectiveConfigPath } from '../support/test-helpers.js';
@@ -23,37 +26,33 @@ const WARN_JWT =
  * assertions enumerate the durable surfaces a capture touches, because an
  * exit code alone would still pass if the event had already been appended.
  */
-describe('capture refuses refuse-tier secrets and leaves no state', () => {
-  let repo: TempRepo;
+describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 60_000 }, () => {
+  let f: Awaited<ReturnType<typeof fixture>>;
   let agent: ReturnType<typeof makeAgent>;
 
-  const orcaopsDir = (): string => path.join(repo.path, '.orcaops');
+  const snapshotDurableState = () => inventory(f.temporary);
 
-  const snapshotDurableState = async (): Promise<Record<string, string>> => {
-    const git = gitClient(repo.path);
-    const refs = await git.raw([
-      'for-each-ref',
-      '--format=%(refname) %(objectname)',
-      'refs/orcaops/',
-    ]);
-    const status = await git.raw(['status', '--porcelain']);
-    let artifacts = '(no artifacts dir)';
-    try {
-      artifacts = (await readdir(path.join(orcaopsDir(), 'artifacts'))).sort().join(',');
-    } catch {
-      // absent before the first successful capture — that IS the clean state
-    }
-    return { refs, status, artifacts };
-  };
+  async function retainApprovedPlan(record: PullCacheRecord) {
+    // A previously permitted record must be scanned again under the current allowlist.
+    await createDatabasePlanPullPersistence({
+      reader: f.writer,
+      target: { server_url: record.base_url, org_id: record.org_id, account_id: 'account_1' },
+      secretAllow: [FAKE_GH_TOKEN],
+      openWriter: () => openProjectDatabase({ authority: f.authority, mode: 'writer' }),
+    }).writeRecord(record);
+  }
 
   beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    agent = makeAgent({ cwd: repo.path });
-    await agent.init({ noLlm: true });
-  });
-
-  afterEach(async () => {
-    await repo.cleanup();
+    f = await fixture();
+    await mkdir(path.join(f.main, '.orcaops'), { recursive: true });
+    await writeFile(
+      path.join(f.main, '.orcaops', 'config.json'),
+      JSON.stringify({ schema_version: 6 })
+    );
+    agent = makeAgent({
+      cwd: f.main,
+      env: { ORCAOPS_DATA_DIR: f.root, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
   });
 
   it('refuses a plan whose step text carries a vendor token, writing nothing', async () => {
@@ -130,9 +129,9 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
 
   it('releases the idempotency key when a local source baseline is refused', async () => {
     const key = '01a03014-0000-7000-8000-000000000003';
-    const planFile = path.join(repo.path, 'baseline-plan.md');
+    const planFile = path.join(f.main, 'baseline-plan.md');
     await writeFile(planFile, '# Baseline plan\n\nClean content.\n', 'utf8');
-    const git = gitClient(repo.path);
+    const git = gitClient(f.main);
     await git.raw(['remote', 'add', 'origin', `file:///tmp/${FAKE_GH_TOKEN}/repo.git`]);
     const payload = inputFile(
       JSON.stringify({
@@ -207,7 +206,7 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
   });
 
   it('scans a warn-tier local source plan and surfaces one deduplicated warning', async () => {
-    const planFile = path.join(repo.path, 'warn-plan.md');
+    const planFile = path.join(f.main, 'warn-plan.md');
     await writeFile(planFile, `# Plan\n\n${QUOTED_CODE}\n`, 'utf8');
 
     const res = await agent.runRaw([
@@ -242,8 +241,8 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
   });
 
   it('scans the derived repository branch before persisting a plan', async () => {
-    await gitClient(repo.path).checkoutLocalBranch(`feature/${WARN_JWT}`);
-    const planFile = path.join(repo.path, 'clean-plan.md');
+    await gitClient(f.main).checkoutLocalBranch(`feature/${WARN_JWT}`);
+    const planFile = path.join(f.main, 'clean-plan.md');
     await writeFile(planFile, '# Clean plan\n', 'utf8');
 
     const res = await agent.runRaw([
@@ -270,11 +269,15 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
     };
     expect(envelope.secret_warnings).toEqual([
       expect.objectContaining({ path: 'branch', patterns: expect.arrayContaining(['jwt']) }),
+      expect.objectContaining({
+        path: 'source_plan.baseline.branch',
+        patterns: expect.arrayContaining(['jwt']),
+      }),
     ]);
   });
 
   it('refuses a local --source-plan file before the pin hash is minted', async () => {
-    const planFile = path.join(repo.path, 'slice-plan.md');
+    const planFile = path.join(f.main, 'slice-plan.md');
     await writeFile(planFile, `# Slice\n\nDeploy with ${FAKE_GH_TOKEN}.\n`, 'utf8');
     // Snapshot AFTER the fixture exists, so this measures orcaops' writes
     // rather than the untracked file the test just created.
@@ -305,10 +308,8 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
   });
 
   it('refuses a cloud source pin with both team remedies and no artifact write', async () => {
-    await writePullCacheRecord(
-      sourcePlanCacheDir(repo.path),
-      cloudRecord({ body: `# Approved plan\n\nDeploy with ${FAKE_GH_TOKEN}.` }),
-      repo.path
+    await retainApprovedPlan(
+      cloudRecord({ body: `# Approved plan\n\nDeploy with ${FAKE_GH_TOKEN}.` })
     );
     const before = await snapshotDurableState();
 
@@ -340,11 +341,7 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
   });
 
   it('refuses a secret-shaped cloud locator without cloud-content remediation', async () => {
-    await writePullCacheRecord(
-      sourcePlanCacheDir(repo.path),
-      cloudRecord({ external_id: FAKE_GH_TOKEN }),
-      repo.path
-    );
+    await retainApprovedPlan(cloudRecord({ external_id: FAKE_GH_TOKEN }));
 
     const res = await agent.runRaw([
       'capture',
@@ -376,8 +373,8 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
   });
 
   it('does not attribute an ordinary plan secret to a clean cloud pin', async () => {
-    await writePullCacheRecord(sourcePlanCacheDir(repo.path), cloudRecord(), repo.path);
-    await gitClient(repo.path).checkoutLocalBranch(`feature/${FAKE_GH_TOKEN}`);
+    await retainApprovedPlan(cloudRecord());
+    await gitClient(f.main).checkoutLocalBranch(`feature/${FAKE_GH_TOKEN}`);
     const before = await snapshotDurableState();
 
     const res = await agent.runRaw([
@@ -410,11 +407,7 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
   });
 
   it('surfaces a warn-tier cloud source pin without persisting warning details', async () => {
-    await writePullCacheRecord(
-      sourcePlanCacheDir(repo.path),
-      cloudRecord({ body: `# Approved plan\n\n${QUOTED_CODE}` }),
-      repo.path
-    );
+    await retainApprovedPlan(cloudRecord({ body: `# Approved plan\n\n${QUOTED_CODE}` }));
 
     const res = await agent.runRaw([
       'capture',
@@ -446,22 +439,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
     ]);
     expect(res.stdout).not.toContain(QUOTED_CODE);
 
-    const artifacts = await readdir(path.join(repo.path, '.orcaops', 'artifacts'));
-    const artifact = JSON.parse(
-      await readFile(
-        path.join(repo.path, '.orcaops', 'artifacts', artifacts[0]!, 'artifact.json'),
-        'utf8'
-      )
-    ) as Record<string, unknown>;
+    const artifactId = (JSON.parse(res.stdout) as { artifact_id: string }).artifact_id;
+    const artifact = readProjectArtifact(f.writer, artifactId)!.thread.artifactJson!;
     expect(artifact).not.toHaveProperty('secret_warnings');
   });
 
   it('surfaces a warn-tier cloud metadata path', async () => {
-    await writePullCacheRecord(
-      sourcePlanCacheDir(repo.path),
-      cloudRecord({ base_url: `https://cloud.example/${WARN_JWT}` }),
-      repo.path
-    );
+    await retainApprovedPlan(cloudRecord({ base_url: `https://cloud.example/${WARN_JWT}` }));
 
     const res = await agent.runRaw([
       'capture',
@@ -494,17 +478,15 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
   });
 
   it('accepts an exactly allowlisted secret in an approved cloud pin', async () => {
-    const configPath = await effectiveConfigPath(repo.path);
+    const configPath = await effectiveConfigPath(f.main);
     const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     await writeFile(
       configPath,
       JSON.stringify({ ...config, redact: { allow: [FAKE_GH_TOKEN] } }),
       'utf8'
     );
-    await writePullCacheRecord(
-      sourcePlanCacheDir(repo.path),
-      cloudRecord({ body: `# Approved plan\n\nDeploy with ${FAKE_GH_TOKEN}.` }),
-      repo.path
+    await retainApprovedPlan(
+      cloudRecord({ body: `# Approved plan\n\nDeploy with ${FAKE_GH_TOKEN}.` })
     );
 
     const res = await agent.runRaw([
@@ -534,7 +516,7 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
     // The secret sits in the source-plan file, so this exercises
     // `assertNoSecretsOutbound` (through source-plan-resolver) rather than the
     // capture-payload gate the other cases here cover.
-    const configPath = await effectiveConfigPath(repo.path);
+    const configPath = await effectiveConfigPath(f.main);
     const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     await writeFile(
       configPath,
@@ -542,7 +524,7 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
       'utf8'
     );
 
-    const planFile = path.join(repo.path, 'slice-plan.md');
+    const planFile = path.join(f.main, 'slice-plan.md');
     await writeFile(planFile, `# Slice\n\nDeploy with ${FAKE_GH_TOKEN}.\n`, 'utf8');
 
     const res = await agent.runRaw([
@@ -689,102 +671,100 @@ describe('capture refuses refuse-tier secrets and leaves no state', () => {
   });
 });
 
-/**
- * `redact.allow` is the only way past a refusal, so a config that fails to load
- * makes the gate behave exactly as if the user had configured nothing — and the
- * refusal it produces is indistinguishable from the gate disagreeing with an
- * exemption the user believes is in force. The allowlist stays empty (strict);
- * what these cover is that it says so.
- */
-describe('an unreadable redact.allow is reported, not swallowed', () => {
-  let repo: TempRepo;
-  let agent: ReturnType<typeof makeAgent>;
+describe(
+  'invalid allowlists are refused without exposing their contents',
+  { timeout: 60_000 },
+  () => {
+    let f: Awaited<ReturnType<typeof fixture>>;
+    let agent: ReturnType<typeof makeAgent>;
 
-  const planArgs = (stepText: string): string[] => [
-    'capture',
-    'plan',
-    '--no-llm',
-    '--input',
-    inputFile(
-      JSON.stringify({
-        task: 'ship the deploy slice',
-        label: 'ship deploy slice',
-        plan_steps: [{ text: stepText, label: 'wire deploy' }],
-        touched_scope: [],
-        non_goals: [],
-      })
-    ),
-  ];
+    const planArgs = (stepText: string): string[] => [
+      'capture',
+      'plan',
+      '--no-llm',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          task: 'ship the deploy slice',
+          label: 'ship deploy slice',
+          plan_steps: [{ text: stepText, label: 'wire deploy' }],
+          touched_scope: [],
+          non_goals: [],
+        })
+      ),
+    ];
 
-  const writeConfig = async (body: string): Promise<void> => {
-    await writeFile(await effectiveConfigPath(repo.path), body, 'utf8');
-  };
+    const writeConfig = async (body: string): Promise<void> => {
+      await writeFile(await effectiveConfigPath(f.main), body, 'utf8');
+    };
 
-  beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    agent = makeAgent({ cwd: repo.path });
-    await agent.init({ noLlm: true });
-  });
+    beforeEach(async () => {
+      f = await fixture();
+      await mkdir(path.join(f.main, '.orcaops'), { recursive: true });
+      await writeFile(
+        path.join(f.main, '.orcaops', 'config.json'),
+        JSON.stringify({ schema_version: 6 })
+      );
+      agent = makeAgent({
+        cwd: f.main,
+        env: { ORCAOPS_DATA_DIR: f.root, ORCAOPS_DISABLE_DRAIN: '1' },
+      });
+    });
 
-  afterEach(async () => {
-    await repo.cleanup();
-  });
+    it('refuses a malformed allowlist without echoing its secret', async () => {
+      const config = JSON.parse(
+        await readFile(await effectiveConfigPath(f.main), 'utf8')
+      ) as Record<string, unknown>;
+      await writeConfig(JSON.stringify({ ...config, redact: { allow: FAKE_GH_TOKEN } }));
 
-  it('warns on stderr when a malformed allowlist turns into a refusal', async () => {
-    const config = JSON.parse(
-      await readFile(await effectiveConfigPath(repo.path), 'utf8')
-    ) as Record<string, unknown>;
-    await writeConfig(JSON.stringify({ ...config, redact: { allow: FAKE_GH_TOKEN } }));
+      const before = await inventory(f.temporary);
+      const res = await agent.runRaw(planArgs(`deploy with ${FAKE_GH_TOKEN}`));
+      expect(await inventory(f.temporary)).toEqual(before);
 
-    const res = await agent.runRaw(planArgs(`deploy with ${FAKE_GH_TOKEN}`));
+      expect(JSON.parse(res.stdout).error.code).toBe('INVALID_CONFIG');
+      expect(res.exitCode).not.toBe(0);
+      expect(res.stderr).not.toContain(FAKE_GH_TOKEN);
+      expect(res.stdout).not.toContain(FAKE_GH_TOKEN);
+    });
 
-    // The refusal replaces the success envelope, so stderr is the only surface
-    // left — which is why the loader reports there rather than only on the
-    // response.
-    expect(JSON.parse(res.stdout).error.code).toBe('SECRET_IN_PAYLOAD');
-    expect(res.stderr).toContain('redact.allow was IGNORED');
-    expect(res.stderr).toContain('redact.allow');
-    expect(res.stderr).not.toContain(FAKE_GH_TOKEN);
-  });
+    it('refuses unparseable configuration before accepting a capture', async () => {
+      await writeConfig('{ not json');
 
-  it('warns on unparseable JSON, which the config validator alone would not name', async () => {
-    // The config is broken enough that `buildContext` fails too — but its
-    // INVALID_CONFIG never mentions the allowlist, and here it is not even
-    // reached: the payload gate refuses first.
-    await writeConfig('{ not json');
+      const before = await inventory(f.temporary);
+      const res = await agent.runRaw(planArgs(`deploy with ${FAKE_GH_TOKEN}`));
+      expect(await inventory(f.temporary)).toEqual(before);
 
-    const res = await agent.runRaw(planArgs(`deploy with ${FAKE_GH_TOKEN}`));
+      expect(JSON.parse(res.stdout).error.code).toBe('INVALID_CONFIG');
+      expect(res.exitCode).not.toBe(0);
+    });
 
-    expect(JSON.parse(res.stdout).error.code).toBe('SECRET_IN_PAYLOAD');
-    expect(res.stderr).toContain('redact.allow was IGNORED');
-  });
+    it('never echoes the config bytes a JSON parse error quotes back', async () => {
+      // `JSON.parse` reports `Unexpected token 'g', "ghp_ABCDEF"... is not valid
+      // JSON` — the file it fails on is where dead credentials are written down,
+      // so echoing that message would make the diagnostic the leak.
+      await writeConfig(`${FAKE_GH_TOKEN} is not json`);
 
-  it('never echoes the config bytes a JSON parse error quotes back', async () => {
-    // `JSON.parse` reports `Unexpected token 'g', "ghp_ABCDEF"... is not valid
-    // JSON` — the file it fails on is where dead credentials are written down,
-    // so echoing that message would make the diagnostic the leak.
-    await writeConfig(`${FAKE_GH_TOKEN} is not json`);
+      const res = await agent.runRaw(planArgs('wire the deploy'));
 
-    const res = await agent.runRaw(planArgs('wire the deploy'));
+      expect(res.exitCode).not.toBe(0);
+      expect(res.stderr).not.toContain(FAKE_GH_TOKEN.slice(0, 12));
+      expect(res.stdout).not.toContain(FAKE_GH_TOKEN.slice(0, 12));
+    });
 
-    expect(res.stderr).toContain('redact.allow was IGNORED');
-    expect(res.stderr).not.toContain(FAKE_GH_TOKEN.slice(0, 12));
-    expect(res.stdout).not.toContain(FAKE_GH_TOKEN.slice(0, 12));
-  });
+    it('stays silent when no config file exists', async () => {
+      await rm(await effectiveConfigPath(f.main));
 
-  it('stays silent when no config file exists', async () => {
-    await rm(await effectiveConfigPath(repo.path));
+      const res = await agent.runRaw(planArgs('wire the deploy'));
 
-    const res = await agent.runRaw(planArgs('wire the deploy'));
+      expect(res.stderr).not.toContain('redact.allow');
+    });
 
-    expect(res.stderr).not.toContain('redact.allow');
-  });
+    it('stays silent when the config is valid', async () => {
+      const res = await agent.runRaw(planArgs('wire the deploy'));
 
-  it('stays silent when the config is valid', async () => {
-    const res = await agent.runRaw(planArgs('wire the deploy'));
-
-    expect(res.exitCode).toBe(0);
-    expect(res.stderr).not.toContain('redact.allow');
-    expect(res.stdout).not.toContain('redact-allow-unreadable');
-  });
-});
+      expect(res.exitCode).toBe(0);
+      expect(res.stderr).not.toContain('redact.allow');
+      expect(res.stdout).not.toContain('redact-allow-unreadable');
+    });
+  }
+);

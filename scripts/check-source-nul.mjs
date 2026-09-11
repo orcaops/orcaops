@@ -1,19 +1,30 @@
 #!/usr/bin/env node
 
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const BINARY_EXTENSIONS = new Set(['.gz', '.tgz']);
+const BINARY_EXTENSIONS = new Set(['.gz', '.tgz', '.png']);
 
 export function isSourcePath(filePath) {
-  return !BINARY_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+  return (
+    filePath.split('/')[0] !== 'internal' &&
+    !BINARY_EXTENSIONS.has(path.extname(filePath).toLowerCase())
+  );
 }
 
 export function filesWithLiteralNul(rootDir, filePaths) {
   return filePaths.filter(isSourcePath).flatMap((filePath) => {
-    const bytes = readFileSync(path.join(rootDir, filePath));
+    let bytes;
+    try {
+      const absolute = path.join(rootDir, filePath);
+      if (!lstatSync(absolute).isFile()) return [];
+      bytes = readFileSync(absolute);
+    } catch (error) {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    }
     const count = bytes.reduce((total, byte) => total + (byte === 0 ? 1 : 0), 0);
     return count === 0 ? [] : [{ filePath, count }];
   });
@@ -36,7 +47,7 @@ function main() {
   const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const matches = filesWithLiteralNul(rootDir, trackedFiles(rootDir));
   if (matches.length === 0) {
-    console.log('Tracked source files contain no literal NUL bytes.');
+    console.log('Tracked public source files contain no literal NUL bytes.');
     return;
   }
 

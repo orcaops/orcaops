@@ -1,13 +1,13 @@
 import { ErrorCodes, OrcaopsError } from '../../io/errors.js';
 import { CliExit } from '../../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../../io/output.js';
-import { buildContext } from '../../lib/context.js';
 import {
   EVALUATOR_CONFIG_FILE,
   readEvaluatorsConfig,
   validateEvaluatorsConfig,
   writeEvaluatorState,
 } from '../../lib/evaluators-config.js';
+import { resolveInstallCommandContext } from '../../lib/repository-context.js';
 
 export interface RemovePackOptions {
   packId: string;
@@ -44,54 +44,50 @@ export async function evalRemovePackAction(opts: RemovePackOptions): Promise<voi
 }
 
 async function runRemovePack(opts: RemovePackOptions): Promise<RemovePackResult> {
-  const ctx = await buildContext();
-  try {
-    const config = await readEvaluatorsConfig(ctx.repoRoot);
-    if (config === null) {
-      throw new OrcaopsError(
-        ErrorCodes.UNINITIALIZED,
-        `${EVALUATOR_CONFIG_FILE} not found; nothing to remove. Run \`orcaops eval add-pack <source>\` first.`
-      );
-    }
-    const idx = config.packages.findIndex((p) => p.id === opts.packId);
-    if (idx === -1) {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        `Pack "${opts.packId}" is not registered. Known packs: [${config.packages.map((p) => p.id).join(', ')}]`
-      );
-    }
-    const nextConfig = {
-      ...config,
-      runtime: { ...config.runtime },
-      packages: config.packages
-        .filter((_, packageIndex) => packageIndex !== idx)
-        .map((pack) => ({ ...pack, source: { ...pack.source } })),
-      evaluators: { ...config.evaluators },
-    };
-
-    const removedRefs: string[] = [];
-    const prefix = `${opts.packId}/`;
-    for (const ref of Object.keys(nextConfig.evaluators)) {
-      if (ref.startsWith(prefix)) {
-        delete nextConfig.evaluators[ref];
-        removedRefs.push(ref);
-      }
-    }
-
-    const validatedConfig = validateEvaluatorsConfig(nextConfig);
-    const grantRevoked = await writeEvaluatorState(ctx.repoRoot, validatedConfig, {
-      kind: 'revoke',
-      packageId: opts.packId,
-    });
-
-    return {
-      ok: true,
-      pack_id: opts.packId,
-      evaluators_removed: removedRefs.sort(),
-      grant_revoked: grantRevoked,
-      config_path: EVALUATOR_CONFIG_FILE,
-    };
-  } finally {
-    ctx.store.close();
+  const ctx = await resolveInstallCommandContext();
+  const config = await readEvaluatorsConfig(ctx.repoRoot);
+  if (config === null) {
+    throw new OrcaopsError(
+      ErrorCodes.UNINITIALIZED,
+      `${EVALUATOR_CONFIG_FILE} not found; nothing to remove. Run \`orcaops eval add-pack <source>\` first.`
+    );
   }
+  const idx = config.packages.findIndex((p) => p.id === opts.packId);
+  if (idx === -1) {
+    throw new OrcaopsError(
+      ErrorCodes.INVALID_INPUT,
+      `Pack "${opts.packId}" is not registered. Known packs: [${config.packages.map((p) => p.id).join(', ')}]`
+    );
+  }
+  const nextConfig = {
+    ...config,
+    runtime: { ...config.runtime },
+    packages: config.packages
+      .filter((_, packageIndex) => packageIndex !== idx)
+      .map((pack) => ({ ...pack, source: { ...pack.source } })),
+    evaluators: { ...config.evaluators },
+  };
+
+  const removedRefs: string[] = [];
+  const prefix = `${opts.packId}/`;
+  for (const ref of Object.keys(nextConfig.evaluators)) {
+    if (ref.startsWith(prefix)) {
+      delete nextConfig.evaluators[ref];
+      removedRefs.push(ref);
+    }
+  }
+
+  const validatedConfig = validateEvaluatorsConfig(nextConfig);
+  const grantRevoked = await writeEvaluatorState(ctx.repoRoot, validatedConfig, {
+    kind: 'revoke',
+    packageId: opts.packId,
+  });
+
+  return {
+    ok: true,
+    pack_id: opts.packId,
+    evaluators_removed: removedRefs.sort(),
+    grant_revoked: grantRevoked,
+    config_path: EVALUATOR_CONFIG_FILE,
+  };
 }

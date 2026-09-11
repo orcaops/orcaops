@@ -2,7 +2,7 @@ export * from './repo.js';
 
 // Narrow, explicit re-export from snapshots.js. Internals (runGit /
 // RunGitOptions / RunGitResult / allocateTempIndex / snapshotRefName /
-// parseSnapshotRefName / classifySnapshotFailure) stay exported in
+// classifySnapshotFailure) stay exported in
 // `./snapshots.js` so colocated tests can reach them via the relative
 // path, but are intentionally NOT re-exported through this barrel —
 // they're implementation details, not contract. `resolveRepoTopLevel`
@@ -14,7 +14,7 @@ export * from './repo.js';
 // export here must be added to the expected runtime set, and any
 // `export *` from snapshots.js will fail the source-level check.
 // Treat additions as a public-surface change that warrants its own
-// review.
+// review. The public snapshot-ref parser lets GC protect malformed raw refs.
 export {
   // Baseline namespace (the per-artifact plan-time baseline ref).
   // Public surface: the CLI captures the seed at `capture plan`, gc /
@@ -46,11 +46,10 @@ export {
   listSensitiveTreePaths,
   materializeSnapshotTree,
   parseBaselineRefName,
+  parseSnapshotRefName,
   pinBaselineTree,
   pruneBaselineRefs,
   pruneBaselineRefsIfUnchanged,
-  // Review-pin namespace (refs/orcaops/review/<slug>[-base]) — pruned when gc
-  // collects a stale review dir; the pins keep only that dir's trees readable.
   pruneReviewRefs,
   pruneReviewRefsIfUnchanged,
   pruneSnapshotRefs,

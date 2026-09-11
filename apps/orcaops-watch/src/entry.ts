@@ -3,9 +3,15 @@
 // bare install (the proprietary run-time shims throw at module init without a
 // deps root), and a render without a terminal has to be refused before OpenTUI
 // touches stdin. Everything else is `main`, imported lazily.
-import { interactiveTerminalProblem, parseArgs } from './cli';
+import { type CliOptions, interactiveTerminalProblem, parseArgs } from './cli';
 
-const opts = parseArgs(process.argv.slice(2));
+let opts: CliOptions;
+try {
+  opts = parseArgs(process.argv.slice(2));
+} catch (error) {
+  process.stderr.write(`${(error as Error).message}\n`);
+  process.exit(2);
+}
 
 // The compile step inlines the build version as a literal, so a released
 // executable reports what it was built for and no environment can change it.

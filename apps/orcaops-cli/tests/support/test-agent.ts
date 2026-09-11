@@ -1,6 +1,7 @@
 import { DEFAULT_CLOUD_BASE_URL } from '@orcaops/core';
 import { InProcessAgent } from '@orcaops/test-harness';
 
+import { assertIsolatedTestEnvironment } from './test-environment.js';
 import { buildProgram } from '../../src/cli/program.js';
 import { runInInvocationContext } from '../../src/lib/invocation-context.js';
 
@@ -28,7 +29,9 @@ export function makeAgent(opts: {
     env: opts.env,
     timeoutMs: opts.timeoutMs,
     buildProgram: buildInjectedProgram,
-    runInInvocationContext: (context, fn) =>
-      runInInvocationContext({ ...context, cloudBaseUrl }, fn),
+    runInInvocationContext: async (context, fn) => {
+      await assertIsolatedTestEnvironment(context.env ?? process.env, context.cwd ?? opts.cwd);
+      return runInInvocationContext({ ...context, cloudBaseUrl }, fn);
+    },
   });
 }

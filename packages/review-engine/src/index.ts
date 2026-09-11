@@ -7,7 +7,6 @@
 // plain Node (storage/git/fs) — no renderer, no Bun.
 
 export { runAnchor } from './anchor.js';
-export { type ReviewArchiveWarning } from './archive.js';
 export {
   type CommentsPayload,
   type EnrichedComment,
@@ -15,9 +14,15 @@ export {
   runComments,
 } from './comments.js';
 export { buildFloor, FLOOR_PRODUCER_VERSION } from './floor.js';
+export {
+  type DatabaseReviewPane,
+  type PaneRoutineStory,
+  type PaneStoryAnchors,
+  type PaneStoryStatus,
+  readDatabaseReviewPane,
+} from './database/pane.js';
 export * from './floorSource.js';
-export * from './currentStory.js';
-export { validateReviewLogFiles } from './durableState.js';
+export * from './projectReviewIdentity.js';
 export {
   JOURNAL_APPEND_REJECTION_CODE,
   type JournalAppendRejection,
@@ -25,11 +30,6 @@ export {
   runJournal,
 } from './journal.js';
 export { type NormalizedDiff, normalizeTruncatedReviewDiff } from './truncate.js';
-export {
-  ensureReviewStateVersion,
-  REVIEW_STATE_VERSION,
-  type ReviewStateInitialization,
-} from './reviewState.js';
 export {
   buildCurrentGapRows,
   buildCurrentThreadManifests,
@@ -42,11 +42,6 @@ export * from './semanticAnchors.js';
 export * from './semanticAnchorGenerations.js';
 export * from './storyReviewModel.js';
 export { SLICE_DIAGNOSTIC_CODES } from './twolaneSlice.js';
-export {
-  parseReviewArgs,
-  resolveReviewRoot,
-  type ReviewArgs,
-  reviewFloorLockKey,
-  reviewLocksDir,
-  runReview,
-} from './run.js';
+export { parseReviewArgs, resolveReviewRoot, type ReviewArgs, runReview } from './run.js';
+
+export { isolatedReviewGitEnvironment } from './git.js';

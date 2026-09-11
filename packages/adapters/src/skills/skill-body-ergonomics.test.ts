@@ -67,9 +67,13 @@ describe('skill-body ergonomics', () => {
     expect(resume).toContain("only corrects the existing summary's wording");
     expect(resume).not.toContain('Re-summarize / amend');
     expect(resume).toContain('`candidates`');
-    expect(resume).toContain('`default_candidate_id`');
-    expect(resume).toContain('`--accept-default`');
-    expect(resume).toContain('`--no-pin`');
+    expect(resume).toContain('`reason`');
+    expect(resume).toContain('Resume is passive: it never changes focus');
+    expect(resume).toContain('orcaops resume --artifact <id>');
+    expect(resume).toContain('NO_ELIGIBLE_ARTIFACT');
+    expect(resume).not.toContain('default_candidate_id');
+    expect(resume).not.toContain('--accept-default');
+    expect(resume).not.toContain('--no-pin');
     expect(resume).not.toContain('branch is N commits ahead');
 
     const prePr = bodyText(orcaopsPrePrSkill);
@@ -119,7 +123,7 @@ describe('skill-body ergonomics', () => {
     expect(finish).toContain('`idempotency_status: replay`');
 
     const summary = bodyText(orcaopsSummarySkill);
-    expect(summary).toContain('A successful summary automatically materializes');
+    expect(summary).toContain('A successful summary automatically renders');
     expect(summary).toContain('`finalization_status: finalized_without_digest`');
     expect(summary).not.toContain('Immediately run:');
   });

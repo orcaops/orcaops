@@ -1,0 +1,43 @@
+{
+  "name": "@orcaops/history-convert",
+  "version": "0.0.0",
+  "license": "FSL-1.1-ALv2",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
+    "test": "vitest run",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@orcaops/diff-fingerprint": "0.0.8",
+    "@orcaops/storage": "workspace:*",
+    "better-sqlite3": "13.0.3",
+    "yaml": "^2.8.2",
+    "zod": "^4.0.17"
+  },
+  "devDependencies": {
+    "@orcaops/eslint-config": "workspace:*",
+    "@orcaops/prettier-config": "workspace:*",
+    "@orcaops/test-harness": "workspace:*",
+    "@orcaops/typescript-config": "workspace:*",
+    "@types/better-sqlite3": "^7.6.12",
+    "vitest": "^4.0.18"
+  }
+}

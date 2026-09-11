@@ -1,4 +1,4 @@
-import { type ArtifactStore, RecoveryRefusedError } from '@orcaops/storage';
+import type { ArtifactThread } from '@orcaops/storage';
 
 import type { Repo } from '../git/repo.js';
 
@@ -57,35 +57,43 @@ export interface RepoState {
   open_items_addressed_since: OpenItemEvidence[];
 }
 
-export interface BuildRepoStateOptions {
-  store: ArtifactStore;
+export interface RepoStateSnapshotOptions {
   repo: Repo;
   artifactId: string;
+  snapshot: Pick<ArtifactThread, 'plan' | 'checkpoints' | 'summary'>;
+  laterArtifactEvidence: { artifact_id: string; files: string[] } | null;
   /**
    * Cap `working_tree_status` at N lines. Default 50 keeps the JSON
    * envelope bounded even on a freshly-cloned monorepo with thousands
    * of untracked files.
    */
   workingTreeStatusMaxLines?: number;
+  strictGit?: boolean;
 }
 
 const DEFAULT_WORKING_TREE_LINES = 50;
-
-/**
- * Build the repo_state block for a given artifact. Recovery-aware reads never
- * append events or write projection files; missing or stale projections are
- * derived from the durable event log in memory.
- * Tolerant of partial data (no checkpoints, no summary, branch with no
- * other artifacts).
- */
-export async function buildRepoState(opts: BuildRepoStateOptions): Promise<RepoState | null> {
-  const { store, repo, artifactId } = opts;
+export function buildRepoStateFromSnapshot(
+  opts: RepoStateSnapshotOptions
+): Promise<RepoState | null> {
+  const snapshot = structuredClone({
+    plan: opts.snapshot.plan,
+    checkpoints: opts.snapshot.checkpoints,
+    summary: opts.snapshot.summary,
+  });
+  const laterArtifactEvidence = structuredClone(opts.laterArtifactEvidence);
+  if (!snapshot.plan) return Promise.resolve(null);
+  return buildRepoStateData({ ...opts, ...snapshot, plan: snapshot.plan, laterArtifactEvidence });
+}
+async function buildRepoStateData(
+  opts: Omit<RepoStateSnapshotOptions, 'snapshot'> & {
+    plan: NonNullable<ArtifactThread['plan']>;
+    checkpoints: ArtifactThread['checkpoints'];
+    summary: ArtifactThread['summary'];
+    laterArtifactEvidence: RepoStateSnapshotOptions['laterArtifactEvidence'];
+  }
+): Promise<RepoState> {
+  const { plan, checkpoints, summary, repo } = opts;
   const cap = opts.workingTreeStatusMaxLines ?? DEFAULT_WORKING_TREE_LINES;
-
-  const plan = await store.readPlan(artifactId);
-  if (!plan) return null; // No plan → not a real artifact.
-  const checkpoints = await store.readCheckpoints(artifactId);
-  const summary = await store.readSummary(artifactId);
 
   const artifactHeadSha = summary
     ? summary.head_sha
@@ -113,7 +121,9 @@ export async function buildRepoState(opts: BuildRepoStateOptions): Promise<RepoS
 
   const commits_since_artifact_head_touching_artifact_files: RepoStateCommit[] = [];
   if (!headMatchesArtifact && artifactHeadSha && artifactFiles.size > 0) {
-    const range = await repo.getCommitsBetween(artifactHeadSha, currentHeadSha);
+    const range = opts.strictGit
+      ? await repo.getCommitsBetweenStrict(artifactHeadSha, currentHeadSha)
+      : await repo.getCommitsBetween(artifactHeadSha, currentHeadSha);
     for (const c of range) {
       const matched = c.files.filter((f) => artifactFiles.has(f));
       if (matched.length > 0) {
@@ -127,15 +137,10 @@ export async function buildRepoState(opts: BuildRepoStateOptions): Promise<RepoS
   }
 
   const open_items_addressed_since = await buildOpenItemEvidence({
-    store,
-    repo,
-    plan,
+    laterArtifactEvidence: opts.laterArtifactEvidence,
     artifactFiles,
-    artifactStartedAt: plan.started_at,
     summaryOpenItems: summary?.open_items ?? [],
     rangeCommits: commits_since_artifact_head_touching_artifact_files,
-    artifactBranch: plan.branch,
-    artifactId,
   });
 
   return {
@@ -151,15 +156,10 @@ export async function buildRepoState(opts: BuildRepoStateOptions): Promise<RepoS
 }
 
 interface OpenItemEvidenceOptions {
-  store: ArtifactStore;
-  repo: Repo;
-  plan: { branch: string; started_at: string };
+  laterArtifactEvidence: RepoStateSnapshotOptions['laterArtifactEvidence'];
   artifactFiles: Set<string>;
-  artifactStartedAt: string;
   summaryOpenItems: string[];
   rangeCommits: RepoStateCommit[];
-  artifactBranch: string;
-  artifactId: string;
 }
 
 async function buildOpenItemEvidence(opts: OpenItemEvidenceOptions): Promise<OpenItemEvidence[]> {
@@ -176,10 +176,7 @@ async function buildOpenItemEvidence(opts: OpenItemEvidenceOptions): Promise<Ope
     }
   }
 
-  // Evidence kind 2: a later artifact on this branch references the
-  // same files. "Later" = started_at strictly after this artifact's
-  // started_at.
-  const laterArtifactRef = await findLaterArtifactReferencingFiles(opts);
+  const laterArtifactRef = opts.laterArtifactEvidence;
 
   const out: OpenItemEvidence[] = [];
   for (const item of opts.summaryOpenItems) {
@@ -200,43 +197,6 @@ async function buildOpenItemEvidence(opts: OpenItemEvidenceOptions): Promise<Ope
     }
   }
   return out;
-}
-
-async function findLaterArtifactReferencingFiles(
-  opts: OpenItemEvidenceOptions
-): Promise<{ artifact_id: string; files: string[] } | null> {
-  const branchRows = opts.store.store.listArtifactsByLineageBranch({ branch: opts.artifactBranch });
-  for (const row of branchRows) {
-    if (row.id === opts.artifactId) continue;
-    if (row.started_at <= opts.artifactStartedAt) continue;
-    // Best-effort evidence scan: a sibling with a rotted log must not
-    // fail this artifact's repo-state build — skip it with a warning
-    // (doctor surfaces the corruption; here only optional evidence is
-    // lost, no decision flips on the absence). Only a recovery refusal
-    // is containable; anything else propagates.
-    const cps = await opts.store.readCheckpoints(row.id).catch((err: unknown) => {
-      if (!(err instanceof RecoveryRefusedError)) throw err;
-      return null;
-    });
-    if (cps === null) {
-      process.stderr.write(
-        `warning: skipping unreadable artifact ${row.id} during repo-state evidence scan — ` +
-          `run \`orcaops doctor\` to see its corruption\n`
-      );
-      continue;
-    }
-    const overlapping: string[] = [];
-    for (const cp of cps) {
-      if (cp.status !== 'closed') continue;
-      for (const f of cp.files_changed) {
-        if (opts.artifactFiles.has(f) && !overlapping.includes(f)) overlapping.push(f);
-      }
-    }
-    if (overlapping.length > 0) {
-      return { artifact_id: row.id, files: overlapping.sort() };
-    }
-  }
-  return null;
 }
 
 function capLines(input: string, maxLines: number): string {

@@ -1,6 +1,6 @@
 import { blockingEvaluatorFailureKind, GateAuditPayloadSchema } from '@orcaops/evaluator-protocol';
 
-import { type EventRecord, type EventType, loadEventPayload } from './event-log.js';
+import { type EventRecord, type EventType } from './event-log.js';
 import { RecoveryRefusedError } from '../artifacts/errors.js';
 import {
   type ArtifactJson,
@@ -45,32 +45,12 @@ import { prePrCheckedOutcome, PrePrCheckedPayloadSchema } from '../schema/pre-pr
 import { SourcePlanPinSchema } from '../schema/source-plan.js';
 import { type Summary, SummarySchema } from '../schema/summary.js';
 
-/**
- * Pure projection rebuilders that fold an event log into each
- * canonical-JSON projection shape. The recovery-on-read path
- * (`recoverProjection`) calls these when the on-disk projection is
- * missing, unreadable, or stale.
- */
+/** Pure projection rebuilders that fold retained events into canonical projections. */
 
 /** An event together with its already-loaded payload (inline or sidecar). */
 export interface EventWithPayload {
   record: EventRecord;
   payload: unknown;
-}
-
-export async function loadEventsWithPayloads(
-  events: readonly EventRecord[],
-  opts: { sidecarsDir: string; containmentRoot?: string }
-): Promise<EventWithPayload[]> {
-  const out: EventWithPayload[] = [];
-  for (const record of events) {
-    const payload = await loadEventPayload(record, {
-      sidecarsDir: opts.sidecarsDir,
-      containmentRoot: opts.containmentRoot,
-    });
-    out.push({ record, payload });
-  }
-  return out;
 }
 
 export function eventsOfType(
@@ -115,7 +95,7 @@ function refuseGitImportEnrichment(
   throw new RecoveryRefusedError(
     `artifact ${artifactId} is unreadable: git-import enrichment` +
       `${eventId ? ` event ${eventId}` : ''} ${reason} — run \`orcaops doctor\`; ` +
-      'restore events.ndjson from a backup or archive mirror before reading this artifact.',
+      'preserve the retained history and report the missing original event before reading this artifact.',
     artifactId
   );
 }
@@ -928,15 +908,12 @@ export function rebuildEvaluatorLogFromEvents(
 
   // Empty event log → null. Callers (readEvaluatorLog) distinguish
   // this from "events exist but none contributed eval rows": the
-  // recovery layer only invokes the rebuilder when at least one
-  // relevant event exists, so seeing events.length === 0 here is an
-  // unambiguous "nothing to rebuild against."
+  // Seeing events.length === 0 is an unambiguous "nothing to rebuild against."
   if (events.length === 0) return null;
   // Events exist but no eval rows landed (typical: an artifact with
   // checkpoint_opened events but no embedded gate_audit and no
   // standalone evaluator_run/disposition events). Return an empty log
-  // keyed to the last event's id so recoverProjection's "rebuilder
-  // never returns null when relevant events exist" invariant holds.
+  // keyed to the last event's id so callers retain an exact source identity.
   const effectiveLastEventId = lastEventId ?? events[events.length - 1].record.event_id;
   if (runRows.length === 0 && dispoRows.length === 0) {
     return {

@@ -92,6 +92,19 @@ describe('runReviewFeedbackWatch', () => {
     expect(result.status).toBe('TIMEOUT');
   });
 
+  it('compares activity instants rather than timestamp text', async () => {
+    const { client, deps } = harness([{ items: [itemWith('2026-07-02T10:00:00Z')] }]);
+    const result = await runReviewFeedbackWatch({
+      client,
+      taskNumber: null,
+      pullRequestId: 'pr_1',
+      baselineCursor: '2026-07-02T10:00:00.000Z',
+      timeoutMs: 0,
+      deps,
+    });
+    expect(result.status).toBe('TIMEOUT');
+  });
+
   it('resolves a single --task to its PR and watches it', async () => {
     // The successful half: exactly one open reviewed PR matches the task.
     const { client, deps, sleeps } = harness([

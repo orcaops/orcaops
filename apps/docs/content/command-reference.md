@@ -42,36 +42,35 @@ hooks, capture controls, generated files, and environment variables.
 
 ## Inspect captured work
 
-| Command                                        | What it does                                                                                                                           |
-| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `orcaops status [--json]`                      | Show the current branch's artifact state and immediate next actions.                                                                   |
-| `orcaops list [--state <state>]`               | List artifacts and optionally filter by lifecycle state.                                                                               |
-| `orcaops show <artifact-id>`                   | Render one complete artifact thread.                                                                                                   |
-| `orcaops checkout <artifact-id>`               | Pin one artifact as the current shell's focus; `--clear` removes the pin.                                                              |
-| `orcaops decisions`                            | Query recorded plan, checkpoint, and deferred decisions by branch, artifact, time window, or archive.                                  |
-| `orcaops loose-ends`                           | Report open items, uncertainty, uncovered steps, open checkpoints, and missing summaries.                                              |
-| `orcaops step brief <step-id>`                 | Produce a bounded task brief with criteria, guardrails, evidence, and sibling claim state for one plan step.                           |
-| `orcaops stats`                                | Show repository artifact/checkpoint/summary counts and session-token totals; `--all-projects` reads the archive.                       |
-| `orcaops usage [--artifact <id>]`              | Show exact session/model totals or labeled per-artifact estimates and checkpoint spans.                                                |
-| `orcaops search <query>`                       | Search captured plan, checkpoint, and summary content with FTS5.                                                                       |
-| `orcaops resume`                               | Show in-flight progress and a paste-ready continuation prompt.                                                                         |
-| `orcaops why <file> / <file>:<line-or-symbol>` | Show complete newest-first history for a bare file, or trace a line or symbol to the captured artifact and checkpoint that touched it. |
-| `orcaops finish --input <path>`                | Run pre-PR review, finalize the artifact, and render its digest.                                                                       |
-| `orcaops digest [artifact-id]`                 | Render one artifact; add `--branch-wide [--base <ref>]` to combine all captured work in a PR range.                                    |
-| `orcaops watch`                                | Open Orcaops Watch, the live cross-project dashboard and local Task Review interface.                                                  |
+| Command                              | What it does                                                                                                                                           |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `orcaops status [--json]`            | Show the current branch's artifact state and immediate next actions.                                                                                   |
+| `orcaops list [--state <state>]`     | List artifacts and optionally filter by lifecycle state.                                                                                               |
+| `orcaops show <artifact-id>`         | Render one complete artifact thread.                                                                                                                   |
+| `orcaops checkout <artifact-id>`     | Pin one artifact as the current shell's focus; `--clear` removes the pin.                                                                              |
+| `orcaops decisions`                  | Query recorded plan, checkpoint, and deferred decisions by branch, artifact, time window, or project scope.                                            |
+| `orcaops loose-ends`                 | Report open items, uncertainty, uncovered steps, open checkpoints, and missing summaries.                                                              |
+| `orcaops step brief <step-id>`       | Produce a bounded task brief with criteria, guardrails, evidence, and sibling claim state for one plan step.                                           |
+| `orcaops stats`                      | Show repository artifact/checkpoint/summary counts and session-token totals; `--scope all-projects` reads across project databases.                    |
+| `orcaops usage [--artifact <id>]`    | Show exact session/model totals or labeled per-artifact estimates and checkpoint spans.                                                                |
+| `orcaops search <query>`             | Search captured plan, checkpoint, and summary content with FTS5.                                                                                       |
+| `orcaops resume`                     | Show in-flight progress and a paste-ready continuation prompt.                                                                                         |
+| `orcaops why <file> / <file>:<line>` | Find ranked provenance for a file or line; compact JSON by default, with `--details` for full candidates and rich `best` (no effect without `--json`). |
+| `orcaops finish --input <path>`      | Run pre-PR review, finalize the artifact, and render its digest.                                                                                       |
+| `orcaops digest [artifact-id]`       | Render one artifact; add `--branch-wide [--base <ref>]` to combine all captured work in a PR range.                                                    |
+| `orcaops watch`                      | Open Orcaops Watch, the live cross-project dashboard and local Task Review interface.                                                                  |
 
-With `--all-projects`, `list`, `decisions`, `loose-ends`, `stats`, and
-`search` include both hot and retained archive projections for the current
-project. Duplicate artifact IDs use the freshest projection: the archive wins
-only when it is strictly newer, and a tie stays on hot. This makes the result
-complete when run inside a repository or linked worktree without scanning
-sibling worktree directories.
+With `--scope all-projects`, `list`, `decisions`, `loose-ends`, `stats`, and
+`search` read the registered project databases and combine their results. Each
+project database is authoritative for its history; there is no hot/archive
+merge. Use `--project <id>` to select one project explicitly.
 
-`orcaops show` remains current-repository-only. Use the cross-project
-`decisions` and `loose-ends` readers for archived detail from other projects.
-`orcaops list --between <ref1>..<ref2>` also remains repository-anchored because
-it resolves the git refs locally, but it includes retained archive history for
-the identified current project.
+`orcaops show <artifact-id> --project <id>` reads an artifact from the selected
+project. `orcaops list --between <ref1>..<ref2>` remains repository-anchored
+because it resolves the Git refs locally, then reads the identified project's
+database history.
+
+See [Provenance JSON](./provenance-json.md) for schema v4, detail expansion, pagination, and processing budgets.
 
 The [Skills guide](./skills.md) maps these capabilities to the plain-language
 requests normally used with an agent. The [Task Review guide](./task-review.md)
@@ -108,38 +107,43 @@ shipping executable evaluator code.
 
 ## Provenance, snapshots, and maintenance
 
-| Command                          | What it does                                                                                                             |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `orcaops fingerprint show`       | Inspect a closed checkpoint's captured diff-fingerprint metadata and manifest.                                           |
-| `orcaops fingerprint derive`     | Recompute a manifest from pinned trees and verify its hash without persisting output.                                    |
-| `orcaops diff --attribution`     | Match live or committed diff hunks to the checkpoints that produced them.                                                |
-| `orcaops diff --reconcile`       | Report in-window commits not accounted for by checkpoints.                                                               |
-| `orcaops export agent-trace`     | Export per-line provenance as a Cursor agent-trace record, file, or explicit local git note.                             |
-| `orcaops snapshots checkout`     | Materialize a checkpoint-boundary tree in a scratch worktree.                                                            |
-| `orcaops snapshots diff <range>` | Diff checkpoint boundaries or a boundary against the plan baseline.                                                      |
-| `orcaops snapshots prune`        | Preview local snapshot-ref pruning; `--apply` deletes the selected refs.                                                 |
-| `orcaops lineage`                | Refresh captured lineage after a merge, rebase, or amend changes branch ancestry.                                        |
-| `orcaops rebuild`                | Rebuild the disposable SQLite projection from durable local event logs.                                                  |
-| `orcaops seed [--dry-run]`       | Preview or apply the consent-gated one-time git-history backfill.                                                        |
-| `orcaops seed enrich`            | Preview or append an enrichment amendment to one imported artifact.                                                      |
-| `orcaops seed status`            | Show history coverage, failures, progress, and remembered discovery declines.                                            |
-| `orcaops gc`                     | Report stale pins, abandoned summarized artifacts, stale reviews, and nonterminal orphans; `--apply` deletes candidates. |
-| `orcaops archive <verb>`         | Enable, disable, inspect, repair, resolve, or explicitly prune the home-directory archive.                               |
+| Command                          | What it does                                                                                                          |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `orcaops fingerprint show`       | Inspect a closed checkpoint's captured diff-fingerprint metadata and manifest.                                        |
+| `orcaops fingerprint derive`     | Recompute a manifest from pinned trees and verify its hash without persisting output.                                 |
+| `orcaops diff --attribution`     | Match live or committed diff hunks to the checkpoints that produced them.                                             |
+| `orcaops diff --reconcile`       | Report in-window commits not accounted for by checkpoints.                                                            |
+| `orcaops export agent-trace`     | Export per-line provenance as a Cursor agent-trace record, file, or explicit local git note.                          |
+| `orcaops snapshots checkout`     | Materialize a checkpoint-boundary tree in a scratch worktree.                                                         |
+| `orcaops snapshots diff <range>` | Diff checkpoint boundaries or a boundary against the plan baseline.                                                   |
+| `orcaops snapshots prune`        | Preview retired, unreferenced snapshot publications; `--apply` reclaims eligible refs.                                |
+| `orcaops lineage`                | Refresh captured lineage after a merge, rebase, or amend changes branch ancestry.                                     |
+| `orcaops rebuild`                | Rebuild derived query and search metadata from retained project database rows.                                        |
+| `orcaops seed [--dry-run]`       | Preview or apply the consent-gated one-time git-history backfill.                                                     |
+| `orcaops seed enrich`            | Preview or append an enrichment amendment to one imported artifact.                                                   |
+| `orcaops seed status`            | Show history coverage, failures, progress, and remembered discovery declines.                                         |
+| `orcaops gc`                     | Inspect canonical retained Git publications; `--apply` reclaims only exact, positively retired, dependency-free refs. |
 
-See [Local data](./local-data.md) before pruning capture or archive state.
+`orcaops history convert` previews supported legacy history; `--apply --offline`
+converts it while preserving originals. Legacy Task Review history is intentionally
+omitted. See [Local data](./local-data.md) before reclaiming retained Git resources.
+Apply prints its operation ID before importing. If interrupted, keep the same
+checkout and data root and retry with `--operation-id <id>`. An unregistered
+committed conversion can recover that ID from its validated receipt when its
+original sources still match; unrelated or changed history is refused.
 
 ## Task Review engine
 
 The `orcaops-task-review` skill normally drives this surface. The most relevant
 groups are:
 
-| Command                                 | What it does                                                                                    |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `orcaops review data --branch <branch>` | Derive the bounded review floor and diff; `--rebuild-cache` replaces an older disposable cache. |
-| `orcaops review routine-start`          | Pin inputs, mint a two-lane run, and serve the capture-blind forensic payload.                  |
-| `orcaops review routine-submit`         | Validate a lane submission, serve the next input, or finalize the accepted routine.             |
-| `orcaops review journal`                | Read or append local reviewer disposition events.                                               |
-| `orcaops review comments` / `comment`   | Read, add, reply to, resolve, or reopen local Task Review comments.                             |
+| Command                                 | What it does                                                                                                                       |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `orcaops review data --branch <branch>` | Publish the bounded review floor and diff, reusing the selected floor when its inputs are unchanged. `--rebuild-cache` is retired. |
+| `orcaops review routine-start`          | Pin inputs, mint a two-lane run, and serve the capture-blind forensic payload.                                                     |
+| `orcaops review routine-submit`         | Validate a lane submission, serve the next input, or finalize the accepted routine.                                                |
+| `orcaops review journal`                | Read or append local reviewer disposition events.                                                                                  |
+| `orcaops review comments` / `comment`   | Read, add, reply to, resolve, or reopen local Task Review comments.                                                                |
 
 The [Task Review protocol](./task-review-protocol.md) is the full integration
 contract, including payloads, status dimensions, limits, and repair behavior.

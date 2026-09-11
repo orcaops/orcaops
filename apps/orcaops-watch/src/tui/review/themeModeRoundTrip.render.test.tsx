@@ -23,7 +23,7 @@ function thread(index: number): WatchThread {
     branch: 'feat/debug-theme',
     title: `Debug member ${index + 1}`,
     agent: 'claude-code',
-    sessions: [{ agent: 'claude-code', session_id: `s-${index}`, tokens: 1_000 }],
+    sessions: [{ agent: 'claude-code', session_id: `s-${index}`, status: 'exact', tokens: 1_000 }],
     openCheckpoints: 0,
     openComments: 0,
     isCurrentCheckout: index === 0,

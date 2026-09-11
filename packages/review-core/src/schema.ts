@@ -30,10 +30,9 @@ import { isCitationId, parseCitationId } from './keys.js';
  * On-disk schema version of `floor.json`. Bump on any breaking floor shape
  * change.
  *
- * Floor data is a regenerable cache, but reviewer state (journal and comments)
- * is not. Bump REVIEW_STATE_VERSION separately only when durable reviewer keys
- * move. Version 4 makes the current floor contract exact without changing any
- * key recipe, so v3 floors simply miss and rebuild while reviewer state stays.
+ * Version 4 makes the current floor contract exact without changing any key
+ * recipe. Retained review records and authored events have independently
+ * versioned schemas.
  */
 export const FLOOR_SCHEMA_VERSION = 4;
 // ---------------------------------------------------------------------------

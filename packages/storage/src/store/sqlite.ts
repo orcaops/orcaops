@@ -829,7 +829,7 @@ export class Store {
       return resolved;
     };
     this.dbPath = resolveDbPaths();
-    mkdirSync(path.dirname(this.dbPath), { recursive: true });
+    if (this.dbPath !== ':memory:') mkdirSync(path.dirname(this.dbPath), { recursive: true });
     this.dbPath = resolveDbPaths();
     try {
       this.db = new (loadDatabase())(this.dbPath);
@@ -838,6 +838,7 @@ export class Store {
       if (isMissingBindingError(cause)) throw new Error(nativeModuleHint(cause));
       throw error;
     }
+    if (this.dbPath === ':memory:') this.db.pragma('temp_store = MEMORY');
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.migrate(opts.rebuildFreshProjection === true, opts.rebuildExistingProjection === true);
@@ -2535,7 +2536,7 @@ export class Store {
   }
 
   /** Project one usage snapshot. `idempotency_key` is UNIQUE — the caller
-   * (UsageLedger) skips-if-seen first, so this never races within the lock. */
+   * Canonical usage preparation skips-if-seen first, so this never races within the lock. */
   insertUsageSnapshot(row: UsageSnapshotRow): void {
     const insert = this.db.prepare(
       // OR IGNORE on the UNIQUE idempotency_key: the live path skips-if-seen
@@ -3043,6 +3044,17 @@ export class Store {
            recorded_at           = excluded.recorded_at`
       )
       .run(row);
+  }
+
+  listIdempotencyBlocks(artifactId: string): IdempotencyBlockRow[] {
+    return this.db
+      .prepare(
+        `SELECT artifact_id, idempotency_key, event_type, outcome,
+              payload_hash, evaluator_fingerprint, envelope, recorded_at
+       FROM idempotency_blocks WHERE artifact_id = ?
+       ORDER BY event_type, idempotency_key`
+      )
+      .all(artifactId) as IdempotencyBlockRow[];
   }
 
   deleteIdempotencyBlock(opts: {

@@ -1,6 +1,7 @@
 // UI-side journal loader/appender. Mirrors reviewSource.ts: spawn the app's own
-// Node sidecar (`review journal --branch <b> [--input -]`) so the locked
-// append + replay stay off the Bun UI (ArtifactLock pulls sqlite via storage).
+// Node sidecar (`review journal --branch <b> [--input -]`) so the settlement
+// and replay stay off the Bun UI — they open the project database, and the UI
+// bundle deliberately carries no native sqlite addon.
 // The event/batch JSON travels over the child's STDIN (`--input -`), never
 // argv — a row-coverage event can exceed argv limits. The verb prints the
 // replayed ledger JSON to stdout; since coverage entries carry those manifests,
@@ -16,7 +17,6 @@ import {
   JOURNAL_APPEND_REJECTION_CODE,
   type JournalAppendRejection,
   type JournalAppendRejectionCode,
-  type ReviewArchiveWarning,
 } from '@orcaops/review-engine';
 
 import { resolveRoot } from './reviewSource';
@@ -40,34 +40,10 @@ export interface JournalSourceOptions {
 
 interface ReviewLedgerWire extends Omit<ReviewLedgerV2, 'ledgerGeneration'> {
   ledger_generation: string;
-  warnings?: ReviewArchiveWarning[];
-}
-
-const ARCHIVE_WARNING_CODES = new Set<string>([
-  'REVIEW_ARCHIVE_SETUP_FAILED',
-  'REVIEW_ARCHIVE_WRITE_FAILED',
-]);
-
-function parseArchiveWarnings(value: unknown): ReviewArchiveWarning[] | undefined {
-  if (value === undefined) return undefined;
-  if (
-    !Array.isArray(value) ||
-    value.some(
-      (warning) =>
-        warning === null ||
-        typeof warning !== 'object' ||
-        !ARCHIVE_WARNING_CODES.has(String((warning as { code?: unknown }).code)) ||
-        typeof (warning as { message?: unknown }).message !== 'string'
-    )
-  ) {
-    throw new Error('unexpected review archive warning shape');
-  }
-  return value as ReviewArchiveWarning[];
 }
 
 interface ParsedJournalResponse {
   ledger: ReviewLedgerV2;
-  warnings?: ReviewArchiveWarning[];
 }
 
 /** Translate the persisted CLI vocabulary exactly once at the Watch boundary. */
@@ -90,13 +66,8 @@ export function parseJournalResponse(text: string): ParsedJournalResponse {
   ) {
     throw new Error('unexpected review ledger shape');
   }
-  const warnings = parseArchiveWarnings(data.warnings);
   const { ledger_generation, ...ledger } = data;
-  delete ledger.warnings;
-  return {
-    ledger: { ...ledger, ledgerGeneration: ledger_generation },
-    ...(warnings !== undefined ? { warnings } : {}),
-  };
+  return { ledger: { ...ledger, ledgerGeneration: ledger_generation } };
 }
 
 export function parseLedger(text: string): ReviewLedgerV2 {
@@ -201,13 +172,8 @@ async function runJournalVerb(
 
 export type WatchJournalAppendRejectionCode = JournalAppendRejectionCode | 'TRANSPORT_ERROR';
 export type JournalAppendResult =
-  | { status: 'appended'; ledger: ReviewLedgerV2; warnings?: ReviewArchiveWarning[] }
-  | {
-      status: 'rejected';
-      code: WatchJournalAppendRejectionCode;
-      message: string;
-      warnings?: ReviewArchiveWarning[];
-    };
+  | { status: 'appended'; ledger: ReviewLedgerV2 }
+  | { status: 'rejected'; code: WatchJournalAppendRejectionCode; message: string };
 
 const REJECTION_CODES = new Set<string>(Object.values(JOURNAL_APPEND_REJECTION_CODE));
 
@@ -221,12 +187,10 @@ export function parseAppendRejection(text: string): JournalAppendRejection | nul
     ) {
       return null;
     }
-    const warnings = parseArchiveWarnings(value.warnings);
     return {
       ok: false,
       code: value.code as JournalAppendRejectionCode,
       message: value.message,
-      ...(warnings !== undefined ? { warnings } : {}),
     };
   } catch {
     return null;
@@ -260,12 +224,7 @@ async function runJournalAppend(
           code: 'TRANSPORT_ERROR',
           message: result.stderr || `review journal exited with code ${result.code}`,
         }
-      : {
-          status: 'rejected',
-          code: rejection.code,
-          message: rejection.message,
-          ...(rejection.warnings !== undefined ? { warnings: rejection.warnings } : {}),
-        };
+      : { status: 'rejected', code: rejection.code, message: rejection.message };
   } catch (error) {
     return {
       status: 'rejected',

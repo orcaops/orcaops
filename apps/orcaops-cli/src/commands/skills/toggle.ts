@@ -4,7 +4,7 @@ import { ErrorCodes, OrcaopsError } from '../../io/errors.js';
 import { CliExit } from '../../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../../io/output.js';
 import { openEffectiveConfig, writeConfigDocument } from '../../lib/config-file.js';
-import { buildContext } from '../../lib/context.js';
+import { resolveInstallCommandContext } from '../../lib/repository-context.js';
 import { withRepositoryInstallLock } from '../../lib/repository-install-lock.js';
 import {
   currentSkillCapabilities,
@@ -120,52 +120,45 @@ const UPDATE_HINT = 'run `orcaops update` to apply the change to installed skill
 
 async function runToggle(opts: ToggleSkillOptions, enabled: boolean): Promise<void> {
   try {
-    const ctx = await buildContext();
-    try {
-      const commonDir = await ctx.repo.getCommonDirAbsolute();
-      const { plan, configRel } = await withRepositoryInstallLock(
-        commonDir,
-        async (installLease) => {
-          const document = await openEffectiveConfig(ctx.repoRoot);
-          const plan = planSkillToggle(resolveConfig(document.raw), opts.id, enabled, ctx.gates);
-          const skills = (document.raw.skills ?? {}) as { enabled?: Record<string, boolean> };
-          document.raw.skills = {
-            ...skills,
-            enabled: { ...(skills.enabled ?? {}), [opts.id]: enabled },
-          };
-          await installLease.verify();
-          await writeConfigDocument(document);
-          return { plan, configRel: document.displayPath };
-        }
-      );
-
-      const result = {
-        ok: true as const,
-        id: plan.id,
-        enabled: plan.enabled,
-        previous_effective: plan.previous_effective,
-        previous_override: plan.previous_override,
-        noop: plan.noop,
-        config_path: configRel,
-        warnings: plan.warnings,
-        hint: UPDATE_HINT,
+    const ctx = await resolveInstallCommandContext();
+    const commonDir = await ctx.repo.getCommonDirAbsolute();
+    const { plan, configRel } = await withRepositoryInstallLock(commonDir, async (installLease) => {
+      const document = await openEffectiveConfig(ctx.repoRoot);
+      const plan = planSkillToggle(resolveConfig(document.raw), opts.id, enabled, ctx.gates);
+      const skills = (document.raw.skills ?? {}) as { enabled?: Record<string, boolean> };
+      document.raw.skills = {
+        ...skills,
+        enabled: { ...(skills.enabled ?? {}), [opts.id]: enabled },
       };
-      if (opts.json) {
-        emitOk(result);
-        return;
-      }
-      const verb = enabled ? 'Enabled' : 'Disabled';
-      const lines = [
-        plan.noop
-          ? `${verb} "${plan.id}" (no-op — already effectively ${enabled}; override recorded).`
-          : `${verb} "${plan.id}" in ${configRel}.`,
-        ...plan.warnings.map((w) => `Warning: ${w}`),
-        `Next: ${UPDATE_HINT}.`,
-      ];
-      writeTerminalSafeStdout(lines.join('\n') + '\n');
-    } finally {
-      ctx.store.close();
+      await installLease.verify();
+      await writeConfigDocument(document);
+      return { plan, configRel: document.displayPath };
+    });
+
+    const result = {
+      ok: true as const,
+      id: plan.id,
+      enabled: plan.enabled,
+      previous_effective: plan.previous_effective,
+      previous_override: plan.previous_override,
+      noop: plan.noop,
+      config_path: configRel,
+      warnings: plan.warnings,
+      hint: UPDATE_HINT,
+    };
+    if (opts.json) {
+      emitOk(result);
+      return;
     }
+    const verb = enabled ? 'Enabled' : 'Disabled';
+    const lines = [
+      plan.noop
+        ? `${verb} "${plan.id}" (no-op — already effectively ${enabled}; override recorded).`
+        : `${verb} "${plan.id}" in ${configRel}.`,
+      ...plan.warnings.map((w) => `Warning: ${w}`),
+      `Next: ${UPDATE_HINT}.`,
+    ];
+    writeTerminalSafeStdout(lines.join('\n') + '\n');
   } catch (err) {
     if (opts.json) emitError(err);
     writeErrorLine(err);

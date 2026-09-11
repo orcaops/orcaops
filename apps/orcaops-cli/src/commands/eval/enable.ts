@@ -3,13 +3,13 @@ import { EvaluatorRefRegex } from '@orcaops/evaluator-protocol';
 import { ErrorCodes, OrcaopsError } from '../../io/errors.js';
 import { CliExit } from '../../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../../io/output.js';
-import { buildContext } from '../../lib/context.js';
 import { discoverEvaluatorsForCli, evaluatorNotFound } from '../../lib/evaluator-discovery.js';
 import {
   EVALUATOR_CONFIG_FILE,
   readEvaluatorsConfig,
   writeEvaluatorsConfig,
 } from '../../lib/evaluators-config.js';
+import { resolveInstallCommandContext } from '../../lib/repository-context.js';
 
 export interface ToggleEvaluatorOptions {
   ref: string;
@@ -57,50 +57,46 @@ async function runToggle(opts: ToggleEvaluatorOptions, enabled: boolean): Promis
 }
 
 async function applyToggle(opts: ToggleEvaluatorOptions, enabled: boolean): Promise<ToggleResult> {
-  const ctx = await buildContext();
-  try {
-    const config = await readEvaluatorsConfig(ctx.repoRoot);
-    if (config === null) {
-      throw new OrcaopsError(
-        ErrorCodes.UNINITIALIZED,
-        `${EVALUATOR_CONFIG_FILE} not found; run \`orcaops eval add-pack <source>\` first.`
-      );
-    }
-    if (!EvaluatorRefRegex.test(opts.ref)) {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        `Evaluator ref must be "<pack-id>/<evaluator-id>"; got "${opts.ref}".`
-      );
-    }
-    const [packId] = opts.ref.split('/', 1);
-    if (!config.packages.some((p) => p.id === packId)) {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        `Pack "${packId}" is not registered. Add it first with \`orcaops eval add-pack\`.`
-      );
-    }
-    const { evaluators, errors } = await discoverEvaluatorsForCli(ctx.repoRoot);
-    if (!evaluators.some((evaluator) => evaluator.ref === opts.ref)) {
-      throw evaluatorNotFound(opts.ref, errors);
-    }
-    const prior = config.evaluators[opts.ref] ?? null;
-    const nextConfig = {
-      ...config,
-      evaluators: {
-        ...config.evaluators,
-        [opts.ref]: { ...(prior ?? {}), enabled },
-      },
-    };
-    await writeEvaluatorsConfig(ctx.repoRoot, nextConfig);
-
-    return {
-      ok: true,
-      ref: opts.ref,
-      enabled,
-      config_path: EVALUATOR_CONFIG_FILE,
-      previous_enabled: prior?.enabled ?? null,
-    };
-  } finally {
-    ctx.store.close();
+  const ctx = await resolveInstallCommandContext();
+  const config = await readEvaluatorsConfig(ctx.repoRoot);
+  if (config === null) {
+    throw new OrcaopsError(
+      ErrorCodes.UNINITIALIZED,
+      `${EVALUATOR_CONFIG_FILE} not found; run \`orcaops eval add-pack <source>\` first.`
+    );
   }
+  if (!EvaluatorRefRegex.test(opts.ref)) {
+    throw new OrcaopsError(
+      ErrorCodes.INVALID_INPUT,
+      `Evaluator ref must be "<pack-id>/<evaluator-id>"; got "${opts.ref}".`
+    );
+  }
+  const [packId] = opts.ref.split('/', 1);
+  if (!config.packages.some((p) => p.id === packId)) {
+    throw new OrcaopsError(
+      ErrorCodes.INVALID_INPUT,
+      `Pack "${packId}" is not registered. Add it first with \`orcaops eval add-pack\`.`
+    );
+  }
+  const { evaluators, errors } = await discoverEvaluatorsForCli(ctx.repoRoot);
+  if (!evaluators.some((evaluator) => evaluator.ref === opts.ref)) {
+    throw evaluatorNotFound(opts.ref, errors);
+  }
+  const prior = config.evaluators[opts.ref] ?? null;
+  const nextConfig = {
+    ...config,
+    evaluators: {
+      ...config.evaluators,
+      [opts.ref]: { ...(prior ?? {}), enabled },
+    },
+  };
+  await writeEvaluatorsConfig(ctx.repoRoot, nextConfig);
+
+  return {
+    ok: true,
+    ref: opts.ref,
+    enabled,
+    config_path: EVALUATOR_CONFIG_FILE,
+    previous_enabled: prior?.enabled ?? null,
+  };
 }

@@ -14,12 +14,7 @@ import {
 import { makeAgent } from '../support/test-agent.js';
 import { effectiveConfigPath, TEST_PACK_ABS_PATH } from '../support/test-helpers.js';
 
-/**
- * The plan's definition of done, end to end: one personal init in worktree A
- * enables existing and future worktrees without another init; hot data stays
- * separate; reads create nothing; a project config wins where present;
- * unrelated repositories and fresh clones stay uninitialized.
- */
+/** Personal configuration and canonical history across linked worktrees. */
 describe('personal scope across git worktrees', () => {
   let main: TempRepo;
   let before: TempRepo;
@@ -58,7 +53,7 @@ describe('personal scope across git worktrees', () => {
       })
     );
 
-  it('one init enables siblings that existed before and are created after, with separate hot data', async () => {
+  it('one init enables sibling reads while each writing worktree completes first-use setup', async () => {
     const init = await agentIn(main.path).runRaw(['init', '--personal', '--no-llm', '--json']);
     expect(init.exitCode).toBe(0);
     const after = await createLinkedWorktree(main.path, { branch: 'created-after-init' });
@@ -72,7 +67,25 @@ describe('personal scope across git worktrees', () => {
         expect(gitStatus(wt), wt).toBe('');
       }
 
-      // Captures stay where they are made.
+      const refused = await agentIn(after.path).runRaw([
+        'capture',
+        'plan',
+        '--no-llm',
+        '--input',
+        planFor('refused before first-use setup'),
+      ]);
+      expect(JSON.parse(refused.stdout)).toMatchObject({
+        error: { code: 'IDENTITY_RECOVERY_REQUIRED' },
+      });
+
+      const setup = await agentIn(after.path).runRaw([
+        'init',
+        '--personal',
+        '--force',
+        '--no-llm',
+        '--json',
+      ]);
+      expect(setup.exitCode, `${setup.stdout}\n${setup.stderr}`).toBe(0);
       const plan = await agentIn(after.path).runRaw([
         'capture',
         'plan',
@@ -80,14 +93,36 @@ describe('personal scope across git worktrees', () => {
         '--input',
         planFor('work in the newer worktree'),
       ]);
-      expect(plan.exitCode).toBe(0);
-      expect(await absent(path.join(after.path, '.orcaops', 'artifacts'))).toBe(false);
+      expect(plan.exitCode, `${plan.stdout}\n${plan.stderr}`).toBe(0);
+      const artifactId = (JSON.parse(plan.stdout) as { artifact_id: string }).artifact_id;
+      expect(await absent(path.join(after.path, '.orcaops'))).toBe(true);
       expect(await absent(path.join(before.path, '.orcaops'))).toBe(true);
       expect(await absent(path.join(main.path, '.orcaops'))).toBe(true);
+      const unresolvedList = await agentIn(before.path).runRaw([
+        'list',
+        '--scope',
+        'worktree',
+        '--json',
+      ]);
+      expect(JSON.parse(unresolvedList.stdout)).toMatchObject({
+        error: { code: 'WORKTREE_SCOPE_UNAVAILABLE' },
+      });
+      const setupBefore = await agentIn(before.path).runRaw([
+        'init',
+        '--personal',
+        '--force',
+        '--no-llm',
+        '--json',
+      ]);
+      expect(setupBefore.exitCode).toBe(0);
       const listBefore = JSON.parse(
-        (await agentIn(before.path).runRaw(['list', '--json'])).stdout
-      ) as { artifacts: unknown[] };
-      expect(listBefore.artifacts).toEqual([]);
+        (await agentIn(before.path).runRaw(['list', '--scope', 'worktree', '--json'])).stdout
+      ) as { results: unknown[] };
+      expect(listBefore.results).toEqual([]);
+      const listAfter = JSON.parse(
+        (await agentIn(after.path).runRaw(['list', '--scope', 'worktree', '--json'])).stdout
+      ) as { results: Array<{ id: string }> };
+      expect(listAfter.results.map((row) => row.id)).toContain(artifactId);
 
       // One repository identity, so the global skills carry one ref.
       const manifest = JSON.parse(
@@ -99,7 +134,7 @@ describe('personal scope across git worktrees', () => {
     }
   });
 
-  it('applies custom artifact/cache paths, capture excludes, and redact.allow in every worktree', async () => {
+  it('shares supported capture and redaction settings across worktrees', async () => {
     await agentIn(main.path).runRaw(['init', '--personal', '--no-llm', '--json']);
     const configPath = await effectiveConfigPath(main.path);
     const raw = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
@@ -108,8 +143,6 @@ describe('personal scope across git worktrees', () => {
       `${JSON.stringify(
         {
           ...raw,
-          artifacts: { path: 'custom/artifacts' },
-          cache: { path: 'custom/cache/orcaops.db' },
           capture: { exclude: ['vendor/**'] },
           redact: { allow: ['ghp_EXAMPLEnotasecret000000000000000000'] },
         },
@@ -119,6 +152,15 @@ describe('personal scope across git worktrees', () => {
       'utf8'
     );
 
+    const setup = await agentIn(before.path).runRaw([
+      'init',
+      '--personal',
+      '--force',
+      '--no-llm',
+      '--json',
+    ]);
+    expect(setup.exitCode, `${setup.stdout}\n${setup.stderr}`).toBe(0);
+
     const plan = await agentIn(before.path).runRaw([
       'capture',
       'plan',
@@ -126,18 +168,17 @@ describe('personal scope across git worktrees', () => {
       '--input',
       planFor('uses the shared custom paths'),
     ]);
-    expect(plan.exitCode).toBe(0);
-    // The sibling wrote under the CUSTOM paths, interpreted from its own root.
-    expect(await absent(path.join(before.path, 'custom', 'artifacts'))).toBe(false);
-    expect(await absent(path.join(before.path, 'custom', 'cache', 'orcaops.db'))).toBe(false);
-    // Only the fixed-location bookkeeping (locks, usage ledger) lands under
-    // `.orcaops/`; no artifact or cache data does.
-    expect(await absent(path.join(before.path, '.orcaops', 'artifacts'))).toBe(true);
-    expect(await absent(path.join(before.path, '.orcaops', 'cache'))).toBe(true);
-    // A read from the main checkout sees the same projection and creates nothing.
-    const status = await agentIn(main.path).runRaw(['status', '--json']);
-    expect(status.exitCode).toBe(0);
-    expect(await absent(path.join(main.path, 'custom'))).toBe(true);
+    expect(plan.exitCode, `${plan.stdout}\n${plan.stderr}`).toBe(0);
+    expect(await effectiveConfigPath(before.path)).toBe(configPath);
+    const inherited = JSON.parse(
+      await readFile(await effectiveConfigPath(before.path), 'utf8')
+    ) as {
+      capture: { exclude: string[] };
+      redact: { allow: string[] };
+    };
+    expect(inherited.capture.exclude).toEqual(['vendor/**']);
+    expect(inherited.redact.allow).toEqual(['ghp_EXAMPLEnotasecret000000000000000000']);
+    expect(await absent(path.join(before.path, '.orcaops'))).toBe(true);
   });
 
   it('lets a branch with a project config win, and falls back when it is gone', async () => {
@@ -170,24 +211,26 @@ describe('personal scope across git worktrees', () => {
     expect(await effectiveConfigPath(before.path)).toBe(await effectiveConfigPath(main.path));
   });
 
-  it('never leaks into an unrelated repository or a fresh clone', async () => {
+  it('does not select personal history for an unrelated repository or fresh clone', async () => {
     await agentIn(main.path).runRaw(['init', '--personal', '--no-llm', '--json']);
     const unrelated = await createTempRepo({ initialBranch: 'main' });
     const cloneParent = await mkdtemp(path.join(tmpdir(), 'orcaops-scope-clone-'));
     try {
       const status = await agentIn(unrelated.path).runRaw(['status', '--json']);
-      expect(status.exitCode).toBe(1);
-      expect((JSON.parse(status.stdout) as { error: { code: string } }).error.code).toBe(
-        'UNINITIALIZED'
-      );
+      expect(status.exitCode).toBe(0);
+      expect(JSON.parse(status.stdout)).toMatchObject({
+        context: { issues: [] },
+        history: { state: 'unavailable', projects: [] },
+      });
 
       const clone = path.join(cloneParent, 'clone');
       execFileSync('git', ['clone', '-q', main.path, clone]);
       const cloned = await agentIn(clone).runRaw(['status', '--json']);
-      expect(cloned.exitCode).toBe(1);
-      expect((JSON.parse(cloned.stdout) as { error: { code: string } }).error.code).toBe(
-        'UNINITIALIZED'
-      );
+      expect(cloned.exitCode).toBe(0);
+      expect(JSON.parse(cloned.stdout)).toMatchObject({
+        context: { issues: [] },
+        history: { state: 'unavailable', projects: [] },
+      });
       expect(await absent(path.join(clone, '.git', 'orcaops', 'config.json'))).toBe(true);
     } finally {
       await unrelated.cleanup();
@@ -241,7 +284,7 @@ describe('personal scope across git worktrees', () => {
     expect(siblingOut.evaluators ?? []).toEqual([]);
   });
 
-  it('uninstalling from any worktree silences every worktree and keeps the exclusion', async () => {
+  it('uninstalling from any worktree silences hooks and retains canonical history', async () => {
     await agentIn(main.path).runRaw([
       'init',
       '--personal',
@@ -258,9 +301,10 @@ describe('personal scope across git worktrees', () => {
     expect((await hook(main.path)).stdout).toBe('');
     expect((await hook(before.path)).stdout).toBe('');
     const status = await agentIn(main.path).runRaw(['status', '--json']);
-    expect((JSON.parse(status.stdout) as { error: { code: string } }).error.code).toBe(
-      'UNINITIALIZED'
-    );
+    expect(status.exitCode).toBe(0);
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      history: { state: 'available', complete: true },
+    });
     const exclude = await readFile(path.join(main.path, '.git', 'info', 'exclude'), 'utf8');
     expect(exclude).toContain('.orcaops/');
     expect(await absent(path.join(main.path, '.git', 'orcaops', 'personal-manifest.json'))).toBe(
@@ -275,8 +319,8 @@ describe('personal scope across git worktrees', () => {
 
   it('a project sibling purge keeps personal data in another worktree hidden', async () => {
     await agentIn(main.path).runRaw(['init', '--personal', '--no-llm', '--json']);
-    await mkdir(path.join(main.path, '.orcaops', 'artifacts'), { recursive: true });
-    await writeFile(path.join(main.path, '.orcaops', 'artifacts', 'retained.txt'), 'retained\n');
+    await mkdir(path.join(main.path, '.orcaops', 'local'), { recursive: true });
+    await writeFile(path.join(main.path, '.orcaops', 'local', 'retained.txt'), 'retained\n');
     await mkdir(path.join(before.path, '.orcaops'), { recursive: true });
     await writeFile(
       path.join(before.path, '.orcaops', 'config.json'),
@@ -290,7 +334,7 @@ describe('personal scope across git worktrees', () => {
     const uninstall = await agentIn(before.path).runRaw(['uninstall', '--purge-data', '--json']);
 
     expect(uninstall.exitCode).toBe(0);
-    expect(await absent(path.join(main.path, '.orcaops', 'artifacts', 'retained.txt'))).toBe(false);
+    expect(await absent(path.join(main.path, '.orcaops', 'local', 'retained.txt'))).toBe(false);
     const exclude = await readFile(path.join(main.path, '.git', 'info', 'exclude'), 'utf8');
     expect(exclude).toContain('.orcaops/');
     expect(gitStatus(main.path)).toBe('');

@@ -13,10 +13,9 @@
 // KEEP=1 skips teardown.
 //
 // Why this drives `doctor` rather than `--version`: better-sqlite3's addon is
-// dlopen'd lazily in the Database constructor, and neither `--version` nor `init`
-// constructs one. A tarball whose native install silently failed passes a
-// `--version` check and dies on the user's first capture. `doctor`'s `cache`
-// check opens the store, so it actually loads the addon.
+// dlopen'd lazily in the Database constructor. A tarball whose native install
+// silently failed can pass `--version`. Doctor's `history-database` check reads
+// the canonical store, so it proves the addon loads and history is readable.
 
 import { spawn, spawnSync } from 'node:child_process';
 import {
@@ -445,10 +444,10 @@ try {
   );
   assert(doc.status === 0, 'doctor exits 0');
 
-  const cache = dchecks.find((c) => c.name === 'cache');
+  const history = dchecks.find((c) => c.name === 'history-database');
   assert(
-    cache?.status === 'pass',
-    `doctor's cache check passed — SQLite opened (${cache?.summary ?? 'no summary'})`
+    history?.status === 'pass',
+    `doctor's history-database check passed — SQLite opened (${history?.summary ?? 'missing'})`
   );
 
   // -------------------------------------------------------------------------
@@ -654,7 +653,7 @@ try {
     );
     assert(
       !existsSync(path.join(repo2, '.orcaops')),
-      'invisible init created no worktree data directory (the first capture does)'
+      'invisible init created no worktree data directory'
     );
     const exclude = readFileSync(path.join(repo2, '.git', 'info', 'exclude'), 'utf8');
     const excludeLines = exclude.split(/\r?\n/);
@@ -800,15 +799,41 @@ try {
         touched_scope: [],
       })
     );
+    const unregisteredPlan = orcaops(bin, ['capture', 'plan', '--no-llm', '--input', planFile], {
+      cwd: matrixSibling,
+      home,
+    });
+    assert(
+      unregisteredPlan.status !== 0 &&
+        unregisteredPlan.json?.error?.code === 'IDENTITY_RECOVERY_REQUIRED',
+      'matrix: capture requires explicit registration of a new sibling'
+    );
+    const sInit = orcaops(bin, ['init', '--force', '--yes', '--json'], {
+      cwd: matrixSibling,
+      home,
+    });
+    assert(sInit.status === 0, 'matrix: sibling registration exits 0');
+    const sInitData = sInit.json?.data ?? sInit.json ?? {};
+    assert(sInitData.project_id_minted === false, 'matrix: sibling reuses the existing project');
     const sPlan = orcaops(bin, ['capture', 'plan', '--no-llm', '--input', planFile], {
       cwd: matrixSibling,
       home,
     });
     assert(sPlan.status === 0, 'matrix: capture in the sibling exits 0');
     assert(
-      existsSync(path.join(matrixSibling, '.orcaops', 'artifacts')) &&
+      !existsSync(path.join(matrixSibling, '.orcaops')) &&
         !existsSync(path.join(matrixMain, '.orcaops')),
-      'matrix: the capture created only the sibling store'
+      'matrix: capture keeps canonical history outside both worktrees'
+    );
+    const sPlanData = sPlan.json?.data ?? sPlan.json ?? {};
+    assert(typeof sPlanData.artifact_id === 'string', 'matrix: capture returned an artifact id');
+    const sharedPlan = orcaops(bin, ['show', sPlanData.artifact_id, '--json'], {
+      cwd: matrixMain,
+      home,
+    });
+    assert(
+      sharedPlan.status === 0 && sharedPlan.json?.ok === true,
+      'matrix: the main worktree can read the sibling capture from shared history'
     );
   }
 
@@ -828,8 +853,8 @@ try {
     assert(sUninstall.status === 0, 'matrix: uninstall from the sibling exits 0');
     const mStatus = orcaops(bin, ['status', '--json'], { cwd: matrixMain, home });
     assert(
-      mStatus.status !== 0 && mStatus.json?.error?.code === 'UNINITIALIZED',
-      'matrix: the main checkout is uninitialized after the sibling uninstall'
+      mStatus.status === 0 && mStatus.json?.history?.state === 'available',
+      'matrix: retained history stays readable after the sibling uninstall'
     );
     const mHook = capture(bin, ['hook', 'session-start', '--agent', 'claude-code', '--user'], {
       cwd: matrixMain,

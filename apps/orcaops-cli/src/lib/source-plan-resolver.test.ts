@@ -4,11 +4,16 @@ import os, { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { sourcePlanCacheDir, writePullCacheRecord } from '@orcaops/storage';
+import type { PullCacheRecord } from '@orcaops/storage';
 
+import { createDatabasePlanPullPersistence } from './database-source-plan-pull.js';
+import { databaseSourcePlanLookup } from './database-source-plan-resolver.js';
 import { runInInvocationContext } from './invocation-context.js';
-import { resolveSourcePlan } from './source-plan-resolver.js';
-import { cloudRecord } from '../../tests/support/source-plan-test-helpers.js';
+import { resolveSourcePlan, type SourcePlanLookup } from './source-plan-resolver.js';
+import {
+  cloudRecord,
+  sourcePlanDatabaseFixture,
+} from '../../tests/support/source-plan-test-helpers.js';
 
 const sha = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex');
 const FAKE_GH_TOKEN = 'ghp_ABCDEF1234567890abcdef1234567890ABCDEF';
@@ -16,18 +21,43 @@ const WARN_JWT =
   'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
 
 describe('resolveSourcePlan — cloud refs', () => {
+  let database: Awaited<ReturnType<typeof sourcePlanDatabaseFixture>>;
+  let lookup: SourcePlanLookup;
   let repoRoot: string;
+
   beforeEach(async () => {
-    repoRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-resolver-'));
-  });
-  afterEach(async () => {
-    await rm(repoRoot, { recursive: true, force: true });
+    database = await sourcePlanDatabaseFixture();
+    lookup = databaseSourcePlanLookup(database.reader);
+    repoRoot = database.authority.resolvedRoot;
   });
 
-  it('resolves an exactly-one cloud ref into a cloud pin', async () => {
-    const rec = cloudRecord();
-    await writePullCacheRecord(sourcePlanCacheDir(repoRoot), rec);
-    const { pin, secretWarnings } = await resolveSourcePlan('cloud:ext-1@3', repoRoot, []);
+  afterEach(async () => {
+    await database.cleanup();
+  });
+
+  async function retain(
+    record: PullCacheRecord,
+    target = database.target,
+    secretAllow: readonly string[] = []
+  ): Promise<void> {
+    const persistence = createDatabasePlanPullPersistence({
+      reader: database.reader,
+      openWriter: database.openWriter,
+      target,
+      secretAllow,
+    });
+    await persistence.preflight();
+    await persistence.writeRecord(record);
+  }
+
+  const resolveCloud = (ref: string, allow: readonly string[] = []) =>
+    resolveSourcePlan(ref, repoRoot, allow, lookup);
+
+  it('resolves exactly one retained cloud ref into a cloud pin', async () => {
+    const record = cloudRecord();
+    await retain(record);
+    const before = database.reader.read(() => null).counters;
+    const { pin, secretWarnings } = await resolveCloud('cloud:ext-1@3');
     expect(pin).toEqual({
       source_ref: {
         kind: 'cloud',
@@ -36,84 +66,101 @@ describe('resolveSourcePlan — cloud refs', () => {
         base_url: 'https://cloud.example',
         org_id: 'org_1',
       },
-      content: rec.body,
-      hash: rec.content_hash,
-      // The resolver never resolves a baseline for either kind (pure
-      // file/cache-IO) — `capture plan` merges it for local pins.
+      content: record.body,
+      hash: record.content_hash,
       baseline: null,
     });
     expect(secretWarnings).toEqual([]);
+    expect(database.reader.read(() => null).counters).toEqual(before);
   });
 
-  it('hard-errors when the ref is not cached (miss → run plan pull)', async () => {
-    await expect(resolveSourcePlan('cloud:ext-1@3', repoRoot, [])).rejects.toThrow(/plan pull/);
-  });
-
-  it('hard-errors when the ref is ambiguous across sessions', async () => {
-    await writePullCacheRecord(sourcePlanCacheDir(repoRoot), cloudRecord({ org_id: 'org_a' }));
-    await writePullCacheRecord(sourcePlanCacheDir(repoRoot), cloudRecord({ org_id: 'org_b' }));
-    await expect(resolveSourcePlan('cloud:ext-1@3', repoRoot, [])).rejects.toThrow(/[Aa]mbiguous/);
-  });
-
-  it('rejects a non-integer / non-positive / malformed cloud version', async () => {
-    for (const ref of ['cloud:ext-1@abc', 'cloud:ext-1@1.5', 'cloud:ext-1@0', 'cloud:ext-1@']) {
-      await expect(resolveSourcePlan(ref, repoRoot, [])).rejects.toThrow(
-        /Invalid cloud source-plan ref/
-      );
-    }
-  });
-
-  it('rejects hardened-regex violations: leading-zero, whitespace id, zero, unsafe magnitude', async () => {
-    for (const ref of [
-      'cloud:ext@007', // leading zero
-      'cloud:ext 1@3', // whitespace in externalId
-      'cloud:ext@0', // zero version
-      'cloud:ext@9007199254740993', // > Number.MAX_SAFE_INTEGER
-    ]) {
-      await expect(resolveSourcePlan(ref, repoRoot, [])).rejects.toThrow(
-        /Invalid cloud source-plan ref/
-      );
-    }
-  });
-
-  it('rejects a whitespace-only cached body (cloud-side blank-anchor guard)', async () => {
-    await writePullCacheRecord(sourcePlanCacheDir(repoRoot), cloudRecord({ body: '   \n  ' }));
-    await expect(resolveSourcePlan('cloud:ext-1@3', repoRoot, [])).rejects.toThrow(/blank/i);
-  });
-
-  it('rejects a cached body carrying a forbidden control char instead of pinning it', async () => {
-    // Hash-consistent but dirty (a C1 byte): asserted, never stripped — a
-    // stripped body would no longer match its content-addressed hash, and a
-    // pinned dirty body could never pass the wire assert at push.
-    await writePullCacheRecord(
-      sourcePlanCacheDir(repoRoot),
-      cloudRecord({ body: 'clean prose\u0085dirty tail' })
+  it('requires an injected project-database lookup and reports a retained miss', async () => {
+    await expect(resolveSourcePlan('cloud:ext-1@3', repoRoot, [])).rejects.toThrow(
+      /registered project history/
     );
-    await expect(resolveSourcePlan('cloud:ext-1@3', repoRoot, [])).rejects.toThrow(/U\+0085/);
+    await expect(resolveCloud('cloud:ext-1@3')).rejects.toThrow(/plan pull/);
+  });
+
+  it('hard-errors when the ref is ambiguous across account namespaces', async () => {
+    await retain(cloudRecord());
+    await retain(cloudRecord(), { ...database.target, account_id: 'account_2' });
+    await expect(resolveCloud('cloud:ext-1@3')).rejects.toThrow(/[Aa]mbiguous/);
+  });
+
+  it('rejects malformed and unsafe cloud versions before lookup', async () => {
+    const spy = vi.fn<SourcePlanLookup>(async () => []);
+    for (const ref of [
+      'cloud:ext-1@abc',
+      'cloud:ext-1@1.5',
+      'cloud:ext-1@0',
+      'cloud:ext-1@',
+      'cloud:ext@007',
+      'cloud:ext 1@3',
+      'cloud:ext@9007199254740993',
+    ]) {
+      await expect(resolveSourcePlan(ref, repoRoot, [], spy)).rejects.toThrow(
+        /Invalid cloud source-plan ref/
+      );
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a whitespace-only retained body', async () => {
+    await retain(cloudRecord({ body: '   \n  ' }));
+    await expect(resolveCloud('cloud:ext-1@3')).rejects.toThrow(/blank/i);
+  });
+
+  it('rejects retained content with a forbidden control character', async () => {
+    const record = cloudRecord({ body: 'clean prose\u0085dirty tail' });
+    await expect(
+      resolveSourcePlan('cloud:ext-1@3', repoRoot, [], async () => [
+        { record, namespace: 'malformed-record' },
+      ])
+    ).rejects.toThrow(/U\+0085/);
+  });
+
+  it('rejects a retained body whose recorded hash does not match', async () => {
+    const record = cloudRecord({ content_hash: '0'.repeat(64) });
+    await expect(
+      resolveSourcePlan('cloud:ext-1@3', repoRoot, [], async () => [
+        { record, namespace: 'malformed-record' },
+      ])
+    ).rejects.toThrow(/sha256 mismatch/);
   });
 
   it.each([
     {
       field: 'locator',
-      record: { external_id: FAKE_GH_TOKEN },
+      record: cloudRecord({ external_id: FAKE_GH_TOKEN }),
+      target: undefined,
       ref: `cloud:${FAKE_GH_TOKEN}@3`,
       path: 'source_ref.locator',
     },
     {
       field: 'base URL',
-      record: { base_url: `https://cloud.example/${FAKE_GH_TOKEN}` },
+      record: cloudRecord({ base_url: `https://cloud.example/${FAKE_GH_TOKEN}` }),
+      target: {
+        server_url: `https://cloud.example/${FAKE_GH_TOKEN}`,
+        org_id: 'org_1',
+        account_id: 'account_1',
+      },
       ref: 'cloud:ext-1@3',
       path: 'source_ref.base_url',
     },
     {
       field: 'organization id',
-      record: { org_id: FAKE_GH_TOKEN },
+      record: cloudRecord({ org_id: FAKE_GH_TOKEN }),
+      target: {
+        server_url: 'https://cloud.example',
+        org_id: FAKE_GH_TOKEN,
+        account_id: 'account_1',
+      },
       ref: 'cloud:ext-1@3',
       path: 'source_ref.org_id',
     },
-  ])('refuses a secret-shaped cloud $field without cloud-content remediation', async (fixture) => {
-    await writePullCacheRecord(sourcePlanCacheDir(repoRoot), cloudRecord(fixture.record));
-    const error = await resolveSourcePlan(fixture.ref, repoRoot, []).then(
+  ])('refuses a secret-shaped cloud $field', async (fixture) => {
+    await retain(fixture.record, fixture.target, [FAKE_GH_TOKEN]);
+    const error = await resolveCloud(fixture.ref).then(
       () => null,
       (caught: unknown) =>
         caught as {
@@ -130,13 +177,15 @@ describe('resolveSourcePlan — cloud refs', () => {
     expect(error?.message).not.toContain('re-approve');
   });
 
-  it('returns a warn-tier finding for cloud metadata', async () => {
-    await writePullCacheRecord(
-      sourcePlanCacheDir(repoRoot),
-      cloudRecord({ base_url: `https://cloud.example/${WARN_JWT}` })
-    );
+  it('returns a warn-tier finding for retained cloud metadata', async () => {
+    const target = {
+      server_url: `https://cloud.example/${WARN_JWT}`,
+      org_id: 'org_1',
+      account_id: 'account_1',
+    };
+    await retain(cloudRecord({ base_url: target.server_url }), target);
 
-    const resolved = await resolveSourcePlan('cloud:ext-1@3', repoRoot, []);
+    const resolved = await resolveCloud('cloud:ext-1@3');
     expect(resolved.secretWarnings).toEqual([
       expect.objectContaining({
         path: 'source_ref.base_url',
@@ -150,8 +199,9 @@ describe('resolveSourcePlan — cloud refs', () => {
     '0123456789abcdef0123456789abcdef',
     'org_0123456789abcdef0123456789abcdef',
   ])('does not flag a normal organization identifier: %s', async (orgId) => {
-    await writePullCacheRecord(sourcePlanCacheDir(repoRoot), cloudRecord({ org_id: orgId }));
-    const resolved = await resolveSourcePlan('cloud:ext-1@3', repoRoot, []);
+    const target = { ...database.target, org_id: orgId };
+    await retain(cloudRecord({ org_id: orgId }), target);
+    const resolved = await resolveCloud('cloud:ext-1@3');
     expect(resolved.secretWarnings).toEqual([]);
   });
 });

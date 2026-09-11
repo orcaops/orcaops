@@ -1,139 +1,35 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { loadConfig } from '@orcaops/core';
-import { ArtifactStore } from '@orcaops/storage';
-import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
+import { type ProjectEvidenceFile, readProjectEvidence } from '@orcaops/storage/history/database';
 
-import { runGit } from '../../src/git.js';
 import { runReview } from '../../src/run.js';
-import type { ReviewRuntimeDescriptor } from '../../src/runtimeIdentity.js';
 import { parseStoryReviewModel, STORY_REVIEW_MODEL_FILE } from '../../src/storyReviewModel.js';
+import { capturedReviewFixture, type CapturedReviewFixture } from '../capturedReviewFixture.js';
 
-const BRANCH = 'routine-e2e';
-const ARTIFACT = '11111111-1111-4111-8111-111111111111';
-const STEP = 'routine-e2e-step';
-
-async function git(root: string, args: readonly string[]): Promise<string> {
-  const result = await runGit(root, args);
-  if (result.code !== 0) {
-    throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
-  }
-  return result.stdout.toString('utf8').trim();
-}
-
-async function createCapturedRepo(): Promise<{
-  repo: TempRepo;
-  runtime: ReviewRuntimeDescriptor;
-}> {
-  const repo = await createTempRepo({ initialBranch: 'main' });
-  const root = repo.path;
-  await mkdir(path.join(root, 'src'), { recursive: true });
-  await writeFile(path.join(root, '.gitignore'), '.orcaops/\n');
-  await writeFile(path.join(root, 'src', 'app.ts'), 'export const baseline = true;\n');
-  await git(root, ['add', '-A']);
-  await git(root, ['commit', '-m', 'base']);
-  const baseSha = await git(root, ['rev-parse', 'HEAD']);
-  await git(root, ['checkout', '-b', BRANCH]);
-
-  const config = await loadConfig(root);
-  const store = new ArtifactStore({ repoRoot: root, config });
-  try {
-    await store.writePlan(
-      {
-        schema_version: 4,
-        artifact_id: ARTIFACT,
-        branch: BRANCH,
-        base_sha: baseSha,
-        agent: 'codex',
-        agent_session_id: null,
-        task: 'add a captured routine feature',
-        label: 'captured routine feature',
-        plan_steps: [
-          {
-            step_id: STEP,
-            text: 'add the routine feature',
-            label: 'routine feature',
-            acceptance_criteria: [],
-          },
-        ],
-        touched_scope: ['src/feature.ts'],
-        non_goals: [],
-        decisions: [],
-        started_at: '2026-07-31T00:00:00.000Z',
-        revision_n: 0,
-        revised_at: null,
-        rationale: null,
-        step_lineage: { added: [], dropped: [], unchanged: [], rewritten: [] },
-        criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
-        prior_plan_event_id: null,
-      },
-      { idempotencyKey: 'routine-plan' }
-    );
-    await store.writeCheckpointOpened(
-      { artifact_id: ARTIFACT, declared_step_ids: [STEP] },
-      { idempotencyKey: 'routine-open', headSha: baseSha }
-    );
-    await writeFile(
-      path.join(root, 'src', 'feature.ts'),
-      'export const routineFeature = "captured";\n'
-    );
-    await store.writeCheckpointClosed(
-      {
-        artifact_id: ARTIFACT,
-        n: 1,
-        summary: 'added the captured routine feature',
-        files_changed: ['src/feature.ts'],
-        decisions: [
-          {
-            decision: 'keep the fixture feature self-contained',
-            reason: 'one changed file keeps the lifecycle assertion focused',
-          },
-        ],
-        uncertainty: [],
-        done_criteria: [],
-        verification: [{ command: 'fixture verification', exit_code: 0 }],
-        completed_step_ids: [STEP],
-        head_sha: baseSha,
-      },
-      { idempotencyKey: 'routine-close' }
-    );
-  } finally {
-    store.close();
-  }
-
-  await git(root, ['add', '-A']);
-  await git(root, ['commit', '-m', 'add routine feature']);
-
-  const runtimeRoot = path.join(root, '.orcaops', 'runtime');
-  const entrypointPath = path.join(runtimeRoot, 'dist', 'sidecar.js');
-  await mkdir(path.dirname(entrypointPath), { recursive: true });
-  await writeFile(
-    path.join(runtimeRoot, 'package.json'),
-    JSON.stringify({ name: '@orcaops/review-engine', version: '0.0.0' })
-  );
-  await writeFile(entrypointPath, 'export {};\n');
-  return { repo, runtime: { packageRoot: runtimeRoot, entrypointPath } };
-}
-
-function authoredAccount(checkpointAlias: string, citationAlias: string) {
+/** An account story that claims every checkpoint the served payload lists. */
+function authoredAccount(markdown: string) {
+  const checkpoints = [...markdown.matchAll(/^#### (k\d+) ·/gm)].map((match) => match[1]!);
+  const citation = /\[(c\d+)\]/.exec(markdown)?.[1];
+  expect(checkpoints.length).toBeGreaterThan(0);
+  expect(citation).toBeDefined();
   return {
     schema_version: 1,
     overview: {
-      text: 'The captured checkpoint adds one bounded feature.',
-      citations: [citationAlias],
+      text: 'The captured checkpoints add two bounded features.',
+      citations: [citation],
     },
     acts: [
       {
-        title: 'Add the bounded feature',
-        interpretation: 'The checkpoint carries the feature from intent to implementation.',
+        title: 'Add the bounded features',
+        interpretation: 'The checkpoints carry the features from intent to implementation.',
         parts: [
           {
-            title: 'Captured feature',
-            checkpoints: [checkpointAlias],
-            interpretation: 'The changed file implements the captured checkpoint.',
-            citations: [citationAlias],
+            title: 'Captured features',
+            checkpoints,
+            interpretation: 'The changed files implement the captured checkpoints.',
+            citations: [citation],
           },
         ],
       },
@@ -143,17 +39,19 @@ function authoredAccount(checkpointAlias: string, citationAlias: string) {
 }
 
 describe('two-lane routine lifecycle', () => {
-  let repo: TempRepo | null = null;
+  let fixture: CapturedReviewFixture | null = null;
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    await repo?.cleanup();
-    repo = null;
+    await fixture?.cleanup();
+    fixture = null;
   });
 
-  it('enforces forensic-first ordering and installs the accepted Story', async () => {
-    const fixture = await createCapturedRepo();
-    repo = fixture.repo;
+  it('enforces forensic-first ordering and seals the accepted Story', async () => {
+    const f = await capturedReviewFixture();
+    fixture = f;
+    const runtime = await f.runtimeDescriptor();
+    vi.stubEnv('ORCAOPS_DATA_DIR', f.dataRoot);
 
     const stdout: string[] = [];
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
@@ -164,21 +62,19 @@ describe('two-lane routine lifecycle', () => {
     const lastJson = (): Record<string, unknown> => {
       for (let index = stdout.length - 1; index >= 0; index -= 1) {
         const line = stdout[index]!;
-        if (line.trimStart().startsWith('{')) {
-          return JSON.parse(line) as Record<string, unknown>;
-        }
+        if (line.trimStart().startsWith('{')) return JSON.parse(line) as Record<string, unknown>;
       }
       throw new Error('routine command emitted no JSON');
     };
     const run = (args: string[]) =>
       runReview(
-        ['review', ...args, '--branch', BRANCH, '--root', fixture.repo.path, '--json'],
+        ['review', ...args, '--branch', f.branch, '--root', f.gitRoot, '--json'],
         process.env,
         undefined,
-        fixture.runtime
+        runtime
       );
     const writePayload = async (name: string, value: unknown): Promise<string> => {
-      const file = path.join(fixture.repo.path, name);
+      const file = path.join(f.root, name);
       await writeFile(file, JSON.stringify(value));
       return file;
     };
@@ -210,8 +106,8 @@ describe('two-lane routine lifecycle', () => {
     const forensic = await writePayload('forensic.json', {
       findings: [
         {
-          claim: 'The new exported value has no behavioral guard.',
-          file: 'src/feature.ts',
+          claim: 'The limiter has no shared clock across processes.',
+          file: 'src/limiter.ts',
           related_files: [],
           severity: 'CAUTION',
           confidence: 'HIGH',
@@ -226,18 +122,11 @@ describe('two-lane routine lifecycle', () => {
     });
     const accountEnvelope = forensicEnvelope.account as Record<string, unknown>;
     const accountPrompt = await readFile(
-      path.join(fixture.repo.path, accountEnvelope.payload_path as string),
+      path.join(f.gitRoot, accountEnvelope.payload_path as string),
       'utf8'
     );
-    const checkpointAlias = accountPrompt.match(/^#### (k\d+) ·/m)?.[1];
-    const citationAlias = accountPrompt.match(/\[(c\d+)\]/)?.[1];
-    expect(checkpointAlias).toBeDefined();
-    expect(citationAlias).toBeDefined();
 
-    const account = await writePayload(
-      'account.json',
-      authoredAccount(checkpointAlias!, citationAlias!)
-    );
+    const account = await writePayload('account.json', authoredAccount(accountPrompt));
     expect(await submit(runId, 'account', account)).toBe(0);
     const finalized = lastJson();
     expect(finalized, JSON.stringify(finalized, null, 2)).toMatchObject({
@@ -250,22 +139,37 @@ describe('two-lane routine lifecycle', () => {
         'brief.json',
         'composed-story-v2.json',
         STORY_REVIEW_MODEL_FILE,
-        'run-record-v1.json',
       ])
     );
 
-    const runDir = path.join(fixture.repo.path, finalized.run_dir as string);
-    const record = JSON.parse(await readFile(path.join(runDir, 'run-record-v1.json'), 'utf8')) as {
-      outcome: string;
+    // The Story is retained evidence under its publication, not a run directory.
+    const story = await f.read(async (database) => {
+      const members = database.read((view) =>
+        view.all<ProjectEvidenceFile & { name: string }>(
+          'SELECT name, relative_path AS relativePath, sha256, byte_length AS byteLength FROM review_evidence_members WHERE publication_id = ? ORDER BY name',
+          finalized.story_publication_id as string
+        )
+      ).value;
+      const bytes: Record<string, string> = {};
+      for (const member of members)
+        bytes[member.name] = (await readProjectEvidence(database, member)).toString('utf8');
+      return { names: members.map((member) => member.name), bytes };
+    });
+    expect(story.names).toEqual([
+      'brief.json',
+      'composed-story-v2.json',
+      'review.md',
+      STORY_REVIEW_MODEL_FILE,
+    ]);
+    const composed = JSON.parse(story.bytes['composed-story-v2.json']!) as {
+      story: { parts: { title: string }[] };
     };
+    expect(composed.story.parts).toEqual([expect.objectContaining({ title: 'Captured features' })]);
+    const installed = parseStoryReviewModel(JSON.parse(story.bytes[STORY_REVIEW_MODEL_FILE]!));
+    expect(installed.parts).toEqual([expect.objectContaining({ title: 'Captured features' })]);
+
+    const record = (finalized.run_record ?? {}) as { outcome?: string; submission_count?: number };
     expect(record.outcome).toBe('FULL');
-    const composed = JSON.parse(
-      await readFile(path.join(runDir, 'composed-story-v2.json'), 'utf8')
-    ) as { story: { parts: { title: string }[] } };
-    expect(composed.story.parts).toEqual([expect.objectContaining({ title: 'Captured feature' })]);
-    const installed = parseStoryReviewModel(
-      JSON.parse(await readFile(path.join(runDir, STORY_REVIEW_MODEL_FILE), 'utf8'))
-    );
-    expect(installed.parts).toEqual([expect.objectContaining({ title: 'Captured feature' })]);
-  });
+    expect(record.submission_count).toBe(2);
+  }, 300_000);
 });

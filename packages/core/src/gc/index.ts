@@ -1,1 +1,1 @@
-export * from './scanner.js';
+export * from './shared-resource-ownership.js';

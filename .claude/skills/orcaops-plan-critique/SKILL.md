@@ -2,8 +2,8 @@
 name: "Orcaops: plan critique"
 description: "Before drafting or capturing a non-trivial coding plan, check prior Orcaops work for relevant decisions and risks. Also critique a plan draft against that history. Use for \"critique this plan\", \"review this plan against earlier decisions\", or \"poke holes in this plan before I start\". For history questions not tied to a plan, use captured-history lookup instead."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "34ed631bf730"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "55378cecc5bd"
 tags: ["orcaops", "insight"]
 ---
 
@@ -39,19 +39,12 @@ error strings) and sweep captured history:
 
 ```bash
 orcaops search "<term>" --json
-orcaops decisions --all-branches --json     # decision records with rationale
+orcaops decisions --scope project --json     # decision records with rationale
 ```
 
-**Cross-project mode:** when the archive is enabled
-(`archive.enabled: true`), add `--all-projects` to BOTH commands to
-sweep every archived project on this machine, not just this repo —
-each hit carries a `project` field; cite it. From inside a repo or linked
-worktree, the current project includes hot and retained archive history,
-deduplicated by artifact ID with archive selected only when strictly newer
-(ties use hot). Without the archive the same sweep runs current-repo-only —
-say so and proceed; never block planning on missing history. `orcaops show`
-remains current-repository-only, so use cross-project `decisions` and
-`loose-ends` for detail from other projects.
+**Cross-project mode:** add `--scope all-projects` to BOTH commands to sweep every
+catalogued project, not just this repository. Cite the project identity with each
+hit. For exact detail, use `orcaops show <artifact-id> --project <project-id> --json`.
 
 What to inject into the new plan, from matching artifacts:
 
@@ -72,8 +65,8 @@ to `orcaops-capture`.
 Read the draft, then interrogate it against captured history — one pass
 per lens, citations required:
 
-1. **Contradicted decisions.** `orcaops decisions --all-branches --json` (replace with
-   `--all-projects` when the archive is enabled): does any step reverse
+1. **Contradicted decisions.** `orcaops decisions --scope project --json` (replace with
+   `--scope all-projects` for a cross-project review): does any step reverse
    a recorded decision without saying why it no longer holds? Flag it —
    the fix is a new decision acknowledging the reversal, not silence.
 2. **Fragile files.** For each file/subsystem the draft touches:
@@ -89,7 +82,7 @@ per lens, citations required:
 4. **Non-goal drift.** Compare the draft against recurring `non_goals`
    in prior artifacts; a plan quietly re-including a recurring exclusion
    needs the exclusion's rationale addressed.
-5. **Weak acceptance criteria.** `orcaops loose-ends --all-branches --json` shows what
+5. **Weak acceptance criteria.** `orcaops loose-ends --scope project --json` shows what
    past plans left dangling. Steps whose criteria are vague ("works",
    "is clean") or missing produce exactly those dangles — propose
    concrete, checkable criteria.

@@ -632,6 +632,10 @@ describe('slice v3 — merge and story render', () => {
       forensicPresent: true,
     });
     expect(markdown).toContain(`related: \`${related}\``);
+    expect(markdown).toContain('_(agent-reported)_ (forensic)');
+    expect(markdown).toContain(
+      'agreement between lanes does not establish independent reproduction'
+    );
     expect(brief.mustDecide[0]!.relatedFiles).toEqual([related]);
   });
 

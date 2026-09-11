@@ -1,28 +1,18 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
-import {
-  artifactPathsFor,
-  getDefaultConfig,
-  sourcePlanCacheDir,
-  writePullCacheRecord,
-} from '@orcaops/storage';
-import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
+import { openProjectDatabase, readProjectArtifact } from '@orcaops/storage/history/database';
+import { inputFile } from '@orcaops/test-harness';
 
+import { createDatabasePlanPullPersistence } from '../../src/lib/database-source-plan-pull.js';
+import { fixture, inventory } from '../helpers/database-history.js';
 import { cloudRecord } from '../support/source-plan-test-helpers.js';
 import { makeAgent } from '../support/test-agent.js';
 
-/**
- * `--source-plan <ref>` reads + hashes a local plan file and
- * pins it immutably onto the artifact (projected onto artifact.json).
- * Opt-in: absent → source_plan stays null. A missing file fails loud
- * BEFORE any idempotency / artifact state is committed.
- */
-describe('capture plan --source-plan', () => {
-  let repo: TempRepo;
+describe('capture plan --source-plan', { timeout: 60_000 }, () => {
+  let f: Awaited<ReturnType<typeof fixture>>;
   let inputDir: string;
   let agent: ReturnType<typeof makeAgent>;
 
@@ -35,27 +25,31 @@ describe('capture plan --source-plan', () => {
       touched_scope: [],
     });
 
-  async function readArtifactJson(artifactId: string): Promise<Record<string, unknown>> {
-    const paths = artifactPathsFor(repo.path, getDefaultConfig(), artifactId);
-    return JSON.parse(await readFile(paths.artifactJson, 'utf8')) as Record<string, unknown>;
+  function readArtifact(artifactId: string): Record<string, unknown> {
+    return readProjectArtifact(f.writer, artifactId)!.thread.artifactJson!;
+  }
+
+  async function retainApprovedPlan() {
+    const persistence = createDatabasePlanPullPersistence({
+      reader: f.writer,
+      target: { server_url: 'https://cloud.example', org_id: 'org_1', account_id: 'account_1' },
+      secretAllow: [],
+      openWriter: () => openProjectDatabase({ authority: f.authority, mode: 'writer' }),
+    });
+    await persistence.writeRecord(cloudRecord());
   }
 
   beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    inputDir = await mkdtemp(path.join(tmpdir(), 'orcaops-srcplan-'));
-    agent = makeAgent({ cwd: repo.path });
-    await agent.init({ noLlm: true });
-  });
-
-  afterEach(async () => {
-    await repo.cleanup();
+    f = await fixture();
+    inputDir = f.temporary;
+    agent = makeAgent({
+      cwd: f.main,
+      env: { ORCAOPS_DATA_DIR: f.root, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
   });
 
   it('plan upload rejects a dirty body locally, before any credential or network work', async () => {
     const planFile = path.join(inputDir, 'dirty-plan.md');
-    // U+0085 — the C1 byte the wire policy forbids. No cloud credentials
-    // exist in this harness, so reaching the network would surface an
-    // auth/connection error instead of the promised local code-point one.
     await writeFile(planFile, '# Plan\n\nbody\u0085tail\n', 'utf8');
 
     const res = await agent.runRaw(['plan', 'upload', planFile, '--title', 'Dirty', '--json']);
@@ -63,7 +57,7 @@ describe('capture plan --source-plan', () => {
     expect(res.stdout + res.stderr).toContain('U+0085 at offset 12');
   });
 
-  it('pins the source plan content + hash onto artifact.json', async () => {
+  it('retains the source plan content and hash on the captured artifact', async () => {
     const planFile = path.join(inputDir, 'slice-plan.md');
     const content = '# Demo plan\n\n- pin source plan\n- structured non_goals\n';
     await writeFile(planFile, content, 'utf8');
@@ -81,7 +75,7 @@ describe('capture plan --source-plan', () => {
     const out = JSON.parse(res.stdout) as { ok: boolean; artifact_id: string };
     expect(out.ok).toBe(true);
 
-    const artifact = await readArtifactJson(out.artifact_id);
+    const artifact = readArtifact(out.artifact_id);
     const pin = artifact.source_plan as {
       content: string;
       hash: string;
@@ -90,15 +84,9 @@ describe('capture plan --source-plan', () => {
     };
     expect(pin).not.toBeNull();
     expect(pin.content).toBe(content);
-    // The hash is a content-integrity anchor (the plan-conformance evaluator
-    // relies on it), so assert the real sha256 of the pinned content — not
-    // just its hex shape.
     const expectedHash = createHash('sha256').update(content, 'utf8').digest('hex');
     expect(pin.hash).toBe(expectedHash);
     expect(pin.source_ref).toEqual({ kind: 'local', locator: planFile });
-    // A LOCAL pin freezes the authoring baseline at capture: the temp repo
-    // has no remote (repo_url null) and the memoized HEAD read makes the
-    // frozen head_sha exactly the sha the artifact was created at.
     const lineage = artifact.branch_lineage as Array<{ branch: string; head_sha: string }>;
     expect(pin.baseline).toEqual({
       repo_url: null,
@@ -108,7 +96,7 @@ describe('capture plan --source-plan', () => {
   });
 
   it('captures a cloud-ref pin with baseline null (local pins only)', async () => {
-    await writePullCacheRecord(sourcePlanCacheDir(repo.path), cloudRecord());
+    await retainApprovedPlan();
 
     const res = await agent.runRaw([
       'capture',
@@ -123,10 +111,8 @@ describe('capture plan --source-plan', () => {
     const out = JSON.parse(res.stdout) as { ok: boolean; artifact_id: string };
     expect(out.ok).toBe(true);
 
-    const artifact = await readArtifactJson(out.artifact_id);
+    const artifact = readArtifact(out.artifact_id);
     const pin = artifact.source_plan as { source_ref: { kind: string }; baseline: unknown };
-    // The authoring baseline of a cloud plan already lives cloud-side from
-    // `plan upload`; capture must NOT stamp local git state onto it.
     expect(pin.source_ref.kind).toBe('cloud');
     expect(pin.baseline).toBeNull();
   });
@@ -141,7 +127,7 @@ describe('capture plan --source-plan', () => {
     ]);
     expect(res.exitCode).toBe(0);
     const out = JSON.parse(res.stdout) as { artifact_id: string };
-    const artifact = await readArtifactJson(out.artifact_id);
+    const artifact = readArtifact(out.artifact_id);
     expect(artifact.source_plan).toBeNull();
   });
 
@@ -161,10 +147,6 @@ describe('capture plan --source-plan', () => {
     expect(env.error.code).toBe('NO_INPUT');
     expect(env.error.path).toBe('source-plan');
 
-    // Regression: resolution runs BEFORE lookupOrInsertPlanIdempotency,
-    // so the failed attempt must not have committed an idempotency row.
-    // Re-capturing with the SAME key therefore CREATES a fresh artifact
-    // (a 'replay' here would prove a dangling row was left behind).
     const retry = await agent.runRaw([
       'capture',
       'plan',
@@ -201,9 +183,6 @@ describe('capture plan --source-plan', () => {
       expect(env.error.code).toBe('NO_INPUT');
       expect(env.error.path).toBe('source-plan');
 
-      // Same regression guard as the missing-file case: the blank pin is
-      // rejected BEFORE any idempotency row is committed, so re-capturing
-      // with the same key creates a fresh artifact rather than replaying.
       const retry = await agent.runRaw([
         'capture',
         'plan',
@@ -217,13 +196,8 @@ describe('capture plan --source-plan', () => {
     }
   );
 
-  // ── Response echo (pin observability) ──────────────────────────────
-  // The capture RESPONSE echoes a content-free source_plan view, so the
-  // caller confirms the pin attached in the same breath as ok:true — no
-  // follow-up `show` needed, and a real cloud pin never looks like a
-  // silent no-op.
   it('echoes the content-free cloud source_plan in the capture response', async () => {
-    await writePullCacheRecord(sourcePlanCacheDir(repo.path), cloudRecord());
+    await retainApprovedPlan();
     const res = await agent.runRaw([
       'capture',
       'plan',
@@ -249,7 +223,6 @@ describe('capture plan --source-plan', () => {
       version: '3',
     });
     expect(typeof out.source_plan.hash).toBe('string');
-    // Content-free: the full pinned body must never ride the response.
     expect('content' in out.source_plan).toBe(false);
   });
 
@@ -287,26 +260,28 @@ describe('capture plan --source-plan', () => {
     expect(out.source_plan).toBeNull();
   });
 
-  it('omits source_plan on an idempotent replay (the replay arm never re-pins)', async () => {
-    const key = 'k-echo-replay';
-    const first = await agent.runRaw([
+  it('returns the retained content-free pin on replay without changing history', async () => {
+    await retainApprovedPlan();
+    const args = [
       'capture',
       'plan',
       '--no-llm',
+      '--source-plan',
+      'cloud:ext-1@3',
       '--input',
-      inputFile(planJson(key)),
-    ]);
-    expect(first.exitCode).toBe(0);
-    const replay = await agent.runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(planJson(key)),
-    ]);
-    expect(replay.exitCode).toBe(0);
-    const out = JSON.parse(replay.stdout) as { idempotency_status: string };
+      inputFile(planJson('retained-pin-replay')),
+    ];
+    const first = await agent.runRaw(args);
+    expect(first.exitCode, first.stderr || first.stdout).toBe(0);
+    const original = JSON.parse(first.stdout);
+    const before = await inventory(f.temporary);
+    const replay = await agent.runRaw(args);
+    expect(replay.exitCode, replay.stderr || replay.stdout).toBe(0);
+    const out = JSON.parse(replay.stdout);
     expect(out.idempotency_status).toBe('replay');
-    expect('source_plan' in out).toBe(false);
+    expect(out.artifact_id).toBe(original.artifact_id);
+    expect(out.source_plan).toEqual(original.source_plan);
+    expect(out.source_plan).not.toHaveProperty('content');
+    expect(await inventory(f.temporary)).toEqual(before);
   });
 });

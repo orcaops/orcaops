@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
 // Compiles the OpenTUI UI into one single-file executable per platform
 // (build/compiled/<package>/bin/orcaops-watch-ui). OpenTUI, React and the
-// FSL workspace code are bundled; the three proprietary packages are NOT —
-// every import of them is rewritten into a shim that require()s the real
-// package at run time from the @orcaops/cli install that launched the UI.
+// FSL workspace code are bundled; the three proprietary packages and the two
+// native addons are NOT — every import of them is rewritten into a shim that
+// require()s the real package at run time from the @orcaops/cli install that
+// launched the UI.
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
+import { embeddedAddonFindings } from '../../../scripts/lib/bundle-scan.mjs';
 import platforms from '../platforms.json';
 
 interface Platform {
@@ -24,9 +26,28 @@ const OUT = path.join(APP, 'build', 'compiled');
 const ENTRY = path.join(APP, 'src', 'entry.ts');
 
 const PROPRIETARY = ['@orcaops/protocol', '@orcaops/sdk', '@orcaops/diff-fingerprint'] as const;
-// Subpaths too: diff-fingerprint exports ./fixtures, and the licence gate
-// counts `pkg/…` specifiers as the package.
-const PROPRIETARY_FILTER = /^@orcaops\/(protocol|sdk|diff-fingerprint)(\/|$)/;
+
+// A native addon resolves its binary relative to the package directory it was
+// installed into, so bundling one bakes in the BUILD machine's absolute path
+// and the executable then looks for a `.node` that exists nowhere. These load
+// from the launching CLI's install through the same runtime shim, which is the
+// only copy whose prebuild matches the user's platform. Both are lazy in the
+// packages that use them, so the shim runs only if something actually needs
+// them — and the compiled UI is not supposed to (the Node sidecar is).
+//
+// Anything named here or in PROPRIETARY is pruned, with its whole transitive
+// subtree, from THIRD-PARTY-NOTICES by scripts/third-party-notices.mjs, because
+// that walk treats a declared external as not shipped in this artifact. Each one
+// must therefore be attributed as a dependency of the CLI dist that resolves it
+// at run time; adding an entry here without that leaves its licence
+// unattributed in every platform package.
+const NATIVE = ['better-sqlite3', '@napi-rs/keyring'] as const;
+
+// Every specifier the executable resolves from the CLI install rather than
+// inlining. Subpaths too: diff-fingerprint exports ./fixtures, and the licence
+// gate counts `pkg/…` specifiers as the package.
+const RUNTIME_LOAD_FILTER =
+  /^(@orcaops\/(protocol|sdk|diff-fingerprint)|better-sqlite3|@napi-rs\/keyring)(\/|$)/;
 
 function fail(message: string): never {
   console.error(`[compile] ${message}`);
@@ -104,9 +125,9 @@ async function compile(platform: Platform): Promise<string> {
     define: { 'process.env.ORCAOPS_WATCH_BUILD_VERSION': JSON.stringify(version) },
     plugins: [
       {
-        name: 'orcaops-proprietary-runtime-load',
+        name: 'orcaops-runtime-load',
         setup(build) {
-          build.onResolve({ filter: PROPRIETARY_FILTER }, (args) => {
+          build.onResolve({ filter: RUNTIME_LOAD_FILTER }, (args) => {
             rewrites.set(args.path, (rewrites.get(args.path) ?? 0) + 1);
             return { path: args.path, namespace: 'orcaops-runtime-dep' };
           });
@@ -124,9 +145,12 @@ async function compile(platform: Platform): Promise<string> {
     fail(`${platform.target}: bundle failed`);
   }
 
-  // A package that was never rewritten was either dropped by tree shaking or
-  // inlined by a path the plugin did not see; only the first is acceptable,
-  // and the licence gate cannot tell them apart from the bytes alone.
+  // A PROPRIETARY package that was never rewritten was either dropped by tree
+  // shaking or inlined by a path the plugin did not see; only the first is
+  // acceptable, and the licence gate cannot tell them apart from the bytes
+  // alone. NATIVE is deliberately not asserted here: a tree-shaken native addon
+  // is the desired end state, and the embedded-path scan below is what proves
+  // none was inlined.
   for (const pkg of PROPRIETARY) {
     const count = [...rewrites.entries()]
       .filter(([spec]) => spec === pkg || spec.startsWith(`${pkg}/`))
@@ -134,6 +158,19 @@ async function compile(platform: Platform): Promise<string> {
     if (count === 0)
       fail(`${platform.target}: no import of ${pkg} was rewritten to a runtime shim`);
   }
+
+  // Bundling a native addon bakes this checkout's absolute path into the
+  // executable (better-sqlite3's binding.js closes over `__dirname`), and the
+  // installed copy then looks for a `.node` that exists nowhere. A Bun compile
+  // exposes no module graph, so the bytes are the only evidence available.
+  //
+  // What this proves: the executable carries neither this checkout's path nor
+  // the shape a bundled addon loader leaves. What it does not prove: how a
+  // standalone Bun executable addresses its own embedded modules — it may use
+  // `$bunfs` paths rather than build paths — so a clean scan here is weaker
+  // evidence than the same scan over a plain bundle.
+  const findings = embeddedAddonFindings(readFileSync(outfile, 'latin1'), { checkout: REPO });
+  if (findings.length > 0) fail(`${platform.target}: the executable ${findings.join('; ')}`);
 
   chmodSync(outfile, 0o755);
   if (platform.os === 'darwin') resign(outfile);
@@ -171,10 +208,18 @@ const built: string[] = [];
 for (const platform of selectedPlatforms()) built.push(await compile(platform));
 
 // The licence gate has no module graph for a Bun compile, so it verifies this
-// declaration plus the bytes. Written by the build so it cannot drift.
+// declaration plus the bytes. Written by the build so it cannot drift. `checkout`
+// records where these executables were built: a release commonly assembles
+// artifacts compiled in a different checkout, and scanning them for the
+// assembling machine's own root would match nothing and pass for the wrong
+// reason.
 writeFileSync(
   path.join(OUT, '.compile-externals.json'),
-  JSON.stringify({ external: [...PROPRIETARY], version, bun: pinnedBun }, null, 2) + '\n'
+  JSON.stringify(
+    { external: [...PROPRIETARY, ...NATIVE], version, bun: pinnedBun, checkout: REPO },
+    null,
+    2
+  ) + '\n'
 );
 if (!existsSync(path.join(OUT, '.compile-externals.json')))
   fail('externals declaration not written');

@@ -84,6 +84,7 @@ export interface BranchDigestData {
     exit_code?: number;
     output_digest?: string;
     note?: string;
+    close_snapshot?: { tree_sha: string | null; snapshot_commit_sha: string | null };
     sources: BranchSource[];
   }>;
   release_checks: Array<DigestEvaluatorRow & { sources: BranchSource[] }>;
@@ -215,8 +216,6 @@ export function buildBranchDigestData(input: {
   const decisionByKey = new Map<string, BranchDigestData['decisions'][number]>();
   const openItems: BranchDigestData['open_items'] = [];
   const tests: BranchDigestData['tests'] = [];
-  const successfulVerification = new Map<string, BranchDigestData['tests'][number]>();
-  const verificationByKey = new Map<string, BranchDigestData['tests'][number][]>();
   const releaseChecks: BranchDigestData['release_checks'] = [];
   const passingReleaseCheck = new Map<string, BranchDigestData['release_checks'][number]>();
   const warnings: BranchDigestData['warnings'] = [];
@@ -245,18 +244,11 @@ export function buildBranchDigestData(input: {
             : {}),
           ...(verification.note !== undefined ? { note: verification.note } : {}),
           sources: [source],
+          ...(checkpoint.close_snapshot !== undefined
+            ? { close_snapshot: checkpoint.close_snapshot }
+            : {}),
         };
-        const key = normalized(verification.command);
-        const evidence = verificationByKey.get(key);
-        if (evidence) evidence.push(test);
-        else verificationByKey.set(key, [test]);
-        if (verification.exit_code === 0) {
-          const prior = successfulVerification.get(key);
-          successfulVerification.set(key, {
-            ...test,
-            sources: mergeSources(prior?.sources ?? [], test.sources),
-          });
-        } else tests.push(test);
+        tests.push(test);
       }
     }
     for (const decision of artifact.data.decisions) {
@@ -357,20 +349,6 @@ export function buildBranchDigestData(input: {
       acknowledgedBlocks.push({ ...block, source: { artifact_id: artifactId } });
     }
   }
-  for (const [key, verification] of verificationByKey) {
-    const matchingRuns = tests.filter(
-      (test) => test.kind === 'test_run' && normalized(test.text) === key
-    );
-    for (const run of matchingRuns) tests.splice(tests.indexOf(run), 1);
-    const target = successfulVerification.get(key) ?? verification.at(-1);
-    if (target) {
-      target.sources = mergeSources(
-        target.sources,
-        matchingRuns.flatMap((run) => run.sources)
-      );
-    }
-  }
-  tests.push(...successfulVerification.values());
   releaseChecks.push(...passingReleaseCheck.values());
   releaseChecks.sort((a, b) =>
     a.ts !== b.ts ? a.ts.localeCompare(b.ts) : a.evaluator_ref.localeCompare(b.evaluator_ref)
@@ -491,6 +469,9 @@ export function renderBranchDigestMarkdown(data: BranchDigestData): string {
   lines.push(`# ${data.title?.text ?? `Branch digest for ${data.branch}`}`, '');
   lines.push(`> Branch-wide digest for \`${data.branch}\` against \`${data.base}\`.`);
   lines.push(
+    '> Findings and conclusions are **agent-reported**. Evaluator statuses do not independently establish their truth.'
+  );
+  lines.push(
     `> Range: \`${data.range.merge_base}..${data.range.head}\` (${data.range.commit_count} commits).`,
     ''
   );
@@ -539,9 +520,10 @@ export function renderBranchDigestMarkdown(data: BranchDigestData): string {
     }
     lines.push('');
   }
-  if (data.outcome !== null) lines.push('## summary', '', data.outcome, '');
+  if (data.outcome !== null)
+    lines.push('## agent-reported conclusions and corrections', '', data.outcome, '');
   if (data.changes.length > 0) {
-    lines.push('## what changed', '');
+    lines.push('## what changed — agent-reported', '');
     for (const change of data.changes) {
       lines.push(`- ${change.summary} _(${sourceLabel(change.source)})_`);
       if (change.files_changed.length > 0) {
@@ -567,30 +549,46 @@ export function renderBranchDigestMarkdown(data: BranchDigestData): string {
     }
     lines.push('');
   }
-  if (data.open_items.length > 0) {
+  const openItems = data.open_items.filter((item) => item.kind !== 'uncertainty');
+  if (openItems.length > 0) {
     lines.push('## open items', '');
-    for (const item of data.open_items) {
+    for (const item of openItems) {
       lines.push(
         `- **${item.kind.replaceAll('_', ' ')}:** ${item.text} _(${item.sources.map(sourceLabel).join('; ')})_`
       );
     }
     lines.push('');
   }
+  const uncertainties = data.open_items.filter((item) => item.kind === 'uncertainty');
+  if (uncertainties.length > 0) {
+    lines.push('## recorded uncertainty — resolution status not encoded', '');
+    for (const item of uncertainties)
+      lines.push(`- ${item.text} _(${item.sources.map(sourceLabel).join('; ')})_`);
+    lines.push('');
+  }
+  lines.push(
+    '## challenged findings',
+    '',
+    '_This digest has no structured challenge status. Recorded uncertainty and agent-reported corrections do not establish refutation._',
+    ''
+  );
   if (data.tests.length > 0) {
-    lines.push('## tests', '');
+    lines.push('## commands and tests the agent reports', '');
+    lines.push(
+      '_Command entries are agent-supplied. Orcaops does not execute them; a later close snapshot does not establish the command target._',
+      ''
+    );
     for (const test of data.tests) {
-      const result = test.exit_code === undefined ? '' : ` — exit ${test.exit_code}`;
-      const kind =
+      const snapshot = test.close_snapshot?.snapshot_commit_sha ?? test.close_snapshot?.tree_sha;
+      const report =
         test.kind === 'verification'
-          ? 'Verification'
+          ? `Agent reports command exited ${test.exit_code}. ${snapshot ? `Checkpoint subsequently closed at snapshot \`${snapshot}\`.` : 'Checkpoint subsequently closed; snapshot unavailable.'}`
           : test.kind === 'test_run'
-            ? 'Test run'
-            : 'Test file';
-      lines.push(
-        `- **${kind}:** \`${test.text}\`${result} _(${test.sources.map(sourceLabel).join('; ')})_`
-      );
-      if (test.output_digest) lines.push(`  - ${test.output_digest}`);
-      if (test.note) lines.push(`  - ${test.note}`);
+            ? 'Agent reports running this command; result and target not recorded here.'
+            : 'Agent reports writing this test file.';
+      lines.push(`- \`${test.text}\` — ${report} _(${test.sources.map(sourceLabel).join('; ')})_`);
+      if (test.output_digest) lines.push(`  - Agent-supplied output: ${test.output_digest}`);
+      if (test.note) lines.push(`  - Agent-supplied note: ${test.note}`);
     }
     lines.push('');
   }

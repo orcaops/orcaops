@@ -1,49 +1,24 @@
 import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
-import { loadConfig } from '@orcaops/core';
-import { ArtifactStore } from '@orcaops/storage';
-import { createRepoTemplate, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
+import { gitClient, inputFile } from '@orcaops/test-harness';
 
+import { fixture, inventory } from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
 import { commitFile } from '../support/test-helpers.js';
 
-/**
- * `capture summary` supersede at the CLI boundary — surfaces
- * summary_event_id, refuses a bare re-summary (SUMMARY_ALREADY_CAPTURED naming
- * the existing event), rejects a stale token (STALE_SUMMARY), and replaces the
- * summary when the correct prior_summary_event_id token is passed.
- */
-describe('orcaops capture summary — supersede', () => {
-  let repo: TempRepo;
+describe('capture summary supersession', { timeout: 60_000 }, () => {
+  let f: Awaited<ReturnType<typeof fixture>>;
   let agent: ReturnType<typeof makeAgent>;
 
-  // `init` is identical for every test here and costs ~450ms; run it once
-  // and give each test a ~20ms copy of the result.
-  const repoTemplate = createRepoTemplate(
-    async (repoPath) => {
-      await makeAgent({ cwd: repoPath, env: { ORCAOPS_DISABLE_DRAIN: '1' } }).runRaw([
-        'init',
-        '--json',
-        '--no-llm',
-      ]);
-    },
-    { initialBranch: 'main' }
-  );
-
   beforeEach(async () => {
-    repo = await repoTemplate.checkout();
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
-  });
-
-  afterAll(async () => {
-    await repoTemplate.destroy();
-  });
-
-  afterEach(async () => {
-    await repo.cleanup();
+    f = await fixture();
+    agent = makeAgent({
+      cwd: f.main,
+      env: { ORCAOPS_DATA_DIR: f.root, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
   });
 
   async function planAndSummary(): Promise<{ artifactId: string; summaryEventId: string }> {
@@ -55,8 +30,8 @@ describe('orcaops capture summary — supersede', () => {
       inputFile(
         JSON.stringify({
           idempotency_key: `plan-${randomUUID()}`,
-          task: 'F3ii summary fixture',
-          label: `f3ii-${randomUUID().slice(0, 8)}`,
+          task: 'Amend retained summary',
+          label: `summary-${randomUUID().slice(0, 8)}`,
           plan_steps: [{ text: 's1', label: 's1' }],
           touched_scope: [],
         })
@@ -100,7 +75,7 @@ describe('orcaops capture summary — supersede', () => {
   it('surfaces summary_event_id, refuses a bare re-summary, and supersedes with the token', async () => {
     const { artifactId, summaryEventId } = await planAndSummary();
 
-    // bare re-summary → SUMMARY_ALREADY_CAPTURED, message names the event.
+    const beforeRefusal = await inventory(f.temporary);
     const bare = await reSummary(artifactId, {});
     expect(bare.exitCode).toBe(1);
     const bareErr = JSON.parse(bare.stdout) as {
@@ -110,15 +85,15 @@ describe('orcaops capture summary — supersede', () => {
     expect(bareErr.ok).toBe(false);
     expect(bareErr.error.code).toBe('SUMMARY_ALREADY_CAPTURED');
     expect(bareErr.error.message).toContain(summaryEventId);
+    expect(await inventory(f.temporary)).toEqual(beforeRefusal);
 
-    // stale token → STALE_SUMMARY.
     const stale = await reSummary(artifactId, { prior_summary_event_id: 'not-the-latest' });
     expect(stale.exitCode).toBe(1);
     expect((JSON.parse(stale.stdout) as { error: { code: string } }).error.code).toBe(
       'STALE_SUMMARY'
     );
 
-    // correct token → supersedes.
+    expect(await inventory(f.temporary)).toEqual(beforeRefusal);
     const amend = await reSummary(artifactId, { prior_summary_event_id: summaryEventId });
     expect(amend.exitCode, amend.stdout).toBe(0);
     expect((JSON.parse(amend.stdout) as { ok: boolean }).ok).toBe(true);
@@ -149,11 +124,13 @@ describe('orcaops capture summary — supersede', () => {
     });
     const s1 = await agent.runRaw(['capture', 'summary', '--input', inputFile(payload)]);
     expect(s1.exitCode, s1.stdout).toBe(0);
+    const beforeReplay = await inventory(f.temporary);
     const s2 = await agent.runRaw(['capture', 'summary', '--input', inputFile(payload)]);
     expect(s2.exitCode, s2.stdout).toBe(0);
     expect((JSON.parse(s2.stdout) as { idempotency_status?: string }).idempotency_status).toBe(
       'replay'
     );
+    expect(await inventory(f.temporary)).toEqual(beforeReplay);
   });
 
   it('finish allows a wording-only amendment after the worktree changes', async () => {
@@ -174,33 +151,36 @@ describe('orcaops capture summary — supersede', () => {
     ]);
     const artifactId = (JSON.parse(plan.stdout) as { artifact_id: string }).artifact_id;
     const runId = `run-${randomUUID()}`;
-    const store = new ArtifactStore({ repoRoot: repo.path, config: await loadConfig(repo.path) });
-    await store.writeEvaluatorRunPayload(
-      artifactId,
-      {
-        schema: 'orcaops.evaluator_run/v1',
-        run_id: runId,
-        artifact_id: artifactId,
-        evaluator_ref: 'test/warning',
-        package_id: 'test',
-        evaluator_id: 'warning',
-        phase: 'pre-pr',
-        severity: 'warn',
-        run_status: 'completed',
-        verdict: 'violation',
-        body: 'review this warning',
-        ts: new Date().toISOString(),
-      },
-      { idempotencyKey: `warning-${randomUUID()}` }
+    await f.mutate(artifactId, { runId }, (semantics) =>
+      semantics.writeEvaluatorRunPayload(
+        artifactId,
+        {
+          schema: 'orcaops.evaluator_run/v1',
+          run_id: runId,
+          artifact_id: artifactId,
+          evaluator_ref: 'test/warning',
+          package_id: 'test',
+          evaluator_id: 'warning',
+          phase: 'pre-pr',
+          severity: 'warn',
+          run_status: 'completed',
+          verdict: 'violation',
+          body: 'review this warning',
+          ts: new Date().toISOString(),
+        },
+        { idempotencyKey: `warning-${randomUUID()}` }
+      )
     );
-    const review = await store.writePrePrChecked(artifactId, {
-      head_sha: await gitClient(repo.path).revparse(['HEAD']),
-      outcome: 'needs_attention',
-      evaluator_set_fingerprint: 'a'.repeat(64),
-      review_context_fingerprint: 'b'.repeat(64),
-      run_ids: [runId],
-    });
-    store.close();
+    const headSha = await gitClient(f.main).revparse(['HEAD']);
+    const review = await f.mutate(artifactId, { runId, headSha }, (semantics) =>
+      semantics.writePrePrChecked(artifactId, {
+        head_sha: headSha,
+        outcome: 'needs_attention',
+        evaluator_set_fingerprint: 'a'.repeat(64),
+        review_context_fingerprint: 'b'.repeat(64),
+        run_ids: [runId],
+      })
+    );
 
     const acceptedWarnings = [
       {
@@ -227,7 +207,7 @@ describe('orcaops capture summary — supersede', () => {
     const summaryEventId = (JSON.parse(first.stdout) as { summary_event_id: string })
       .summary_event_id;
 
-    await writeFile(path.join(repo.path, 'uncommitted.ts'), 'export const changed = true;\n');
+    await writeFile(path.join(f.main, 'uncommitted.ts'), 'export const changed = true;\n');
 
     const amended = await agent.runRaw([
       'finish',
@@ -255,12 +235,6 @@ describe('orcaops capture summary — supersede', () => {
     expect(shown.artifact.summary.accepted_warnings).toEqual(acceptedWarnings);
   }, 30_000);
 
-  // ── head_sha is not restamped by an amendment ────────────────────────
-  //
-  // This is the layer where derivation actually happens: the CLI reads current
-  // HEAD. Amending after later commits must not move the window the summary
-  // records, or an artifact reviewed at one commit silently claims a head it
-  // never saw.
   it('an amendment taken after a later commit keeps the original head_sha', async () => {
     const { artifactId, summaryEventId } = await planAndSummary();
 
@@ -270,10 +244,8 @@ describe('orcaops capture summary — supersede', () => {
     ).artifact.summary.head_sha;
     expect(originalHead).toBeTruthy();
 
-    // Move HEAD after the summary was captured, and confirm it actually moved —
-    // otherwise this test would pass vacuously.
-    await commitFile(repo.path, 'later.ts', 'export const later = 1;\n', 'work after summary');
-    const newHead = await gitClient(repo.path).revparse(['HEAD']);
+    await commitFile(f.main, 'later.ts', 'export const later = 1;\n', 'work after summary');
+    const newHead = await gitClient(f.main).revparse(['HEAD']);
     expect(newHead).not.toBe(originalHead);
 
     const amend = await reSummary(artifactId, {

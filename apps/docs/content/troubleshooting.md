@@ -32,14 +32,12 @@ next action. For example:
 orcaops doctor — v<version>
   repo: <repo>
 
-✓ repository           8 checks passed
+✓ repository           7 checks passed
 ✓ install surfaces     9 checks passed
-✓ artifact state       20/21 checks passed
-  archive-redaction: archive mirror stores event text verbatim (archive.redact_secrets: false)
-    The mirror is outside the repository and outside .gitignore, and survives deleting the worktree. Set archive.redact_secrets: true to redact the copy — a cold-start `orcaops resume` then restores the redacted text.
-⚠ seed                 git history exists but Orcaops has never been seeded
-  Preview with `orcaops seed --dry-run`; apply with `orcaops seed --yes` or `orcaops doctor --fix`.
-✓ evaluator health     9 checks passed
+✓ artifact state       18/19 checks passed
+⚠ seed                 Git history exists but the project database has no seed state
+  Preview with `orcaops seed --dry-run`; apply with `orcaops seed --yes`.
+✓ evaluator health     10 checks passed
 ✓ pins and shell       6 checks passed
 
 Overall: WARN (1 warning(s))
@@ -88,27 +86,20 @@ instead of guessing whether another worktree still needs the shared
 confirming it is stale, then run `orcaops init --personal` from a worktree that
 should remain personal before retrying the interrupted command.
 
-## Local cache needs rebuilding after an upgrade
+## History format or derived indexes need attention
 
-`.orcaops/cache/orcaops.db` is an untracked, disposable projection of captured
-event logs and usage records. When Orcaops Watch finds a cache created by an
-older Orcaops version, it offers to rebuild it before opening **Review**. The
-rebuild does not change captured history.
+Watch opens existing project history without migrating it or rebuilding indexes.
+If the database requires an upgrade, use a compatible installed CLI and the
+specific action reported by Doctor. A database from a newer unsupported version
+must not be downgraded or replaced.
 
-Headless or scripted review generation never prompts. Authorize the same rebuild
-explicitly:
+`orcaops rebuild` rebuilds derived query and search metadata from valid retained
+database rows. It does not restore missing authoritative history. Do not delete
+`history.sqlite3`, its WAL file, or its registration to force a rebuild.
 
-```bash
-orcaops review data --branch <branch> --rebuild-cache
-```
-
-Use `orcaops rebuild` instead when you want to rebuild the repository cache
-without opening Review. A cache created by a **newer** Orcaops version is never
-rebuilt backward; upgrade the running Orcaops installation instead.
-
-Orcaops supports one active installed binary version at launch. Running older
-and newer binaries against the same worktree simultaneously is unsupported: a
-cache rebuilt by the newer binary can be unreadable to the older one.
+Running incompatible old and new binaries against the same project is unsupported.
+Stop writers before legacy conversion and keep the converter's explicit offline
+window through registration.
 
 Configuration scope and generated-file posture are separate from cache
 compatibility. See [Agent integrations](./agent-integrations.md#install-scope)
@@ -187,19 +178,20 @@ the store, so a single corrupt artifact refuses the whole export — a partial
 export would silently attribute against an incomplete ambiguity pool, which
 is worse than no export. The refusal names the artifact(s); to recover:
 
-- `orcaops doctor` — the event-log-corruption check names the corrupt
-  line(s) and kind for each artifact;
-- `orcaops archive resolve --artifact <id> --source archive --apply` —
-  replace a corrupt hot log from the archive mirror (archive enabled);
-- restore `events.ndjson` from a backup, then `orcaops rebuild`;
-- if the artifact is expendable: delete its directory under
-  `.orcaops/artifacts/`, run `orcaops rebuild` **immediately** (the cache
-  row must go before anything else reads it — a stale row makes the
-  deleted artifact look clean-and-empty, silently shrinking the very
-  ambiguity pool this refusal protects), then
-  `orcaops snapshots prune --orphans --apply` and `orcaops gc --apply`.
+- Run `orcaops doctor` to identify missing, inaccessible or inconsistent history.
+- Preserve the database, registration and retained evidence while diagnosing it.
+  Restore a verified backup if authoritative content has been lost or corrupted;
+  there is no archive mirror to restore from.
+- `orcaops rebuild` repairs derived query/search metadata from valid retained rows.
+  It cannot reconstruct missing authoritative history.
+- Do not delete history to clear the error. `orcaops gc --apply` only reclaims
+  exact Git publications already recorded as retired and unreferenced; missing
+  owners or inaccessible state never authorize deletion.
 
 ## Where are my artifacts?
 
-Under `.orcaops/` at the **repository root** — Orcaops keys off the current
-working directory, so run capture commands from the root of the repo.
+Captured history is in the project's SQLite database under the local data root,
+usually `~/.orcaops/projects/<project-id>/history.sqlite3`. Run `orcaops status`
+and `orcaops doctor` from the repository to inspect its registration and history.
+The repository's `.orcaops/` directory contains configuration and working files,
+not the canonical history. See [Local data](./local-data.md).

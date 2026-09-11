@@ -13,14 +13,10 @@ const row = (overrides: Partial<RunRow> = {}): RunRow => ({
   ...overrides,
 });
 
-const context = (rows: RunRow[]) => ({
-  store: { store: { listEvaluatorRuns: () => rows } },
-});
-
 describe('resolveTargetRun', () => {
   it('resolves the current policy violation', () => {
     expect(
-      resolveTargetRun(context([row()]), { artifact: 'A', evaluator: 'x' }, 'core/x', 'dismiss')
+      resolveTargetRun([row()], { artifact: 'A', evaluator: 'x' }, 'core/x', 'dismiss')
     ).toEqual({ run_id: 'run-1', evaluator_ref: 'core/x' });
   });
 
@@ -32,11 +28,11 @@ describe('resolveTargetRun', () => {
       disposition: null,
     });
     expect(() =>
-      resolveTargetRun(context([error]), { artifact: 'A', evaluator: 'x' }, 'core/x', 'dismiss')
+      resolveTargetRun([error], { artifact: 'A', evaluator: 'x' }, 'core/x', 'dismiss')
     ).toThrow(/evaluator error.*rerun its pre-pr phase/i);
     expect(() =>
       resolveTargetRun(
-        context([error]),
+        [error],
         { artifact: 'A', evaluator: 'x', runId: 'run-error' },
         'core/x',
         'acknowledge'

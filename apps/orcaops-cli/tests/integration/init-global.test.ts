@@ -33,6 +33,39 @@ describe('orcaops init --scope global', () => {
   const agentFor = (repo: TempRepo): ReturnType<typeof makeAgent> =>
     makeAgent({ cwd: repo.path, env: { ORCAOPS_GLOBAL_ROOT: globalRoot } });
 
+  it('retains setup when installation fails and adopts it on retry', async () => {
+    const repo = await createTempRepo({ initialBranch: 'main' });
+    try {
+      const dataRoot = path.join(repo.path, '.history-data');
+      await rm(globalRoot, { recursive: true, force: true });
+      await writeFile(globalRoot, 'occupied by a file\n', 'utf8');
+      const agent = makeAgent({
+        cwd: repo.path,
+        env: { ORCAOPS_DATA_DIR: dataRoot, ORCAOPS_GLOBAL_ROOT: globalRoot },
+      });
+
+      const interrupted = await agent.runRaw(['init', '--scope', 'global', '--no-llm', '--json']);
+      expect(interrupted.exitCode).toBe(1);
+      expect(JSON.parse(interrupted.stdout).error.message).toMatch(/ENOTDIR|not a directory/i);
+      expect(interrupted.stderr).toContain('remains registered, but installation did not complete');
+      const registrationPath = path.join(repo.path, '.git', 'orcaops', 'registration.json');
+      const registration = await readFile(registrationPath, 'utf8');
+      const projectId = JSON.parse(registration).authority.project_id as string;
+      expect(await exists(path.join(dataRoot, 'projects', projectId, 'history.sqlite3'))).toBe(
+        true
+      );
+
+      await rm(globalRoot, { force: true });
+      await mkdir(globalRoot, { recursive: true });
+      const retried = await agent.runRaw(['init', '--scope', 'global', '--no-llm', '--json']);
+      expect(retried.exitCode, retried.stdout + retried.stderr).toBe(0);
+      expect(JSON.parse(retried.stdout).project_id).toBe(projectId);
+      expect(await readFile(registrationPath, 'utf8')).toBe(registration);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('materializes global skills; project skills NOT installed; block + manifest stay project', async () => {
     const repo = await createTempRepo({ initialBranch: 'main' });
     try {

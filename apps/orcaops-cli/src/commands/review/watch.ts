@@ -1,7 +1,11 @@
 import type { OssReviewFeedbackStatusResponse } from '@orcaops/sdk';
-import { readReviewFeedbackWatchCursor, writeReviewFeedbackWatchCursor } from '@orcaops/storage';
+import { uuidv7 } from '@orcaops/storage';
+import {
+  advanceProjectReviewFeedbackWatchCursor,
+  readProjectReviewFeedbackWatchCursor,
+} from '@orcaops/storage/history/database';
 
-import { reviewFeedbackCacheDir, withReviewCloud } from './shared.js';
+import { withReviewCloud } from './shared.js';
 import { toCloudErrorEnvelope } from '../../io/cloud-error-envelope.js';
 import { ErrorCodes, OrcaopsError } from '../../io/errors.js';
 import { emitError, emitOk, writeTerminalSafeStdout } from '../../io/output.js';
@@ -92,7 +96,7 @@ export async function runReviewFeedbackWatch(args: {
 
   for (;;) {
     const current = item.activity.last_human_activity_at;
-    if (current !== null && (baseline === null || current > baseline)) {
+    if (current !== null && (baseline === null || Date.parse(current) > Date.parse(baseline))) {
       return { status: 'NEW_ACTIVITY', item, cursor: current };
     }
     if (deps.now() >= deadline) {
@@ -139,19 +143,15 @@ export async function reviewFeedbackWatchAction(
         operation: 'review watch',
       },
       async (ctx) => {
-        const cacheDir = reviewFeedbackCacheDir(ctx.repoRoot);
         // Subject id for the cursor read may be unknown pre-poll (--task); the
         // baseline read happens against --pr when given, else after the arm poll
         // inside runReviewFeedbackWatch (null baseline = baseline-at-arm).
         const baselineCursor =
           opts.pr !== undefined
-            ? await readReviewFeedbackWatchCursor(
-                cacheDir,
-                ctx.baseUrl,
-                ctx.orgId,
-                opts.pr,
-                ctx.repoRoot
-              )
+            ? (readProjectReviewFeedbackWatchCursor(ctx.reader, {
+                target: ctx.target,
+                pullRequestId: opts.pr,
+              }).value?.cursor ?? null)
             : null;
         const watch = await runReviewFeedbackWatch({
           client: ctx.client,
@@ -161,16 +161,23 @@ export async function reviewFeedbackWatchAction(
           timeoutMs: timeoutSec * 1000,
         });
         if (watch.status === 'NEW_ACTIVITY') {
-          await writeReviewFeedbackWatchCursor(
-            cacheDir,
-            {
-              baseUrl: ctx.baseUrl,
-              orgId: ctx.orgId,
-              pullRequestId: watch.item.subject.pull_request_id,
-              lastSeenHumanActivityAt: watch.cursor,
-            },
-            ctx.repoRoot
-          );
+          const pullRequestId = watch.item.subject.pull_request_id;
+          const writer = await ctx.openSettlementWriter();
+          try {
+            await advanceProjectReviewFeedbackWatchCursor(
+              writer,
+              {
+                operationId: uuidv7(),
+                target: ctx.target,
+                pullRequestId,
+                cursor: watch.cursor,
+                advancedAt: new Date().toISOString(),
+              },
+              { onWait: ctx.onWait }
+            );
+          } finally {
+            writer.close();
+          }
         }
         return watch;
       }

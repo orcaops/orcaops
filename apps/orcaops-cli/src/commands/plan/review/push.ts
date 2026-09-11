@@ -9,15 +9,15 @@ import type {
   SourcePlanReviewProposeResponse,
   SourcePlanReviewPushResponse,
 } from '@orcaops/sdk';
-import {
-  firstForbiddenControlChar,
-  readReviewCandidate,
-  sha256Hex,
-  sourcePlanCacheDir,
-  writeReviewPullRecord,
-} from '@orcaops/storage';
+import { firstForbiddenControlChar, sha256Hex } from '@orcaops/storage';
 
-import { mapReviewAuthzError, requireRef, withReviewCloud } from './shared.js';
+import type { PlanReviewPersistence } from './persistence.js';
+import {
+  createReviewMutation,
+  mapReviewAuthzError,
+  requireRef,
+  withReviewCloud,
+} from './shared.js';
 import { readBodyInput } from '../../../io/body-input.js';
 import { toCloudErrorEnvelope } from '../../../io/cloud-error-envelope.js';
 import { ErrorCodes, OrcaopsError } from '../../../io/errors.js';
@@ -29,7 +29,7 @@ import {
   writeSecretWarnings,
 } from '../../../lib/cloud-secret-gate.js';
 import { loadSecretAllowlist } from '../../../lib/run-capture.js';
-import { reviewUsageStamp, stampPlanReviewUsage } from '../../../lib/usage-stamp.js';
+import { reviewUsageStamp } from '../../../lib/usage-stamp.js';
 
 export interface ReviewPushOptions {
   input?: string;
@@ -59,6 +59,7 @@ export interface ReviewPushResult {
 }
 
 export interface RunReviewPushArgs {
+  persistence: PlanReviewPersistence;
   client: ReviewPushClient;
   repoRoot: string;
   baseUrl: string;
@@ -75,13 +76,7 @@ export interface RunReviewPushArgs {
 
 async function resolveExpectedCandidateVersionId(args: RunReviewPushArgs): Promise<string> {
   if (args.baseVersionIdOverride !== undefined) return args.baseVersionIdOverride;
-  const rec = await readReviewCandidate(
-    sourcePlanCacheDir(args.repoRoot),
-    args.baseUrl,
-    args.orgId,
-    args.externalId,
-    args.repoRoot
-  );
+  const rec = await args.persistence.readCandidate(args.externalId);
   if (!rec || rec.version_id === null) {
     throw new OrcaopsError(
       ErrorCodes.NO_INPUT,
@@ -128,6 +123,7 @@ export async function runReviewPush(
       'plan-review-push'
     );
   }
+  await args.persistence.preflight();
   const expectedCandidateVersionId = await resolveExpectedCandidateVersionId(args);
   const contentHash = sha256Hex(args.body);
 
@@ -149,16 +145,13 @@ export async function runReviewPush(
     throw mapReviewAuthzError(err, { command: 'push' });
   }
 
-  const cacheDir = sourcePlanCacheDir(args.repoRoot);
-
   if (res.status === 'published') {
     // Overwrite the local candidate with the new version (latest-wins, same key).
     // candidateVersionId/Number are nullable in the wire type; persist only when
     // both are present (a published candidate normally has them). If null, the
     // CAS token can't advance — skip the write; the next op re-pulls.
     if (res.candidateVersionId !== null && res.candidateVersionNumber !== null) {
-      await writeReviewPullRecord(
-        cacheDir,
+      await args.persistence.writeRecord(
         {
           schema_version: 1,
           target: 'candidate',
@@ -173,7 +166,7 @@ export async function runReviewPush(
           org_id: args.orgId,
           pulled_at: args.pulledAt,
         },
-        args.repoRoot
+        { preserveEquivalent: true }
       );
     }
     return withSecretWarnings(
@@ -211,8 +204,7 @@ export async function runReviewPush(
     } catch (err) {
       throw mapReviewAuthzError(err, { command: 'propose' });
     }
-    await writeReviewPullRecord(
-      cacheDir,
+    await args.persistence.writeRecord(
       {
         schema_version: 1,
         target: 'proposal',
@@ -227,7 +219,7 @@ export async function runReviewPush(
         org_id: args.orgId,
         pulled_at: args.pulledAt,
       },
-      args.repoRoot
+      { preserveEquivalent: true }
     );
     return withSecretWarnings(
       {
@@ -281,7 +273,17 @@ export async function reviewPushAction(ref: string, opts: ReviewPushOptions = {}
     // authored reaching the network rather than only preceding the mutation.
     // The identical gate inside the run* core is defense in depth and is what
     // the client-injected core tests drive.
-    assertNoSecretsOutbound('plan-review-push', [['body', body]], await loadSecretAllowlist());
+    assertNoSecretsOutbound(
+      'plan-review-push',
+      [
+        ['external_id', ref],
+        ['body', body],
+        ['base_version_id', opts.baseVersionId],
+        ['on_conflict', opts.onConflict],
+        ['base_url', opts.baseUrl],
+      ],
+      await loadSecretAllowlist()
+    );
     const onConflict = opts.onConflict === 'propose' ? 'propose' : 'fail';
 
     const result = await withReviewCloud(
@@ -290,9 +292,21 @@ export async function reviewPushAction(ref: string, opts: ReviewPushOptions = {}
         requires: [ORCAOPS_CAPABILITIES.SOURCE_PLAN_REVIEW],
         operation: 'plan review push',
       },
-      async (ctx) =>
-        runReviewPush({
-          client: ctx.client,
+      async (ctx) => {
+        const pulledAt = new Date().toISOString();
+        const mutation = createReviewMutation(
+          ctx,
+          {
+            verb: 'push',
+            externalId: ref,
+            body,
+            baseVersionId: opts.baseVersionId ?? null,
+            onConflict,
+          },
+          { publicationAt: pulledAt }
+        );
+        const result = await runReviewPush({
+          client: mutation.client,
           repoRoot: ctx.repoRoot,
           baseUrl: ctx.baseUrl,
           orgId: ctx.orgId,
@@ -301,16 +315,19 @@ export async function reviewPushAction(ref: string, opts: ReviewPushOptions = {}
           ...(opts.baseVersionId ? { baseVersionIdOverride: opts.baseVersionId } : {}),
           onConflict,
           baseline: await resolveReviewBaseline(ctx.repo),
-          pulledAt: new Date().toISOString(),
-        })
-    );
-
-    await stampPlanReviewUsage(
-      reviewUsageStamp(
-        'push',
-        result.external_id,
-        result.candidate_version_number ?? result.current_version_number
-      )
+          pulledAt,
+          persistence: mutation.persistence,
+        });
+        if (mutation.didDispatch())
+          await ctx.stampUsage(
+            reviewUsageStamp(
+              'push',
+              result.external_id,
+              result.candidate_version_number ?? result.current_version_number
+            )
+          );
+        return result;
+      }
     );
 
     writeSecretWarnings(result.secret_warnings);

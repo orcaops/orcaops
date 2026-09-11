@@ -14,7 +14,7 @@ import { writeTerminalSafeStderr } from '../io/output.js';
  * **before** computing any `content_hash` and before any wire call. That
  * ordering is the whole point: refusing before the hash prevents an anchor
  * from ever being minted, where refusing after would be trying to un-mint one.
- * `runPlanUpload`, `runReviewPush` and `runReviewPropose` assert control
+ * `runDatabaseSourcePlanUpload`, `runReviewPush` and `runReviewPropose` assert control
  * characters on the same ordering, for the same reason.
  *
  * The verb list is not maintained here. `cloud-write-surface.test.ts` derives

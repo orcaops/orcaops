@@ -8,7 +8,6 @@ function thread(id: string, branch: string, state: AgentState): WatchThread {
   return {
     artifactId: id,
     artifactStatus: 'active' as WatchThread['artifactStatus'],
-    source: 'archive',
     branch,
     openComments: 0,
     isCurrentCheckout: false,
@@ -28,11 +27,22 @@ function thread(id: string, branch: string, state: AgentState): WatchThread {
     planDecisions: [],
     nonGoals: [],
     recentEvents: [],
+    version: '1:retained',
+    omittedEvents: 0,
+    activityWindowComplete: true,
   };
 }
 
 function project(threads: WatchThread[]): WatchProject {
-  return { projectId: 'P', displayName: 'proj', threads };
+  return {
+    projectId: 'P',
+    displayName: 'proj',
+    authorityKey: 'store',
+    writeSequence: 1,
+    state: 'current',
+    completeness: { complete: true, issues: [] },
+    threads,
+  };
 }
 
 describe('isDefaultBranch', () => {

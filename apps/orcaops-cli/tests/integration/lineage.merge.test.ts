@@ -125,8 +125,8 @@ describe('orcaops lineage — merge-event detection', () => {
     await runSync();
 
     const listRes = await agent.runRaw(['list', '--json']);
-    const r = JSON.parse(listRes.stdout) as { ok: boolean; artifacts: Array<{ id: string }> };
-    expect(r.artifacts.map((a) => a.id)).toContain(plan.artifact_id);
+    const r = JSON.parse(listRes.stdout) as { ok: boolean; results: Array<{ id: string }> };
+    expect(r.results.map((a) => a.id)).toContain(plan.artifact_id);
   });
 
   it('multiple feature branches merged into main → each gets a merged entry', async () => {

@@ -12,7 +12,13 @@ describe('instruction install refusal boundary', () => {
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
-    agent = makeAgent({ cwd: repo.path });
+    agent = makeAgent({
+      cwd: repo.path,
+      env: {
+        ORCAOPS_DATA_DIR: path.join(repo.path, '.history-data'),
+        ORCAOPS_DISABLE_DRAIN: '1',
+      },
+    });
   });
 
   afterEach(async () => {
@@ -35,6 +41,9 @@ describe('instruction install refusal boundary', () => {
     await expect(access(path.join(repo.path, '.orcaops'))).rejects.toMatchObject({
       code: 'ENOENT',
     });
+    await expect(access(path.join(repo.path, '.history-data'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('init refuses malformed markers before creating any install footprint', async () => {
@@ -53,6 +62,9 @@ describe('instruction install refusal boundary', () => {
     expect(await readFile(agentsPath, 'utf8')).toBe(malformed);
     expect(await readFile(claudePath, 'utf8')).toBe(claude);
     await expect(access(path.join(repo.path, '.orcaops'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(access(path.join(repo.path, '.history-data'))).rejects.toMatchObject({
       code: 'ENOENT',
     });
   });

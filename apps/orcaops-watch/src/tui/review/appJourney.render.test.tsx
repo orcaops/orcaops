@@ -13,7 +13,7 @@ import {
 } from '../../../tests/review/appJourneyFixture';
 import { buildReviewAppHarness } from '../../../tests/review/reviewAppHarness';
 import type { SnapshotSource } from '../../data/snapshot';
-import { App, composeWatchFooterNotice, MIXED_ARCHIVE_NOTICE_PREFIX } from '../App';
+import { App, composeWatchFooterNotice, HISTORY_INCOMPLETE_NOTICE_PREFIX } from '../App';
 import { ThemeProvider } from '../ThemeProvider';
 import { executableHelpInvocation } from '../commandRegistry';
 import { selectShellHelpCommands } from '../shellCommands';
@@ -403,17 +403,20 @@ test('Watch replaces a stale dashboard with the source error after disconnecting
   harness.renderer.destroy();
 });
 
-test('Watch keeps the dashboard usable while visibly warning about partial archive data', async () => {
+test('Watch keeps the dashboard usable while visibly warning about incomplete history', async () => {
   const snapshot = reviewableWatchSnapshot();
-  snapshot.archiveIssues = [
-    {
-      kind: 'artifact_unavailable',
-      project_id: 'proj-a',
-      project: 'sample-service',
-      artifact_id: '01999999-9999-7000-8000-0000000000ee',
-      message: 'checkpoint abandonment has no matching open',
-    },
-  ];
+  snapshot.state = 'deferred';
+  snapshot.completeness = {
+    complete: false,
+    issues: [
+      {
+        code: 'HISTORY_MISSING',
+        project_id: 'journey-project-id',
+        message:
+          'The expected main database is missing; explicit repair is required, never reinitialization',
+      },
+    ],
+  };
   const source: SnapshotSource = {
     start({ onSnapshot }) {
       onSnapshot(snapshot);
@@ -443,8 +446,8 @@ test('Watch keeps the dashboard usable while visibly warning about partial archi
   }
 
   const frame = harness.captureCharFrame();
-  expect(frame).toContain('Partial archive data');
-  expect(frame).toContain('1 artifact unavailable');
+  expect(frame).toContain('History incomplete');
+  expect(frame).toContain('1 issue in 1 project');
   expect(frame).not.toContain('Live data unavailable');
 
   harness.mockInput.pressKey('v');
@@ -453,84 +456,39 @@ test('Watch keeps the dashboard usable while visibly warning about partial archi
     await harness.renderOnce();
   }
   const withTransient = harness.captureCharFrame();
-  expect(withTransient).toContain('Partial archive · repair/prune · review');
+  expect(withTransient).toContain('History incomplete · review');
   expect(withTransient).not.toContain('while the worktree index refreshes');
   expect(
     composeWatchFooterNotice(
       'review temporarily unavailable while the worktree index refreshes',
-      'Partial archive data · 1 artifact unavailable in sample-service',
+      'History incomplete · 1 issue in 1 project · HISTORY_MISSING: missing',
       width,
-      'Partial archive · repair/prune · '
+      HISTORY_INCOMPLETE_NOTICE_PREFIX
     )
-  ).toBe('Partial archive · repair/prune · review tempo…');
+  ).toBe('History incomplete · review temporarily unava…');
   harness.renderer.destroy();
 });
 
-test('Watch keeps the dashboard usable while visibly warning about project identity', async () => {
+test('Watch discloses root and project history issues together', async () => {
   const snapshot = reviewableWatchSnapshot();
-  snapshot.archiveIssues = [
-    {
-      kind: 'project_identity_unavailable',
-      source: 'hot',
-      project_id: null,
-      project: 'sample-service',
-      message: 'stored project identity is invalid',
-    },
-  ];
-  const source: SnapshotSource = {
-    start({ onSnapshot }) {
-      onSnapshot(snapshot);
-      return () => {};
-    },
+  snapshot.state = 'deferred';
+  snapshot.completeness = {
+    complete: false,
+    issues: [
+      {
+        code: 'IDENTITY_RECOVERY_REQUIRED',
+        project_id: null,
+        resource: 'stray',
+        message:
+          'Project inventory contains unknown ownership; preserve the entry for explicit repair',
+      },
+      {
+        code: 'HISTORY_INTEGRITY_REQUIRED',
+        project_id: 'journey-project-id',
+        message: 'Query metadata is missing or incompatible; run an explicit index rebuild',
+      },
+    ],
   };
-  const harness = await createTestRenderer({ width: 72, height: 30, kittyKeyboard: true });
-  const root = createRoot(harness.renderer);
-  root.render(
-    <ThemeProvider detectedThemeMode={undefined}>
-      <App
-        options={{
-          intervalMs: 2_000,
-          snapshotSource: source,
-          resolveReviewTarget: async () => ({
-            ok: false,
-            reason: 'review temporarily unavailable while the worktree index refreshes',
-          }),
-        }}
-      />
-    </ThemeProvider>
-  );
-  for (let pass = 0; pass < 8; pass += 1) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    await harness.renderOnce();
-  }
-
-  const frame = harness.captureCharFrame();
-  expect(frame).toContain('Project identity problem');
-  expect(frame).toContain('run doctor');
-  expect(frame).not.toContain('Live data unavailable');
-
-  harness.mockInput.pressKey('v');
-  for (let pass = 0; pass < 8; pass += 1) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    await harness.renderOnce();
-  }
-  const withTransient = harness.captureCharFrame();
-  expect(withTransient).toContain('Identity · doctor');
-  expect(withTransient).toContain('review temporarily');
-  harness.renderer.destroy();
-});
-
-test('Watch keeps the dashboard usable while visibly warning about an incomplete hot projection', async () => {
-  const snapshot = reviewableWatchSnapshot();
-  snapshot.archiveIssues = [
-    {
-      kind: 'hot_projection_incomplete',
-      project_id: 'proj-a',
-      project: 'sample-service',
-      health: 'degraded',
-      message: 'one durable artifact was skipped during rebuild',
-    },
-  ];
   const source: SnapshotSource = {
     start({ onSnapshot }) {
       onSnapshot(snapshot);
@@ -550,81 +508,9 @@ test('Watch keeps the dashboard usable while visibly warning about an incomplete
   }
 
   const frame = harness.captureCharFrame();
-  expect(frame).toContain('Local projection incomplete');
-  expect(frame).toContain('needs repair');
-  expect(frame).toContain('run doctor');
+  expect(frame).toContain('History incomplete');
+  expect(frame).toContain('2 issues in 1 project · IDENTITY_RECOVERY_REQUIR');
   expect(frame).not.toContain('Live data unavailable');
-  harness.renderer.destroy();
-});
-
-test('Watch discloses both project identity and archive artifact problems', async () => {
-  const snapshot = reviewableWatchSnapshot();
-  snapshot.archiveIssues = [
-    {
-      kind: 'project_identity_unavailable',
-      source: 'hot',
-      project_id: null,
-      project: 'sample-service',
-      message: 'stored project identity is invalid',
-    },
-    {
-      kind: 'artifact_unavailable',
-      project_id: '019fc200-0000-7000-8000-00000000ccc1',
-      project: 'sample-service',
-      artifact_id: '019fc200-0000-7000-8000-00000000ddd1',
-      message: 'archive artifact cannot be reconstructed',
-    },
-  ];
-  const source: SnapshotSource = {
-    start({ onSnapshot }) {
-      onSnapshot(snapshot);
-      return () => {};
-    },
-  };
-  const harness = await createTestRenderer({ width: 72, height: 30, kittyKeyboard: true });
-  const root = createRoot(harness.renderer);
-  root.render(
-    <ThemeProvider detectedThemeMode={undefined}>
-      <App
-        options={{
-          intervalMs: 2_000,
-          snapshotSource: source,
-          resolveReviewTarget: async () => ({
-            ok: false,
-            reason: 'review temporarily unavailable while the worktree index refreshes',
-          }),
-        }}
-      />
-    </ThemeProvider>
-  );
-  for (let pass = 0; pass < 8; pass += 1) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    await harness.renderOnce();
-  }
-
-  const frame = harness.captureCharFrame();
-  expect(frame).toContain('Project identity problem');
-  expect(frame).toContain('Partial archive');
-  expect(frame).toContain('archive repair');
-  expect(frame).not.toContain('Live data unavailable');
-
-  harness.mockInput.pressKey('v');
-  for (let pass = 0; pass < 8; pass += 1) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    await harness.renderOnce();
-  }
-  const withTransient = harness.captureCharFrame();
-  expect(withTransient).toContain('ID+archive');
-  expect(withTransient).toContain('doctor/repair');
-  expect(withTransient).toContain('review temporarily');
-  expect(
-    composeWatchFooterNotice(
-      'review temporarily unavailable',
-      'Project identity problem · Partial archive',
-      40,
-      MIXED_ARCHIVE_NOTICE_PREFIX
-    )
-  ).toBe('ID+archive · doctor/repair · review t…');
   harness.renderer.destroy();
 });
 
@@ -799,7 +685,7 @@ test('Watch distinguishes true, filter, and repository empty states with recover
   const base = reviewableWatchSnapshot();
   const empty = await mountWatch({
     ...base,
-    totals: { activeThreads: 0, openCheckpoints: 0, sessionTokens: 0 },
+    totals: { activeThreads: 0, openCheckpoints: 0, sessionTokens: 0, usageStatus: 'unavailable' },
     projects: [],
   });
   expect(empty.harness.captureCharFrame()).toContain('No captured work yet');
@@ -808,7 +694,18 @@ test('Watch distinguishes true, filter, and repository empty states with recover
 
   const scoped = await mountWatch({
     ...base,
-    projects: [{ projectId: null, displayName: 'empty-project', threads: [] }, ...base.projects],
+    projects: [
+      {
+        projectId: 'empty-project-id',
+        displayName: 'empty-project',
+        authorityKey: 'empty-store',
+        writeSequence: 1,
+        state: 'current',
+        completeness: { complete: true, issues: [] },
+        threads: [],
+      },
+      ...base.projects,
+    ],
   });
   scoped.harness.mockInput.pressKey('/');
   await scoped.settle();

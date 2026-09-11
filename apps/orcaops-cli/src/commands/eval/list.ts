@@ -14,9 +14,9 @@ import {
   writeTerminalSafeStderr,
   writeTerminalSafeStdout,
 } from '../../io/output.js';
-import { buildContext } from '../../lib/context.js';
 import { discoverEvaluatorsForCli } from '../../lib/evaluator-discovery.js';
 import { getInvocationCwd, getInvocationEnv } from '../../lib/invocation-context.js';
+import { resolveInstallCommandContext } from '../../lib/repository-context.js';
 
 export interface EvalListOptions {
   json?: boolean;
@@ -60,111 +60,107 @@ interface EvaluatorSummary {
  */
 export async function evalListAction(opts: EvalListOptions = {}): Promise<void> {
   try {
-    const ctx = await buildContext({ mintArchiveIdentity: false });
-    try {
-      const { evaluators, errors } = await discoverEvaluatorsForCli(ctx.repoRoot);
-      const providerSnapshot =
-        ctx.config.llm.tool === 'none'
-          ? ({ claude: 'absent', codex: 'absent' } satisfies ProviderProbeSnapshot)
-          : await run(() =>
-              probeProviderAvailability({
-                env: getInvocationEnv(),
-                cwd: getInvocationCwd(),
-              })
-            );
-      const defaultProvider = selectDefaultProvider(ctx.config.llm.tool, providerSnapshot);
+    const ctx = await resolveInstallCommandContext();
+    const { evaluators, errors } = await discoverEvaluatorsForCli(ctx.repoRoot);
+    const providerSnapshot =
+      ctx.config.llm.tool === 'none'
+        ? ({ claude: 'absent', codex: 'absent' } satisfies ProviderProbeSnapshot)
+        : await run(() =>
+            probeProviderAvailability({
+              env: getInvocationEnv(),
+              cwd: getInvocationCwd(),
+            })
+          );
+    const defaultProvider = selectDefaultProvider(ctx.config.llm.tool, providerSnapshot);
 
-      const summary: EvaluatorSummary[] = evaluators.map((e) => {
-        const effectiveProvider =
-          e.engine.kind === 'llm' ? (e.engine.provider ?? defaultProvider) : null;
-        return {
-          ref: e.ref,
-          package_id: e.package_id,
-          evaluator_id: e.evaluator_id,
-          severity: e.severity,
-          phase: e.phase,
-          engine: e.engine.kind,
-          enabled: e.enabled,
-          filters: {
-            paths: e.filters.paths,
-            scopes: e.filters.scopes,
-            when_llm: e.filters.when_llm,
-          },
-          ...(e.engine.kind === 'llm'
-            ? {
-                llm: {
-                  provider: {
-                    value: effectiveProvider ?? 'none',
-                    source: e.engine.selection_sources?.provider ?? 'global',
-                    available:
-                      effectiveProvider === null || ctx.config.llm.tool === 'none'
+    const summary: EvaluatorSummary[] = evaluators.map((e) => {
+      const effectiveProvider =
+        e.engine.kind === 'llm' ? (e.engine.provider ?? defaultProvider) : null;
+      return {
+        ref: e.ref,
+        package_id: e.package_id,
+        evaluator_id: e.evaluator_id,
+        severity: e.severity,
+        phase: e.phase,
+        engine: e.engine.kind,
+        enabled: e.enabled,
+        filters: {
+          paths: e.filters.paths,
+          scopes: e.filters.scopes,
+          when_llm: e.filters.when_llm,
+        },
+        ...(e.engine.kind === 'llm'
+          ? {
+              llm: {
+                provider: {
+                  value: effectiveProvider ?? 'none',
+                  source: e.engine.selection_sources?.provider ?? 'global',
+                  available:
+                    effectiveProvider === null || ctx.config.llm.tool === 'none'
+                      ? null
+                      : providerSnapshot[effectiveProvider] === 'unverified'
                         ? null
-                        : providerSnapshot[effectiveProvider] === 'unverified'
-                          ? null
-                          : providerSnapshot[effectiveProvider] === 'present',
-                  },
-                  model: {
-                    value:
-                      e.engine.selection_sources?.model === 'global'
-                        ? ctx.config.llm.model
-                        : (e.engine.model ?? null),
-                    source:
-                      e.engine.selection_sources?.model === 'global'
-                        ? ctx.config.llm.model === null
-                          ? 'provider-default'
-                          : 'global'
-                        : (e.engine.selection_sources?.model ?? 'provider-default'),
-                  },
-                  timeout_ms: {
-                    value: e.engine.timeout_ms,
-                    source: e.engine.selection_sources?.timeout_ms ?? 'pack-default',
-                  },
+                        : providerSnapshot[effectiveProvider] === 'present',
                 },
-              }
-            : {}),
-          ...(e.severity === 'block'
-            ? {
-                allows_acknowledge: e.resolution.acknowledge.enabled,
-                allows_policy_exception: e.resolution.policy_exception.enabled,
-              }
-            : {}),
-        };
+                model: {
+                  value:
+                    e.engine.selection_sources?.model === 'global'
+                      ? ctx.config.llm.model
+                      : (e.engine.model ?? null),
+                  source:
+                    e.engine.selection_sources?.model === 'global'
+                      ? ctx.config.llm.model === null
+                        ? 'provider-default'
+                        : 'global'
+                      : (e.engine.selection_sources?.model ?? 'provider-default'),
+                },
+                timeout_ms: {
+                  value: e.engine.timeout_ms,
+                  source: e.engine.selection_sources?.timeout_ms ?? 'pack-default',
+                },
+              },
+            }
+          : {}),
+        ...(e.severity === 'block'
+          ? {
+              allows_acknowledge: e.resolution.acknowledge.enabled,
+              allows_policy_exception: e.resolution.policy_exception.enabled,
+            }
+          : {}),
+      };
+    });
+
+    if (opts.json) {
+      emitOk({
+        evaluators: summary,
+        errors: errors.map((e) => ({
+          source_path: e.source_path,
+          field_path: e.field_path,
+          message: e.message,
+        })),
       });
+      if (opts.strict && errors.length > 0) {
+        throw new CliExit(2);
+      }
+      return;
+    }
 
-      if (opts.json) {
-        emitOk({
-          evaluators: summary,
-          errors: errors.map((e) => ({
-            source_path: e.source_path,
-            field_path: e.field_path,
-            message: e.message,
-          })),
-        });
-        if (opts.strict && errors.length > 0) {
-          throw new CliExit(2);
-        }
-        return;
+    if (summary.length === 0 && errors.length === 0) {
+      writeTerminalSafeStdout(
+        `No evaluators discovered. Run \`orcaops eval add-pack @orcaops/evaluator-pack core\` to install the default first-party pack.\n`
+      );
+      return;
+    }
+    if (summary.length > 0) {
+      writeTerminalSafeStdout(formatHumanList(summary));
+    }
+    if (errors.length > 0) {
+      writeTerminalSafeStderr(
+        `\n⚠ ${errors.length} evaluator discovery problem(s); run \`orcaops doctor\` for details.\n`
+      );
+      if (opts.strict) {
+        throw new CliExit(2);
       }
-
-      if (summary.length === 0 && errors.length === 0) {
-        writeTerminalSafeStdout(
-          `No evaluators discovered. Run \`orcaops eval add-pack @orcaops/evaluator-pack core\` to install the default first-party pack.\n`
-        );
-        return;
-      }
-      if (summary.length > 0) {
-        writeTerminalSafeStdout(formatHumanList(summary));
-      }
-      if (errors.length > 0) {
-        writeTerminalSafeStderr(
-          `\n⚠ ${errors.length} evaluator discovery problem(s); run \`orcaops doctor\` for details.\n`
-        );
-        if (opts.strict) {
-          throw new CliExit(2);
-        }
-      }
-    } finally {
-      ctx.store.close();
     }
   } catch (err) {
     if (err instanceof CliExit) throw err;

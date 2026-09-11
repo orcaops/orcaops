@@ -287,8 +287,8 @@ describe('buildCitations — done-criteria evidence (chain 2)', () => {
   });
 });
 
-describe('buildCitations — verified-close records (chain 3)', () => {
-  const verified = (): ReviewArtifact => {
+describe('buildCitations — reported commands', () => {
+  const reportedCommands = (): ReviewArtifact => {
     const artifact = artifactA();
     artifact.checkpoints[0]!.verification = [
       {
@@ -302,8 +302,18 @@ describe('buildCitations — verified-close records (chain 3)', () => {
     return artifact;
   };
 
+  it('reports unavailable snapshots without inventing a command target', () => {
+    const artifact = reportedCommands();
+    artifact.checkpoints[0]!.closeTreeSha = null;
+    const runs = buildCitations([artifact]).citations.filter(
+      (c) => c.kind === 'CHECKPOINT_VERIFICATION'
+    );
+    expect(runs[0]!.text).toContain('Checkpoint subsequently closed; snapshot unavailable.');
+    expect(runs[0]!.text).not.toContain('ran against snapshot');
+  });
+
   it('emits one checkpoint-scoped citation per verification entry', () => {
-    const { citations, byCheckpoint } = buildCitations([verified()]);
+    const { citations, byCheckpoint } = buildCitations([reportedCommands()]);
     const runs = citations.filter((c) => c.kind === 'CHECKPOINT_VERIFICATION');
     expect(runs.map((c) => c.id)).toEqual([
       'cite:art-a:cp1:verification:0',
@@ -322,17 +332,21 @@ describe('buildCitations — verified-close records (chain 3)', () => {
   });
 
   it('carries the digest and note verbatim, and keeps a FAILING exit code', () => {
-    const runs = buildCitations([verified()]).citations.filter(
+    const runs = buildCitations([reportedCommands()]).citations.filter(
       (c) => c.kind === 'CHECKPOINT_VERIFICATION'
     );
-    expect(runs[0]!.text).toBe('pnpm test → exit 0 · 638 passed\n↳ full engine suite');
+    expect(runs[0]!.text).toBe(
+      'pnpm test — Agent reports command exited 0. Checkpoint subsequently closed at snapshot close1. Agent-supplied output: 638 passed\nAgent-supplied note: full engine suite'
+    );
     // A non-zero exit is honest evidence; the floor must not filter proof by
     // whether it passed.
-    expect(runs[1]!.text).toBe('pnpm typecheck → exit 1');
+    expect(runs[1]!.text).toBe(
+      'pnpm typecheck — Agent reports command exited 1. Checkpoint subsequently closed at snapshot close1.'
+    );
   });
 
   it('is distinct from the artifact-scoped evaluator-run log', () => {
-    const { citations } = buildCitations([verified()]);
+    const { citations } = buildCitations([reportedCommands()]);
     const evaluator = citations.filter((c) => c.kind === 'EVALUATOR_RUN');
     const verification = citations.filter((c) => c.kind === 'CHECKPOINT_VERIFICATION');
     expect(evaluator).toHaveLength(1);

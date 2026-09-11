@@ -3,42 +3,26 @@ import { describe, expect, it } from 'vitest';
 import { parsePayload } from './commentsSource';
 
 describe('Watch comments sidecar boundary', () => {
-  it('retains archive warnings in the single comments response', () => {
+  it('accepts the enriched payload the comments verb emits', () => {
     const payload = parsePayload(
       JSON.stringify({
         schema_version: 1,
         branch: 'demo',
-        open_count: 0,
-        disclosure: [],
+        open_count: 1,
+        disclosure: ['no selected floor for this review'],
         comments: [],
-        warnings: [
-          {
-            code: 'REVIEW_ARCHIVE_WRITE_FAILED',
-            message: 'hot append succeeded; mirror unavailable',
-          },
-        ],
       })
     );
 
-    expect(payload.warnings).toEqual([
-      {
-        code: 'REVIEW_ARCHIVE_WRITE_FAILED',
-        message: 'hot append succeeded; mirror unavailable',
-      },
-    ]);
+    expect(payload.branch).toBe('demo');
+    expect(payload.open_count).toBe(1);
+    expect(payload.comments).toEqual([]);
   });
 
-  it('rejects malformed archive warning fields', () => {
+  it('refuses a comments payload with no records array', () => {
     expect(() =>
       parsePayload(
-        JSON.stringify({
-          schema_version: 1,
-          branch: 'demo',
-          open_count: 0,
-          disclosure: [],
-          comments: [],
-          warnings: [{ code: 'INVENTED_WARNING', message: 'nope' }],
-        })
+        JSON.stringify({ schema_version: 1, branch: 'demo', open_count: 0, disclosure: [] })
       )
     ).toThrow('unexpected review comments shape');
   });

@@ -151,67 +151,47 @@ has one independent repair. Diagnostics name the exact shape, membership, alias,
 or limit violation to fix; minting another run to evade an exhausted repair is
 not part of the protocol.
 
-## Run and artifact layout
+## Retained run state
 
-Every run is self-contained beneath:
+The project database retains run identity, pinned inputs, served-input receipts,
+submissions, attempts, and workflow transitions. Comments keep append-only revision
+history and exact review targets. These records are read through the review
+commands and Watch; there is no mutable `.orcaops/reviews` run directory to edit.
 
-```text
-.orcaops/reviews/<branch-slug>/twolane/<run-id>/
-```
-
-The directory contains:
-
-| Artifact                                                                  | Contract                                                                                                                                                                                |
-| ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `run-v1.json`                                                             | Mutable routine state while lanes are active; terminal outcome and time after finalization. (Container name fixed at v1; the contract version lives in `schema_version` — currently 2.) |
-| `dossier-v1.json`, `account-projection-v1.json`, `forensic-input-v1.json` | Pinned inputs whose hashes are recorded by the run.                                                                                                                                     |
-| `coverage-v1.json`, `diff.patch`                                          | The optional attribution snapshot and exact eligible diff used for ownership and rendering.                                                                                             |
-| `lane-forensic.md`, `lane-account.md`                                     | The inputs served to the reviewer in enforced order.                                                                                                                                    |
-| `accepted-forensic.json`, `accepted-account.json`                         | The validated terminal lane submissions when present.                                                                                                                                   |
-| `review.md`, `brief.json`                                                 | Concise rendered outputs.                                                                                                                                                               |
-| `composed-story-v2.json`                                                  | The deterministic merged Story before reader-model projection.                                                                                                                          |
-| `story-review-model-v4.json`                                              | The primary installed Story model, including engine-derived Part ownership and residue.                                                                                                 |
-| `run-record-v1.json`                                                      | Immutable disclosure of inputs, attempts, repairs, isolation, runtime identity, latency, outcome, outputs, hashes, and optional semantic-anchor preparation.                            |
+Floor and Story evidence are immutable files. Their database publications record
+the evidence kind, exact identity, and content hash. Evidence is written durably
+before a transaction can select it. Git snapshot retention uses immutable refs;
+changing the selected publication changes a database row, not an existing ref.
 
 Current routine contract versions are run schema 2, slice state schema 5, Story
-review model schema 4, current Story pointer schema 1, durable review-state
-version 4, and floor producer version 11.
+review model schema 4, and floor producer version 11.
 
-## Finalization and current Story installation
+## Finalization and current Story selection
 
-Finalization validates accepted lane state, composes the Story, derives
-ownership, renders the concise artifacts, writes the Story model, and then
-writes `run-record-v1.json` before marking `run-v1.json` terminal. `FULL` has
-both accepted lanes. A terminal run may instead be explicitly `DEGRADED` or
-`FAILED`; a failed run cannot install a current Story.
+Finalization validates accepted lane state, composes the Story and derives its
+ownership outside the database transaction. `FULL` has both accepted lanes. A
+terminal run may instead be explicitly `DEGRADED` or `FAILED`; a failed run cannot
+select a current Story.
 
-After a non-failed terminal run is durable, the engine publishes the branch-wide
-pointer:
-
-```text
-.orcaops/reviews/<branch-slug>/twolane/current-story-v1.json
-```
-
-The pointer names the run ID, finalization time, floor input hash, model file,
-and model SHA-256. Publication happens under the review-state lock. A newer
-valid terminal pointer wins; a missing or invalid pointer can be repaired by a
-valid terminal run.
+The publication transaction checks the expected run and version before selecting
+the prepared Story. A stale run cannot replace the current Story or overwrite
+newer review progress. Older accepted publications remain retained with their
+exact run, floor, model, and anchor identities.
 
 ## Reader contract
 
-Readers resolve exactly the run named by `current-story-v1.json`. They validate
-the pointer schema, safe run path, agreement between `run-v1.json` and
-`run-record-v1.json`, terminal non-failed outcome, model hash, canonical Story
-model bytes, branch identity, and floor input hash. They never select a run by
-modification time, scan backward for an older valid run, or treat an unpointed
-model as current.
+Readers resolve exactly the selected Story publication. They validate its
+retained run owner, sealed run revision, terminal non-failed outcome, model
+hash, canonical Story model bytes, branch identity, and floor input hash. They
+never select a run by modification time, scan backward for an older valid run,
+or treat an unselected model as current.
 
 Resolution returns:
 
-- `OK` when the pointer and model are valid for the current floor;
-- `ABSENT` when no current pointer exists;
+- `OK` when the selected publication and model are valid for the current floor;
+- `ABSENT` when no Story publication is selected;
 - `STALE` when a fully validated model belongs to a different floor;
-- `INVALID` when the pointer, terminal record, hash, or model contract fails.
+- `INVALID` when the selection, terminal record, hash, or model contract fails.
 
 A stale model may be shown best-effort, but status—not model presence—controls
 authority. Orcaops Watch reads this same engine-owned boundary and preserves the
@@ -249,17 +229,16 @@ lane nor replacing the run is ever the remedy. All codes except the
 `STORY_COMPOSE_FAILED` fallback are deterministic — retrying reproduces them,
 so fix what the diagnostic names instead of retrying.
 
-| Finalize code                       | What broke                                                                                                              |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `TWOLANE_EXECUTABLE_IDENTITY_DRIFT` | The finalizing executable is not the one that started the run; rerun finalization with the original build.              |
-| `PINNED_DIFF_UNREADABLE`            | `diff.patch` is recorded in `input_shas` but unreadable, so Part ranges cannot be validated; restore the run directory. |
-| `STORY_MODEL_CATALOG_INVALID`       | The composed Story references identities absent from its citation and ledger catalogs.                                  |
-| `STORY_MODEL_PROJECTION_INVALID`    | Projecting the composed Story into the review model failed.                                                             |
-| `STORY_MODEL_RANGES_UNRESOLVED`     | Part code ranges could not be resolved against the pinned diff.                                                         |
-| `STORY_MODEL_INVARIANT`             | The composed model violates a Story review-model invariant.                                                             |
-| `PART_OWNERSHIP_INVARIANT`          | Part ownership derivation broke its coverage invariant.                                                                 |
-| `STORY_MODEL_SCHEMA_INVALID`        | The composed model fails schema validation.                                                                             |
-| `STORY_COMPOSE_FAILED`              | Unclassified engine failure — the one code where retrying finalization once is the right first move.                    |
+| Finalize code                       | What broke                                                                                                 |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `TWOLANE_EXECUTABLE_IDENTITY_DRIFT` | The finalizing executable is not the one that started the run; rerun finalization with the original build. |
+| `STORY_MODEL_CATALOG_INVALID`       | The composed Story references identities absent from its citation and ledger catalogs.                     |
+| `STORY_MODEL_PROJECTION_INVALID`    | Projecting the composed Story into the review model failed.                                                |
+| `STORY_MODEL_RANGES_UNRESOLVED`     | Part code ranges could not be resolved against the pinned diff.                                            |
+| `STORY_MODEL_INVARIANT`             | The composed model violates a Story review-model invariant.                                                |
+| `PART_OWNERSHIP_INVARIANT`          | Part ownership derivation broke its coverage invariant.                                                    |
+| `STORY_MODEL_SCHEMA_INVALID`        | The composed model fails schema validation.                                                                |
+| `STORY_COMPOSE_FAILED`              | Unclassified engine failure — the one code where retrying finalization once is the right first move.       |
 
 If current Story publication fails after outputs become terminal, the run
 record remains durable and the failure is reported separately rather than

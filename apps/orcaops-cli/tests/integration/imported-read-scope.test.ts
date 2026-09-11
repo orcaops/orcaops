@@ -6,11 +6,7 @@ import { createHistoryRepo, type HistoryRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
 
-/**
- * Read surfaces against a store holding ONLY imported artifacts: every
- * branch-scoped arm either includes the imported corpus or discloses it via
- * the shared trailer — never a bare empty state.
- */
+/** Read surfaces against a database holding only imported artifacts. */
 describe('imported-only store read surfaces', () => {
   let repo: HistoryRepo;
   let agent: ReturnType<typeof makeAgent>;
@@ -50,35 +46,28 @@ describe('imported-only store read surfaces', () => {
     await repo.cleanup();
   });
 
-  it('discloses imported hits withheld from list --touching and reaches them via --imported', async () => {
+  it('includes imported matches in the canonical touching result', async () => {
     const human = (await agent.runRaw(['list', '--touching', 'src/health.ts'])).stdout;
-    expect(human).toContain('No closed checkpoints touched src/health.ts.');
-    expect(human).toMatch(
-      /… and 1 imported artifact — `orcaops list --touching src\/health\.ts --imported`/u
-    );
+    expect(human).toContain('[imported]');
+    expect(human).toContain('Returned: 0 captured, 1 imported.');
 
     const json = JSON.parse(
       (await agent.runRaw(['list', '--touching', 'src/health.ts', '--json'])).stdout
-    ) as { artifacts: unknown[]; imported_artifacts?: { count: number; hint: string } };
-    expect(json.artifacts).toEqual([]);
-    expect(json.imported_artifacts).toEqual({
-      count: 1,
-      hint: 'orcaops list --touching src/health.ts --imported',
-    });
-
-    const importedView = (await agent.runRaw(['list', '--touching', 'src/health.ts', '--imported']))
-      .stdout;
-    expect(importedView).toContain('[imported]');
-    expect(importedView).toContain('Artifacts touching src/health.ts');
+    ) as {
+      results: Array<{ origin: string }>;
+      origin_counts: { returned: { captured: number; imported: number } };
+    };
+    expect(json.results).toEqual([expect.objectContaining({ origin: 'git-import' })]);
+    expect(json.origin_counts.returned).toEqual({ captured: 0, imported: 1 });
   });
 
-  it('aligns the list --imported table under its own header', async () => {
-    const stdout = (await agent.runRaw(['list', '--imported'])).stdout;
+  it('aligns imported rows under the canonical list header', async () => {
+    const stdout = (await agent.runRaw(['list'])).stdout;
     const lines = stdout.split('\n');
-    const header = lines.find((line) => line.startsWith('ID       STATE'))!;
+    const header = lines.find((line) => line.startsWith('ID       PROJECT'))!;
     const rows = lines.filter((line) => line.includes('[imported]'));
     expect(rows.length).toBeGreaterThan(0);
-    for (const column of ['STATE', 'CPS', 'BRANCH']) {
+    for (const column of ['PROJECT', 'STATE', 'CPS', 'BRANCH']) {
       const at = header.indexOf(column);
       // Every row must have a cell boundary where the header says one is: a
       // full 36-char id padded to 8 pushed every later column off its heading.
@@ -99,76 +88,68 @@ describe('imported-only store read surfaces', () => {
     expect(envelope.attribution_granularity).not.toBe('none');
   });
 
-  it('carries the imported trailer on the decisions empty state', async () => {
+  it('reports an imported-only decisions selection without inventing records', async () => {
     const human = (await agent.runRaw(['decisions'])).stdout;
-    expect(human).toContain('No decisions in scope.');
-    expect(human).toMatch(/… and 1 imported artifact — `orcaops list --imported`/u);
+    expect(human).toContain('No decisions in available history.');
+    expect(human).toContain('Inspected 1 artifact(s); returned 0 captured, 0 imported.');
     const json = JSON.parse((await agent.runRaw(['decisions', '--json'])).stdout) as {
-      artifacts: unknown[];
-      imported_artifacts?: { count: number; hint: string };
+      results: unknown[];
+      page: { inspected: number };
+      origin_counts: { returned: { captured: number; imported: number } };
     };
-    expect(json.artifacts).toEqual([]);
-    expect(json.imported_artifacts).toEqual({ count: 1, hint: 'orcaops list --imported' });
+    expect(json.results).toEqual([]);
+    expect(json.page.inspected).toBe(1);
+    expect(json.origin_counts.returned).toEqual({ captured: 0, imported: 0 });
   });
 
-  it('carries the imported trailer on the loose-ends empty state', async () => {
+  it('reports an imported-only loose-ends selection without inventing findings', async () => {
     const human = (await agent.runRaw(['loose-ends'])).stdout;
-    expect(human).toContain('No loose ends in scope.');
-    expect(human).toMatch(/… and 1 imported artifact — `orcaops list --imported`/u);
+    expect(human).toContain('No loose ends in available history.');
+    expect(human).toContain('Inspected 1 artifact(s); returned 0 captured, 0 imported.');
     const json = JSON.parse((await agent.runRaw(['loose-ends', '--json'])).stdout) as {
-      artifacts: unknown[];
-      imported_artifacts?: { count: number; hint: string };
+      results: unknown[];
+      page: { inspected: number };
+      origin_counts: { returned: { captured: number; imported: number } };
     };
-    expect(json.artifacts).toEqual([]);
-    expect(json.imported_artifacts).toEqual({ count: 1, hint: 'orcaops list --imported' });
+    expect(json.results).toEqual([]);
+    expect(json.page.inspected).toBe(1);
+    expect(json.origin_counts.returned).toEqual({ captured: 0, imported: 0 });
   });
 
-  it('carries the imported pointer on the loose-ends --all-branches empty state', async () => {
-    // --all-branches reaches the imported rows, but they owe no loose ends,
-    // so the view is empty — the pointer must still disclose the corpus.
-    const human = (await agent.runRaw(['loose-ends', '--all-branches'])).stdout;
-    expect(human).toContain('No loose ends in scope.');
-    expect(human).toMatch(/… and 1 imported artifact — `orcaops list --imported`/u);
-    const json = JSON.parse(
-      (await agent.runRaw(['loose-ends', '--all-branches', '--json'])).stdout
-    ) as {
-      artifacts: unknown[];
-      imported_artifacts?: { count: number; hint: string };
-    };
-    expect(json.artifacts).toEqual([]);
-    expect(json.imported_artifacts).toEqual({ count: 1, hint: 'orcaops list --imported' });
-  });
-
-  it('explains the missing symbol lane when a non-file why target misses', async () => {
+  it('reports a missing code path without claiming checkpoint attribution', async () => {
     const human = (await agent.runRaw(['why', 'resolveWidgetRegistry'])).stdout;
-    expect(human).toContain('No matching captured artifact.');
-    expect(human).toContain('the symbol lane has no imported coverage');
-    expect(human).toContain('imported artifacts resolve by file:line');
+    expect(human).toContain('resolveWidgetRegistry — none');
+    expect(human).toContain('CODE_PATH_ABSENT');
     expect(human).not.toContain("not claimed in any checkpoint's files_changed");
 
     const json = JSON.parse(
       (await agent.runRaw(['why', 'resolveWidgetRegistry', '--json'])).stdout
-    ) as { best: unknown; hint?: string };
+    ) as { best: unknown; target: { issues: string[] } };
     expect(json.best).toBeNull();
-    expect(json.hint).toContain('the symbol lane has no imported coverage');
+    expect(json.target.issues).toContain('CODE_PATH_ABSENT');
 
-    // A target that IS a worktree file keeps the segment-attribution
-    // framing on a miss — the symbol-lane wording is for non-files only.
+    // An untracked worktree file has no blame evidence and remains unattributed.
     await writeFile(path.join(repo.path, 'notes.txt'), 'uncaptured\n', 'utf8');
     const fileMiss = (await agent.runRaw(['why', 'notes.txt:1'])).stdout;
-    expect(fileMiss).toContain("not claimed in any checkpoint's files_changed");
-    expect(fileMiss).not.toContain('the symbol lane has no imported coverage');
+    expect(fileMiss).toContain('notes.txt:1 — none');
+    expect(fileMiss).toContain('CODE_BLAME_UNAVAILABLE');
   });
 
-  it('carries the imported trailer on the resume empty state', async () => {
+  it('does not treat completed imported evidence as an implicit resumable task', async () => {
     const human = (await agent.runRaw(['resume'])).stdout;
-    expect(human).toContain('No in-flight artifacts on branch "main".');
-    expect(human).toMatch(/… and 1 imported artifact — `orcaops list --imported`/u);
+    expect(human).toContain('No task selected: NO_ELIGIBLE_ARTIFACT.');
+    expect(human).toContain('(ARTIFACT_COMPLETED)');
     const json = JSON.parse((await agent.runRaw(['resume', '--json'])).stdout) as {
-      resolution_via: string;
-      imported_artifacts?: { count: number; hint: string };
+      resolved: boolean;
+      reason: string;
+      candidates: Array<{ eligibility: { reason: string } }>;
     };
-    expect(json.resolution_via).toBe('no-active-artifacts');
-    expect(json.imported_artifacts).toEqual({ count: 1, hint: 'orcaops list --imported' });
+    expect(json.resolved).toBe(false);
+    expect(json.reason).toBe('NO_ELIGIBLE_ARTIFACT');
+    expect(json.candidates).toEqual([
+      expect.objectContaining({
+        eligibility: expect.objectContaining({ reason: 'ARTIFACT_COMPLETED' }),
+      }),
+    ]);
   });
 });

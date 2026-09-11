@@ -16,7 +16,6 @@
       "default": "./dist/ui.js"
     },
     "./sidecar": "./dist/sidecar.js",
-    "./testing": "./tests/support/fixture-archive.ts",
     "./package.json": "./package.json"
   },
   "files": [
@@ -46,7 +45,6 @@
     "@orcaops/core": "workspace:*",
     "@orcaops/eslint-config": "workspace:*",
     "@orcaops/prettier-config": "workspace:*",
-    "@orcaops/test-harness": "workspace:*",
     "@orcaops/typescript-config": "workspace:*",
     "typescript": "5.9.2",
     "vitest": "^4.0.18"

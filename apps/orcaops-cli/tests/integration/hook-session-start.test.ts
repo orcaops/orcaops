@@ -1,4 +1,3 @@
-import Database from 'better-sqlite3';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -17,6 +16,18 @@ import { renderSessionStartGuidance } from '../../src/lib/session-start-guidance
 import type { SessionStartState } from '../../src/lib/session-start-state.js';
 import { makeAgent } from '../support/test-agent.js';
 
+async function projectDatabaseFile(repoRoot: string): Promise<string> {
+  const registration = JSON.parse(
+    await readFile(path.join(repoRoot, '.git', 'orcaops', 'registration.json'), 'utf8')
+  ) as { authority: { resolved_root: string; project_id: string } };
+  return path.join(
+    registration.authority.resolved_root,
+    'projects',
+    registration.authority.project_id,
+    'history.sqlite3'
+  );
+}
+
 /**
  * `orcaops hook session-start` — the entry point installed agent session
  * hooks execute. The hard contract under test: ALWAYS exit 0 (a failure would
@@ -28,14 +39,17 @@ import { makeAgent } from '../support/test-agent.js';
 describe('orcaops hook session-start', () => {
   let repo: TempRepo;
   let agent: ReturnType<typeof makeAgent>;
+  let dataRoot: string;
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
-    agent = makeAgent({ cwd: repo.path });
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-hook-data-'));
+    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DATA_DIR: dataRoot } });
   });
 
   afterEach(async () => {
     await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
   });
 
   it('non-git directory → exit 0, empty stdout', async () => {
@@ -128,10 +142,8 @@ describe('orcaops hook session-start', () => {
       'state-aware',
       '--session-hooks',
     ]);
-    const dbPath = path.join(repo.path, '.orcaops', 'cache', 'orcaops.db');
-    // Archive-enabled init materializes the cache itself; clear it so the
-    // assertions below prove the HOOK performs zero store writes.
-    await rm(path.dirname(dbPath), { recursive: true, force: true });
+    const dbPath = await projectDatabaseFile(repo.path);
+    await rm(dbPath, { force: true });
     await expect(access(dbPath)).rejects.toMatchObject({ code: 'ENOENT' });
 
     const r = await agent.runRaw(['hook', 'session-start']);
@@ -146,8 +158,7 @@ describe('orcaops hook session-start', () => {
     expect(r.stdout).toContain('`oo-checkpoint`');
     expect(r.stdout).not.toContain('orcaops-capture');
 
-    // The no-store-writes guarantee: a read-only nudge must not materialize
-    // the SQLite cache in a repo the user hasn't captured in.
+    // The passive reader must not recreate missing project history.
     await expect(access(dbPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
@@ -176,9 +187,11 @@ describe('orcaops hook session-start', () => {
         })
       ),
     ]);
-    expect(planRes.exitCode).toBe(0);
+    expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
 
+    const databasePath = await projectDatabaseFile(repo.path);
+    const before = await readFile(databasePath);
     const r = await agent.runRaw(['hook', 'session-start']);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain(plan.artifact_id);
@@ -186,6 +199,7 @@ describe('orcaops hook session-start', () => {
     expect(r.stdout).toContain('open a checkpoint via the `orcaops-checkpoint` skill BEFORE');
     expect(r.stdout).toContain('close it: orcaops-finish');
     expect(r.stdout).not.toContain('orcaops-pre-pr');
+    expect((await readFile(databasePath)).equals(before)).toBe(true);
   });
 
   it('open checkpoint → named as OPEN with close-or-abandon guidance', async () => {
@@ -238,17 +252,6 @@ describe('orcaops hook session-start', () => {
     expect(r.stdout).toContain('or abandon it');
     // Freshly opened: no stale wording.
     expect(r.stdout).not.toContain('left over from a previous session');
-
-    const db = new Database(path.join(repo.path, '.orcaops', 'cache', 'orcaops.db'));
-    db.prepare('UPDATE checkpoints SET opened_at = ? WHERE artifact_id = ? AND n = 1').run(
-      'not-a-date',
-      plan.artifact_id
-    );
-    db.close();
-    const corruptTimestamp = await agent.runRaw(['hook', 'session-start']);
-    expect(corruptTimestamp.stdout).toContain('Checkpoint 1 is OPEN.');
-    expect(corruptTimestamp.stdout).not.toContain('NaN');
-    expect(corruptTimestamp.stdout).not.toContain('opened ');
   });
 
   it('state-aware payload honors ORCAOPS_ROOT and labels detached HEAD readably', async () => {
@@ -278,15 +281,16 @@ describe('orcaops hook session-start', () => {
     ]);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
     const outside = await mkdtemp(path.join(tmpdir(), 'orcaops-hook-root-'));
-    const rooted = makeAgent({ cwd: outside, env: { ORCAOPS_ROOT: repo.path } });
+    const rooted = makeAgent({
+      cwd: outside,
+      env: { ORCAOPS_ROOT: repo.path, ORCAOPS_DATA_DIR: dataRoot },
+    });
     const fromOverride = await rooted.runRaw(['hook', 'session-start']);
     expect(fromOverride.stdout).toContain(plan.artifact_id);
-    const fromFlag = await makeAgent({ cwd: outside }).runRaw([
-      '--root',
-      repo.path,
-      'hook',
-      'session-start',
-    ]);
+    const fromFlag = await makeAgent({
+      cwd: outside,
+      env: { ORCAOPS_DATA_DIR: dataRoot },
+    }).runRaw(['--root', repo.path, 'hook', 'session-start']);
     expect(fromFlag.stdout).toContain(plan.artifact_id);
 
     await gitClient(repo.path).raw(['checkout', '--detach']);
@@ -352,7 +356,7 @@ describe('orcaops hook session-start', () => {
     expect(() => JSON.parse(claude.stdout)).toThrow();
   });
 
-  it('corrupted cache DB: state-aware falls back to the static reminder; static still emits', async () => {
+  it('corrupted project DB: state-aware falls back to the static reminder; static still emits', async () => {
     // Formerly pinned as silence. A store that cannot open (corrupt cache, or
     // a hook environment whose node ABI mismatches the better-sqlite3 addon)
     // silenced the whole feature with zero signal — indistinguishable from
@@ -368,10 +372,7 @@ describe('orcaops hook session-start', () => {
       'state-aware',
       '--session-hooks',
     ]);
-    const dbPath = path.join(repo.path, '.orcaops', 'cache', 'orcaops.db');
-    // Init no longer creates the cache directory; the corrupt file stands in
-    // for a cache a capture created and something later damaged.
-    await mkdir(path.dirname(dbPath), { recursive: true });
+    const dbPath = await projectDatabaseFile(repo.path);
     await writeFile(dbPath, 'this is not a sqlite database\n', 'utf8');
     const aware = await agent.runRaw(['hook', 'session-start']);
     expect(aware.exitCode).toBe(0);
@@ -411,7 +412,11 @@ describe('orcaops hook session-start', () => {
     for (const value of ['', '0', 'false', 'no', 'off']) {
       const unsuppressed = makeAgent({
         cwd: repo.path,
-        env: { ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_HOOK_SUPPRESS: value },
+        env: {
+          ORCAOPS_DATA_DIR: dataRoot,
+          ORCAOPS_DISABLE_DRAIN: '1',
+          ORCAOPS_HOOK_SUPPRESS: value,
+        },
       });
       const result = await unsuppressed.runRaw(['hook', 'session-start', '--agent', 'codex']);
       expect(result.exitCode).toBe(0);
@@ -421,7 +426,11 @@ describe('orcaops hook session-start', () => {
     for (const value of ['1', 'true', 'yes', 'on']) {
       const suppressed = makeAgent({
         cwd: repo.path,
-        env: { ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_HOOK_SUPPRESS: value },
+        env: {
+          ORCAOPS_DATA_DIR: dataRoot,
+          ORCAOPS_DISABLE_DRAIN: '1',
+          ORCAOPS_HOOK_SUPPRESS: value,
+        },
       });
       const result = await suppressed.runRaw(['hook', 'session-start', '--agent', 'codex']);
       expect(result.exitCode).toBe(0);
@@ -667,28 +676,30 @@ describe('orcaops hook session-start — shared personal config across worktrees
   let linked: TempRepo;
   let mainAgent: ReturnType<typeof makeAgent>;
   let globalRoot: string;
+  let dataRoot: string;
 
   beforeEach(async () => {
     main = await createTempRepo({ initialBranch: 'main' });
     linked = await createLinkedWorktree(main.path, { branch: 'feature-hooks' });
     globalRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-hook-global-'));
-    mainAgent = makeAgent({ cwd: main.path, env: { ORCAOPS_GLOBAL_ROOT: globalRoot } });
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-hook-data-'));
+    mainAgent = makeAgent({
+      cwd: main.path,
+      env: { ORCAOPS_GLOBAL_ROOT: globalRoot, ORCAOPS_DATA_DIR: dataRoot },
+    });
   });
   afterEach(async () => {
     await linked.cleanup();
     await main.cleanup();
     await rm(globalRoot, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
   });
 
   const hookIn = (cwd: string, ...extra: string[]) =>
-    makeAgent({ cwd, env: { ORCAOPS_GLOBAL_ROOT: globalRoot } }).runRaw([
-      'hook',
-      'session-start',
-      '--agent',
-      'claude-code',
-      '--user',
-      ...extra,
-    ]);
+    makeAgent({
+      cwd,
+      env: { ORCAOPS_GLOBAL_ROOT: globalRoot, ORCAOPS_DATA_DIR: dataRoot },
+    }).runRaw(['hook', 'session-start', '--agent', 'claude-code', '--user', ...extra]);
 
   it('emits exactly once from the main root, a main subdirectory, and a linked worktree', async () => {
     await mainAgent.runRaw(['init', '--personal', '--session-hooks', '--no-llm', '--json']);
@@ -740,7 +751,7 @@ describe('orcaops hook session-start — shared personal config across worktrees
     expect(r.stdout).toBe('');
   });
 
-  it('state-aware payload in an empty sibling reports the cache as unavailable and creates nothing', async () => {
+  it('state-aware payload reads an empty sibling without creating worktree state', async () => {
     await mainAgent.runRaw([
       'init',
       '--personal',
@@ -752,7 +763,7 @@ describe('orcaops hook session-start — shared personal config across worktrees
     ]);
     const r = await hookIn(linked.path);
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain('no cached thread state is available on branch `feature-hooks`');
+    expect(r.stdout).toContain('no capture thread is in flight on branch `feature-hooks`');
     await expect(access(path.join(linked.path, '.orcaops'))).rejects.toMatchObject({
       code: 'ENOENT',
     });

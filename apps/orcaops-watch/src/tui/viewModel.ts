@@ -95,11 +95,11 @@ export function railGroups(
   const groups: RailGroup[] = [];
   const attn = attentionRows(snapshot);
   const attnIds = new Set(attn.map((row) => row.thread.artifactId));
-  const repoOk = (displayName: string): boolean => repo === null || displayName === repo;
+  const repoOk = (projectId: string): boolean => repo === null || projectId === repo;
 
   // NEEDS ATTENTION — pinned first, thread rows, in every mode.
   const attnRows: RailRow[] = attn
-    .filter((row) => repoOk(row.project.displayName) && matchesFilter(row.thread, true, filter))
+    .filter((row) => repoOk(row.project.projectId) && matchesFilter(row.thread, true, filter))
     .map((row) => threadRow(row.thread, row.project.displayName, row.project.projectId));
   if (attnRows.length > 0) {
     groups.push({
@@ -120,7 +120,7 @@ export function railGroups(
   if (groupBy === 'none') {
     const rows: RailRow[] = [];
     for (const project of sortedProjects(snapshot)) {
-      if (!repoOk(project.displayName)) continue;
+      if (!repoOk(project.projectId)) continue;
       for (const thread of remainder(project)) {
         rows.push(threadRow(thread, project.displayName, project.projectId));
       }
@@ -135,7 +135,7 @@ export function railGroups(
   // plus loose thread rows for default-branch threads. `count` stays the thread
   // total so the header reads honestly; `rows` may be fewer (grouped).
   for (const project of sortedProjects(snapshot)) {
-    if (!repoOk(project.displayName)) continue;
+    if (!repoOk(project.projectId)) continue;
     const threads = remainder(project);
     // In the ordinary all-status task view, aggregate the full branch even when
     // actionable members are also pinned above as shortcuts. Otherwise a task's
@@ -289,9 +289,18 @@ export function statusCounts(snapshot: WatchSnapshot): Record<StatusFilter, numb
   return counts;
 }
 
-/** All repo display names present in the snapshot, in sorted order. */
-export function repoNames(snapshot: WatchSnapshot): string[] {
-  return sortedProjects(snapshot).map((project) => project.displayName);
+export function repositoryOptions(snapshot: WatchSnapshot): Array<{ name: string; value: string }> {
+  const projects = sortedProjects(snapshot);
+  const counts = new Map<string, number>();
+  for (const project of projects)
+    counts.set(project.displayName, (counts.get(project.displayName) ?? 0) + 1);
+  return projects.map((project) => ({
+    name:
+      counts.get(project.displayName)! > 1
+        ? `${project.displayName} (${project.projectId})`
+        : project.displayName,
+    value: project.projectId,
+  }));
 }
 
 /** Total threads across all projects. */

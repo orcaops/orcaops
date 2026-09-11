@@ -7,6 +7,7 @@ import path from 'node:path';
 import { type Checkpoint, selectExcludedPaths, uuidv7 } from '@orcaops/storage';
 
 import type { Repo } from './repo.js';
+import { runBoundedSnapshotGit } from './snapshot-process.js';
 
 /**
  * Captures non-destructive Git tree snapshots of the working tree under
@@ -227,6 +228,8 @@ const SNAPSHOT_PHASES: readonly SnapshotPhase[] = ['open', 'close', 'abandon'];
 // ── Internal: runGit (promisified spawn with byte-bounded stdout) ──
 
 export interface RunGitOptions {
+  signal?: AbortSignal;
+  commandTimeoutMs?: number;
   /**
    * Env vars for the spawned process. Callers MUST merge `process.env`
    * FIRST and then their overrides — `{ ...process.env, ...overrides }`
@@ -265,6 +268,8 @@ export async function runGit(
   args: string[],
   opts: RunGitOptions = {}
 ): Promise<RunGitResult> {
+  if (opts.signal !== undefined || opts.commandTimeoutMs !== undefined)
+    return runBoundedSnapshotGit(cwd, args, opts);
   return new Promise((resolve, reject) => {
     const child = spawn('git', args, {
       cwd,
@@ -339,8 +344,8 @@ export async function runGit(
  *
  * Throws when `cwd` is not inside a git repo.
  */
-export async function resolveRepoTopLevel(cwd: string): Promise<string> {
-  const result = await runGit(cwd, ['rev-parse', '--show-toplevel']);
+export async function resolveRepoTopLevel(cwd: string, env?: NodeJS.ProcessEnv): Promise<string> {
+  const result = await runGit(cwd, ['rev-parse', '--show-toplevel'], { env });
   if (result.code !== 0) {
     throw new Error(
       `resolveRepoTopLevel: '${cwd}' is not inside a git work tree (` +
@@ -445,7 +450,8 @@ export function snapshotRefName(artifactId: string, n: number, phase: SnapshotPh
  * components, or return null if the string doesn't match the namespace.
  * Used by `listSnapshotRefs` to filter `git for-each-ref` output —
  * malformed entries (which shouldn't exist, but defensive) are skipped
- * rather than crashing the listing.
+ * rather than crashing the listing. Public GC callers use the null result
+ * to protect unrecognized refs instead of treating them as disposable.
  */
 export function parseSnapshotRefName(
   ref: string
@@ -596,10 +602,30 @@ export function classifySnapshotFailure(stderr: string, errno?: string): Snapsho
  * pipeline never throws. The outer try/catch is the backstop for runGit
  * spawn-channel rejections (missing git binary, EACCES, ENOMEM, …).
  */
+function selectedSnapshotEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const selected = { ...env };
+  for (const key of [
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_COMMON_DIR',
+    'GIT_INDEX_FILE',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  ])
+    delete selected[key];
+  selected.GIT_NO_REPLACE_OBJECTS = '1';
+  return selected;
+}
+
 export async function captureWorktreeTree(
   repo: Repo,
   label: string,
-  opts?: { excludePatterns?: readonly string[] }
+  opts?: {
+    excludePatterns?: readonly string[];
+    durableObjects?: boolean;
+    signal?: AbortSignal;
+    commandTimeoutMs?: number;
+  }
 ): Promise<
   | {
       ok: true;
@@ -624,6 +650,9 @@ export async function captureWorktreeTree(
   label: string,
   opts: {
     skipCommit: true;
+    durableObjects?: boolean;
+    signal?: AbortSignal;
+    commandTimeoutMs?: number;
     trackedOnly?: boolean;
     /**
      * Globs whose matching UNTRACKED files must not enter the tree. Resolved
@@ -658,6 +687,9 @@ export async function captureWorktreeTree(
   label: string,
   opts: {
     skipCommit?: boolean;
+    durableObjects?: boolean;
+    signal?: AbortSignal;
+    commandTimeoutMs?: number;
     /** Review-only mode: update tracked paths without ingesting every untracked file. */
     trackedOnly?: boolean;
     /** Literal untracked paths to add after the tracked-only update. */
@@ -689,11 +721,58 @@ export async function captureWorktreeTree(
     }
   | { ok: false; error_reason: SnapshotFailureReason; error_message?: string }
 > {
+  let ownedIndex: string | undefined;
+  const captureGit: typeof runGit =
+    opts.durableObjects === true
+      ? (cwd, args, options) => {
+          const env = selectedSnapshotEnvironment(options?.env);
+          if (opts.signal !== undefined || opts.commandTimeoutMs !== undefined) {
+            for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
+            Object.assign(env, {
+              GIT_NO_REPLACE_OBJECTS: '1',
+              GIT_OPTIONAL_LOCKS: '0',
+              GIT_TERMINAL_PROMPT: '0',
+            });
+            if (args[0] === 'commit-tree') {
+              for (const key of [
+                'GIT_AUTHOR_NAME',
+                'GIT_AUTHOR_EMAIL',
+                'GIT_COMMITTER_NAME',
+                'GIT_COMMITTER_EMAIL',
+              ])
+                env[key] = options?.env?.[key];
+            }
+            if (options?.env?.GIT_LITERAL_PATHSPECS === '1') env.GIT_LITERAL_PATHSPECS = '1';
+          }
+          if (ownedIndex !== undefined && options?.env?.GIT_INDEX_FILE === ownedIndex)
+            env.GIT_INDEX_FILE = ownedIndex;
+          return runGit(
+            cwd,
+            ['-c', 'core.fsync=loose-object', '-c', 'core.fsyncMethod=fsync', ...args],
+            { ...options, env, signal: opts.signal, commandTimeoutMs: opts.commandTimeoutMs }
+          );
+        }
+      : (cwd, args, options) =>
+          runGit(cwd, args, {
+            ...options,
+            signal: opts.signal,
+            commandTimeoutMs: opts.commandTimeoutMs,
+          });
   try {
     // Step 2: resolve repo top-level. `Repo.cwd` may be a subdirectory.
     let repoTopLevel: string;
     try {
-      repoTopLevel = await resolveRepoTopLevel(repo.cwd);
+      if (opts.signal !== undefined || opts.commandTimeoutMs !== undefined) {
+        const top = await captureGit(repo.cwd, ['rev-parse', '--show-toplevel']);
+        if (top.code !== 0 || top.truncated || !top.stdout.toString('utf8').trim())
+          throw new Error(top.stderr || 'Snapshot repository root is unavailable');
+        repoTopLevel = top.stdout.toString('utf8').trim();
+      } else {
+        repoTopLevel = await resolveRepoTopLevel(
+          repo.cwd,
+          opts.durableObjects ? selectedSnapshotEnvironment() : undefined
+        );
+      }
     } catch (err) {
       return {
         ok: false,
@@ -705,8 +784,13 @@ export async function captureWorktreeTree(
     // Step 3: unborn-repo gate. Deterministic v1 behavior — if HEAD is
     // missing, return 'unborn_repo' immediately without pinning a ref.
     try {
-      await repo.getHeadSha();
-    } catch {
+      if (opts.durableObjects || opts.signal !== undefined || opts.commandTimeoutMs !== undefined) {
+        const head = await captureGit(repo.cwd, ['rev-parse', '--verify', 'HEAD']);
+        if (head.code !== 0) throw new Error(head.stderr);
+      } else await repo.getHeadSha();
+    } catch (cause) {
+      if (['ABORT_ERR', 'ETIMEDOUT', 'EFBIG'].includes((cause as NodeJS.ErrnoException).code ?? ''))
+        throw cause;
       return { ok: false, error_reason: 'unborn_repo' };
     }
 
@@ -718,6 +802,7 @@ export async function captureWorktreeTree(
     let tempIndex: string;
     try {
       ({ directory: tempDir, indexPath: tempIndex } = await allocateTempIndex());
+      ownedIndex = tempIndex;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const errno = (err as NodeJS.ErrnoException).code;
@@ -746,7 +831,7 @@ export async function captureWorktreeTree(
       delete indexEnv.GIT_ICASE_PATHSPECS;
 
       // Step 6: read-tree HEAD into the temp index.
-      const readTree = await runGit(repoTopLevel, ['read-tree', 'HEAD'], { env: indexEnv });
+      const readTree = await captureGit(repoTopLevel, ['read-tree', 'HEAD'], { env: indexEnv });
       if (readTree.code !== 0) {
         return {
           ok: false,
@@ -775,7 +860,7 @@ export async function captureWorktreeTree(
       let excludedPaths: readonly string[] = [];
       let exclusionProbeFailed = false;
       if ((opts.excludePatterns?.length ?? 0) > 0) {
-        const untracked = await runGit(
+        const untracked = await captureGit(
           repoTopLevel,
           ['ls-files', '--others', '--exclude-standard', '-z'],
           { env: indexEnv }
@@ -821,12 +906,12 @@ export async function captureWorktreeTree(
         opts.trackedOnly === true
           ? ['add', '-u', '--', '.']
           : ['add', '-A', '--', '.', ...excludePathspecs];
-      let addAll = await runGit(repoTopLevel, addArgs, { env: indexEnv });
+      let addAll = await captureGit(repoTopLevel, addArgs, { env: indexEnv });
       if (addAll.code !== 0 && excludePathspecs.length > 0) {
         // Fail open on a git-version quirk in the pathspec: step 12 is the
         // authoritative scrub, so retrying without them still yields a clean
         // tree — it just also writes the blobs first.
-        addAll = await runGit(repoTopLevel, ['add', '-A', '--', '.'], { env: indexEnv });
+        addAll = await captureGit(repoTopLevel, ['add', '-A', '--', '.'], { env: indexEnv });
       }
       if (addAll.code !== 0) {
         return {
@@ -841,7 +926,9 @@ export async function captureWorktreeTree(
       // index and always read clean.
       const probeEnv: NodeJS.ProcessEnv = { ...process.env };
       delete probeEnv.GIT_INDEX_FILE;
-      const lsUnmerged = await runGit(repoTopLevel, ['ls-files', '-u', '-z'], { env: probeEnv });
+      const lsUnmerged = await captureGit(repoTopLevel, ['ls-files', '-u', '-z'], {
+        env: probeEnv,
+      });
       const probeFailed = lsUnmerged.code !== 0;
       const unmergedPaths: readonly string[] = probeFailed
         ? []
@@ -849,7 +936,7 @@ export async function captureWorktreeTree(
 
       // Step 10: stage the review path's opt-in untracked evidence.
       if ((opts.includeUntracked?.length ?? 0) > 0) {
-        const addOptIns = await runGit(
+        const addOptIns = await captureGit(
           repoTopLevel,
           ['add', '--', ...(opts.includeUntracked ?? [])],
           {
@@ -880,7 +967,7 @@ export async function captureWorktreeTree(
       // files (install.json, evaluators.yaml) are user work and stay.
       // NESTED `.orcaops` dirs (any depth) are scrubbed wholesale — they
       // are never legitimate and self-fingerprint at MB scale.
-      const rmVolatile = await runGit(
+      const rmVolatile = await captureGit(
         repoTopLevel,
         [
           'rm',
@@ -908,7 +995,7 @@ export async function captureWorktreeTree(
       // depth, while these are resolved literal paths and must not be
       // reinterpreted as globs.
       if (excludedPaths.length > 0) {
-        const rmExcluded = await runGit(
+        const rmExcluded = await captureGit(
           repoTopLevel,
           ['rm', '-r', '--cached', '--ignore-unmatch', '--', ...excludedPaths],
           { env: { ...indexEnv, GIT_LITERAL_PATHSPECS: '1' } }
@@ -923,7 +1010,7 @@ export async function captureWorktreeTree(
       }
 
       // Step 13: write-tree.
-      const writeTree = await runGit(repoTopLevel, ['write-tree'], { env: indexEnv });
+      const writeTree = await captureGit(repoTopLevel, ['write-tree'], { env: indexEnv });
       if (writeTree.code !== 0) {
         return {
           ok: false,
@@ -962,9 +1049,13 @@ export async function captureWorktreeTree(
         GIT_COMMITTER_EMAIL: 'orcaops@local',
       };
       const commitMsg = `orcaops snapshot ${label}`;
-      const commitTree = await runGit(repoTopLevel, ['commit-tree', tree_sha, '-m', commitMsg], {
-        env: commitEnv,
-      });
+      const commitTree = await captureGit(
+        repoTopLevel,
+        ['commit-tree', tree_sha, '-m', commitMsg],
+        {
+          env: commitEnv,
+        }
+      );
       if (commitTree.code !== 0) {
         return {
           ok: false,
@@ -1101,7 +1192,8 @@ async function inspectUntrackedFile(
 async function selectPathsPresentInTree(
   repoTopLevel: string,
   treeSha: string,
-  paths: readonly string[]
+  paths: readonly string[],
+  env: NodeJS.ProcessEnv = process.env
 ): Promise<
   | { ok: true; present: ReadonlySet<string> }
   | { ok: false; error_reason: SnapshotFailureReason; error_message?: string }
@@ -1112,7 +1204,7 @@ async function selectPathsPresentInTree(
     const listed = await runGit(
       repoTopLevel,
       ['ls-tree', '-r', '--name-only', '-z', treeSha, '--', ...chunk],
-      { env: { ...process.env, GIT_LITERAL_PATHSPECS: '1' } }
+      { env: { ...env, GIT_LITERAL_PATHSPECS: '1' } }
     );
     if (listed.code !== 0) {
       return {
@@ -1141,13 +1233,16 @@ async function selectPathsPresentInTree(
 export async function captureReviewWorktreeTreeSha(
   repo: Repo,
   requestedOptIns: readonly string[] = [],
-  opts: { excludePatterns?: readonly string[] } = {}
+  opts: { excludePatterns?: readonly string[]; durableObjects?: boolean } = {}
 ): Promise<
   | ({ ok: true } & ReviewWorktreeTreeResult)
   | { ok: false; error_reason: SnapshotFailureReason; error_message?: string }
 > {
+  const env = opts.durableObjects ? selectedSnapshotEnvironment() : process.env;
+  const reviewGit: typeof runGit = (cwd, args, options) =>
+    runGit(cwd, args, { ...options, env: { ...env, ...options?.env } });
   try {
-    const repoTopLevel = await resolveRepoTopLevel(repo.cwd);
+    const repoTopLevel = await resolveRepoTopLevel(repo.cwd, env);
     const normalizedOptIns: string[] = [];
     for (const raw of requestedOptIns) {
       const normalized = normalizeReviewOptIn(raw);
@@ -1162,7 +1257,7 @@ export async function captureReviewWorktreeTreeSha(
     }
     const uniqueOptIns = [...new Set(normalizedOptIns)].sort();
 
-    const untrackedResult = await runGit(repoTopLevel, [
+    const untrackedResult = await reviewGit(repoTopLevel, [
       'ls-files',
       '--others',
       '--exclude-standard',
@@ -1197,9 +1292,13 @@ export async function captureReviewWorktreeTreeSha(
     );
     let ignoredOptIns: string[] = [];
     if (unmatchedCandidates.length > 0) {
-      const ignored = await runGit(repoTopLevel, ['check-ignore', '--no-index', '-z', '--stdin'], {
-        stdin: `${unmatchedCandidates.join('\0')}\0`,
-      });
+      const ignored = await reviewGit(
+        repoTopLevel,
+        ['check-ignore', '--no-index', '-z', '--stdin'],
+        {
+          stdin: `${unmatchedCandidates.join('\0')}\0`,
+        }
+      );
       // check-ignore exits 1 when none match; both 0 and 1 are normal.
       if (ignored.code !== 0 && ignored.code !== 1) {
         return {
@@ -1225,6 +1324,7 @@ export async function captureReviewWorktreeTreeSha(
 
     const result = await captureWorktreeTree(repo, 'live-review', {
       skipCommit: true,
+      durableObjects: opts.durableObjects,
       trackedOnly: true,
       includeUntracked: includedUntracked,
       ...(opts.excludePatterns ? { excludePatterns: opts.excludePatterns } : {}),
@@ -1243,7 +1343,12 @@ export async function captureReviewWorktreeTreeSha(
     let withheldOptIns = sensitiveOptIns;
     let retainedOptIns: string[] = [];
     if (sensitiveOptIns.length > 0) {
-      const inTree = await selectPathsPresentInTree(repoTopLevel, result.tree_sha, sensitiveOptIns);
+      const inTree = await selectPathsPresentInTree(
+        repoTopLevel,
+        result.tree_sha,
+        sensitiveOptIns,
+        env
+      );
       // Fail closed, like the classification probes above: an unverifiable
       // claim about a credential-bearing path is not one to publish.
       if (!inTree.ok) return inTree;
@@ -1538,12 +1643,15 @@ export type SnapshotCheckoutResult =
 export async function listSensitiveTreePaths(
   repo: Repo,
   treeSha: string,
-  patterns: readonly string[]
+  patterns: readonly string[],
+  env?: NodeJS.ProcessEnv
 ): Promise<string[]> {
   if (patterns.length === 0) return [];
   try {
-    const repoTopLevel = await resolveRepoTopLevel(repo.cwd);
-    const listed = await runGit(repoTopLevel, ['ls-tree', '-r', '--name-only', '-z', treeSha]);
+    const repoTopLevel = await resolveRepoTopLevel(repo.cwd, env);
+    const listed = await runGit(repoTopLevel, ['ls-tree', '-r', '--name-only', '-z', treeSha], {
+      env,
+    });
     if (listed.code !== 0) return [];
     return selectExcludedPaths(
       listed.stdout.toString('utf8').split('\0').filter(Boolean),
@@ -1586,10 +1694,11 @@ export async function listSensitiveTreePaths(
 export async function materializeSnapshotTree(
   repo: Repo,
   commitSha: string,
-  dir: string
+  dir: string,
+  options: { env?: NodeJS.ProcessEnv } = {}
 ): Promise<SnapshotCheckoutResult> {
   try {
-    const repoTopLevel = await resolveRepoTopLevel(repo.cwd);
+    const repoTopLevel = await resolveRepoTopLevel(repo.cwd, options.env);
 
     if (!/^[0-9a-f]{40,64}$/i.test(commitSha)) {
       return {
@@ -1598,7 +1707,9 @@ export async function materializeSnapshotTree(
         error_message: `not a commit sha: "${commitSha}"`,
       };
     }
-    const catFile = await runGit(repoTopLevel, ['cat-file', '-e', `${commitSha}^{commit}`]);
+    const catFile = await runGit(repoTopLevel, ['cat-file', '-e', `${commitSha}^{commit}`], {
+      env: options.env,
+    });
     if (catFile.code !== 0) {
       return {
         ok: false,
@@ -1622,15 +1733,11 @@ export async function materializeSnapshotTree(
       // ENOENT — worktree add creates it. Other fs errors surface below.
     }
 
-    const add = await runGit(repoTopLevel, [
-      '-c',
-      'core.hooksPath=/dev/null',
-      'worktree',
-      'add',
-      '--detach',
-      dir,
-      commitSha,
-    ]);
+    const add = await runGit(
+      repoTopLevel,
+      ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--detach', dir, commitSha],
+      { env: options.env }
+    );
     if (add.code !== 0) {
       return {
         ok: false,
@@ -1693,6 +1800,7 @@ export async function diffSnapshotTrees(opts: {
    * detects renames correctly.
    */
   pathspecs?: string[];
+  env?: NodeJS.ProcessEnv;
 }): Promise<DiffSnapshotResult> {
   const { repo, openTreeSha, closeTreeSha, maxDiffBytes, pathspecs } = opts;
 
@@ -1714,12 +1822,13 @@ export async function diffSnapshotTrees(opts: {
       ],
       {
         maxStdoutBytes: maxDiffBytes,
+        env: opts.env,
         // `pathspecs` is untrusted agent input (files_changed). Force
         // LITERAL pathspecs so a glob-looking name (`*.ts`, `:(exclude)…`, a magic
         // prefix) can't widen or erase the scoped recovery diff. Only set when
         // pathspecs are present — the unscoped full diff is byte-for-byte unchanged.
         ...(pathspecs && pathspecs.length > 0
-          ? { env: { ...process.env, GIT_LITERAL_PATHSPECS: '1' } }
+          ? { env: { ...(opts.env ?? process.env), GIT_LITERAL_PATHSPECS: '1' } }
           : {}),
       }
     );
@@ -1771,6 +1880,7 @@ export async function diffSnapshotStats(opts: {
   repo: Repo;
   openTreeSha: string;
   closeTreeSha: string;
+  env?: NodeJS.ProcessEnv;
 }): Promise<DiffSnapshotStatsResult> {
   const { repo, openTreeSha, closeTreeSha } = opts;
   let result: RunGitResult;
@@ -1788,7 +1898,7 @@ export async function diffSnapshotStats(opts: {
       ],
       // One row per changed file makes 10MB absurdly generous headroom; the
       // cap only guards against a pathological object streaming unbounded.
-      { maxStdoutBytes: 10 * 1024 * 1024 }
+      { maxStdoutBytes: 10 * 1024 * 1024, env: opts.env }
     );
   } catch {
     return { ok: false };

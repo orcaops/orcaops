@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, readdir } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,36 +44,33 @@ async function runCli(
 }
 
 /**
- * Smoke surface for cross-process XDG_STATE_HOME propagation. The pin
- * lookup path resolves under `$XDG_STATE_HOME/orcaops/pins/<repo-id>/`
- * at every entry point (capture-plan auto-pin, doctor, checkout,
- * resume). In-process tests can override XDG_STATE_HOME via the
- * AsyncLocalStorage frame, but only a real spawn proves that the env
- * propagates through the OS-level fork boundary — every CLI process
- * must read what the parent shell exported.
+ * Smoke surface for cross-process focus propagation. A plan capture binds
+ * the current session in the canonical project database, and a separate
+ * process must observe that same binding.
  */
-describe('orcaops doctor pin path with spawn-set XDG_STATE_HOME (smoke)', () => {
+describe('orcaops cross-process database focus (smoke)', () => {
   let repo: TempRepo;
-  let xdgState: string;
+  let dataRoot: string;
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
-    xdgState = await mkdtemp(path.join(tmpdir(), 'orcaops-pins-smoke-xdg-'));
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-focus-smoke-history-'));
     await runCli(['init', '--json', '--no-llm'], {
       cwd: repo.path,
-      env: { ...process.env, ...withCleanSession({ XDG_STATE_HOME: xdgState }) },
+      env: { ...process.env, ...withCleanSession({ ORCAOPS_DATA_DIR: dataRoot }) },
     });
   });
 
   afterEach(async () => {
     await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
   });
 
-  it('capture plan with CLAUDE_SESSION_ID + XDG_STATE_HOME → pin lands at the spawn-passed path', async () => {
+  it('a captured plan is focused for the same session in a new process', async () => {
     const sessionEnv: NodeJS.ProcessEnv = {
       ...process.env,
       ...withCleanSession({
-        XDG_STATE_HOME: xdgState,
+        ORCAOPS_DATA_DIR: dataRoot,
         CLAUDE_SESSION_ID: 'smoke-pin-session',
       }),
     };
@@ -95,13 +92,11 @@ describe('orcaops doctor pin path with spawn-set XDG_STATE_HOME (smoke)', () => 
       { cwd: repo.path, env: sessionEnv }
     );
     expect(planRes.exitCode).toBe(0);
-
-    // pin file lives somewhere under $XDG_STATE_HOME/orcaops/pins/<repoId>/
-    const pinsRoot = path.join(xdgState, 'orcaops', 'pins');
-    const repoDirs = await readdir(pinsRoot);
-    expect(repoDirs.length).toBeGreaterThan(0);
-    const pinFiles = await readdir(path.join(pinsRoot, repoDirs[0]));
-    const pinFile = pinFiles.find((f) => f.endsWith('.json'));
-    expect(pinFile).toBeTruthy();
+    const artifactId = (JSON.parse(planRes.stdout) as { artifact_id: string }).artifact_id;
+    const status = await runCli(['status', '--json'], { cwd: repo.path, env: sessionEnv });
+    expect(status.exitCode).toBe(0);
+    const focus = (JSON.parse(status.stdout) as { focus: Array<{ pin: { artifact_id: string } }> })
+      .focus;
+    expect(focus[0]?.pin.artifact_id).toBe(artifactId);
   });
 });

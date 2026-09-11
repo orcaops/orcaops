@@ -172,8 +172,6 @@ describe('orcaops init --personal', () => {
 
       Installed 18 skills for claude-code → <global>/claude-code/skills
 
-      Archive backfill: 0 event(s) replayed, 0 remaining; 0 artifact(s) rebuilt, 0 rebuild(s) remaining.
-
       Tip: pass \`--with-hooks\` next time to auto-run \`orcaops lineage\` after merges/rebases.
 
       No evaluator packs installed.

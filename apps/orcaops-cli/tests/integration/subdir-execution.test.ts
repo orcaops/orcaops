@@ -109,21 +109,30 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
     );
 
     // bare cwd-relative target → normalized to the root-relative path and hits the cp
-    const fromSub = await sub().why('a.ts:1');
-    expect(fromSub.file).toBe('apps/cli/src/a.ts');
+    const fromSub = JSON.parse((await sub().runRaw(['why', 'a.ts:1', '--json'])).stdout) as {
+      target: { file: string };
+      best: { artifact_id: string } | null;
+    };
+    expect(fromSub.target.file).toBe('apps/cli/src/a.ts');
     expect(fromSub.best).not.toBeNull();
     expect(fromSub.best?.artifact_id).toBe(plan.artifact_id);
 
     // absolute target under the symlinked temp root → resolves identically
-    const fromAbs = await sub().why(`${path.join(subdir, 'a.ts')}:1`);
-    expect(fromAbs.file).toBe('apps/cli/src/a.ts');
+    const fromAbs = JSON.parse(
+      (await sub().runRaw(['why', `${path.join(subdir, 'a.ts')}:1`, '--json'])).stdout
+    ) as { target: { file: string }; best: { artifact_id: string } | null };
+    expect(fromAbs.target.file).toBe('apps/cli/src/a.ts');
     expect(fromAbs.best?.artifact_id).toBe(plan.artifact_id);
   });
 
-  it('why with an out-of-tree target yields no match, not an error', async () => {
-    const r = await sub().why('../../../../../../no-such-out-of-tree-file.ts:1');
-    expect(r.best).toBeNull();
-    expect(r.blame_sha).toBeNull();
+  it('why rejects a target outside the selected checkout', async () => {
+    const r = await sub().runRaw([
+      'why',
+      '../../../../../../no-such-out-of-tree-file.ts:1',
+      '--json',
+    ]);
+    expect(r.exitCode).toBe(1);
+    expect(code(r.stdout)).toBe('INVALID_INPUT');
   });
 
   it('why keeps a tracked symlink literal (does not follow it to its destination)', async () => {
@@ -150,8 +159,11 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
     );
 
     // why must keep `link.ts` literal (NOT normalize to real.ts) and hit the cp
-    const onLink = await rootAgent.why('link.ts:1');
-    expect(onLink.file).toBe('link.ts');
+    const onLink = JSON.parse((await rootAgent.runRaw(['why', 'link.ts:1', '--json'])).stdout) as {
+      target: { file: string };
+      best: { artifact_id: string } | null;
+    };
+    expect(onLink.target.file).toBe('link.ts');
     expect(onLink.best?.artifact_id).toBe(plan.artifact_id);
   });
 
@@ -168,7 +180,7 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
       '--root',
       repo.path,
     ]);
-    expect(viaFlag.exitCode).toBe(0);
+    expect(viaFlag.exitCode, `${viaFlag.stdout}\n${viaFlag.stderr}`).toBe(0);
     expect(ids(viaFlag.stdout)).toContain(plan.artifact_id);
 
     const viaEnv = await makeAgent({ cwd: outside, env: { ORCAOPS_ROOT: repo.path } }).runRaw([
@@ -224,11 +236,14 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
     expect(code(control.stdout)).toBe('NOT_A_REPO');
   });
 
-  it('a non-git cwd is NOT_A_REPO; a --root at a git repo without .orcaops is UNINITIALIZED', async () => {
+  it('status outside registered history reports unavailable context without writing', async () => {
     const outside = await outsideDir();
     const noRepo = await makeAgent({ cwd: outside }).runRaw(['status', '--json']);
-    expect(noRepo.exitCode).not.toBe(0);
-    expect(code(noRepo.stdout)).toBe('NOT_A_REPO');
+    expect(noRepo.exitCode).toBe(0);
+    expect(JSON.parse(noRepo.stdout)).toMatchObject({
+      context: { git: null, issues: [expect.objectContaining({ code: 'PROJECT_REQUIRED' })] },
+      history: { state: 'unavailable', complete: false },
+    });
 
     const bare = await createTempRepo({ initialBranch: 'main' });
     cleanups.push(() => bare.cleanup());
@@ -238,7 +253,10 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
       '--root',
       bare.path,
     ]);
-    expect(code(uninit.stdout)).toBe('UNINITIALIZED');
+    expect(uninit.exitCode).toBe(0);
+    expect(JSON.parse(uninit.stdout)).toMatchObject({
+      history: { state: 'unavailable', complete: false },
+    });
   });
 
   it('init from a subdir refuses with INIT_NOT_AT_ROOT; --here initializes the subdir', async () => {

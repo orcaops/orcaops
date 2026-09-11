@@ -1,9 +1,10 @@
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
-import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
+import { inputFile } from '@orcaops/test-harness';
 
+import { fixture, inventory } from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
 import { plantAcknowledge, plantBlockViolation } from '../support/test-helpers.js';
 
@@ -12,18 +13,16 @@ interface ErrEnvelope {
   error: { code: string; message: string };
 }
 
-describe('captureSummary BLOCKED rejection', () => {
-  let repo: TempRepo;
+describe('blocked summary refusal', { timeout: 60_000 }, () => {
+  let f: Awaited<ReturnType<typeof fixture>>;
   let agent: ReturnType<typeof makeAgent>;
 
   beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    agent = makeAgent({ cwd: repo.path });
-    await agent.init({ noLlm: true });
-  });
-
-  afterEach(async () => {
-    await repo.cleanup();
+    f = await fixture();
+    agent = makeAgent({
+      cwd: f.main,
+      env: { ORCAOPS_DATA_DIR: f.root, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
   });
 
   async function capturePlan(): Promise<{
@@ -37,6 +36,7 @@ describe('captureSummary BLOCKED rejection', () => {
       '--input',
       inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
     ]);
+    expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     return JSON.parse(planRes.stdout) as {
       artifact_id: string;
       plan_steps: Array<{ step_id: string }>;
@@ -46,11 +46,12 @@ describe('captureSummary BLOCKED rejection', () => {
   it('captureSummary rejects with BLOCKED when an unresolved block-severity violation exists', async () => {
     const plan = await capturePlan();
     await plantBlockViolation({
-      cwd: repo.path,
+      fixture: f,
       artifactId: plan.artifact_id,
       evaluatorRef: 'test-pack/api-stub',
     });
 
+    const before = await inventory(f.temporary);
     const sumRes = await agent.runRaw([
       'capture',
       'summary',
@@ -58,6 +59,7 @@ describe('captureSummary BLOCKED rejection', () => {
       inputFile(JSON.stringify({ artifact_id: plan.artifact_id, outcome: 'shipped' })),
     ]);
     expect(sumRes.exitCode).toBe(1);
+    expect(await inventory(f.temporary)).toEqual(before);
     const env = JSON.parse(sumRes.stdout) as ErrEnvelope;
     expect(env.ok).toBe(false);
     expect(env.error.code).toBe('BLOCKED');
@@ -67,8 +69,8 @@ describe('captureSummary BLOCKED rejection', () => {
 
   it('captureSummary succeeds again after the block is cleared (acknowledge re-runs the gate)', async () => {
     const plan = await capturePlan();
-    await plantBlockViolation({
-      cwd: repo.path,
+    const runId = await plantBlockViolation({
+      fixture: f,
       artifactId: plan.artifact_id,
       evaluatorRef: 'test-pack/api-stub',
     });
@@ -80,7 +82,8 @@ describe('captureSummary BLOCKED rejection', () => {
     ]);
     expect(blocked.exitCode).toBe(1);
     await plantAcknowledge({
-      cwd: repo.path,
+      fixture: f,
+      runId,
       artifactId: plan.artifact_id,
       evaluatorRef: 'test-pack/api-stub',
     });
@@ -99,13 +102,13 @@ describe('captureSummary BLOCKED rejection', () => {
   it('checkpoint capture is allowed during blocked (remediation work)', async () => {
     const plan = await capturePlan();
     await plantBlockViolation({
-      cwd: repo.path,
+      fixture: f,
       artifactId: plan.artifact_id,
       evaluatorRef: 'test-pack/api-stub',
     });
-    await writeFile(path.join(repo.path, 'fix.ts'), 'fix\n', 'utf8');
+    await writeFile(path.join(f.main, 'fix.ts'), 'fix\n', 'utf8');
     const { gitClient } = await import('@orcaops/test-harness');
-    const git = gitClient(repo.path);
+    const git = gitClient(f.main);
     await git.add('fix.ts');
     await git.commit('remediation');
     const headSha = (await git.revparse(['HEAD'])).trim();

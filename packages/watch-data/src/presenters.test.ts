@@ -8,8 +8,8 @@ function agent(
   over: Partial<WatchThread> & { artifactId: string; state: AgentState }
 ): WatchThread {
   return {
+    version: '1:retained',
     artifactStatus: 'active',
-    source: 'hot',
     branch: 'b',
     openComments: 0,
     isCurrentCheckout: true,
@@ -28,7 +28,21 @@ function agent(
     nonGoals: [],
     checkpoints: [],
     recentEvents: [],
+    omittedEvents: 0,
+    activityWindowComplete: true,
     ...over,
+  };
+}
+
+function project(threads: WatchThread[]): WatchProject {
+  return {
+    projectId: 'p',
+    displayName: 'proj',
+    authorityKey: 'store',
+    writeSequence: 1,
+    state: 'current',
+    completeness: { complete: true, issues: [] },
+    threads,
   };
 }
 
@@ -37,8 +51,10 @@ function snap(projects: WatchProject[]): WatchSnapshot {
     generated_at: '2030-01-01T00:00:00.000Z',
     generatedAtMs: 100_000,
     dataRoot: '/d',
-    archiveEnabled: true,
-    totals: { activeThreads: 0, openCheckpoints: 0, sessionTokens: 0 },
+    rootKey: 'root',
+    state: 'current',
+    completeness: { complete: true, issues: [] },
+    totals: { activeThreads: 0, openCheckpoints: 0, sessionTokens: 0, usageStatus: 'exact' },
     projects,
     ticker: [],
   };
@@ -62,15 +78,11 @@ describe('deriveSteps', () => {
 describe('attentionRows', () => {
   it('pins stalled before ready, oldest first', () => {
     const snapshot = snap([
-      {
-        projectId: 'p',
-        displayName: 'proj',
-        threads: [
-          agent({ artifactId: 'w', state: 'working', lastWriteMs: 9_000 }),
-          agent({ artifactId: 'r', state: 'ready', lastWriteMs: 5_000 }),
-          agent({ artifactId: 's', state: 'stalled', lastWriteMs: 1_000 }),
-        ],
-      },
+      project([
+        agent({ artifactId: 'w', state: 'working', lastWriteMs: 9_000 }),
+        agent({ artifactId: 'r', state: 'ready', lastWriteMs: 5_000 }),
+        agent({ artifactId: 's', state: 'stalled', lastWriteMs: 1_000 }),
+      ]),
     ]);
     expect(attentionRows(snapshot).map((row) => row.thread.artifactId)).toEqual(['s', 'r']);
   });
@@ -79,11 +91,7 @@ describe('attentionRows', () => {
 describe('reclassify', () => {
   it('recomputes state over a fresh now', () => {
     const snapshot = snap([
-      {
-        projectId: 'p',
-        displayName: 'proj',
-        threads: [agent({ artifactId: 'a', state: 'working', openCheckpoints: 1, lastWriteMs: 0 })],
-      },
+      project([agent({ artifactId: 'a', state: 'working', openCheckpoints: 1, lastWriteMs: 0 })]),
     ]);
     expect(reclassify(snapshot, 0, DEFAULT_THRESHOLDS).projects[0].threads[0].state).toBe(
       'working'

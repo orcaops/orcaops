@@ -37,8 +37,8 @@ already has an active artifact.
 # Pre-step: prior-art sweep (plan-critique)
 
 If the \`${skillRef('plan-critique', prefix)}\` skill is installed, invoke
-it BEFORE drafting a non-trivial plan. With the archive enabled it mines
-every archived project; otherwise it searches the current repository.
+it BEFORE drafting a non-trivial plan. It searches canonical captured history
+and can include every catalogued project when the task calls for it.
 Relevant decisions, rejected alternatives, non-goals, and unresolved
 uncertainty slot directly into the fields below. Skip it for trivial tasks
 or when the skill is not installed.

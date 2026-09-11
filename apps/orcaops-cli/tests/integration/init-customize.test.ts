@@ -11,7 +11,7 @@ import { effectiveConfigPath } from '../support/test-helpers.js';
 
 /**
  * The customize-more branch of interactive init: ONE default-No confirm after
- * the archive question, opening the settings init does not otherwise ask
+ * the normal setup prompts, opening the settings init does not otherwise ask
  * about (prefix, install location, generated files, workflow reminders,
  * session-hook registration, git hooks). Under test: default-No leaves
  * config at defaults; the yes-path persists all of them through the normal
@@ -69,7 +69,7 @@ describe('init customize-more branch (mocked TTY + @clack)', () => {
     delete process.env.CI;
     const m = await mocks();
     // Fallbacks walk the happy path: session hooks static, section via select
-    // fallback ('static' → maps to manual), archive/customize declined.
+    // fallback ('static' → maps to manual), customization declined.
     prime(m.select, 'static');
     prime(m.multiselect, ['claude-code']);
     prime(m.confirm, false);
@@ -94,7 +94,7 @@ describe('init customize-more branch (mocked TTY + @clack)', () => {
 
   it('declining "Customize more?" leaves every branch setting at its default', async () => {
     const m = await mocks();
-    prime(m.confirm, false); // archive no, customize no
+    prime(m.confirm, false);
     const r = await agent.runRaw(['init', '--json', '--no-llm']);
     expect(r.exitCode).toBe(0);
     const c = await cfg();
@@ -117,7 +117,6 @@ describe('init customize-more branch (mocked TTY + @clack)', () => {
       m.confirm,
       false,
       false /* machine-hook consent */,
-      false /* archive */,
       true /* customize */,
       true /* git hooks */
     );
@@ -166,13 +165,7 @@ describe('init customize-more branch (mocked TTY + @clack)', () => {
 
   it('cancelling inside the customization branch aborts before writes', async () => {
     const m = await mocks();
-    prime(
-      m.confirm,
-      false,
-      false /* machine-hook consent */,
-      false /* archive */,
-      true /* customize */
-    );
+    prime(m.confirm, false, false /* machine-hook consent */, true /* customize */);
     prime(m.text, 'orcaops', CANCELLED /* prefix */);
     prime(m.select, 'static', 'static' /* session hooks */, 'manual' /* section */);
     prime(m.multiselect, ['claude-code'], ['claude-code'] /* agents */);
@@ -189,7 +182,6 @@ describe('init customize-more branch (mocked TTY + @clack)', () => {
       m.confirm,
       false,
       false /* machine-hook consent */,
-      false /* archive */,
       true /* customize */,
       false /* git hooks */
     );
@@ -235,7 +227,7 @@ describe('init customize-more branch (mocked TTY + @clack)', () => {
     await expect(access(skillAbs)).rejects.toThrow();
 
     const m = await mocks();
-    prime(m.confirm, false, false /* archive */, true /* customize */, false /* git hooks */);
+    prime(m.confirm, false, true /* customize */, false /* git hooks */);
     prime(m.text, '', 'orcaops' /* prefix */, '' /* finish custom reminders */);
     prime(
       m.select,

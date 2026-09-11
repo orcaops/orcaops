@@ -2,6 +2,7 @@ import { ORCAOPS_CAPABILITIES } from '@orcaops/core';
 import type { OssSourcePlanReviewDecline, SourcePlanReviewDeclineResponse } from '@orcaops/sdk';
 
 import {
+  createReviewMutation,
   mapPlanCloudReadError,
   mapReviewAuthzError,
   requireRef,
@@ -16,7 +17,7 @@ import {
   writeSecretWarnings,
 } from '../../../lib/cloud-secret-gate.js';
 import { loadSecretAllowlist } from '../../../lib/run-capture.js';
-import { reviewUsageStamp, stampPlanReviewUsage } from '../../../lib/usage-stamp.js';
+import { reviewUsageStamp } from '../../../lib/usage-stamp.js';
 
 export interface ReviewDeclineOptions {
   proposal: string;
@@ -102,7 +103,12 @@ export async function reviewDeclineAction(ref: string, opts: ReviewDeclineOption
     // the client-injected core tests drive.
     assertNoSecretsOutbound(
       'plan-review-decline',
-      [['reason', opts.reason]],
+      [
+        ['external_id', ref],
+        ['proposal_id', opts.proposal],
+        ['reason', opts.reason],
+        ['base_url', opts.baseUrl],
+      ],
       await loadSecretAllowlist()
     );
 
@@ -112,22 +118,26 @@ export async function reviewDeclineAction(ref: string, opts: ReviewDeclineOption
         requires: [ORCAOPS_CAPABILITIES.SOURCE_PLAN_REVIEW],
         operation: 'plan review decline',
       },
-      (ctx) =>
-        runReviewDecline({
-          client: ctx.client,
+      async (ctx) => {
+        const mutation = createReviewMutation(ctx, {
+          verb: 'decline',
+          externalId: ref,
+          proposalId: opts.proposal,
+          reason: opts.reason ?? null,
+        });
+        const result = await runReviewDecline({
+          client: mutation.client,
           externalId: ref,
           proposalId: opts.proposal,
           ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
-        })
+        });
+        if (mutation.didDispatch() && opts.reason !== undefined && opts.reason.trim().length > 0)
+          await ctx.stampUsage(
+            reviewUsageStamp('decline', result.external_id, result.proposal_id, opts.reason)
+          );
+        return result;
+      }
     );
-
-    // Stamp only a SUBSTANTIVE decline (a non-empty --reason); a bare decline is
-    // ~0 authoring and is excluded.
-    if (opts.reason !== undefined && opts.reason.trim().length > 0) {
-      await stampPlanReviewUsage(
-        reviewUsageStamp('decline', result.external_id, result.proposal_id, opts.reason)
-      );
-    }
 
     writeSecretWarnings(result.secret_warnings);
     if (opts.json) {

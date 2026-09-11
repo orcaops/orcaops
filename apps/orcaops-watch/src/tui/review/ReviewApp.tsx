@@ -27,9 +27,7 @@ import {
   UNCERTAINTY_STATE,
   uncertaintyState,
 } from '@orcaops/review-core';
-import { ReviewCacheBehindError } from '@orcaops/watch-data/ui';
 
-import { CacheUpgradeDialog } from './CacheUpgradeDialog';
 import { executableHelpEntries, type ExecutableHelpEntry, HelpDialog } from './HelpDialog';
 import { InputModal } from './InputModal';
 import { changedRowsForFloorHunk, filterFlatFiles, ReviewExperience } from './ReviewExperience';
@@ -165,6 +163,7 @@ import {
   readReviewGenerations,
   type ReviewData,
   type ReviewGenerations,
+  ReviewPaneError,
 } from '../../data/reviewSource';
 import {
   computeFloorStaleness,
@@ -265,13 +264,21 @@ function conciseReviewLoadError(cause: unknown): string {
 
 interface ReviewLoadFailure {
   detail: string;
-  cacheBehind: ReviewCacheBehindError | null;
+}
+
+function reviewHistoryFormatFailureDetail(): string {
+  return (
+    'The canonical history database format is unsupported by this Orcaops. ' +
+    'Watch did not modify the database. Run `orcaops doctor` from this repository to inspect the supported recovery path.'
+  );
 }
 
 function reviewLoadFailure(cause: unknown): ReviewLoadFailure {
   return {
-    detail: conciseReviewLoadError(cause),
-    cacheBehind: cause instanceof ReviewCacheBehindError ? cause : null,
+    detail:
+      cause instanceof ReviewPaneError && cause.code === 'HISTORY_FORMAT_UNSUPPORTED'
+        ? reviewHistoryFormatFailureDetail()
+        : conciseReviewLoadError(cause),
   };
 }
 
@@ -1009,8 +1016,6 @@ export function ReviewApp({
   }, []);
   const [loading, setLoading] = useState(initialLoaded === undefined);
   const [error, setError] = useState<ReviewLoadFailure | null>(null);
-  const [cacheUpgradePromptOpen, setCacheUpgradePromptOpen] = useState(false);
-  const [rebuildingCache, setRebuildingCache] = useState(false);
   const [controller, setController] = useState(
     initialControllerState ?? initialReviewControllerState()
   );
@@ -1021,8 +1026,8 @@ export function ReviewApp({
   const [helpSelection, setHelpSelection] = useState(0);
   const helpSelectionRef = useRef(0);
   const helpCommandsRef = useRef<ExecutableHelpEntry[]>([]);
-  const shellLayerRef = useRef({ inputSuspended, modal, helpOpen, cacheUpgradePromptOpen });
-  shellLayerRef.current = { inputSuspended, modal, helpOpen, cacheUpgradePromptOpen };
+  const shellLayerRef = useRef({ inputSuspended, modal, helpOpen });
+  shellLayerRef.current = { inputSuspended, modal, helpOpen };
   const helpScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const walkScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const [diffScrollSurface, setDiffScrollSurface] = useState<ScrollBoxRenderable | null>(null);
@@ -1799,11 +1804,7 @@ export function ReviewApp({
   }, []);
 
   const load = useCallback(
-    async (
-      mode: 'active' | 'installed' = 'active',
-      bundleChangeObserved = false,
-      rebuildCache = false
-    ) => {
+    async (mode: 'active' | 'installed' = 'active', bundleChangeObserved = false) => {
       cancelActiveLoad();
       const epoch = ++loadEpochRef.current;
       const abortController = new AbortController();
@@ -1812,15 +1813,12 @@ export function ReviewApp({
       if (mode === 'active') {
         setLoading(true);
         setError(null);
-        setCacheUpgradePromptOpen(false);
-        setRebuildingCache(rebuildCache);
       }
       try {
         const data = await (mode === 'active' ? reviewLoader : installedReviewLoader)({
           root,
           branch,
           signal: abortController.signal,
-          ...(rebuildCache ? { rebuildCache: true } : {}),
         });
         const [ledgerResult, auxResult, generationResult] = await Promise.allSettled([
           journal.load({ root, branch }),
@@ -1922,9 +1920,7 @@ export function ReviewApp({
       } catch (cause) {
         if (abortController.signal.aborted) return;
         if (mode === 'active' && loadEpochRef.current === epoch) {
-          const failure = reviewLoadFailure(cause);
-          setError(failure);
-          setCacheUpgradePromptOpen(failure.cacheBehind !== null);
+          setError(reviewLoadFailure(cause));
         }
       } finally {
         if (activeLoadAbortRef.current === abortController) {
@@ -1932,7 +1928,6 @@ export function ReviewApp({
         }
         if (loadEpochRef.current === epoch) {
           setLoading(false);
-          setRebuildingCache(false);
         }
       }
     },
@@ -4518,7 +4513,6 @@ export function ReviewApp({
   );
 
   useKeyboard((key: ReviewKeyLike) => {
-    if (cacheUpgradePromptOpen) return;
     if (modal !== null) return;
     if (helpOpen) {
       const sequence = key.sequence ?? key.name ?? '';
@@ -4538,12 +4532,6 @@ export function ReviewApp({
       return;
     }
     if (inputSuspended) return;
-    const sequence = key.sequence ?? key.name ?? '';
-    if (error !== null && error.cacheBehind !== null && sequence.toLowerCase() === 'r') {
-      key.preventDefault?.();
-      setCacheUpgradePromptOpen(true);
-      return;
-    }
     const dispatched = dispatchCurrentReviewKey(key);
     if (!claimConsumedReviewKey(key, dispatched.consumed)) return;
     commitDispatch(dispatched);
@@ -4558,13 +4546,7 @@ export function ReviewApp({
       return;
     }
     const layer = shellLayerRef.current;
-    if (
-      layer.inputSuspended ||
-      layer.modal !== null ||
-      layer.helpOpen ||
-      layer.cacheUpgradePromptOpen
-    )
-      return;
+    if (layer.inputSuspended || layer.modal !== null || layer.helpOpen) return;
     if (shellRequest.id === 'back') {
       commitDispatch(dispatchReviewRouteBack(controllerRef.current));
       return;
@@ -4595,8 +4577,8 @@ export function ReviewApp({
   }, [helpOpen, onHelpOpenChange]);
 
   useEffect(() => {
-    onModalOpenChange?.(modal !== null || cacheUpgradePromptOpen);
-  }, [cacheUpgradePromptOpen, modal, onModalOpenChange]);
+    onModalOpenChange?.(modal !== null);
+  }, [modal, onModalOpenChange]);
 
   const activateFinishObligation = useCallback(
     (index: number) => {
@@ -4753,7 +4735,7 @@ export function ReviewApp({
   const helpCommands = executableHelpEntries(helpSections);
   helpCommandsRef.current = helpCommands;
   const helpDialog =
-    modal === null && !cacheUpgradePromptOpen && helpOpen ? (
+    modal === null && helpOpen ? (
       <HelpDialog
         title="Review controls"
         context={storyReviewHelpContext(
@@ -4780,11 +4762,7 @@ export function ReviewApp({
           <LoadingScreen
             width={width}
             height={height}
-            message={
-              rebuildingCache
-                ? `Rebuilding local cache for ${branch}…`
-                : `Loading review for ${branch}…`
-            }
+            message={`Loading review for ${branch}…`}
             background={theme.background}
             accent={cockpit.LIVE}
             fg={cockpit.DIM}
@@ -4810,29 +4788,7 @@ export function ReviewApp({
             title={`Review unavailable for ${branch}`}
             message="The captured review bundle could not be loaded."
             detail={error.detail}
-            action={
-              error.cacheBehind === null
-                ? undefined
-                : {
-                    id: 'review-cache-rebuild',
-                    label: 'Rebuild cache',
-                    onSelect: () => setCacheUpgradePromptOpen(true),
-                  }
-            }
           />
-          {cacheUpgradePromptOpen && error.cacheBehind !== null ? (
-            <CacheUpgradeDialog
-              cacheVersion={error.cacheBehind.cacheVersion}
-              currentVersion={error.cacheBehind.currentVersion}
-              width={width}
-              height={height}
-              onConfirm={() => {
-                setCacheUpgradePromptOpen(false);
-                void load('active', false, true);
-              }}
-              onDecline={() => setCacheUpgradePromptOpen(false)}
-            />
-          ) : null}
           {helpDialog}
         </box>
       </CockpitThemeContext.Provider>

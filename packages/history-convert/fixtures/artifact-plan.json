@@ -1,0 +1,38 @@
+{
+  "schema_version": 4,
+  "artifact_id": "01999999-9999-7000-8000-000000000001",
+  "branch": "feat/x",
+  "base_sha": "abc",
+  "agent": "claude-code",
+  "agent_session_id": null,
+  "task": "do the thing",
+  "label": "thing-plan",
+  "plan_steps": [
+    {
+      "step_id": "step-1",
+      "text": "step 1",
+      "label": "step-1",
+      "acceptance_criteria": []
+    }
+  ],
+  "touched_scope": [],
+  "non_goals": [],
+  "decisions": [],
+  "started_at": "2026-04-26T12:00:00.000Z",
+  "revision_n": 0,
+  "revised_at": null,
+  "rationale": null,
+  "step_lineage": {
+    "added": [],
+    "dropped": [],
+    "unchanged": [],
+    "rewritten": []
+  },
+  "criterion_lineage": {
+    "added": [],
+    "carried": [],
+    "removed": [],
+    "rewritten": []
+  },
+  "prior_plan_event_id": null
+}

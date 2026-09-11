@@ -18,8 +18,9 @@ import {
  *
  * Pass-through args go straight to the child. `--root` is CONSUMED by commander
  * (`addRootOptionRecursively` declares it on this command too), so it never
- * reaches `passThroughArgs`; the caller reads `optsWithGlobals().root` and hands
- * it here, and we re-forward it via the child's `ORCAOPS_ROOT` env.
+ * reaches `passThroughArgs`; the caller reads the invocation override captured
+ * by the pre-action hook and hands it here, and we re-forward it via the child's
+ * `ORCAOPS_ROOT` env.
  *
  * The base env is `getInvocationEnv()` (production-equivalent to `process.env`;
  * in the in-process test harness it is the per-invocation ALS env, which is how

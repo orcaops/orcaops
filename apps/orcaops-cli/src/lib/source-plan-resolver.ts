@@ -4,10 +4,9 @@ import path from 'node:path';
 
 import {
   firstForbiddenControlChar,
-  scanByExternalIdVersion,
+  type PullCacheMatch,
   type SecretFinding,
   sha256Hex,
-  sourcePlanCacheDir,
   type SourcePlanPin,
   stripControlChars,
 } from '@orcaops/storage';
@@ -30,11 +29,11 @@ const CLOUD_REF = /^cloud:(?<externalId>[^@\s]+)@(?<version>[1-9]\d*)$/;
  * Two ref kinds (the resolver is the sole indirection seam — storage and the
  * conformance evaluator only ever see `{ source_ref, content, hash }`):
  *
- *  - `cloud:<externalId>@<version>` — resolved OFFLINE against the local
- *    pull-cache (populated by `orcaops plan pull`). `capture plan` has no
- *    cloud session, so the resolver scans every org-namespace for a record
+ *  - `cloud:<externalId>@<version>` — resolved OFFLINE against project history
+ *    populated by `orcaops plan pull`. `capture plan` has no cloud session, so
+ *    the supplied lookup scans every account namespace for a record
  *    matching `(externalId, version)`: exactly one → pin it; more than one →
- *    hard-error (the same id exists under multiple sessions); none → loud
+ *    hard-error (the same id exists under multiple account namespaces); none → loud
  *    "run `orcaops plan pull` first".
  *  - anything else — a LOCAL filesystem path, resolved relative to the
  *    invocation cwd (run-from-anywhere), read in full (never truncated), and
@@ -43,8 +42,8 @@ const CLOUD_REF = /^cloud:(?<externalId>[^@\s]+)@(?<version>[1-9]\d*)$/;
  * The resolved `source_ref.locator` is stored DISPLAY-SAFE — repo-relative
  * for a file under the repo — because it surfaces in the digest
  * (`builder.ts`) and evaluator context (`evaluator-bridge.ts`); an absolute
- * `/home/<name>/…` must not leak. `repoRoot` anchors both the pull-cache
- * location and the repo-relative locator; thread it from `ctx.repoRoot`.
+ * `/home/<name>/…` must not leak. `repoRoot` anchors the repo-relative locator;
+ * thread it from `ctx.repoRoot`.
  *
  * Fails loud (`OrcaopsError`) on a missing/unreadable/empty/ambiguous ref —
  * a bad *pinned* anchor is a user error worth surfacing. An *absent*
@@ -54,22 +53,24 @@ export interface ResolvedSourcePlan {
   pin: SourcePlanPin;
   secretWarnings: readonly SecretFinding[];
 }
+export type SourcePlanLookup = (externalId: string, version: number) => Promise<PullCacheMatch[]>;
 
 export async function resolveSourcePlan(
   ref: string,
   repoRoot: string,
-  allow: readonly string[]
+  allow: readonly string[],
+  lookup?: SourcePlanLookup
 ): Promise<ResolvedSourcePlan> {
   if (ref.startsWith('cloud:')) {
-    return resolveCloudRef(ref, repoRoot, allow);
+    return resolveCloudRef(ref, allow, lookup);
   }
   return resolveLocalRef(ref, repoRoot, allow);
 }
 
 async function resolveCloudRef(
   ref: string,
-  repoRoot: string,
-  allow: readonly string[]
+  allow: readonly string[],
+  lookup?: SourcePlanLookup
 ): Promise<ResolvedSourcePlan> {
   const m = CLOUD_REF.exec(ref);
   const version = m ? Number(m.groups!.version) : Number.NaN;
@@ -77,7 +78,7 @@ async function resolveCloudRef(
   // remaining bound is magnitude: Number.isSafeInteger (not isInteger) rejects a
   // value past MAX_SAFE_INTEGER — `@9007199254740993` would otherwise
   // Number()-round to a neighbour and silently resolve a different (or missing)
-  // cached version. (A non-match's NaN also fails isSafeInteger; `!m` catches it
+  // retained version. (A non-match's NaN also fails isSafeInteger; `!m` catches it
   // first and reads clearer.)
   if (!m || !Number.isSafeInteger(version)) {
     throw new OrcaopsError(
@@ -87,49 +88,53 @@ async function resolveCloudRef(
     );
   }
   const externalId = m.groups!.externalId;
-  const matches = await scanByExternalIdVersion(
-    sourcePlanCacheDir(repoRoot),
-    externalId,
-    version,
-    repoRoot
+  const referenceSecretWarnings = assertNoSecretsOutbound(
+    'source-plan',
+    [['source_ref.locator', externalId]],
+    allow
   );
+  if (!lookup) {
+    throw new OrcaopsError(
+      ErrorCodes.NO_INPUT,
+      `Cloud source-plan ref "${ref}" requires registered project history. Run \`orcaops plan pull ${externalId}\` in the registered project first.`,
+      'source-plan'
+    );
+  }
+  const matches = await lookup(externalId, version);
   if (matches.length === 0) {
     throw new OrcaopsError(
       ErrorCodes.NO_INPUT,
-      `No pulled plan for "${ref}". Run \`orcaops plan pull ${externalId}\` first to cache the approved version.`,
+      `No pulled plan for "${ref}" in registered project history. Run \`orcaops plan pull ${externalId}\` first.`,
       'source-plan'
     );
   }
   if (matches.length > 1) {
-    const origins = matches.map((x) => x.record.base_url).join(', ');
+    const namespaces = matches.map((match) => match.namespace).join(', ');
     throw new OrcaopsError(
       ErrorCodes.NO_INPUT,
-      `Ambiguous cloud ref "${ref}": cached under multiple sessions (${origins}). Re-run \`orcaops plan pull\` for the intended cloud, or clear the stale namespace under .orcaops/cache/source-plan.`,
+      `Ambiguous cloud ref "${ref}": retained under multiple account namespaces (${namespaces}). Run capture in the registered project containing only the intended pull, or pin an explicitly selected pulled output path as a local plan.`,
       'source-plan'
     );
   }
   const rec = matches[0].record;
-  // Re-verify integrity at resolve. The cache verified sha256(body) on write,
-  // but a pin is a graded conformance anchor — never pin a body that no longer
-  // matches its recorded hash.
+  // Re-verify integrity at resolve. A pin is a graded conformance anchor, so
+  // never pin a body that no longer matches its recorded hash.
   const hash = sha256Hex(rec.body);
   if (hash !== rec.content_hash) {
     throw new OrcaopsError(
       ErrorCodes.NO_INPUT,
-      `Cached plan for "${ref}" is corrupt (sha256 mismatch). Re-run \`orcaops plan pull\`.`,
+      `Retained plan for "${ref}" is corrupt (sha256 mismatch). Re-run \`orcaops plan pull\`.`,
       'source-plan'
     );
   }
   // ASSERTED, never stripped: stripping would break the content-addressed hash
   // and silently alter the reviewed plan. `plan pull` rejects a dirty body at
-  // fetch, but a pre-existing cache entry must still fail loud HERE — pinned,
-  // it could never pass the wire assert (sync.ts) and the artifact would be
-  // permanently unpushable.
+  // fetch, but a pre-existing retained record must still fail loud here.
   const forbidden = firstForbiddenControlChar(rec.body);
   if (forbidden !== null) {
     throw new OrcaopsError(
       ErrorCodes.NO_INPUT,
-      `Cached plan for "${ref}" contains a forbidden control character ` +
+      `Retained plan for "${ref}" contains a forbidden control character ` +
         `(U+${forbidden.code.toString(16).toUpperCase().padStart(4, '0')} at offset ${forbidden.index}) ` +
         `and cannot be pinned: the cloud push rejects it, and stripping would break the ` +
         `content-addressed hash. Fix the plan on the web surface, re-upload and re-approve it, ` +
@@ -137,14 +142,12 @@ async function resolveCloudRef(
       'source-plan'
     );
   }
-  // Cloud-side defense-in-depth against a whitespace-only cached body (the
-  // cache schema's `body.min(1)` admits "   "). Mirrors resolveLocalRef's blank
-  // guard — a blank pin is not a gradable conformance anchor. `plan pull`
-  // rejects this at fetch too, but a pre-existing cache entry must still fail loud.
+  // Cloud-side defense in depth against a whitespace-only retained body. A
+  // blank pin is not a gradable conformance anchor.
   if (rec.body.trim().length === 0) {
     throw new OrcaopsError(
       ErrorCodes.NO_INPUT,
-      `Cached plan for "${ref}" is blank — not a gradable conformance anchor. Re-pull an approved version with content.`,
+      `Retained plan for "${ref}" is blank — not a gradable conformance anchor. Re-pull an approved version with content.`,
       'source-plan'
     );
   }
@@ -158,7 +161,6 @@ async function resolveCloudRef(
   const metadataSecretWarnings = assertNoSecretsOutbound(
     'source-plan',
     [
-      ['source_ref.locator', externalId],
       ['source_ref.base_url', rec.base_url],
       ['source_ref.org_id', rec.org_id],
     ],
@@ -175,12 +177,15 @@ async function resolveCloudRef(
       },
       content: rec.body,
       hash,
-      // The resolver stays pure file/cache-IO: `capture plan` merges the
-      // authoring baseline for LOCAL pins; a cloud pin's authoring baseline
-      // already lives cloud-side from `plan upload`.
+      // `capture plan` merges the authoring baseline for local pins; a cloud
+      // pin's authoring baseline already lives cloud-side from `plan upload`.
       baseline: null,
     },
-    secretWarnings: [...contentSecretWarnings, ...metadataSecretWarnings],
+    secretWarnings: [
+      ...referenceSecretWarnings,
+      ...contentSecretWarnings,
+      ...metadataSecretWarnings,
+    ],
   };
 }
 
@@ -299,7 +304,7 @@ async function resolveLocalRef(
 /**
  * Repo-relative locator when the file lives under the repo, else its absolute
  * path. Resolving the stored repo-relative locator against `repoRoot` (stable
- * at capture AND push) keeps `findByPath` lineage lookups deterministic
+ * at capture AND push) keeps project-history path lookups deterministic
  * regardless of the push process's cwd.
  */
 function displaySafeLocator(absPath: string, repoRoot: string): string {

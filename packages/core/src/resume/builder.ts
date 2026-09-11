@@ -1,7 +1,5 @@
 import {
-  artifactPathsFor,
-  type ArtifactStore,
-  atomicWriteFile,
+  type ArtifactThread,
   type NonGoal,
   redactSecretsInObject,
   redactSecretsInString,
@@ -130,26 +128,17 @@ export interface ResumeOutput {
   markdown: string;
 }
 
-export interface BuildResumeOptions {
-  store: ArtifactStore;
+export function buildResumeFromSnapshot(input: {
   artifactId: string;
-  /**
-   * Apply secret redaction to the resume output (data + markdown +
-   * cached resume.md). Defaults to `true`. The CLI wires this from
-   * `config.digest.redact_secrets` — the same knob governs every
-   * output site (digest, resume, why, search).
-   */
+  plan: ArtifactThread['plan'];
+  checkpoints: ArtifactThread['checkpoints'];
+  summary: ArtifactThread['summary'];
   redactSecrets?: boolean;
-}
-
-export async function buildResume(opts: BuildResumeOptions): Promise<ResumeOutput> {
-  const plan = await opts.store.readPlan(opts.artifactId);
-  if (!plan) {
-    throw new Error(`Cannot build resume: artifact "${opts.artifactId}" has no plan.`);
-  }
-  const checkpoints = await opts.store.readCheckpoints(opts.artifactId);
-  const summary = await opts.store.readSummary(opts.artifactId);
-
+}): ResumeOutput {
+  const opts = structuredClone(input);
+  const { plan, checkpoints, summary } = opts;
+  if (!plan || plan.artifact_id !== opts.artifactId)
+    throw new Error(`Cannot build resume: artifact "${opts.artifactId}" has no matching plan.`);
   const sorted = [...checkpoints].sort((a, b) => a.n - b.n);
   // Step claims and uncertainty are derived from CLOSED cps only.
   // Open cps haven't claimed steps yet; abandoned cps explicitly didn't.
@@ -296,20 +285,6 @@ export async function buildResume(opts: BuildResumeOptions): Promise<ResumeOutpu
   }
   const markdown = renderResumeMarkdown(data);
   return { data, markdown };
-}
-
-/**
- * Build + persist the resume to `<artifact>/resume.md` (cache).
- * Returns the resume output AND the absolute file path.
- */
-export async function writeResume(
-  opts: BuildResumeOptions
-): Promise<ResumeOutput & { path: string }> {
-  const out = await buildResume(opts);
-  const paths = artifactPathsFor(opts.store.repoRoot, opts.store.config, out.data.artifact_id);
-  const resumePath = paths.resumeMd;
-  await atomicWriteFile(resumePath, out.markdown, opts.store.repoRoot);
-  return { ...out, path: resumePath };
 }
 
 // ── Renderers ────────────────────────────────────────────────────────────

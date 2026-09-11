@@ -30,7 +30,7 @@ function richThread(index: number): WatchThread {
   return {
     artifactId: `demo-artifact-${index}`,
     artifactStatus: 'active',
-    source: index % 2 === 0 ? 'hot' : 'archive',
+    version: `1:retained-${index}`,
     branch: 'feature/demo-watch-detail',
     title:
       index === 0
@@ -41,6 +41,7 @@ function richThread(index: number): WatchThread {
       {
         agent: index % 2 === 0 ? 'codex' : 'claude-code',
         session_id: `demo-session-${index}`,
+        status: 'exact',
         tokens: 10_000 + index,
       },
     ],
@@ -125,6 +126,8 @@ function richThread(index: number): WatchThread {
             },
           ]
         : [],
+    omittedEvents: 0,
+    activityWindowComplete: true,
   };
 }
 
@@ -134,12 +137,23 @@ function snapshot(): WatchSnapshot {
     generated_at: new Date(NOW).toISOString(),
     generatedAtMs: NOW,
     dataRoot: '/tmp/orcaops-demo-detail',
-    archiveEnabled: true,
-    totals: { activeThreads: threads.length, openCheckpoints: 7, sessionTokens: 80_028 },
+    rootKey: 'demo-root',
+    state: 'current',
+    completeness: { complete: true, issues: [] },
+    totals: {
+      activeThreads: threads.length,
+      openCheckpoints: 7,
+      sessionTokens: 80_028,
+      usageStatus: 'exact',
+    },
     projects: [
       {
         projectId: 'demo-project',
         displayName: 'demo-monorepo-project',
+        authorityKey: 'demo-store',
+        writeSequence: 1,
+        state: 'current',
+        completeness: { complete: true, issues: [] },
         threads,
       },
     ],
@@ -336,6 +350,42 @@ test('one click activates artifact disclosures and checkpoint routes', async () 
   expect(checkpoint.harness.captureCharFrame()).toContain('ARTIFACT › CHECKPOINT 3');
   expect(checkpoint.harness.captureCharFrame()).toContain('‹ Artifact');
   checkpoint.harness.renderer.destroy();
+});
+
+test('artifact detail identifies incomplete session usage as an observed lower bound', async () => {
+  const partial = snapshot();
+  partial.projects[0]!.threads[0]!.sessions = [
+    { agent: 'codex', session_id: 'partial-session', status: 'incomplete', tokens: 10_000 },
+  ];
+  const source: SnapshotSource = {
+    start({ onSnapshot }) {
+      onSnapshot(partial);
+      return () => {};
+    },
+  };
+  const app = await mount(160, 34, source);
+  const frame = app.harness.captureCharFrame();
+  expect(frame).toContain('≥10.0k observed session tokens');
+  expect(frame).toContain('partial · observed lower bound');
+  expect(frame).not.toContain('10.0k session tokens');
+  app.harness.renderer.destroy();
+});
+
+test('artifact detail does not render absent session usage as zero', async () => {
+  const unavailable = snapshot();
+  unavailable.projects[0]!.threads[0]!.sessions = [];
+  const source: SnapshotSource = {
+    start({ onSnapshot }) {
+      onSnapshot(unavailable);
+      return () => {};
+    },
+  };
+  const app = await mount(160, 34, source);
+  const frame = app.harness.captureCharFrame();
+  expect(frame).toContain('session token total unavailable');
+  expect(frame).toContain('usage unavailable');
+  expect(frame).not.toContain('0 session tokens');
+  app.harness.renderer.destroy();
 });
 
 test('grouping changes retain the selected artifact and Right opens the advertised detail pane', async () => {

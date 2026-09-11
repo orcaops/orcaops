@@ -1,134 +1,175 @@
-import { ErrorCodes, OrcaopsError } from '../io/errors.js';
+import { publishDatabaseCheckout } from '@orcaops/core/history/database-checkout';
+import { stringifyTerminalSafeJson } from '@orcaops/evaluator-protocol/terminal';
+import { HistoryScopeError } from '@orcaops/project-scope/history';
+import { HistoryError } from '@orcaops/storage/history/authority';
+import { openProjectDatabase, ProjectDatabaseError } from '@orcaops/storage/history/database';
+
+import { OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
-import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../io/output.js';
-import { buildContext } from '../lib/context.js';
-import { clearPinForCurrentShell, replacePin, resolvePinTargets } from '../lib/pin-helpers.js';
+import {
+  emitOk,
+  scrubOutboundText,
+  toErrorEnvelope,
+  writeErrorLine,
+  writeTerminalSafeStderr,
+  writeTerminalSafeStdout,
+} from '../io/output.js';
+import {
+  type DatabaseCheckoutOptions,
+  prepareDatabaseCheckoutCommand,
+} from '../lib/database-checkout.js';
+import { closeFailedHistoryRead } from '../lib/history-reader-close.js';
 
-export interface CheckoutOptions {
-  /** Artifact id to pin. Mutually exclusive with `--clear`. */
-  artifactId?: string;
-  /** When true, clear the pin for the current shell instead of writing one. */
-  clear?: boolean;
-  json?: boolean;
-}
-
-/**
- * `orcaops checkout <artifact-id>` — explicit pin for the current shell.
- * `orcaops checkout --clear` — clear the pin for the current shell.
- *
- * Pin storage is per-(repo, shell-key); see
- * `packages/storage/src/pins/`. When the explicit checkout displaces
- * a pin still pointing at an `active` or `blocked` artifact, a
- * `pin_displaced` event is emitted on that prior artifact so doctor
- * can later prompt "was A abandoned?".
- *
- * Headless / CI shells without any of the recognized session env vars
- * resolve to `kind: 'none'`. There is no pin to write; we surface
- * `NO_SHELL_KEY` so the caller can decide whether to skip pinning
- * (`resume --no-pin` covers that case).
- */
-export async function checkoutAction(opts: CheckoutOptions): Promise<void> {
-  try {
-    if (opts.clear && opts.artifactId !== undefined) {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        '`orcaops checkout --clear` does not take an artifact id.'
-      );
-    }
-    if (!opts.clear && (opts.artifactId === undefined || opts.artifactId.length === 0)) {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        'Missing artifact id. Pass `<artifact-id>` to pin, or `--clear` to remove the current pin.'
-      );
-    }
-
-    const ctx = await buildContext();
+export type CheckoutOptions = DatabaseCheckoutOptions;
+export function createDatabaseCheckoutAction(dependencies: {
+  prepare: typeof prepareDatabaseCheckoutCommand;
+  openWriter: typeof openProjectDatabase;
+  publish: typeof publishDatabaseCheckout;
+}) {
+  return async (received: CheckoutOptions): Promise<void> => {
+    const json = !!received && typeof received === 'object' && received.json === true;
+    const controller = new AbortController();
+    const interrupt = () => controller.abort();
+    process.on('SIGINT', interrupt);
+    let identity: Awaited<ReturnType<typeof prepareDatabaseCheckoutCommand>>['identity'] | null =
+      null;
+    let committed: Awaited<ReturnType<typeof publishDatabaseCheckout>> | null = null;
+    let waiting = false;
     try {
-      const targets = await resolvePinTargets(ctx);
-      if (targets.shellKey.kind === 'none') {
-        throw new OrcaopsError(
-          ErrorCodes.NO_SHELL_KEY,
-          'No shell-key resolvable from environment. Set $CLAUDE_SESSION_ID, ' +
-            '$CODEX_SESSION_ID, $TMUX_PANE, $STY+$WINDOW, or $TTY before retrying.'
-        );
-      }
-
-      if (opts.clear) {
-        const result = await clearPinForCurrentShell({ targets });
-        if (opts.json) {
-          emitOk({
-            action: 'cleared',
-            cleared: result.cleared,
-            shell_key: targets.shellKey,
-            previous_artifact_id: result.pin?.artifact_id ?? null,
-          });
-          return;
-        }
-        if (result.cleared && result.pin) {
-          writeTerminalSafeStdout(
-            `Cleared pin (was ${result.pin.artifact_id} on ${result.pin.branch}).\n`
-          );
-        } else {
-          writeTerminalSafeStdout('No pin to clear for this shell.\n');
-        }
-        return;
-      }
-
-      // Explicit checkout: validate artifact, write pin, emit
-      // pin_displaced if appropriate.
-      const artifactId = opts.artifactId as string;
-      const artifactRow = ctx.store.store.getArtifact(artifactId);
-      if (!artifactRow) {
-        throw new OrcaopsError(ErrorCodes.UNKNOWN_ARTIFACT, `No artifact with id "${artifactId}".`);
-      }
-      const artifact = await ctx.store.readArtifact(artifactId);
-      if (artifact === null) {
-        throw new OrcaopsError(ErrorCodes.UNKNOWN_ARTIFACT, `No artifact with id "${artifactId}".`);
-      }
-      if (artifact.state === 'summarized') {
-        throw new OrcaopsError(
-          ErrorCodes.INVALID_INPUT,
-          `Cannot pin summarized artifact "${artifactId}"; its work is already complete.`,
-          'artifactId'
-        );
-      }
-      const result = await replacePin({
-        ctx,
-        artifactId,
-        branch: artifactRow.branch,
-        pinnedAt: new Date().toISOString(),
-        pinnedVia: 'explicit-checkout',
-        targets,
+      const request = await dependencies.prepare(received, {
+        signal: controller.signal,
+        onWait: () => {
+          if (!waiting) {
+            waiting = true;
+            writeTerminalSafeStderr(
+              'Waiting for checkout on the selected project database; Ctrl-C cancels the wait.\n'
+            );
+          }
+        },
       });
-
-      if (opts.json) {
-        emitOk({
-          action: 'pinned',
-          artifact_id: artifactId,
-          branch: artifactRow.branch,
-          shell_key: targets.shellKey,
-          pin_file: result.pinFile,
-          displaced_artifact_id: result.displacedArtifactId,
-        });
-        return;
+      identity = request.identity;
+      if (controller.signal.aborted)
+        throw new ProjectDatabaseError('CANCELLED', 'Checkout cancelled before opening the writer');
+      const writer = await dependencies.openWriter({
+        authority: request.authority,
+        mode: 'writer',
+        signal: controller.signal,
+      });
+      // An interrupt that lands while the writer is opening must be answered here rather
+      // than at settlement, and the opened writer released rather than left behind.
+      if (controller.signal.aborted) {
+        closeFailedHistoryRead(writer);
+        throw new ProjectDatabaseError('CANCELLED', 'Checkout cancelled while opening the writer');
       }
-      const lines: string[] = [
-        `Pinned ${artifactId}  (${artifactRow.task})`,
-        `  branch: ${artifactRow.branch}`,
-        `  shell-key: ${targets.shellKey.kind}`,
-      ];
-      if (result.displacedArtifactId) {
-        lines.push(
-          `  displaced ${result.displacedArtifactId} (still active or blocked — emitted pin_displaced)`
+      try {
+        committed = await dependencies.publish(writer, request.prepared);
+      } catch (cause) {
+        closeFailedHistoryRead(writer);
+        throw cause;
+      }
+      if (committed.focus.state === 'failed') closeFailedHistoryRead(writer);
+      else writer.close();
+      const output = {
+        schema_version: 3,
+        project_id: request.authority.projectId,
+        shell_key: request.shellKey,
+        action:
+          committed.focus.state === 'failed'
+            ? 'partial'
+            : committed.focus.publication?.replayed
+              ? 'replayed'
+              : committed.focus.state === 'cleared'
+                ? 'cleared'
+                : 'focused',
+        artifact_id: committed.artifactId,
+        operation_id: committed.operationId,
+        focus_operation_id: committed.focus.operationId,
+        binding: committed.binding
+          ? { state: committed.binding.replayed ? 'replayed' : 'committed', ...committed.binding }
+          : { state: 'unchanged' },
+        focus: {
+          state: committed.focus.publication?.replayed ? 'replayed' : committed.focus.state,
+          original_state: committed.focus.state,
+          publication: committed.focus.publication,
+        },
+      };
+      if (committed.focus.state === 'failed') {
+        if (json)
+          process.stdout.write(
+            stringifyTerminalSafeJson({ ...toErrorEnvelope(committed.focus.error), ...output }) +
+              '\n'
+          );
+        else {
+          writeTerminalSafeStdout(
+            `Binding committed for ${committed.artifactId}; focus publication failed.\nOriginal checkout: ${committed.operationId}\nOriginal focus: ${committed.focus.operationId}\nRetry: orcaops checkout --operation-id ${committed.operationId}\n`
+          );
+          writeErrorLine(committed.focus.error);
+        }
+        throw new CliExit(1);
+      }
+      if (json) emitOk(output);
+      else
+        writeTerminalSafeStdout(
+          committed.focus.publication?.replayed
+            ? `Replayed original checkout receipt ${committed.operationId}; current focus was not changed.\n`
+            : committed.focus.state === 'cleared'
+              ? `Cleared session focus.\nOperation: ${committed.operationId}\n`
+              : `Focused ${committed.artifactId}.\nBinding: ${committed.binding ? 'committed' : 'unchanged'}.\nOperation: ${committed.operationId}\n`
         );
+    } catch (cause) {
+      if (cause instanceof CliExit) throw cause;
+      const error =
+        cause instanceof ProjectDatabaseError
+          ? cause
+          : cause instanceof HistoryScopeError || cause instanceof HistoryError
+            ? new OrcaopsError(cause.code, scrubOutboundText(cause.message))
+            : cause;
+      if (json)
+        process.stdout.write(
+          stringifyTerminalSafeJson({
+            ...toErrorEnvelope(error),
+            schema_version: 3,
+            ...(identity
+              ? {
+                  operation_id: identity.operationId,
+                  focus_operation_id: identity.focusOperationId,
+                  artifact_id: identity.artifactId,
+                }
+              : {}),
+            ...(committed
+              ? {
+                  binding: committed.binding
+                    ? {
+                        state: committed.binding.replayed ? 'replayed' : 'committed',
+                        ...committed.binding,
+                      }
+                    : { state: 'unchanged' },
+                  focus: {
+                    state: committed.focus.publication?.replayed
+                      ? 'replayed'
+                      : committed.focus.state,
+                    original_state: committed.focus.state,
+                    publication: committed.focus.publication,
+                  },
+                }
+              : {}),
+          }) + '\n'
+        );
+      else {
+        writeErrorLine(error);
+        if (identity)
+          writeTerminalSafeStderr(
+            `Original operation: ${identity.operationId}; original focus: ${identity.focusOperationId}. Retain these IDs when inspecting or retrying checkout.\n`
+          );
       }
-      writeTerminalSafeStdout(lines.join('\n') + '\n');
+      throw new CliExit(1);
     } finally {
-      ctx.store.close();
+      process.off('SIGINT', interrupt);
     }
-  } catch (err) {
-    if (opts.json) emitError(err);
-    writeErrorLine(err);
-    throw new CliExit(1);
-  }
+  };
 }
+export const checkoutAction = createDatabaseCheckoutAction({
+  prepare: prepareDatabaseCheckoutCommand,
+  openWriter: openProjectDatabase,
+  publish: publishDatabaseCheckout,
+});

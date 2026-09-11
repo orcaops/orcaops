@@ -2,8 +2,8 @@
 name: "Orcaops: capture plan"
 description: "Capture or revise a coding-task plan, minting stable step IDs and running plan checks."
 metadata:
-  generatedBy: "orcaops@0.1.1"
-  contentHash: "4bb90a5a0abc"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "9490e11d6a25"
 tags: ["orcaops", "capture"]
 ---
 
@@ -43,8 +43,8 @@ already has an active artifact.
 # Pre-step: prior-art sweep (plan-critique)
 
 If the `orcaops-plan-critique` skill is installed, invoke
-it BEFORE drafting a non-trivial plan. With the archive enabled it mines
-every archived project; otherwise it searches the current repository.
+it BEFORE drafting a non-trivial plan. It searches canonical captured history
+and can include every catalogued project when the task calls for it.
 Relevant decisions, rejected alternatives, non-goals, and unresolved
 uncertainty slot directly into the fields below. Skip it for trivial tasks
 or when the skill is not installed.
@@ -348,4 +348,4 @@ When `blocking: true` is set, do **not** start the work until resolved.
 Every capture command returns a `cloud_sync` object. Branch on `cloud_sync.status`:
 
 - `"ok"` or `"skipped"` — nothing to do. Continue.
-- `"paused"` — this artifact was NOT recorded and it will not fix itself. **STOP and tell the user.** Quote `cloud_sync.message` and `cloud_sync.action` verbatim; `cloud_sync.pending` is how many artifacts are waiting locally. Do NOT re-run the capture hoping it clears: a replay writes nothing new, and the fault needs the remediation in `cloud_sync.action`.
+- `"paused"` — the capture is saved locally, but its current state is NOT confirmed on the cloud. **STOP and tell the user.** Quote `cloud_sync.message` and `cloud_sync.action` verbatim; `cloud_sync.pending` when present is the number of artifacts waiting in the selected project; an omitted count is unknown. Do NOT re-run the capture hoping it clears: replaying a completed capture does not resend it, and the fault needs the remediation in `cloud_sync.action`.

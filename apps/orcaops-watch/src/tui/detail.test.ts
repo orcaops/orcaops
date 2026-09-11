@@ -37,11 +37,10 @@ function thread(id: string, overrides: Partial<WatchThread> = {}): WatchThread {
   return {
     artifactId: id,
     artifactStatus: 'active',
-    source: 'hot',
     branch: 'feature/demo-detail',
     title: 'Refine the demo artifact detail presentation end to end',
     agent: 'codex',
-    sessions: [{ agent: 'codex', session_id: `session-${id}`, tokens: 12_345 }],
+    sessions: [{ agent: 'codex', session_id: `session-${id}`, status: 'exact', tokens: 12_345 }],
     openCheckpoints: 0,
     openComments: 2,
     isCurrentCheckout: false,
@@ -86,6 +85,9 @@ function thread(id: string, overrides: Partial<WatchThread> = {}): WatchThread {
         branch: 'feature/demo-detail',
       },
     ],
+    version: '1:retained',
+    omittedEvents: 0,
+    activityWindowComplete: true,
     ...overrides,
   };
 }
@@ -167,8 +169,8 @@ describe('artifact detail presentation', () => {
     const detail = buildDetail(
       thread('artifact-a', {
         sessions: [
-          { agent: 'codex', session_id: 'shared-id', tokens: 1_000 },
-          { agent: 'claude-code', session_id: 'shared-id', tokens: 2_000 },
+          { agent: 'codex', session_id: 'shared-id', status: 'exact', tokens: 1_000 },
+          { agent: 'claude-code', session_id: 'shared-id', status: 'exact', tokens: 2_000 },
         ],
       }),
       new Set(),

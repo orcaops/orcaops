@@ -1,22 +1,12 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
-
-import {
-  CURRENT_STORY_POINTER_FILE,
-  serializeStoryReviewModel,
-  STORY_REVIEW_MODEL_FILE,
-} from '@orcaops/review-engine';
 
 import {
   STORY_NAVIGATION_SAMPLES,
   STORY_WHEEL_SAMPLES,
   type StoryInteractionMeasurement,
 } from './review-story-interaction-measure';
-import { readReviewGenerations } from '../src/data/reviewSource';
 import {
   collectCpuAttributedWallSamples,
   externallyDescheduled as isExternallyDescheduled,
@@ -33,14 +23,12 @@ import {
   buildProductionStoryReviewHarnessFixture,
   storyOverlay,
 } from '../tests/review/storyReviewHarness';
-import { terminalRunFileSeed } from '../tests/support/twolaneRunFile';
 
 const STORY_READER_ITERATIONS = 25;
 const STORY_WIDTHS = [80, 110, 160] as const;
 const STORY_COLD_BRIEF_SAMPLES = 20;
 const STORY_COLD_BRIEF_BATCH_SIZE = 1;
 const STORY_ACTIVE_PART_SAMPLES = 200;
-const STORY_PASSIVE_PROBE_SAMPLES = 50;
 const STORY_MOUNTED_NODE_LIMIT = 1_000;
 const STORY_FIRST_USEFUL_P50_BUDGET_MS = 100;
 const STORY_FIRST_USEFUL_P95_BUDGET_MS = 150;
@@ -52,7 +40,6 @@ const STORY_ACTIVE_PART_P95_BUDGET_MS = 16;
 const STORY_READER_BUILD_P95_BUDGET_MS = 150;
 const STORY_EVENT_LOOP_STALL_BUDGET_MS = 50;
 const STORY_SPINNER_HEARTBEAT_BUDGET_MS = 100;
-const STORY_PASSIVE_PROBE_P95_BUDGET_MS = 10;
 const STORY_SCHEDULER_ACTIVE_RATIO = 0.8;
 const STORY_SCHEDULER_RETRY_LIMIT = 3;
 
@@ -390,102 +377,6 @@ async function measureStoryColdBrief(
   return { samples, schedulerDiscardedSamples };
 }
 
-async function installPassiveProbeFixture(input: {
-  root: string;
-  floor: Awaited<ReturnType<typeof buildProductionStoryReviewHarnessFixture>>['floor'];
-  reviewDiff: string;
-  model: Awaited<ReturnType<typeof buildProductionStoryReviewHarnessFixture>>['model'];
-}): Promise<void> {
-  const reviewDir = path.join(input.root, '.orcaops', 'reviews', 'probe');
-  const twolaneDir = path.join(reviewDir, 'twolane');
-  const runId = '77777777-7777-7777-8777-777777777777';
-  const runDir = path.join(twolaneDir, runId);
-  const historicalDir = path.join(twolaneDir, '66666666-6666-4666-8666-666666666666');
-  const modelBytes = serializeStoryReviewModel(input.model);
-  const modelSha = createHash('sha256').update(modelBytes).digest('hex');
-  const finalizedAt = '2026-07-23T12:00:00.000Z';
-  const inputShas = { dossier: 'performance-dossier', projection: 'performance-projection' };
-  await Promise.all([
-    mkdir(runDir, { recursive: true }),
-    mkdir(historicalDir, { recursive: true }),
-  ]);
-  await Promise.all([
-    writeFile(path.join(reviewDir, 'floor.json'), `${JSON.stringify(input.floor)}\n`),
-    writeFile(path.join(reviewDir, 'diff.patch'), input.reviewDiff),
-    writeFile(path.join(runDir, STORY_REVIEW_MODEL_FILE), modelBytes),
-    writeFile(
-      path.join(runDir, 'run-v1.json'),
-      `${JSON.stringify(
-        terminalRunFileSeed({ runId, branch: input.model.branch, finalizedAt, inputShas })
-      )}\n`
-    ),
-    writeFile(
-      path.join(runDir, 'run-record-v1.json'),
-      `${JSON.stringify({
-        schema_version: 1,
-        run_id: runId,
-        branch: input.model.branch,
-        input_shas: inputShas,
-        finalized_at: finalizedAt,
-        outcome: 'FULL',
-        outputs: {
-          story_review_model: STORY_REVIEW_MODEL_FILE,
-          story_review_model_sha256: modelSha,
-        },
-      })}\n`
-    ),
-    writeFile(
-      path.join(twolaneDir, CURRENT_STORY_POINTER_FILE),
-      `${JSON.stringify({
-        schema_version: 1,
-        run_id: runId,
-        finalized_at: finalizedAt,
-        floor_input_hash: input.model.floor_input_hash,
-        model_file: STORY_REVIEW_MODEL_FILE,
-        model_sha256: modelSha,
-      })}\n`
-    ),
-    // A corrupt historical generation is deliberate: an idle passive probe may
-    // stat only the current pointer/run and must never parse or hash this file.
-    writeFile(
-      path.join(historicalDir, 'story-review-model-v3.json'),
-      '{historical generation must not be parsed'
-    ),
-  ]);
-}
-
-async function measurePassiveStoryProbe(input: {
-  floor: Awaited<ReturnType<typeof buildProductionStoryReviewHarnessFixture>>['floor'];
-  reviewDiff: string;
-  model: Awaited<ReturnType<typeof buildProductionStoryReviewHarnessFixture>>['model'];
-}) {
-  const root = await mkdtemp(path.join(tmpdir(), 'orcaops-story-passive-perf-'));
-  try {
-    await installPassiveProbeFixture({ root, ...input });
-    const installed = await readReviewGenerations({ root, branch: 'probe' });
-    const samples: number[] = [];
-    for (let index = 0; index < STORY_PASSIVE_PROBE_SAMPLES; index += 1) {
-      const started = performance.now();
-      const next = await readReviewGenerations({ root, branch: 'probe' });
-      samples.push(performance.now() - started);
-      if (
-        next.story !== installed.story ||
-        next.storyInstallation !== installed.storyInstallation ||
-        next.storyAnchors !== installed.storyAnchors
-      ) {
-        throw new Error('idle passive Story probe changed immutable generation identity');
-      }
-    }
-    return {
-      ...stats(samples, STORY_PASSIVE_PROBE_P95_BUDGET_MS),
-      historicalCorruptRunPresent: true,
-      currentRunOnly: true,
-    };
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-}
-
 // CI enters this process immediately after other renderer-heavy suites. None of
 // that work belongs to the benchmarked Watch process, so start from one short
 // scheduler/memory quiescence boundary before launching isolated TUI workers.
@@ -649,11 +540,6 @@ for (const width of STORY_WIDTHS) {
   }
   storyWidths.push(await measureStoryWidth(width, interaction, coldBrief));
 }
-const passiveStoryResolution = await measurePassiveStoryProbe({
-  floor: storyFixture.floor,
-  reviewDiff: storyFixture.reviewDiff,
-  model: storyFixture.model,
-});
 const activePartProjection = stats(activePartSamples, STORY_ACTIVE_PART_P95_BUDGET_MS);
 const storyReaderBuild = stats(watchSamples, STORY_READER_BUILD_P95_BUDGET_MS);
 const storyPerformanceChecks = {
@@ -665,8 +551,6 @@ const storyPerformanceChecks = {
   everyWidthMountBounded: storyWidths.every((result) => result.mountedNodesPass),
   noPostLoadEventLoopStall: storyWidths.every((result) => result.postLoadEventLoop.pass),
   spinnerHeartbeatWithinBudget: spinnerHeartbeat.pass,
-  idlePassiveResolutionWithinBudget: passiveStoryResolution.pass,
-  passiveResolutionCurrentRunOnly: passiveStoryResolution.currentRunOnly,
 };
 const storyPerformancePass = Object.values(storyPerformanceChecks).every(Boolean);
 
@@ -699,7 +583,6 @@ const report = {
     },
     widths: storyWidths,
     spinnerHeartbeat,
-    passiveStoryResolution,
     checks: storyPerformanceChecks,
     pass: storyPerformancePass,
   },

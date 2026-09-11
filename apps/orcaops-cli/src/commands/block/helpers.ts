@@ -36,12 +36,11 @@ export interface TargetRun {
  * "nothing to <verb>" message.
  */
 export function resolveTargetRun(
-  ctx: { store: { store: { listEvaluatorRuns(id: string): readonly RunRow[] } } },
+  rows: readonly RunRow[],
   opts: { artifact: string; evaluator: string; runId?: string },
   evaluatorRef: string,
   verb: 'acknowledge' | 'dismiss'
 ): TargetRun {
-  const rows = ctx.store.store.listEvaluatorRuns(opts.artifact);
   // Current block set, latest-per-ref (a later pass / disposition supersedes an
   // earlier violation) — the single supersession used across the lifecycle.
   const current = computeUnresolvedBlocks(rows);

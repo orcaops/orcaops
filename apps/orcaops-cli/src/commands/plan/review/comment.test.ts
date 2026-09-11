@@ -14,7 +14,11 @@ import {
   runReviewComment,
   type RunReviewCommentArgs,
 } from './comment.js';
-import { seedCandidate, seedProposal } from './test-helpers.js';
+import {
+  createMemoryPlanReviewPersistence,
+  seedCandidate,
+  seedProposal,
+} from '../../../../tests/support/plan-review-persistence.js';
 
 const commentResp = (): SourcePlanReviewCommentResponse => ({
   externalId: 'ext-1',
@@ -29,7 +33,9 @@ function commentClient(
 
 describe('runReviewComment', () => {
   let repoRoot: string;
+  let persistence: ReturnType<typeof createMemoryPlanReviewPersistence>;
   beforeEach(async () => {
+    persistence = createMemoryPlanReviewPersistence();
     repoRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-review-comment-'));
   });
   afterEach(async () => {
@@ -37,6 +43,7 @@ describe('runReviewComment', () => {
   });
 
   const base = (root: string) => ({
+    persistence,
     kind: 'root' as const,
     repoRoot: root,
     baseUrl: 'https://cloud.example',
@@ -85,7 +92,7 @@ describe('runReviewComment', () => {
   });
 
   it('targets the candidate version by default', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewComment = vi.fn(async () => commentResp());
     const result = await runReviewComment({
       client: commentClient(reviewComment),
@@ -98,7 +105,7 @@ describe('runReviewComment', () => {
   });
 
   it('targets a proposal with --proposal', async () => {
-    await seedProposal(repoRoot, { proposalId: 'prop_9' });
+    await seedProposal(persistence, { proposalId: 'prop_9' });
     const reviewComment = vi.fn(async () => commentResp());
     const result = await runReviewComment({
       client: commentClient(reviewComment),
@@ -112,8 +119,8 @@ describe('runReviewComment', () => {
   });
 
   it('defaults to the candidate when both candidate and proposal are cached', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
-    await seedProposal(repoRoot, { proposalId: 'prop_9' });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
+    await seedProposal(persistence, { proposalId: 'prop_9' });
     const reviewComment = vi.fn(async () => commentResp());
     await runReviewComment({ client: commentClient(reviewComment), ...base(repoRoot) });
     expect(reviewComment).toHaveBeenCalledWith(
@@ -122,7 +129,7 @@ describe('runReviewComment', () => {
   });
 
   it('passes quote + disambiguator through', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewComment = vi.fn(async () => commentResp());
     await runReviewComment({
       client: commentClient(reviewComment),
@@ -147,7 +154,7 @@ describe('runReviewComment', () => {
   });
 
   it('maps a PINNED CONFLICT to "comments are closed"', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewComment = vi.fn(async () => {
       throw new TrpcRequestError('conflict', { code: 'CONFLICT', httpStatus: 409 });
     });
@@ -162,7 +169,7 @@ describe('runReviewComment', () => {
   });
 
   it('root comment sends parent_comment_id null', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewComment = vi.fn(async () => commentResp());
     await runReviewComment({ client: commentClient(reviewComment), ...base(repoRoot) });
     expect(reviewComment).toHaveBeenCalledWith(

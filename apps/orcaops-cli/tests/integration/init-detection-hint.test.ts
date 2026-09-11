@@ -92,6 +92,6 @@ describe('interactive init agent checklist hints', () => {
       'github-copilot': 'detected: ~/.copilot/config.json',
     });
     expect(hints.codex).toBeUndefined();
-    expect(await readdir(homeRoot)).toEqual([]);
+    expect(await readdir(homeRoot)).toEqual(['data']);
   });
 });

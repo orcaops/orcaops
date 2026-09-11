@@ -80,7 +80,7 @@ describe('evaluator config discovery snapshot', () => {
     configReadMutation.replacement = 'schema: [';
   }
 
-  it('lifecycle dispatch keeps config and eligibility from one discovery read', async () => {
+  it('lifecycle dispatch keeps one discovery snapshot before advisory reread', async () => {
     await initialize();
     mutateAfterRead(1);
 
@@ -100,10 +100,10 @@ describe('evaluator config discovery snapshot', () => {
     ]);
 
     expect(result.exitCode).toBe(0);
-    expect(configReadMutation.reads).toBe(1);
+    expect(configReadMutation.reads).toBe(2);
   });
 
-  it('checkpoint-open trust and dispatch keep the discovery config snapshot', async () => {
+  it('checkpoint-open trust and dispatch keep one snapshot before advisory reread', async () => {
     await initialize();
     const plan = await agent.runRaw([
       'capture',
@@ -147,7 +147,7 @@ describe('evaluator config discovery snapshot', () => {
     ]);
 
     expect(result.exitCode).toBe(0);
-    expect(configReadMutation.reads).toBe(1);
+    expect(configReadMutation.reads).toBe(2);
   });
 
   it('Doctor trust diagnostics use the same config discovery that supplies evaluators', async () => {

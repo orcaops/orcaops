@@ -113,9 +113,7 @@ describe('resolveEnabledSkills', () => {
     ]);
   });
 
-  it('plan-critique is ENABLED under EMPTY capabilities — no archive gate', () => {
-    // The dissolved precedent skill was `requires: ['archive']`; its
-    // successor must never regain the gate — degradation is in-body.
+  it('plan-critique is enabled without optional capabilities', () => {
     const out = resolveEnabledSkills({
       templates: SKILL_TEMPLATES,
       overrides: {},

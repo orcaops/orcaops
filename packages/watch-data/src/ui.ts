@@ -17,9 +17,3 @@ export {
   type FlatRow,
 } from './presenters.js';
 export { DEFAULT_SPARKLINE, bucketize, type SparklineConfig } from './sparkline.js';
-export {
-  ReviewCacheBehindError,
-  ReviewSidecarSchemaError,
-  parseSidecarSchemaError,
-  serializeSidecarSchemaError,
-} from './sidecarError.js';

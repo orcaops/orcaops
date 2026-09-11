@@ -10,6 +10,7 @@ import {
   withSecretWarnings,
   writeSecretWarnings,
 } from '../../lib/cloud-secret-gate.js';
+import { createDatabaseReviewFeedbackMutationClient } from '../../lib/database-review-feedback-mutations.js';
 import { loadSecretAllowlist } from '../../lib/run-capture.js';
 
 export interface ReviewFeedbackReplyClient {
@@ -41,7 +42,13 @@ export async function runReviewFeedbackReply(args: {
  *  coalescing (per-reply fallback key), never correctness. */
 export async function reviewFeedbackReplyAction(
   commentId: string,
-  opts: { message?: string; passToken?: string; baseUrl?: string; json?: boolean } = {}
+  opts: {
+    message?: string;
+    passToken?: string;
+    idempotencyKey?: string;
+    baseUrl?: string;
+    json?: boolean;
+  } = {}
 ): Promise<void> {
   try {
     if (!commentId) {
@@ -50,12 +57,28 @@ export async function reviewFeedbackReplyAction(
     if (!opts.message || opts.message.length === 0) {
       throw new OrcaopsError(ErrorCodes.NO_INPUT, '--message is required.', 'review-reply');
     }
+    if (opts.idempotencyKey !== undefined && opts.idempotencyKey.length === 0) {
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        '--idempotency-key must be non-empty when provided.',
+        'review-reply'
+      );
+    }
     // The outbound secret gate runs HERE, before credential resolution and the
     // capability ping `withReviewCloud` makes, so a refusal precedes anything
     // authored reaching the network rather than only preceding the mutation.
     // The identical gate inside the run* core is defense in depth and is what
     // the client-injected core tests drive.
-    assertNoSecretsOutbound('review-reply', [['body', opts.message]], await loadSecretAllowlist());
+    assertNoSecretsOutbound(
+      'review-reply',
+      [
+        ['comment_id', commentId],
+        ['body', opts.message],
+        ['pass_token', opts.passToken ?? null],
+        ['idempotency_key', opts.idempotencyKey ?? null],
+      ],
+      await loadSecretAllowlist()
+    );
 
     const result = await withReviewCloud(
       {
@@ -65,7 +88,17 @@ export async function reviewFeedbackReplyAction(
       },
       (ctx) =>
         runReviewFeedbackReply({
-          client: ctx.client,
+          client: createDatabaseReviewFeedbackMutationClient({
+            reader: ctx.reader,
+            openWriter: ctx.openWriter,
+            client: ctx.client,
+            target: ctx.target,
+            idempotencyKey: opts.idempotencyKey,
+            secretAllow: ctx.secretAllow,
+            now: () => new Date().toISOString(),
+            signal: ctx.signal,
+            onWait: ctx.onWait,
+          }),
           commentId,
           body: opts.message as string,
           passToken: opts.passToken ?? null,

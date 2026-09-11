@@ -2,8 +2,8 @@
 name: "Orcaops: pre-PR check"
 description: "Manually run final pre-PR checks for inspection or repair. Normal finalization starts with finish."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "4b809145613c"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "c454e785e2b0"
 tags: ["orcaops", "capture"]
 ---
 
@@ -86,4 +86,4 @@ finalizes anything (only `capture summary` finalizes).
 Every capture command returns a `cloud_sync` object. Branch on `cloud_sync.status`:
 
 - `"ok"` or `"skipped"` — nothing to do. Continue.
-- `"paused"` — this artifact was NOT recorded and it will not fix itself. **STOP and tell the user.** Quote `cloud_sync.message` and `cloud_sync.action` verbatim; `cloud_sync.pending` is how many artifacts are waiting locally. Do NOT re-run the capture hoping it clears: a replay writes nothing new, and the fault needs the remediation in `cloud_sync.action`.
+- `"paused"` — the capture is saved locally, but its current state is NOT confirmed on the cloud. **STOP and tell the user.** Quote `cloud_sync.message` and `cloud_sync.action` verbatim; `cloud_sync.pending` when present is the number of artifacts waiting in the selected project; an omitted count is unknown. Do NOT re-run the capture hoping it clears: replaying a completed capture does not resend it, and the fault needs the remediation in `cloud_sync.action`.

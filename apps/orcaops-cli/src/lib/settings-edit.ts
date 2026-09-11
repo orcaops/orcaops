@@ -1,7 +1,6 @@
 import { type HintKey, resolveConfig } from '@orcaops/storage';
 
 import {
-  archivePrompt,
   blockPrompt,
   generatedFilesPrompt,
   gitHooksPrompt,
@@ -176,13 +175,6 @@ export async function editBlockChoice(
   });
   if (isCancel(value)) return null;
   return value === 'managed' ? 'managed' : 'manual';
-}
-
-export async function editArchiveEnabled(initial: boolean): Promise<boolean | null> {
-  const { confirm, isCancel } = await clack();
-  const value = await confirm({ message: archivePrompt.message, initialValue: initial });
-  if (isCancel(value)) return null;
-  return value;
 }
 
 export async function editGitHooksConfirm(initial: boolean): Promise<boolean | null> {

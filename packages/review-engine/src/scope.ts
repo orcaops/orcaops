@@ -1,42 +1,22 @@
-// Scope resolution — open the store/repo/config, gather every artifact on the
-// branch (lineage-aware), map storage's rich Checkpoint/Plan/Summary/Evaluator
-// shapes into the normalized assembly model, resolve the base + target trees,
-// and produce the live review diff. This is the only place @orcaops/storage +
-// git are touched; everything downstream is pure over the model.
+// Scope assembly maps retained artifact threads into the normalized model and
+// derives the exact Git evidence selected by the database command.
 
 import {
   buildDiffFingerprintManifest,
-  captureReviewWorktreeTreeSha,
   computeDiffFingerprintManifestHash,
   type DiffFingerprintManifest,
   diffSnapshotTrees,
-  loadReadOnlyProjectConfig,
-  readOnlyWorktreeState,
   Repo,
 } from '@orcaops/core';
-import { type Disclosure, DISCLOSURE_CODE, slugifyBranch } from '@orcaops/review-core';
+import type { Disclosure } from '@orcaops/review-core';
 import {
-  type ArtifactRow,
-  ArtifactStore,
-  cacheDbPath,
+  type ArtifactThread,
   type Checkpoint,
-  openEmptyArtifactStore,
   replayAttributionDegradedRemovals,
   replayWindowOverlapRemovals,
-  resolveCaptureExcludes,
-  Store,
   type WindowOverlapFile,
 } from '@orcaops/storage';
 
-import {
-  type BaseSource,
-  chooseBase,
-  type LatestClosed,
-  resolveTargetAndAncestry,
-  validateOverrideBase,
-} from './base.js';
-import { ExcludePolicyError } from './dossier.js';
-import { revParseTree, runGit } from './git.js';
 import type {
   AssemblyInput,
   CapturedFingerprintInputs,
@@ -44,27 +24,6 @@ import type {
   ReviewCheckpoint,
 } from './model.js';
 import { collectReviewDiffBudget } from './reviewDiffBudget.js';
-import { readStickyBase } from './stickyBase.js';
-import { requireCompleteArtifactStore } from './storePreparation.js';
-
-function formatUntrackedEvidence(
-  paths: readonly string[],
-  details: readonly { path: string; bytes: number | null; rows: number | null }[]
-): string {
-  const byPath = new Map(details.map((detail) => [detail.path, detail]));
-  const count = (value: number | null, unit: string): string =>
-    value === null
-      ? `${unit} unknown`
-      : `${String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ',')} ${unit}`;
-  return paths
-    .map((filePath) => {
-      const detail = byPath.get(filePath);
-      return detail === undefined
-        ? `${filePath} (bytes unknown; rows unknown)`
-        : `${filePath} (${count(detail.bytes, 'bytes')}; ${count(detail.rows, 'rows')})`;
-    })
-    .join(', ');
-}
 
 /**
  * Scope-side inputs to the floor's cache fingerprint — everything the whole-floor
@@ -133,22 +92,6 @@ export interface ScopeResult {
   disclosures: Disclosure[];
   /** Scope-side degradation signals feeding the whole-floor cache's health gate. */
   cacheHealth: ScopeCacheHealth;
-}
-
-async function resolveDefaultBranch(root: string): Promise<string | null> {
-  const sym = await runGit(root, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
-  if (sym.code === 0) {
-    const b = sym.stdout
-      .toString('utf8')
-      .trim()
-      .replace(/^refs\/remotes\/origin\//, '');
-    if (b) return `origin/${b}`;
-  }
-  for (const cand of ['main', 'master']) {
-    const v = await runGit(root, ['rev-parse', '--verify', '--quiet', cand]);
-    if (v.code === 0) return cand;
-  }
-  return null;
 }
 
 /** Flatten window-overlap file records to their non-null paths (both rename sides). */
@@ -438,9 +381,25 @@ async function deriveManifestHashes(
   return failed;
 }
 
-async function buildReviewArtifact(
-  store: ArtifactStore,
-  row: ArtifactRow
+export async function buildReviewArtifact(
+  store: {
+    readPlan(artifactId: string): Promise<ArtifactThread['plan']>;
+    readCheckpointsRecovered(artifactId: string): Promise<ArtifactThread['checkpoints']>;
+    readSummary(artifactId: string): Promise<ArtifactThread['summary']>;
+    readEvaluatorLog(artifactId: string): Promise<ArtifactThread['evaluatorLog']>;
+    readArtifact(artifactId: string): Promise<ArtifactThread['artifactJson']>;
+    readCheckpointDiffFingerprints(
+      artifactId: string
+    ): Promise<Map<number, DiffFingerprintManifest>>;
+  },
+  row: {
+    id: string;
+    branch: string;
+    label: string | null;
+    task: string | null;
+    base_sha: string | null;
+    started_at: string | null;
+  }
 ): Promise<ReviewArtifact> {
   const [plan, checkpoints, summary, evalLog, artifactJson, manifests] = await Promise.all([
     store.readPlan(row.id),
@@ -448,10 +407,7 @@ async function buildReviewArtifact(
     store.readSummary(row.id),
     store.readEvaluatorLog(row.id),
     store.readArtifact(row.id),
-    // ONE event-log pass for every checkpoint's manifest. The singular reader
-    // reloads the whole log per call, so calling it per checkpoint would make the
-    // cheap cache preamble O(checkpoints x event log) — on the path the watch TUI
-    // hits every time the review surface opens.
+    // One retained-thread pass supplies every checkpoint manifest.
     store.readCheckpointDiffFingerprints(row.id),
   ]);
 
@@ -502,45 +458,6 @@ async function buildReviewArtifact(
   };
 }
 
-/** The branch's chronologically-last closed checkpoint — its close tree is the captured target. */
-function latestClosed(artifacts: readonly ReviewArtifact[]): LatestClosed | null {
-  let best: { at: string; tree: string; headSha: string | null } | null = null;
-  for (const a of artifacts) {
-    for (const cp of a.checkpoints) {
-      if (cp.status === 'closed' && cp.closeTreeSha !== null && cp.closedAt !== null) {
-        if (best === null || cp.closedAt > best.at) {
-          best = { at: cp.closedAt, tree: cp.closeTreeSha, headSha: cp.headSha };
-        }
-      }
-    }
-  }
-  return best ? { tree: best.tree, headSha: best.headSha } : null;
-}
-
-function oldestArtifactBaseSha(rows: readonly ArtifactRow[]): string | null {
-  const withBase = rows
-    .filter((r) => typeof r.base_sha === 'string' && r.base_sha.length > 0)
-    .sort((a, b) => (a.started_at < b.started_at ? -1 : 1));
-  return withBase[0]?.base_sha ?? null;
-}
-
-/**
- * The thrown floor-capture failure must carry the capture pipeline's
- * underlying cause: the reason enum alone ("unknown") discards the git
- * stderr that explains the failure — e.g. a host sandbox denying .git
- * object writes.
- */
-export function worktreeCaptureFailureMessage(result: {
-  error_reason: string;
-  error_message?: string;
-}): string {
-  const cause =
-    result.error_message !== undefined && result.error_message !== ''
-      ? ` — ${result.error_message}`
-      : '';
-  return `worktree tree capture failed: ${result.error_reason}${cause}`;
-}
-
 /**
  * The CHEAP scope preamble: everything the cache fingerprint keys on, WITHOUT
  * the two expensive git passes (`deriveManifestHashes` + the review diff). The
@@ -549,287 +466,9 @@ export function worktreeCaptureFailureMessage(result: {
  * `derivedManifestHash: null` (the derive is not run here); the fingerprint
  * deep-strips that field so this preamble and a full build fingerprint alike.
  */
-export async function resolveScopeInputs(opts: {
-  root: string;
-  branch: string;
-  base?: string;
-  ignoreStickyBase?: boolean;
-  rebuildCache?: boolean;
-}): Promise<ScopeInputs> {
-  // Governed-but-empty worktrees are valid review roots: a sibling that has
-  // never captured must be served from an in-memory projection rather than
-  // by creating its cache on a read path.
-  const worktree = await readOnlyWorktreeState(opts.root);
-  if (worktree.kind === 'broken') throw worktree.error;
-  const config =
-    worktree.kind === 'enabled' ? worktree.config : await loadReadOnlyProjectConfig(opts.root);
-  const emptyHotState = worktree.kind === 'enabled' && worktree.hot.empty;
-  const repo = new Repo(opts.root);
-
-  // Validate an explicit --base up front so a typo fails loudly rather than
-  // silently falling through to a different base and a plausible-but-wrong review.
-  let overrideTree = opts.base ? await revParseTree(opts.root, opts.base) : null;
-  validateOverrideBase(opts.base, overrideTree);
-
-  // Sticky base: a bare rebuild reuses the branch's recorded
-  // explicit --base instead of silently re-deriving and drifting the session.
-  // The PINNED SHA is the authority — a symbolic ref that advanced since the
-  // record must not silently move the base while the floor claims reuse. A
-  // stale record never hard-fails a bare run — it is disclosed and ignored.
-  let stickyDisclosure: Disclosure | null = null;
-  let stickyRefUsed: string | null = null;
-  if (!opts.base && opts.ignoreStickyBase !== true) {
-    const sticky = await readStickyBase(opts.root, slugifyBranch(opts.branch));
-    if (sticky !== null) {
-      const pinnedTree = await revParseTree(opts.root, sticky.pinnedSha);
-      if (pinnedTree !== null) {
-        overrideTree = pinnedTree;
-        stickyRefUsed = sticky.pinnedSha;
-        const currentRefTree = await revParseTree(opts.root, sticky.baseRef);
-        const refDrifted = currentRefTree !== null && currentRefTree !== pinnedTree;
-        stickyDisclosure = {
-          code: DISCLOSURE_CODE.STICKY_BASE_REUSED,
-          message: refDrifted
-            ? `reusing the pinned base ${sticky.pinnedSha} recorded for '${sticky.baseRef}' on this branch; NOTE '${sticky.baseRef}' has since moved — still using the pinned base; pass --base <ref> to re-pin or --base auto to re-derive`
-            : `reusing the pinned base ${sticky.pinnedSha} recorded for '${sticky.baseRef}' on this branch; pass --base <ref> to change it or --base auto to re-derive`,
-        };
-      } else {
-        stickyDisclosure = {
-          code: DISCLOSURE_CODE.STICKY_BASE_REUSED,
-          message: `the recorded pinned base ${sticky.pinnedSha} (from '${sticky.baseRef}') no longer resolves; the base was re-derived automatically — pass --base <ref> to re-pin or --base auto to clear the record`,
-        };
-      }
-    }
-  }
-
-  const rebuildStore =
-    opts.rebuildCache === true && !emptyHotState
-      ? new Store(cacheDbPath(opts.root, config), {
-          containmentRoot: opts.root,
-          rebuildExistingProjection: true,
-        })
-      : null;
-  const store = emptyHotState
-    ? openEmptyArtifactStore(opts.root, config)
-    : new ArtifactStore({
-        repoRoot: opts.root,
-        config,
-        ...(rebuildStore === null ? {} : { store: rebuildStore }),
-      });
-
-  try {
-    if (!emptyHotState) await requireCompleteArtifactStore(store, 'review scope');
-    // TWO caps, two jobs. `diff_fingerprint.max_diff_bytes` is hashed into the
-    // durable checkpoint manifest, so it governs the re-derive and nothing else;
-    // `review.max_diff_bytes` governs the live review diff and is free to move.
-    const fingerprintMaxDiffBytes = config.diff_fingerprint.max_diff_bytes;
-    const reviewMaxDiffBytes = config.review.max_diff_bytes;
-    const rows = store.store.listArtifactsByLineageBranch({ branch: opts.branch });
-
-    const artifacts: ReviewArtifact[] = [];
-    for (const row of rows) {
-      // FAIL CLOSED, deliberately: this list feeds target resolution
-      // (latestClosed picks the off-branch review target), the floor's
-      // persisted scope, and the claim ledger. Skipping an unreadable
-      // artifact here would silently retarget the review at an older
-      // tree and erase the artifact from durable deliverables — worse
-      // than refusing. Containment-by-skip belongs only to additive
-      // enumeration surfaces where omission weakens claims.
-      let built: ReviewArtifact;
-      try {
-        built = await buildReviewArtifact(store, row);
-      } catch (err) {
-        throw new Error(
-          `review scope cannot read artifact ${row.id} — ` +
-            `${err instanceof Error ? err.message : String(err)} ` +
-            `The review would misstate coverage or target the wrong tree without it; ` +
-            `run \`orcaops doctor\` to see the corruption.`,
-          { cause: err }
-        );
-      }
-      artifacts.push(built);
-    }
-    // deriveManifestHashes is intentionally NOT run here — it is the expensive
-    // per-checkpoint re-diff, and its only output (derivedManifestHash) is
-    // deep-stripped from the cache fingerprint. resolveScope runs it below.
-
-    // Target-first: pick the target, then the ancestry ref that belongs to it.
-    const currentBranch = await repo.getCurrentBranch();
-    const onBranch = currentBranch === opts.branch;
-    // The exclude set has to reach the capture, not just the presentation: the
-    // tree resolved here is pinned to refs/orcaops/review/<slug>, so a
-    // credential-shaped file that reaches it is durable and reachable from no
-    // branch, however thoroughly the dossier stubs its hunks afterwards.
-    const excludes = resolveCaptureExcludes(config.capture);
-    // Same fail-closed posture the dossier takes: a malformed entry is a hole
-    // in a security control, and this refusal lands before a floor is pinned.
-    if (excludes.invalid.length > 0) throw new ExcludePolicyError(excludes.invalid);
-    const worktree = await captureReviewWorktreeTreeSha(repo, config.review.include_untracked, {
-      excludePatterns: excludes.patterns,
-    });
-    if (!worktree.ok) throw new Error(worktreeCaptureFailureMessage(worktree));
-    // Capture itself tolerates an unmerged index; review does not — a floor
-    // tree carrying conflict-marker bytes would poison the review diff.
-    if (worktree.unmerged_paths.length > 0) {
-      throw new Error(
-        `review scope cannot capture the worktree: unresolved merge conflicts in the index ` +
-          `(${worktree.unmerged_paths.join(', ')}). Resolve them (or \`git merge --abort\`) ` +
-          `and re-run.`
-      );
-    }
-    const worktreeHead = await repo.getHeadSha();
-    const ta = resolveTargetAndAncestry({
-      onBranch,
-      worktreeTree: worktree.tree_sha,
-      worktreeHead,
-      latestClosed: latestClosed(artifacts),
-    });
-    const pinnedTreeSha = ta.targetTree;
-    const reviewIncludedUntracked = onBranch ? worktree.included_untracked : [];
-
-    // Base candidates, peeled to trees. merge-base against the ancestry ref that
-    // matches the target — never the parentless snapshot commit.
-    const defaultBranch = await resolveDefaultBranch(opts.root);
-    const mergeBaseSha =
-      ta.ancestryRef && defaultBranch
-        ? await repo.getMergeBase(defaultBranch, ta.ancestryRef)
-        : null;
-    const mergeBaseTree = mergeBaseSha ? await revParseTree(opts.root, mergeBaseSha) : null;
-    // Degenerate = the branch tip is already an ancestor of the default branch
-    // (merged), so merge-base is at/after the target — a merged tip's tree still
-    // differs from the captured target by post-checkpoint drift, so test ancestry.
-    const mergeBaseDegenerate =
-      ta.ancestryRef !== null &&
-      defaultBranch !== null &&
-      (await repo.isAncestor(ta.ancestryRef, defaultBranch));
-    const oldestBaseSha = oldestArtifactBaseSha(rows);
-    const oldestArtifactBaseTree = oldestBaseSha
-      ? await revParseTree(opts.root, oldestBaseSha)
-      : null;
-    const fallbackRef = ta.ancestryRef ?? worktreeHead;
-    const fallbackTree = (await revParseTree(opts.root, fallbackRef)) ?? pinnedTreeSha;
-
-    const chosen = chooseBase({
-      overrideTree,
-      mergeBaseTree,
-      mergeBaseDegenerate,
-      targetTree: pinnedTreeSha,
-      oldestArtifactBaseTree,
-      fallbackTree,
-    });
-    const baseTreeSha = chosen.baseTree;
-    const baseShaBySource: Record<BaseSource, string | null> = {
-      override: opts.base ?? stickyRefUsed,
-      merge_base: mergeBaseSha,
-      oldest_artifact: oldestBaseSha,
-      fallback: fallbackRef,
-    };
-    const baseSha = baseShaBySource[chosen.source] ?? baseTreeSha;
-
-    // Pre-diff topology disclosures only (degenerate/merged-branch scope). These
-    // ARE in the fingerprint — they carry topology facts (chosen base source,
-    // degraded target) that identical trees don't fully determine.
-    const disclosures: Disclosure[] = [...chosen.disclosures];
-    if (stickyDisclosure !== null) disclosures.push(stickyDisclosure);
-    if (ta.degraded) {
-      disclosures.push({
-        code: DISCLOSURE_CODE.DEGENERATE_SCOPE,
-        message:
-          'reviewing a different branch with no captured checkpoint — diffing against the current checkout; pass --base to scope precisely',
-      });
-    }
-    if (onBranch && worktree.included_untracked.length > 0) {
-      disclosures.push({
-        code: DISCLOSURE_CODE.UNTRACKED_EVIDENCE_INCLUDED,
-        message:
-          `explicit review.include_untracked evidence included (${worktree.included_untracked.length}): ` +
-          formatUntrackedEvidence(worktree.included_untracked, worktree.untracked_details),
-      });
-    }
-    if (onBranch && worktree.excluded_untracked.length > 0) {
-      disclosures.push({
-        code: DISCLOSURE_CODE.UNTRACKED_EVIDENCE_EXCLUDED,
-        message:
-          `non-ignored untracked files excluded by the tracked-only review policy ` +
-          `(${worktree.excluded_untracked.length}): ` +
-          formatUntrackedEvidence(worktree.excluded_untracked, worktree.untracked_details),
-      });
-    }
-    if (onBranch && worktree.sensitive_opt_ins.length > 0) {
-      disclosures.push({
-        code: DISCLOSURE_CODE.UNTRACKED_EVIDENCE_WITHHELD,
-        message:
-          `opted-in untracked files withheld from the review tree by capture.exclude ` +
-          `(${worktree.sensitive_opt_ins.length}): ${worktree.sensitive_opt_ins.join(', ')}`,
-      });
-    }
-    // Matched by capture.exclude and in the tree anyway. Disclosed as included
-    // rather than dropped: the reviewer is looking at the file's bytes, and the
-    // one thing they must not be told is that it was held back.
-    if (onBranch && worktree.retained_sensitive_opt_ins.length > 0) {
-      disclosures.push({
-        code: DISCLOSURE_CODE.UNTRACKED_EVIDENCE_INCLUDED,
-        message:
-          `capture.exclude matched opted-in files that are in the review tree anyway — ` +
-          `git tracks them in the index, and exclusion covers untracked files only ` +
-          `(${worktree.retained_sensitive_opt_ins.length}): ` +
-          formatUntrackedEvidence(worktree.retained_sensitive_opt_ins, worktree.untracked_details),
-      });
-    }
-    if (
-      onBranch &&
-      (worktree.ignored_opt_ins.length > 0 || worktree.unmatched_opt_ins.length > 0)
-    ) {
-      const details = [
-        ...(worktree.ignored_opt_ins.length > 0
-          ? [`ignored/generated: ${worktree.ignored_opt_ins.join(', ')}`]
-          : []),
-        ...(worktree.unmatched_opt_ins.length > 0
-          ? [`not untracked or absent: ${worktree.unmatched_opt_ins.join(', ')}`]
-          : []),
-      ];
-      disclosures.push({
-        code: DISCLOSURE_CODE.UNTRACKED_EVIDENCE_REJECTED,
-        message: `review.include_untracked opt-ins not included — ${details.join('; ')}`,
-      });
-    }
-
-    const input: AssemblyInput = {
-      branch: opts.branch,
-      branchSlug: slugifyBranch(opts.branch),
-      baseSha,
-      baseTreeSha,
-      pinnedTreeSha,
-      defaultBranch,
-      // Already resolved above for the merge-base ancestry — reuse it as the
-      // floor's passive staleness anchor rather than spawning a second HEAD read.
-      worktreeHead,
-      artifacts,
-    };
-    return {
-      input,
-      fingerprintMaxDiffBytes,
-      reviewMaxDiffBytes,
-      reviewIncludedUntracked,
-      disclosures,
-    };
-  } finally {
-    store.close();
-    rebuildStore?.close();
-  }
-}
-
 export async function resolveScope(opts: {
   root: string;
-  branch: string;
-  base?: string;
-  /**
-   * Preamble snapshot captured by the caller for this build attempt. A cache
-   * miss already owns this complete snapshot; reloading it here duplicates the
-   * store/config/worktree/base pass and keeps two artifact graphs live at once.
-   * The caller must still fingerprint the current inputs before installation.
-   */
-  scopeInputs?: ScopeInputs;
+  scopeInputs: ScopeInputs;
 }): Promise<ScopeResult> {
   const {
     input,
@@ -837,12 +476,9 @@ export async function resolveScope(opts: {
     reviewMaxDiffBytes,
     reviewIncludedUntracked,
     disclosures,
-  } = opts.scopeInputs ?? (await resolveScopeInputs(opts));
+  } = opts.scopeInputs;
 
-  // The two expensive passes the preamble skipped. Kept here (not in
-  // resolveScopeInputs) so the cache hit-check can fingerprint from the cheap
-  // preamble alone. A fresh Repo — the preamble closed its store; git plumbing
-  // holds no per-instance state.
+  // Re-derive checkpoint manifests from their retained Git inputs before assembly.
   const repo = new Repo(opts.root);
   // No cap argument: the re-derive reads each manifest's OWN recorded cap, which is
   // what makes `diff_fingerprint.max_diff_bytes` safe to change at all.

@@ -86,7 +86,7 @@ function scopeNote(scope: string): string {
 /**
  * `plan review reviewers` — the discovery read backing `--reviewer` handle
  * resolution: who can be requested, by exact handle. Read-only; never touches
- * the review cache. Pairs with `plan upload`'s `unresolved[]` warning (the
+ * project history. Pairs with `plan upload`'s `unresolved[]` warning (the
  * upload prints likely matches from this same read).
  */
 export async function reviewersAction(opts: ReviewersOptions = {}): Promise<void> {

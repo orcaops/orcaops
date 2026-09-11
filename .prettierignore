@@ -5,7 +5,10 @@ bower_components/
 # Build outputs
 build/
 dist/
-lib/
+# Root-anchored: `lib/` alone also hid first-party source directories named
+# `lib` (apps/orcaops-cli/src/lib, scripts/lib), which prettier then never
+# checked at the repo root.
+/lib/
 esm/
 cjs/
 
@@ -98,3 +101,7 @@ packages/diff-render/
 # Compressed evidence — prettier cannot infer a parser and hard-errors, which
 # fails `format:check` for the whole repo.
 *.gz
+
+# Preserve the frozen conversion fixture bytes and hashes; its base64 members
+# are generated evidence, not source to format.
+packages/history-convert/fixtures/legacy-0.2.0-rc.2/

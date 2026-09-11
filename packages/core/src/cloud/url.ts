@@ -12,7 +12,7 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', '[::1]', 'localhost']);
  * This is a security GATE, not a namespace canonicalizer: it returns the input
  * with ONLY trailing slashes trimmed (host case + default port PRESERVED), so
  * `https://Cloud.Example` and `https://cloud.example` come back distinct. Never
- * key a cache namespace off this value — use storage's `canonicalizeBaseUrl`
+ * key an authority namespace off this value — use storage's `canonicalizeBaseUrl`
  * (source-plan/canonical-base-url.ts) for identity. See that file for the split.
  */
 export function assertSafeCloudUrl(value: string): string {

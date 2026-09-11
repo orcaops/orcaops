@@ -1,9 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
-import { ReviewCacheBehindError } from '@orcaops/watch-data/ui';
-
 import { mountReviewApp } from '../../../tests/review/mountReviewApp';
-import { buildReviewAppHarness } from '../../../tests/review/reviewAppHarness';
+import { ReviewPaneError } from '../../data/reviewSource';
 
 describe('persistent App shell → Review bridge', () => {
   test('the Help menu opens the same review overlay as the keyboard command', async () => {
@@ -96,43 +94,33 @@ describe('persistent App shell → Review bridge', () => {
     app.unmount();
   });
 
-  test('an older cache prompts before rebuilding and retains a retry after decline', async () => {
-    const fixture = await buildReviewAppHarness({ scenario: 'no-narrative' });
-    const calls: boolean[] = [];
-    let resolveRebuild!: (data: typeof fixture.loaded.data) => void;
-    const rebuild = new Promise<typeof fixture.loaded.data>((resolve) => {
-      resolveRebuild = resolve;
-    });
+  test('an unsupported history format renders read-only Doctor guidance without retrying', async () => {
+    let calls = 0;
     const app = await mountReviewApp({
       scenario: 'no-narrative',
       autoLoad: true,
       startWithoutReview: true,
-      reviewLoader: async (options) => {
-        calls.push(options.rebuildCache === true);
-        if (options.rebuildCache !== true) {
-          throw new ReviewCacheBehindError(23, 24, 'cache 23 is behind 24');
-        }
-        return rebuild;
+      width: 140,
+      reviewLoader: async () => {
+        calls += 1;
+        throw new ReviewPaneError(
+          'HISTORY_FORMAT_UNSUPPORTED',
+          'This database needs an explicitly supported schema upgrade or repair'
+        );
       },
     });
 
-    await app.settleUntil((frame) => frame.includes('Rebuild local cache?'));
-    expect(app.frame()).toContain("This repository's local cache uses schema 23");
-    expect(app.frame()).toContain('Captured history will not be changed.');
-
-    await app.press('n');
-    expect(app.frame()).not.toContain('Rebuild local cache?');
-    expect(app.frame()).toContain('[Rebuild cache]');
+    await app.settleUntil((frame) => frame.includes('Review unavailable for probe'));
+    expect(app.frame()).toContain('canonical history database format is unsupported');
+    expect(app.frame()).toContain('Watch did not modify the database.');
+    expect(app.frame().replace(/\s+/gu, ' ')).toContain('orcaops doctor');
+    expect(app.frame()).not.toContain('Rebuild');
 
     await app.press('r');
-    expect(app.frame()).toContain('Rebuild local cache?');
     await app.press('y');
-    await app.settleUntil((frame) => frame.includes('Rebuilding local cache for probe'));
-    expect(calls).toEqual([false, true]);
-
-    resolveRebuild(fixture.loaded.data);
-    await app.settleUntil((frame) => frame.includes('Captured checkpoints'));
-    expect(app.frame()).not.toContain('Review unavailable for probe');
+    await app.settle();
+    expect(calls).toBe(1);
+    expect(app.frame()).toContain('Review unavailable for probe');
     app.unmount();
   });
 

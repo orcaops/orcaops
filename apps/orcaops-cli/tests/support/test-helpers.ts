@@ -4,9 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { DEFAULT_CLOUD_BASE_URL, FileStore, loadConfig, resolveConfigPath } from '@orcaops/core';
+import { DEFAULT_CLOUD_BASE_URL, FileStore, resolveConfigPath } from '@orcaops/core';
 import {
-  ArtifactStore,
   type EvaluatorDispositionPayload,
   type EvaluatorRunPayload,
   uuidv7,
@@ -75,92 +74,60 @@ export function withCleanSession(extras: Record<string, string>): Record<string,
   };
 }
 
-/**
- * Seed a pre-pr block evaluator violation for an artifact. Used by
- * tests that exercise the BLOCKED summary / acknowledge / dismiss
- * surface without driving an actual evaluator failure (which would
- * require staging a real violation in the working tree).
- *
- * Writes an `evaluator_run_recorded` event with the new
- * EvaluatorRunPayload shape. Returns the minted run_id so test code
- * can target the disposition write at it.
- *
- * `evaluatorRef` is the `<pack>/<id>` ref the violation will surface
- * as. Tests typically pass one of the `TEST_PACK_REFS` constants
- * (resolved via the real `apps/orcaops-cli/tests/fixtures/test-pack`
- * after the test sets up `runAddPack({ source: TEST_PACK_ABS_PATH })`)
- * so downstream CLI lookups via discoverEvaluators succeed.
- */
+type HistoryFixture = Pick<
+  Awaited<ReturnType<typeof import('../helpers/database-history.js').fixture>>,
+  'mutate'
+>;
+
 export async function plantBlockViolation(opts: {
-  cwd: string;
+  fixture: HistoryFixture;
   artifactId: string;
   evaluatorRef: string;
 }): Promise<string> {
-  const config = await loadConfig(opts.cwd);
-  const store = new ArtifactStore({ repoRoot: opts.cwd, config });
-  try {
-    const runId = uuidv7();
-    const [packageId, evaluatorId] = opts.evaluatorRef.split('/');
-    const payload: EvaluatorRunPayload = {
-      schema: 'orcaops.evaluator_run/v1',
-      run_id: runId,
-      artifact_id: opts.artifactId,
-      evaluator_ref: opts.evaluatorRef,
-      package_id: packageId,
-      evaluator_id: evaluatorId,
-      phase: 'pre-pr',
-      severity: 'block',
-      run_status: 'completed',
-      verdict: 'violation',
-      body: 'VIOLATION\n\nseeded for test',
-      ts: new Date().toISOString(),
-    };
-    await store.writeEvaluatorRunPayload(opts.artifactId, payload);
-    return runId;
-  } finally {
-    store.close();
-  }
+  const runId = uuidv7();
+  const [packageId, evaluatorId] = opts.evaluatorRef.split('/');
+  const payload: EvaluatorRunPayload = {
+    schema: 'orcaops.evaluator_run/v1',
+    run_id: runId,
+    artifact_id: opts.artifactId,
+    evaluator_ref: opts.evaluatorRef,
+    package_id: packageId,
+    evaluator_id: evaluatorId,
+    phase: 'pre-pr',
+    severity: 'block',
+    run_status: 'completed',
+    verdict: 'violation',
+    body: 'VIOLATION\n\nRetained blocking evidence',
+    ts: new Date().toISOString(),
+  };
+  await opts.fixture.mutate(opts.artifactId, payload, (semantics) =>
+    semantics.writeEvaluatorRunPayload(opts.artifactId, payload)
+  );
+  return runId;
 }
 
-/**
- * Seed a pre-pr block evaluator run as already-acknowledged. Pairs
- * with {@link plantBlockViolation} when a test needs to verify
- * behavior on the post-acknowledge path (e.g., summary unblocking).
- *
- * Writes the underlying violation event AND a paired
- * evaluator_disposition_recorded event so the materialized projection
- * surfaces `disposition: 'acknowledged'` on the targeted run.
- */
 export async function plantAcknowledge(opts: {
-  cwd: string;
+  fixture: HistoryFixture;
   artifactId: string;
   evaluatorRef: string;
-}): Promise<{ runId: string; dispositionId: string }> {
-  const runId = await plantBlockViolation({
-    cwd: opts.cwd,
-    artifactId: opts.artifactId,
-    evaluatorRef: opts.evaluatorRef,
-  });
-  const config = await loadConfig(opts.cwd);
-  const store = new ArtifactStore({ repoRoot: opts.cwd, config });
-  try {
-    const dispositionId = uuidv7();
-    const payload: EvaluatorDispositionPayload = {
-      schema: 'orcaops.evaluator_disposition/v1',
-      disposition_id: dispositionId,
-      artifact_id: opts.artifactId,
-      run_id: runId,
-      evaluator_ref: opts.evaluatorRef,
-      disposition: 'acknowledged',
-      reason: 'resolved by test',
-      agent_session_id: null,
-      ts: new Date().toISOString(),
-    };
-    await store.writeEvaluatorDisposition(opts.artifactId, payload);
-    return { runId, dispositionId };
-  } finally {
-    store.close();
-  }
+  runId: string;
+}): Promise<string> {
+  const dispositionId = uuidv7();
+  const payload: EvaluatorDispositionPayload = {
+    schema: 'orcaops.evaluator_disposition/v1',
+    disposition_id: dispositionId,
+    artifact_id: opts.artifactId,
+    run_id: opts.runId,
+    evaluator_ref: opts.evaluatorRef,
+    disposition: 'acknowledged',
+    reason: 'Resolved by test',
+    agent_session_id: null,
+    ts: new Date().toISOString(),
+  };
+  await opts.fixture.mutate(opts.artifactId, payload, (semantics) =>
+    semantics.writeEvaluatorDisposition(opts.artifactId, payload)
+  );
+  return dispositionId;
 }
 
 /**

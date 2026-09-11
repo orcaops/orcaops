@@ -7,8 +7,12 @@ import {
   isPayloadSchemaUnsupportedError,
   MissingGitRemoteError,
   NotConnectedError,
+  SourcePlanIntegrityError,
 } from '@orcaops/core';
+import { HistoryScopeError } from '@orcaops/project-scope/history';
 import { PathContainmentError } from '@orcaops/storage';
+import { HistoryError } from '@orcaops/storage/history/authority';
+import { ProjectDatabaseError } from '@orcaops/storage/history/database';
 
 import { ErrorCodes, OrcaopsError } from './errors.js';
 
@@ -17,6 +21,8 @@ import { ErrorCodes, OrcaopsError } from './errors.js';
  * `plan upload`) into a structured error envelope. Shared mapping:
  *
  *   - `OrcaopsError` → passthrough (already structured)
+ *   - database/history authority errors → their original structured code
+ *   - `SourcePlanIntegrityError` → `HISTORY_INTEGRITY_REQUIRED`
  *   - `NotConnectedError`    → `NOT_CONNECTED`
  *   - `ArtifactNotFoundError` → `UNKNOWN_ARTIFACT`
  *   - `ImportedArtifactLocalOnlyError` → `IMPORTED_ARTIFACT_LOCAL_ONLY`
@@ -26,7 +32,7 @@ import { ErrorCodes, OrcaopsError } from './errors.js';
  *
  * There is deliberately NO ZodError special-case here: every surface that
  * reaches this envelope is cloud-derived (a `TrpcRequestError`, a transport
- * failure, or a cloud-data `*.parse` inside `writePullCacheRecord`), so a raw
+ * failure, or a cloud-data schema parse before database publication), so a raw
  * `ZodError` here is corrupt CLOUD DATA and `CLOUD_ERROR` is the correct label.
  * User-INPUT parse errors are mapped to `INVALID_INPUT` at their own parse site
  * (e.g. `plan upload`'s `OssSourcePlanUploadPayload.parse`) BEFORE they would
@@ -36,6 +42,11 @@ import { ErrorCodes, OrcaopsError } from './errors.js';
  */
 export function toCloudErrorEnvelope(err: unknown): unknown {
   if (err instanceof OrcaopsError) return err;
+  if (err instanceof HistoryScopeError || err instanceof HistoryError)
+    return new OrcaopsError(err.code, err.message);
+  if (err instanceof ProjectDatabaseError) return err;
+  if (err instanceof SourcePlanIntegrityError)
+    return new OrcaopsError('HISTORY_INTEGRITY_REQUIRED', err.message);
   // Typed launch negotiation errors, ahead of the generic flatten so they
   // reach the user with their remediation even from boundaries no verb-level
   // mapper covers (the shared review ping, mutations, push). Verb-specific
@@ -81,6 +92,12 @@ export function toCloudErrorEnvelope(err: unknown): unknown {
   if (err instanceof PathContainmentError) {
     return new OrcaopsError(ErrorCodes.INTERNAL, err.message, err.label);
   }
+  if (
+    err instanceof Error &&
+    'code' in err &&
+    (err.code === 'CLOUD_TARGET_CHANGED' || err.code === 'CONFLICT')
+  )
+    return new OrcaopsError(err.code, err.message);
   if (err instanceof Error) {
     return new OrcaopsError(ErrorCodes.CLOUD_ERROR, err.message);
   }

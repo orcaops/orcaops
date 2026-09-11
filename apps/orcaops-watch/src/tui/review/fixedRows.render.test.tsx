@@ -71,11 +71,11 @@ test('compact vitals retain token and step truth inside their panel', async () =
   const thread = snapshot.projects[0]!.threads.find(
     (candidate) => candidate.artifactId === 'journey-artifact'
   )!;
-  const tokens = thread.sessions.reduce((total, session) => total + session.tokens, 0);
+  const tokenValue = '—';
   const done = thread.planSteps.filter((step) => step.done).length;
   const layout = selectCompactVitalStripLayout({
     width: 32,
-    tokens,
+    tokenValue,
     done,
     total: thread.planSteps.length,
     activity: '0s ago',
@@ -94,6 +94,7 @@ test('compact vitals retain token and step truth inside their panel', async () =
   await settle(harness);
   const row = harness.captureCharFrame().split('\n')[1] ?? '';
   for (const part of layout.parts) expect(row).toContain(part.label);
+  expect(row).not.toContain('session tokens 0');
   harness.renderer.destroy();
 });
 

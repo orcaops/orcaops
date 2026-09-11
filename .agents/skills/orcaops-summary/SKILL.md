@@ -2,8 +2,8 @@
 name: "Orcaops: capture summary"
 description: "Manually save or repair the final outcome of completed work. Use the finish workflow for normal finalization."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "c51563ff130a"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "2fa18ae46b40"
 ---
 
 # Attribution: declare your agent id
@@ -137,9 +137,9 @@ in a new artifact.
 
 # Automatic digest after summary
 
-A successful summary automatically materializes the reviewer-facing digest,
-caches it, and writes its search entry. Only run `orcaops digest --artifact
-<artifact_id>` yourself when the response reports
+A successful summary automatically renders the reviewer-facing digest, embeds
+its markdown in the response, and writes its search entry. Only run `orcaops
+digest --artifact <artifact_id>` yourself when the response reports
 `finalized_without_digest` and returns that repair command.
 
 For inspection, `orcaops show <artifact_id>` displays the full thread
@@ -151,4 +151,4 @@ For inspection, `orcaops show <artifact_id>` displays the full thread
 Every capture command returns a `cloud_sync` object. Branch on `cloud_sync.status`:
 
 - `"ok"` or `"skipped"` — nothing to do. Continue.
-- `"paused"` — this artifact was NOT recorded and it will not fix itself. **STOP and tell the user.** Quote `cloud_sync.message` and `cloud_sync.action` verbatim; `cloud_sync.pending` is how many artifacts are waiting locally. Do NOT re-run the capture hoping it clears: a replay writes nothing new, and the fault needs the remediation in `cloud_sync.action`.
+- `"paused"` — the capture is saved locally, but its current state is NOT confirmed on the cloud. **STOP and tell the user.** Quote `cloud_sync.message` and `cloud_sync.action` verbatim; `cloud_sync.pending` when present is the number of artifacts waiting in the selected project; an omitted count is unknown. Do NOT re-run the capture hoping it clears: replaying a completed capture does not resend it, and the fault needs the remediation in `cloud_sync.action`.

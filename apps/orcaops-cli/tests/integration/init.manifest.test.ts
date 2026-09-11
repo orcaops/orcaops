@@ -2,7 +2,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { DEFAULT_CONFIG, resolveConfig } from '@orcaops/storage';
+import { DEFAULT_CONFIG } from '@orcaops/storage';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -87,7 +87,7 @@ describe('orcaops init writes the install manifest', () => {
     expect(await exists(path.join(repo.path, '.orcaops', 'install.local.json'))).toBe(false);
   });
 
-  it('completes a config-only interrupted initialization through the documented force retry', async () => {
+  it('preserves a pre-database installed checkout for conversion', async () => {
     const configDir = path.join(repo.path, '.orcaops');
     const configPath = path.join(configDir, 'config.json');
     const config = `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`;
@@ -101,15 +101,12 @@ describe('orcaops init writes the install manifest', () => {
     });
 
     const retried = await agent.runRaw(['init', '--force', '--json']);
-    expect(retried.exitCode).toBe(0);
-    // The preserving retry keeps every VALUE and re-minimizes the file: a
-    // seeded all-defaults config collapses to the anchor keys, resolving back
-    // to the identical configuration.
-    const retriedRaw = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
-    expect(resolveConfig(retriedRaw)).toEqual(resolveConfig(DEFAULT_CONFIG));
-    expect(await exists(path.join(repo.path, '.orcaops', 'install.json'))).toBe(true);
+    expect(retried.exitCode).toBe(1);
+    expect(JSON.parse(retried.stdout).error.code).toBe('CONVERSION_REQUIRED');
+    expect(await readFile(configPath, 'utf8')).toBe(config);
+    expect(await exists(path.join(repo.path, '.orcaops', 'install.json'))).toBe(false);
     expect(
       await exists(path.join(repo.path, '.claude', 'skills', 'orcaops-capture', 'SKILL.md'))
-    ).toBe(true);
+    ).toBe(false);
   });
 });

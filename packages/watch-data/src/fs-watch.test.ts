@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -107,6 +107,99 @@ describe('FsWatch (integration)', () => {
       await stimulateUntilTick(dir, ticked);
       expect(ticks).toBeGreaterThan(0);
       expect(onDegrade).not.toHaveBeenCalled();
+    } finally {
+      fsw.close();
+    }
+  });
+
+  it('fires on an append to a watched file that no directory event covers', async () => {
+    // The shape of a SQLite commit: the log file grows and nothing around it
+    // changes. Only the file watch can see it.
+    const log = path.join(dir, 'history.sqlite3-wal');
+    await writeFile(log, 'header');
+    let ticks = 0;
+    let acknowledgeTick!: () => void;
+    const ticked = new Promise<void>((resolve) => {
+      acknowledgeTick = resolve;
+    });
+    const fsw = new FsWatch({
+      roots: [],
+      files: [log],
+      debounceMs: 40,
+      onTick: () => {
+        ticks += 1;
+        acknowledgeTick();
+      },
+    });
+    expect(fsw.start()).toBe(true);
+    try {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        await appendFile(log, `commit-${attempt}`);
+        if (await Promise.race([ticked.then(() => true), delay(100, false)])) break;
+      }
+      expect(ticks).toBeGreaterThan(0);
+    } finally {
+      fsw.close();
+    }
+  });
+
+  it('re-arms a watched file that is replaced, and drops one the refresh no longer names', async () => {
+    const log = path.join(dir, 'history.sqlite3-wal');
+    await writeFile(log, 'header');
+    let ticks = 0;
+    const fsw = new FsWatch({
+      roots: [],
+      files: [log],
+      debounceMs: 30,
+      onTick: () => (ticks += 1),
+    });
+    expect(fsw.start()).toBe(true);
+    try {
+      // A checkpoint deletes and recreates the log; the kqueue watch stays on
+      // the old inode, so without re-arming the next commit is invisible.
+      await unlink(log);
+      await delay(150);
+      await writeFile(log, 'fresh header');
+      fsw.refresh([log]);
+      await delay(100);
+      const before = ticks;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        await appendFile(log, `commit-${attempt}`);
+        await delay(60);
+        if (ticks > before) break;
+      }
+      expect(ticks).toBeGreaterThan(before);
+
+      fsw.refresh([]);
+      const afterDrop = ticks;
+      await appendFile(log, 'ignored');
+      await delay(200);
+      expect(ticks).toBe(afterDrop);
+    } finally {
+      fsw.close();
+    }
+  });
+
+  it('remembers a file that does not exist yet and arms it on a later refresh', async () => {
+    const log = path.join(dir, 'history.sqlite3-wal');
+    let ticks = 0;
+    const fsw = new FsWatch({
+      roots: [],
+      files: [log],
+      debounceMs: 30,
+      onTick: () => (ticks += 1),
+    });
+    expect(fsw.start()).toBe(false);
+    try {
+      await writeFile(log, 'header');
+      fsw.refresh([log]);
+      await delay(100);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        await appendFile(log, `commit-${attempt}`);
+        await delay(60);
+        if (ticks > 0) break;
+      }
+      expect(ticks).toBeGreaterThan(0);
     } finally {
       fsw.close();
     }

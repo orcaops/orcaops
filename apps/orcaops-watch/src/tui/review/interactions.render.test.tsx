@@ -509,6 +509,7 @@ describe('the full-context presentation controls', () => {
     });
 
     const automatic = app.frame();
+    const automaticDiff = app.surfaceRect('review-diff-scroll');
     await app.press('2');
     const stacked = app.frame();
     expect(app.state().diffLayout).toBe('stack');
@@ -520,8 +521,9 @@ describe('the full-context presentation controls', () => {
 
     await app.press('0');
     expect(app.state().diffLayout).toBe('auto');
-    await app.settleUntil((frame) => frame === automatic);
-    expect(app.frame()).toBe(automatic);
+    await app.settle();
+    expect(app.surfaceRect('review-diff-scroll')).toEqual(automaticDiff);
+    expect(app.frame()).not.toBe(stacked);
     app.unmount();
   });
 

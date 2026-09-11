@@ -1,9 +1,6 @@
 import {
   adjudicateOverlapGroups,
-  type ArchivedArtifactThread,
-  artifactPathsFor,
-  ArtifactStore,
-  atomicWriteFile,
+  type ArtifactThread,
   type AttributionDegraded,
   type Checkpoint,
   type EvaluatorLog,
@@ -22,10 +19,7 @@ import {
 import { computeCoverage } from '../lifecycle/coverage.js';
 import {
   formatUsageDetail,
-  isRichUsageDetail,
-  sessionDetailKey,
   type SessionUsageDetail,
-  sessionUsageDetailByKey,
   usageDetailFingerprint,
 } from '../usage/session-usage-detail.js';
 
@@ -192,6 +186,7 @@ export interface DigestCheckpointBlock {
   summary: string;
   files_changed: string[];
   verification?: VerificationEntry[];
+  close_snapshot?: { tree_sha: string | null; snapshot_commit_sha: string | null };
   /** Invoking agent at open time; null on pre-attribution checkpoints. */
   agent?: string | null;
   /** Invoking agent at close time (cross-agent handoffs may differ from `agent`). */
@@ -397,80 +392,14 @@ export interface DigestOutput {
   markdown: string;
   /**
    * The artifact `source_event_id` the digest content was built from,
-   * captured from the SAME `readArtifact` that produced the content (see
-   * `buildDigest`). `writeDigest` records this in the staleness sidecar.
-   * Taking it from a second, later read would let a concurrent event landing
-   * mid-build stamp a newer id than the content reflects, making a
-   * genuinely-stale digest read as current (TOCTOU). Kept on this wrapper
-   * (not `DigestData`) so it never leaks into `digest --json` / the FTS index.
+   * retained with the exact thread snapshot that produced the content. Kept
+   * on this wrapper so it never leaks into digest JSON data.
    */
   source_event_id: string;
   /**
-   * Fingerprint of the usage state this digest reflects. Recorded in the
-   * staleness sidecar so a usage-only change (which doesn't move
-   * `source_event_id`) still marks a cached digest stale.
+   * Fingerprint of the usage state this digest reflects.
    */
   usage_fingerprint: string;
-}
-
-export interface BuildDigestOptions {
-  store: ArtifactStore;
-  artifactId: string;
-  /**
-   * Optional ref → description map (from `discoverEvaluators`). When
-   * provided, the digest renders the description inline next to
-   * non-pass rows in the process-notes section. Keys are resolved
-   * refs (`<pack>/<id>`).
-   */
-  evaluatorDescriptions?: ReadonlyMap<string, string>;
-  /**
-   * Apply secret redaction to the digest output (data + rendered
-   * markdown + cached digest.md). Defaults to `true`. Redaction is
-   * output-only; capture payloads on disk are untouched.
-   */
-  redactSecrets?: boolean;
-}
-
-/**
- * Walk every plan revision (0..latest) and aggregate the
- * acceptance-criterion removals + same-id rewrites recorded on each
- * revision's `criterion_lineage`. Aggregating across ALL revisions (not just
- * the latest) is the point: a later clean revision would otherwise hide an
- * earlier narrowing — exactly the silent-shrink vector this closes. The lineage
- * carries the prior text (removed) and prior→new text (rewritten) so the
- * digest renders the dropped/weakened rubric without re-reading old plans.
- *
- * `step_label` resolves from the revision that made the change (its
- * `prior_step_id` → that revision's step label), falling back to the step_id
- * when the step was itself dropped in the same revision.
- */
-async function collectCriterionChanges(
-  store: ArtifactStore,
-  artifactId: string,
-  latest: Plan
-): Promise<DigestCriterionChanges> {
-  const removed: DigestCriterionRemoval[] = [];
-  const rewritten: DigestCriterionRewrite[] = [];
-  // revision_n 0 is the initial capture (lineage always empty there); start at
-  // 1, but readPlanRevision tolerates 0 too. Bounded by latest.revision_n.
-  for (let n = 1; n <= latest.revision_n; n++) {
-    const rev = n === latest.revision_n ? latest : await store.readPlanRevision(artifactId, n);
-    if (!rev) continue;
-    const labelFor = (stepId: string): string =>
-      rev.plan_steps.find((s) => s.step_id === stepId)?.label ?? stepId;
-    for (const r of rev.criterion_lineage.removed) {
-      removed.push({ revision_n: n, step_label: labelFor(r.prior_step_id), text: r.text });
-    }
-    for (const r of rev.criterion_lineage.rewritten) {
-      rewritten.push({
-        revision_n: n,
-        step_label: labelFor(r.prior_step_id),
-        prior_text: r.prior_text,
-        new_text: r.new_text,
-      });
-    }
-  }
-  return { removed, rewritten };
 }
 
 function collectCriterionChangesFromPlans(plans: readonly Plan[]): DigestCriterionChanges {
@@ -508,7 +437,7 @@ function finishDigest(input: {
   sourceEventId: string;
   criterionChanges: DigestCriterionChanges;
   overlapAdjudication: ReadonlyMap<number, { finalized: boolean }>;
-  usage: DigestUsage;
+  usage?: DigestUsage;
   evaluatorDescriptions?: ReadonlyMap<string, string>;
   redactSecrets?: boolean;
 }): DigestOutput {
@@ -531,80 +460,27 @@ function finishDigest(input: {
   };
   const redacted =
     input.redactSecrets === false ? rawData : redactSecretsInObject<DigestData>(rawData);
-  const data: DigestData = { ...redacted, usage: input.usage };
+  const data: DigestData = {
+    ...redacted,
+    ...(input.usage === undefined ? {} : { usage: input.usage }),
+  };
   return {
     data,
     markdown: renderDigestMarkdown(data),
     source_event_id: input.sourceEventId,
-    usage_fingerprint: usageFingerprint(input.usage),
+    usage_fingerprint: input.usage === undefined ? '' : usageFingerprint(input.usage),
   };
 }
 
-/**
- * Read the artifact thread for `artifactId` and assemble the digest
- * data + rendered markdown. Pure read — does not write to disk. Use
- * `writeDigest` to persist to `<artifact>/digest.md`.
- */
-export async function buildDigest(opts: BuildDigestOptions): Promise<DigestOutput> {
-  // Read the artifact (source_event_id + the pinned source_plan) FIRST, before
-  // the content reads below, so the recorded source_event_id is the OLDEST
-  // observation of the thread. A concurrent append during the content reads can
-  // then only make the digest read STALE (a harmless regenerate), never falsely
-  // current (the false-fresh direction is the dangerous one; reading the id
-  // AFTER the content would reopen that window). source_plan is pinned at
-  // capture and immutable, so reading it here loses nothing.
-  const artifact = await opts.store.readArtifact(opts.artifactId);
-
-  const plan = await opts.store.readPlan(opts.artifactId);
-  if (!plan) {
-    throw new Error(`Cannot build digest: artifact "${opts.artifactId}" has no plan.`);
-  }
-  if (!artifact) {
-    throw new Error(
-      `Cannot build digest: artifact "${opts.artifactId}" has no artifact projection.`
-    );
-  }
-  const checkpoints = await opts.store.readCheckpoints(opts.artifactId);
-  const summary = await opts.store.readSummary(opts.artifactId);
-  const evalLog = await opts.store.readEvaluatorLog(opts.artifactId);
-
-  // Aggregate criterion removals/rewritten across ALL revisions.
-  // The walk needs store access (per-revision `criterion_lineage`), so it lives
-  // here rather than in the pure `composeDigestData`. A later clean revision
-  // must NOT hide an earlier narrowing, so we union every revision's lineage.
-  const criterionChanges = await collectCriterionChanges(opts.store, opts.artifactId, plan);
-
-  // Fold the window-overlap adjudication (the resolved GROUP state) so the
-  // renderer can flag a per-checkpoint snapshot whose group has since fully
-  // closed. Read-model overlay attached POST-compose — composeDigestData stays
-  // pure and the hashable manifest is untouched.
-  const overlapAdjudication = await opts.store.adjudicateWindowOverlap(opts.artifactId);
-
-  const usage = buildDigestUsage(opts.store.store, opts.artifactId);
-  return finishDigest({
-    plan,
-    checkpoints,
-    summary,
-    evalLog,
-    sourcePlan: artifact.source_plan ?? null,
-    sourceEventId: artifact.source_event_id,
-    criterionChanges,
-    overlapAdjudication,
-    usage,
-    evaluatorDescriptions: opts.evaluatorDescriptions,
-    redactSecrets: opts.redactSecrets,
-  });
-}
-
-export interface BuildArchivedDigestOptions {
-  thread: ArchivedArtifactThread;
-  store: ArtifactStore['store'];
+export interface BuildThreadDigestOptions {
+  thread: ArtifactThread;
+  usage?: DigestUsage;
+  overlapAdjudication?: ReadonlyMap<number, { finalized: boolean }>;
   evaluatorDescriptions?: ReadonlyMap<string, string>;
   redactSecrets?: boolean;
 }
 
-/** Build a digest from an archive-rebuilt thread without restoring or caching it. */
-export function buildArchivedDigest(opts: BuildArchivedDigestOptions): DigestOutput {
+export function buildThreadDigest(opts: BuildThreadDigestOptions): DigestOutput {
   const { thread } = opts;
   if (!thread.plan) {
     throw new Error(`Cannot build digest: artifact "${thread.artifactId}" has no plan.`);
@@ -642,89 +518,11 @@ export function buildArchivedDigest(opts: BuildArchivedDigestOptions): DigestOut
     sourcePlan: thread.artifactJson.source_plan ?? null,
     sourceEventId: thread.artifactJson.source_event_id,
     criterionChanges: collectCriterionChangesFromPlans(plans),
-    overlapAdjudication,
-    usage: buildDigestUsage(opts.store, thread.artifactId),
+    overlapAdjudication: opts.overlapAdjudication ?? overlapAdjudication,
+    usage: opts.usage,
     evaluatorDescriptions: opts.evaluatorDescriptions,
     redactSecrets: opts.redactSecrets,
   });
-}
-
-/**
- * Build + persist the digest to `<artifact>/digest.md`. Returns the
- * digest output AND the absolute file path. Also re-indexes the
- * digest in FTS5 so users can search digest content alongside other
- * artifact bodies; the index-write boundary re-redacts for defense
- * in depth.
- */
-export async function writeDigest(
-  opts: BuildDigestOptions
-): Promise<DigestOutput & { path: string }> {
-  const out = await buildDigest(opts);
-  const paths = artifactPathsFor(opts.store.repoRoot, opts.store.config, out.data.artifact_id);
-  await atomicWriteFile(paths.digestMd, out.markdown, opts.store.repoRoot);
-  // Staleness sidecar: record the artifact source_event_id this digest was
-  // built from, so the next-step hint can tell whether the cached digest is
-  // current (compare against the live source_event_id — no mtimes). The
-  // digest itself stays event-less / regenerable.
-  //
-  // The id is taken from `out.source_event_id` — the SAME readArtifact that
-  // produced the content — NOT a second read here. A second read could
-  // observe an event a concurrent capture appended between the content read
-  // and now, stamping a newer id than the markdown reflects, so a
-  // genuinely-stale digest would later read as current (TOCTOU).
-  await atomicWriteFile(
-    paths.digestMeta,
-    JSON.stringify({
-      source_event_id: out.source_event_id,
-      usage_fingerprint: out.usage_fingerprint,
-    }) + '\n',
-    opts.store.repoRoot
-  );
-  opts.store.store.replaceSearchEntry({
-    artifact_id: out.data.artifact_id,
-    source: 'digest',
-    branch: out.data.branch,
-    ts: out.data.completed_at ?? out.data.started_at,
-    content: out.markdown,
-  });
-  return { ...out, path: paths.digestMd };
-}
-
-/**
- * Read the artifact's coding-agent usage LIVE from the repo-level ledger:
- * exact session totals (the accounting base) + the estimated attributed slice.
- */
-export function buildDigestUsage(store: ArtifactStore['store'], artifactId: string): DigestUsage {
-  const sessions = store.artifactCodingSessions(artifactId);
-  const a = store.attributedArtifactUsage(artifactId);
-  // Per-session high-water dimensions + rate-class split (the exact figures; the
-  // attributed_estimate below stays scalar-only). Attached only when it adds
-  // something beyond the scalar total (dimensions or a non-default rate class),
-  // so all-standard sessions render — and fingerprint — exactly as before.
-  const detailByKey = sessionUsageDetailByKey(store.artifactSessionModelBreakdowns(artifactId));
-  return {
-    has_usage: sessions.length > 0,
-    sessions: sessions.map((s) => {
-      const detail = detailByKey.get(sessionDetailKey(s.agent, s.session_id));
-      const rich = isRichUsageDetail(detail);
-      return {
-        agent: s.agent,
-        session_id: s.session_id,
-        input_tokens: s.cumulative_input_tokens,
-        output_tokens: s.cumulative_output_tokens,
-        cache_creation_input_tokens: s.cumulative_cache_creation_input_tokens,
-        cache_read_input_tokens: s.cumulative_cache_read_input_tokens,
-        record_count: s.record_count,
-        ...(rich ? { detail } : {}),
-      };
-    }),
-    attributed_estimate: {
-      input_tokens: a.input_tokens,
-      output_tokens: a.output_tokens,
-      cache_creation_input_tokens: a.cache_creation_input_tokens,
-      cache_read_input_tokens: a.cache_read_input_tokens,
-    },
-  };
 }
 
 /**
@@ -758,7 +556,7 @@ interface ComposeOpts {
   sourcePlan: SourcePlanPin | null;
   /**
    * Criterion removals/rewrites aggregated across ALL plan
-   * revisions by `buildDigest` (which has store access for the revision walk).
+   * revisions from the retained thread event sequence.
    * Empty on an unrevised plan.
    */
   criterionChanges: DigestCriterionChanges;
@@ -798,6 +596,10 @@ function composeDigestData(o: ComposeOpts): DigestData {
     summary: cp.summary,
     files_changed: cp.files_changed,
     ...(cp.verification !== undefined ? { verification: cp.verification } : {}),
+    close_snapshot: {
+      tree_sha: cp.close_snapshot.tree_sha,
+      snapshot_commit_sha: cp.close_snapshot.snapshot_commit_sha,
+    },
     agent: cp.agent ?? null,
     closed_by_agent: cp.closed_by_agent ?? null,
     // Optional-absent: only overlap-partitioned closes.
@@ -1179,6 +981,9 @@ function renderDigestMarkdown(d: DigestData): string {
   lines.push(`# digest — \`${d.branch}\` / \`${d.artifact_id}\` (${cpLabel})`);
   lines.push('');
   lines.push(`> **${d.label}**`);
+  lines.push(
+    '> Findings and conclusions are **agent-reported**. Evaluator statuses do not independently establish their truth.'
+  );
   lines.push('');
   if (d.origin?.kind === 'git-import') {
     const authors = d.origin.authors.length > 0 ? d.origin.authors.join(', ') : 'unknown';
@@ -1396,7 +1201,7 @@ function renderDigestMarkdown(d: DigestData): string {
   // unsummarized thread stays silent (the incomplete-thread blockquote covers
   // that case already).
   if (d.outcome !== null && d.outcome.length > 0) {
-    lines.push(`## outcome  ${provenanceTag}`);
+    lines.push(`## outcome  ${provenanceTag} — agent-reported conclusions and corrections`);
     lines.push('');
     lines.push(d.outcome);
     lines.push('');
@@ -1424,7 +1229,7 @@ function renderDigestMarkdown(d: DigestData): string {
     lines.push('');
   }
 
-  lines.push('## what changed  _(inferred from checkpoints)_');
+  lines.push('## what changed  _(agent-reported checkpoint conclusions)_');
   lines.push('');
   if (d.checkpoints.length === 0) {
     lines.push('_No checkpoints captured._');
@@ -1705,11 +1510,38 @@ function renderDigestMarkdown(d: DigestData): string {
   lines.push('');
 
   if (d.open_uncertainty.length > 0) {
-    lines.push('## checkpoint uncertainties  _(resolution status not encoded)_');
+    lines.push('## checkpoint uncertainties  _(agent-reported; resolution status not encoded)_');
     lines.push('');
     for (const u of d.open_uncertainty) lines.push(`- ${u.item} _(from cp ${u.checkpoint})_`);
     lines.push('');
   }
+
+  lines.push('## commands the agent reports running');
+  lines.push('');
+  lines.push(
+    '_Command entries are agent-supplied. Orcaops does not execute them; a later close snapshot does not establish the command target._'
+  );
+  lines.push('');
+  for (const cp of d.checkpoints) {
+    for (const entry of cp.verification ?? []) {
+      const snapshot = cp.close_snapshot?.snapshot_commit_sha ?? cp.close_snapshot?.tree_sha;
+      lines.push(
+        `- \`${entry.command}\` — Agent reports command exited ${entry.exit_code}. ${snapshot ? `Checkpoint subsequently closed at snapshot \`${snapshot}\`.` : 'Checkpoint subsequently closed; snapshot unavailable.'} _(cp ${cp.n})_`
+      );
+      if (entry.output_digest) lines.push(`  - Agent-supplied output: ${entry.output_digest}`);
+      if (entry.note) lines.push(`  - Agent-supplied note: ${entry.note}`);
+    }
+  }
+  if (!d.checkpoints.some((cp) => (cp.verification?.length ?? 0) > 0)) {
+    lines.push('_No command results recorded._');
+  }
+  lines.push('');
+  lines.push('## challenged findings');
+  lines.push('');
+  lines.push(
+    '_This digest has no structured challenge status. Recorded uncertainty and agent-reported corrections do not establish refutation._'
+  );
+  lines.push('');
 
   lines.push(`## tests  ${provenanceTag}`);
   lines.push('');
@@ -1723,7 +1555,7 @@ function renderDigestMarkdown(d: DigestData): string {
       lines.push('');
     }
     if (d.tests_run.length > 0) {
-      lines.push('**Run:**');
+      lines.push('**Agent reports running (result and target not recorded here):**');
       lines.push('');
       for (const t of d.tests_run) lines.push(`- \`${t}\``);
     }

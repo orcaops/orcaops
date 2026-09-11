@@ -24,7 +24,6 @@ import {
   writeTerminalSafeStderr,
   writeTerminalSafeStdout,
 } from '../../io/output.js';
-import { buildContext } from '../../lib/context.js';
 import {
   type EvaluatorGrantMutation,
   readTrustManifest,
@@ -40,6 +39,7 @@ import {
   writeEvaluatorState,
 } from '../../lib/evaluators-config.js';
 import { getInvocationEnv } from '../../lib/invocation-context.js';
+import { resolveInstallCommandContext } from '../../lib/repository-context.js';
 
 const FIRST_PARTY_PACKAGE = '@orcaops/evaluator-pack';
 
@@ -139,203 +139,195 @@ export async function evalAddPackAction(opts: AddPackOptions): Promise<void> {
 export async function runAddPack(opts: AddPackOptions): Promise<AddPackResult> {
   const profile = parseAddPackProfile(opts.profile);
 
-  const ctx = await buildContext();
-  try {
-    const source = parseSourceArg(opts.source, opts.packId);
-    // Before resolution, validation, and every mutation: a dev grant binds to a
-    // path, so a non-path source has nothing to bind to. Rejecting here rather
-    // than later is what keeps the failure free of side effects — silently
-    // falling back to a fingerprint grant would hand back the durable trust the
-    // flag exists to avoid. Mirrors the same guard in `eval trust --dev`.
-    if (opts.dev && source.kind !== 'path') {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        `--dev is for mutable path-source (workspace) packs; this source is ` +
-          `kind: ${source.kind}, which stays fingerprint-bound. Re-run without --dev.`,
-        'dev'
-      );
-    }
-    let resolved: ResolvedPackSource;
-    try {
-      resolved = await resolvePackSource(source, {
-        repoRoot: ctx.repoRoot,
-        cliRoot: CLI_ROOT,
-      });
-    } catch (err) {
-      throw new OrcaopsError(
-        ErrorCodes.PACK_RESOLUTION,
-        err instanceof Error ? err.message : String(err)
-      );
-    }
-
-    // Classify with the effective provider the dispatch gate will see;
-    // otherwise an implicit-codex evaluator's file-reading capability is
-    // never prompted for, granted, or recorded.
-    const validation = await validatePack(resolved, {
-      defaultLlmProvider: await resolveDefaultProvider(ctx.config.llm, getInvocationEnv()),
-    });
-    if (!validation.ok) {
-      throw new OrcaopsError(
-        ErrorCodes.PACK_VALIDATION,
-        `Pack failed validation:\n${formatErrors(validation)}`
-      );
-    }
-
-    const configId = derivePackId(source, validation);
-    const existing = await readEvaluatorsConfig(ctx.repoRoot);
-    const config = existing ?? emptyEvaluatorsConfig();
-    const configCreated = existing === null;
-    const configPath = (await resolveEvaluatorsConfigLocation(ctx.repoRoot)).displayPath;
-
-    const existingIdx = config.packages.findIndex((pack) => pack.id === configId);
-    if (existingIdx !== -1 && !opts.force) {
-      throw new OrcaopsError(
-        ErrorCodes.PACK_ALREADY_INSTALLED,
-        `Pack id "${configId}" is already registered in ${configPath}. ` +
-          `Use --force to overwrite or \`orcaops eval update-pack ${configId}\` to refresh.`
-      );
-    }
-
-    const nextConfig = {
-      ...config,
-      runtime: { ...config.runtime },
-      packages: config.packages.map((pack) => ({ ...pack, source: { ...pack.source } })),
-      evaluators: { ...config.evaluators },
-    };
-    const packEntry: EvaluatorConfigPackageEntry = { id: configId, source };
-    if (existingIdx === -1) nextConfig.packages.push(packEntry);
-    else nextConfig.packages[existingIdx] = packEntry;
-
-    const enabledRefs: string[] = [];
-    const disabledRefs: string[] = [];
-    const overrides: Record<string, EvaluatorOverride> = nextConfig.evaluators;
-    const discoveredRefs = new Set(
-      validation.specs.map((loaded) => `${configId}/${loaded.spec.id}`)
+  const ctx = await resolveInstallCommandContext();
+  const source = parseSourceArg(opts.source, opts.packId);
+  // Before resolution, validation, and every mutation: a dev grant binds to a
+  // path, so a non-path source has nothing to bind to. Rejecting here rather
+  // than later is what keeps the failure free of side effects — silently
+  // falling back to a fingerprint grant would hand back the durable trust the
+  // flag exists to avoid. Mirrors the same guard in `eval trust --dev`.
+  if (opts.dev && source.kind !== 'path') {
+    throw new OrcaopsError(
+      ErrorCodes.INVALID_INPUT,
+      `--dev is for mutable path-source (workspace) packs; this source is ` +
+        `kind: ${source.kind}, which stays fingerprint-bound. Re-run without --dev.`,
+      'dev'
     );
-
-    if (opts.force) {
-      const prefix = `${configId}/`;
-      for (const ref of Object.keys(overrides)) {
-        if (ref.startsWith(prefix) && !discoveredRefs.has(ref)) delete overrides[ref];
-      }
-    }
-
-    for (const loaded of validation.specs) {
-      const ref = `${configId}/${loaded.spec.id}`;
-      const enable = seedEnableDecision(loaded.spec, profile, opts.disabled);
-      const prior = overrides[ref];
-      if (prior !== undefined && !opts.force) {
-        if (prior.enabled) enabledRefs.push(ref);
-        else disabledRefs.push(ref);
-        continue;
-      }
-      overrides[ref] = { enabled: enable };
-      if (enable) enabledRefs.push(ref);
-      else disabledRefs.push(ref);
-    }
-    const validatedConfig = validateEvaluatorsConfig(nextConfig);
-
-    // Every command and LLM warning is a consent capability. Plain LLM
-    // evaluators still transmit capture context and use the user's
-    // authenticated provider; file-reading evaluators require the additional
-    // worktree capability.
-    const securityWarnings = validation.warnings.filter((warning) =>
-      isTrustCapability(warning.code)
-    );
-    const securityWarningCodes = securityWarnings
-      .map((warning) => warning.code)
-      .filter(isTrustCapability);
-    let grantWritten = false;
-    let grantCoveredByManifest = false;
-    let grantMutation: EvaluatorGrantMutation = { kind: 'revoke', packageId: configId };
-    if (securityWarnings.length > 0) {
-      // Installation-manifest short-circuit: a bundled pack whose final
-      // installed bytes match the manifest shipped WITH this CLI is built-in
-      // trusted — no prompt, no user-local grant needed. Repo-declared
-      // `kind: bundled` grants nothing by itself; the fingerprint match does.
-      const { fingerprint } = await computePackSourceFingerprint(resolved);
-      const manifest = readTrustManifest(CLI_ROOT);
-      if (trustManifestCovers(manifest, source, fingerprint, securityWarningCodes)) {
-        grantCoveredByManifest = true;
-      } else {
-        // Consent must present EVERY capability class it will grant — a
-        // mixed command + file-reading-LLM pack shows both warnings before
-        // acceptance, not just the command one.
-        const combinedWarning = securityWarnings.map((w) => w.message).join('\n');
-        const totalRefs = new Set(securityWarnings.flatMap((w) => w.refs)).size;
-        if (opts.json && !opts.yes) {
-          throw new OrcaopsError(
-            ErrorCodes.INVALID_INPUT,
-            `Pack ships ${totalRefs} evaluator(s) that reach capture data ` +
-              `(${securityWarningCodes.join(', ')}). Trust must be granted explicitly; ` +
-              `re-run with --yes to accept under --json, or run \`orcaops eval trust <pack>\` ` +
-              `interactively.`,
-            'yes'
-          );
-        }
-        const accepted = opts.yes
-          ? true
-          : await promptForTrust(combinedWarning, totalRefs, securityWarningCodes);
-        if (!accepted) {
-          throw new OrcaopsError(ErrorCodes.INVALID_INPUT, 'Aborted: trust not granted.', 'yes');
-        }
-        // The grant is USER-LOCAL (never written into the repository).
-        // Fingerprint-bound to the covered declared pack files by default, so
-        // changes to excluded runtime state do not invalidate it; `--dev` binds
-        // to the resolved path instead, which is the author-iterating case.
-        // See docs/evaluator-consent.md.
-        grantMutation = {
-          kind: 'write',
-          grant: opts.dev
-            ? {
-                kind: 'workspace-dev',
-                package_id: configId,
-                resolved_path: resolved.pack_root,
-                capabilities: securityWarningCodes,
-                granted_at: new Date().toISOString(),
-              }
-            : {
-                kind: 'fingerprint',
-                package_id: configId,
-                source_fingerprint: fingerprint,
-                capabilities: securityWarningCodes,
-                granted_at: new Date().toISOString(),
-              },
-        };
-        grantWritten = true;
-      }
-    }
-
-    await writeEvaluatorState(ctx.repoRoot, validatedConfig, grantMutation);
-
-    return {
-      ok: true,
-      config_path: EVALUATOR_CONFIG_FILE,
-      pack: {
-        id: configId,
-        source,
-        pack_root: resolved.pack_root,
-        description: validation.specs.length > 0 ? loadedPackDescription(validation) : '',
-      },
-      evaluators_enabled: enabledRefs.sort(),
-      evaluators_disabled: disabledRefs.sort(),
-      warnings: validation.warnings.map((w) => ({
-        code: w.code,
-        message: w.message,
-        refs: w.refs,
-      })),
-      config_created: configCreated,
-      trust: grantWritten
-        ? opts.dev
-          ? 'user-local-dev-grant'
-          : 'user-local-grant'
-        : grantCoveredByManifest
-          ? 'builtin-manifest'
-          : 'not-required',
-    };
-  } finally {
-    ctx.store.close();
   }
+  let resolved: ResolvedPackSource;
+  try {
+    resolved = await resolvePackSource(source, {
+      repoRoot: ctx.repoRoot,
+      cliRoot: CLI_ROOT,
+    });
+  } catch (err) {
+    throw new OrcaopsError(
+      ErrorCodes.PACK_RESOLUTION,
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+
+  // Classify with the effective provider the dispatch gate will see;
+  // otherwise an implicit-codex evaluator's file-reading capability is
+  // never prompted for, granted, or recorded.
+  const validation = await validatePack(resolved, {
+    defaultLlmProvider: await resolveDefaultProvider(ctx.config.llm, getInvocationEnv()),
+  });
+  if (!validation.ok) {
+    throw new OrcaopsError(
+      ErrorCodes.PACK_VALIDATION,
+      `Pack failed validation:\n${formatErrors(validation)}`
+    );
+  }
+
+  const configId = derivePackId(source, validation);
+  const existing = await readEvaluatorsConfig(ctx.repoRoot);
+  const config = existing ?? emptyEvaluatorsConfig();
+  const configCreated = existing === null;
+  const configPath = (await resolveEvaluatorsConfigLocation(ctx.repoRoot)).displayPath;
+
+  const existingIdx = config.packages.findIndex((pack) => pack.id === configId);
+  if (existingIdx !== -1 && !opts.force) {
+    throw new OrcaopsError(
+      ErrorCodes.PACK_ALREADY_INSTALLED,
+      `Pack id "${configId}" is already registered in ${configPath}. ` +
+        `Use --force to overwrite or \`orcaops eval update-pack ${configId}\` to refresh.`
+    );
+  }
+
+  const nextConfig = {
+    ...config,
+    runtime: { ...config.runtime },
+    packages: config.packages.map((pack) => ({ ...pack, source: { ...pack.source } })),
+    evaluators: { ...config.evaluators },
+  };
+  const packEntry: EvaluatorConfigPackageEntry = { id: configId, source };
+  if (existingIdx === -1) nextConfig.packages.push(packEntry);
+  else nextConfig.packages[existingIdx] = packEntry;
+
+  const enabledRefs: string[] = [];
+  const disabledRefs: string[] = [];
+  const overrides: Record<string, EvaluatorOverride> = nextConfig.evaluators;
+  const discoveredRefs = new Set(validation.specs.map((loaded) => `${configId}/${loaded.spec.id}`));
+
+  if (opts.force) {
+    const prefix = `${configId}/`;
+    for (const ref of Object.keys(overrides)) {
+      if (ref.startsWith(prefix) && !discoveredRefs.has(ref)) delete overrides[ref];
+    }
+  }
+
+  for (const loaded of validation.specs) {
+    const ref = `${configId}/${loaded.spec.id}`;
+    const enable = seedEnableDecision(loaded.spec, profile, opts.disabled);
+    const prior = overrides[ref];
+    if (prior !== undefined && !opts.force) {
+      if (prior.enabled) enabledRefs.push(ref);
+      else disabledRefs.push(ref);
+      continue;
+    }
+    overrides[ref] = { enabled: enable };
+    if (enable) enabledRefs.push(ref);
+    else disabledRefs.push(ref);
+  }
+  const validatedConfig = validateEvaluatorsConfig(nextConfig);
+
+  // Every command and LLM warning is a consent capability. Plain LLM
+  // evaluators still transmit capture context and use the user's
+  // authenticated provider; file-reading evaluators require the additional
+  // worktree capability.
+  const securityWarnings = validation.warnings.filter((warning) => isTrustCapability(warning.code));
+  const securityWarningCodes = securityWarnings
+    .map((warning) => warning.code)
+    .filter(isTrustCapability);
+  let grantWritten = false;
+  let grantCoveredByManifest = false;
+  let grantMutation: EvaluatorGrantMutation = { kind: 'revoke', packageId: configId };
+  if (securityWarnings.length > 0) {
+    // Installation-manifest short-circuit: a bundled pack whose final
+    // installed bytes match the manifest shipped WITH this CLI is built-in
+    // trusted — no prompt, no user-local grant needed. Repo-declared
+    // `kind: bundled` grants nothing by itself; the fingerprint match does.
+    const { fingerprint } = await computePackSourceFingerprint(resolved);
+    const manifest = readTrustManifest(CLI_ROOT);
+    if (trustManifestCovers(manifest, source, fingerprint, securityWarningCodes)) {
+      grantCoveredByManifest = true;
+    } else {
+      // Consent must present EVERY capability class it will grant — a
+      // mixed command + file-reading-LLM pack shows both warnings before
+      // acceptance, not just the command one.
+      const combinedWarning = securityWarnings.map((w) => w.message).join('\n');
+      const totalRefs = new Set(securityWarnings.flatMap((w) => w.refs)).size;
+      if (opts.json && !opts.yes) {
+        throw new OrcaopsError(
+          ErrorCodes.INVALID_INPUT,
+          `Pack ships ${totalRefs} evaluator(s) that reach capture data ` +
+            `(${securityWarningCodes.join(', ')}). Trust must be granted explicitly; ` +
+            `re-run with --yes to accept under --json, or run \`orcaops eval trust <pack>\` ` +
+            `interactively.`,
+          'yes'
+        );
+      }
+      const accepted = opts.yes
+        ? true
+        : await promptForTrust(combinedWarning, totalRefs, securityWarningCodes);
+      if (!accepted) {
+        throw new OrcaopsError(ErrorCodes.INVALID_INPUT, 'Aborted: trust not granted.', 'yes');
+      }
+      // The grant is USER-LOCAL (never written into the repository).
+      // Fingerprint-bound to the covered declared pack files by default, so
+      // changes to excluded runtime state do not invalidate it; `--dev` binds
+      // to the resolved path instead, which is the author-iterating case.
+      // See docs/evaluator-consent.md.
+      grantMutation = {
+        kind: 'write',
+        grant: opts.dev
+          ? {
+              kind: 'workspace-dev',
+              package_id: configId,
+              resolved_path: resolved.pack_root,
+              capabilities: securityWarningCodes,
+              granted_at: new Date().toISOString(),
+            }
+          : {
+              kind: 'fingerprint',
+              package_id: configId,
+              source_fingerprint: fingerprint,
+              capabilities: securityWarningCodes,
+              granted_at: new Date().toISOString(),
+            },
+      };
+      grantWritten = true;
+    }
+  }
+
+  await writeEvaluatorState(ctx.repoRoot, validatedConfig, grantMutation);
+
+  return {
+    ok: true,
+    config_path: EVALUATOR_CONFIG_FILE,
+    pack: {
+      id: configId,
+      source,
+      pack_root: resolved.pack_root,
+      description: validation.specs.length > 0 ? loadedPackDescription(validation) : '',
+    },
+    evaluators_enabled: enabledRefs.sort(),
+    evaluators_disabled: disabledRefs.sort(),
+    warnings: validation.warnings.map((w) => ({
+      code: w.code,
+      message: w.message,
+      refs: w.refs,
+    })),
+    config_created: configCreated,
+    trust: grantWritten
+      ? opts.dev
+        ? 'user-local-dev-grant'
+        : 'user-local-grant'
+      : grantCoveredByManifest
+        ? 'builtin-manifest'
+        : 'not-required',
+  };
 }
 
 /**

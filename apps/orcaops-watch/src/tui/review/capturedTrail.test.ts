@@ -5,6 +5,26 @@ import { buildReviewFloorFixture } from '@orcaops/review-core';
 import { automatedConcerns, capturedTrailForCheckpoint } from './capturedTrail';
 
 describe('captured trail fallback', () => {
+  it('labels reported commands without upgrading retained citation text', () => {
+    const { floor } = buildReviewFloorFixture('clean');
+    const artifact = floor.scope.artifact_ids[0]!;
+    const checkpoint = floor.outline.threads[0]!.checkpoints[0]!;
+    const id = `cite:${artifact}:cp${checkpoint.checkpoint.cp}:verification:0`;
+    floor.citations.push({
+      id,
+      kind: 'CHECKPOINT_VERIFICATION',
+      artifact,
+      cp: checkpoint.checkpoint.cp,
+      text: 'pnpm test → exit 0',
+    });
+    checkpoint.citationIds.push(id);
+    const trail = capturedTrailForCheckpoint(floor, { artifact, cp: checkpoint.checkpoint.cp });
+    expect(trail.records.find((record) => record.id === id)).toMatchObject({
+      label: 'AGENT-REPORTED COMMAND',
+      text: 'pnpm test → exit 0',
+    });
+  });
+
   it('preserves full deterministic records without claiming semantic placement', () => {
     const fixture = buildReviewFloorFixture('clean');
     const floor = fixture.floor;
@@ -69,7 +89,7 @@ describe('captured trail fallback', () => {
         ['DECISION', 'Keep deterministic truth stable.'],
         ['RULED OUT', 'Rewrite the reader\n↳ duplicates the final v2 surface'],
         ['FLAGGED', 'The exact terminal density still needs inspection.'],
-        ['SUMMARY', 'Delivered the deterministic reader foundation.'],
+        ['AGENT-REPORTED SUMMARY', 'Delivered the deterministic reader foundation.'],
         ['EVALUATOR RUN', 'review-reader — violation: verify the fallback manually'],
       ])
     );

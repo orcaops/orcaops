@@ -39,7 +39,7 @@ describe('orcaops-recap (standup / changelog / journal formats)', () => {
     const body = bodyOf(orcaopsRecapSkill);
     expect(body).toContain('"what did I do yesterday?"');
     expect(body).toContain('"what did I do this week?"');
-    expect(body).toContain('--all-branches --active-since <since> --active-until <until> --json');
+    expect(body).toContain('--scope project --active-since <since> --active-until <until> --json');
     expect(body).toMatch(/interval-overlap/i);
     expect(body).toContain('loose-ends --artifact <id> --artifact <id2> --json');
     // Window flags must NOT be combined with --artifact (rejected).
@@ -63,8 +63,8 @@ describe('orcaops-recap (standup / changelog / journal formats)', () => {
 
   it('journal format: wraps decisions/loose-ends/list and keeps the CLI read-only', () => {
     const body = bodyOf(orcaopsRecapSkill);
-    expect(body).toContain('orcaops decisions --all-branches');
-    expect(body).toContain('orcaops loose-ends --all-branches --json');
+    expect(body).toContain('orcaops decisions --scope project');
+    expect(body).toContain('orcaops loose-ends --scope project --json');
     expect(body).toMatch(/APPEND \(never rewrite history\)/);
     expect(body).toMatch(/The CLI never writes this file/);
   });

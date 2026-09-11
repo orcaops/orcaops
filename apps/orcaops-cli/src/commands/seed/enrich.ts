@@ -2,25 +2,44 @@ import { createHash } from 'node:crypto';
 
 import { type DetailedCommit, type SeedCluster } from '@orcaops/core';
 import {
+  type Checkpoint,
   computeMemberShasHash,
   type GitImportEnrichmentPayload,
+  type GitImportEnrichmentWriteResult,
   type Plan,
   type Summary,
+  UuidV7Schema,
 } from '@orcaops/storage';
+import { ProjectDatabaseError } from '@orcaops/storage/history/database';
 
 import {
   importedArtifactEnrichmentDir,
   readSeedEnrichmentManifest,
   resolveSeedEnrichment,
+  type SeedBundlePersistence,
+  type SeedEnrichmentPersistence,
   writeSeedEnrichmentBundles,
 } from './enrichment.js';
-import { withSeedRunLock } from './journal.js';
 import type { SeedCheckpointSynthesis, SeedClusterSynthesis } from './synthesize.js';
 import { ErrorCodes, OrcaopsError } from '../../io/errors.js';
 import { CliExit } from '../../io/exit.js';
-import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../../io/output.js';
-import { buildContext, type CliContext } from '../../lib/context.js';
-import { getInvocationEnv } from '../../lib/invocation-context.js';
+import {
+  emitError,
+  emitOk,
+  writeErrorLine,
+  writeTerminalSafeStderr,
+  writeTerminalSafeStdout,
+} from '../../io/output.js';
+import {
+  type DatabaseSeedCommandContext,
+  resolveDatabaseSeedCommandContext,
+} from '../../lib/database-seed-context.js';
+import {
+  databaseSeedEnrichContext,
+  databaseSeedEnrichPersistence,
+  prepareDatabaseSeedEnrichmentSources,
+} from '../../lib/database-seed-enrichment.js';
+import { closeFailedHistoryRead } from '../../lib/history-reader-close.js';
 
 export interface SeedEnrichOptions {
   artifact: string;
@@ -32,11 +51,12 @@ export interface SeedEnrichOptions {
   json?: boolean;
 }
 
-interface SeedEnrichResult {
+export interface SeedEnrichResult {
   mode: 'dry-run' | 'apply';
   artifact_id: string;
   bundle_directory: string;
   bundle_file: string;
+  authored_directory?: string;
   decision_mode: 'preserve' | 'replace';
   confirmation_required: boolean;
   ready: boolean;
@@ -44,6 +64,51 @@ interface SeedEnrichResult {
   invalid: Array<{ file: string; reason: string }>;
   warnings: Array<{ file: string; warning: string }>;
   failures: string[];
+}
+
+export interface SeedEnrichContext {
+  repo: DatabaseSeedCommandContext['repo'];
+  config: DatabaseSeedCommandContext['config'];
+  store: {
+    readPlan(artifactId: string): Promise<Plan | null>;
+    readCheckpoints(artifactId: string): Promise<Checkpoint[]>;
+    readSummary(artifactId: string): Promise<Summary | null>;
+    readLatestGitImportEnrichmentEventId(artifactId: string): Promise<string | null>;
+    writeGitImportEnrichment(
+      input: GitImportEnrichmentPayload,
+      options: { idempotencyKey: string }
+    ): Promise<GitImportEnrichmentWriteResult>;
+  };
+}
+export interface SeedEnrichPersistence {
+  directory?: string;
+  bundle: SeedBundlePersistence;
+  enrichment: SeedEnrichmentPersistence;
+}
+
+export function validateSeedEnrichOptions(opts: SeedEnrichOptions): void {
+  if (!opts || typeof opts !== 'object' || !UuidV7Schema.safeParse(opts.artifact).success)
+    throw new OrcaopsError(
+      ErrorCodes.INVALID_INPUT,
+      'Seed enrichment requires an imported artifact UUIDv7.',
+      'artifact'
+    );
+  if (opts.dryRun && opts.yes)
+    throw new OrcaopsError(
+      ErrorCodes.INVALID_INPUT,
+      '--dry-run and --yes cannot be used together.',
+      'dryRun'
+    );
+  for (const field of ['dryRun', 'yes', 'preserveDecisions', 'prContext', 'json'] as const) {
+    if (opts[field] !== undefined && typeof opts[field] !== 'boolean')
+      throw new OrcaopsError(ErrorCodes.INVALID_INPUT, `--${field} must be a boolean.`, field);
+  }
+  if (opts.enrichmentDir !== undefined && typeof opts.enrichmentDir !== 'string')
+    throw new OrcaopsError(
+      ErrorCodes.INVALID_INPUT,
+      '--enrichment-dir must be a path.',
+      'enrichmentDir'
+    );
 }
 
 function enrichmentOptionsHash(plan: Plan): string {
@@ -61,7 +126,7 @@ function enrichmentOptionsHash(plan: Plan): string {
 }
 
 async function loadMemberCommits(
-  ctx: CliContext,
+  ctx: SeedEnrichContext,
   shas: readonly string[]
 ): Promise<DetailedCommit[]> {
   const commits = new Array<DetailedCommit>(shas.length);
@@ -99,7 +164,7 @@ async function loadMemberCommits(
 }
 
 async function existingImportSynthesis(
-  ctx: CliContext,
+  ctx: SeedEnrichContext,
   artifactId: string
 ): Promise<{ synthesis: SeedClusterSynthesis; plan: Plan; summary: Summary }> {
   const plan = await ctx.store.readPlan(artifactId);
@@ -269,16 +334,12 @@ function amendmentPayload(
 }
 
 export async function runSeedEnrich(
-  ctx: CliContext,
-  opts: SeedEnrichOptions
+  ctx: SeedEnrichContext,
+  received: SeedEnrichOptions,
+  persistence?: SeedEnrichPersistence
 ): Promise<SeedEnrichResult> {
-  if (opts.dryRun && opts.yes) {
-    throw new OrcaopsError(
-      ErrorCodes.INVALID_INPUT,
-      '--dry-run and --yes cannot be used together.',
-      'dryRun'
-    );
-  }
+  const opts = structuredClone(received);
+  validateSeedEnrichOptions(opts);
   const current = await existingImportSynthesis(ctx, opts.artifact);
   if (
     opts.preserveDecisions !== true &&
@@ -294,18 +355,28 @@ export async function runSeedEnrich(
   const decisionMode = opts.preserveDecisions ? ('preserve' as const) : ('replace' as const);
   const optionsHash = enrichmentOptionsHash(current.plan);
   const directory =
-    opts.enrichmentDir ?? importedArtifactEnrichmentDir(ctx.repo.cwd, ctx.config, opts.artifact);
+    opts.enrichmentDir ??
+    persistence?.directory ??
+    persistence?.bundle.directory ??
+    importedArtifactEnrichmentDir(ctx.repo.cwd, ctx.config, opts.artifact);
+  const bundleDirectory = persistence?.directory ?? persistence?.bundle.directory ?? directory;
   const priorEnrichmentEventId = await ctx.store.readLatestGitImportEnrichmentEventId(
     opts.artifact
   );
   const mode: SeedEnrichResult['mode'] = opts.yes ? 'apply' : 'dry-run';
 
-  let manifest = await readSeedEnrichmentManifest(ctx.repo.cwd, ctx.config, directory);
+  let manifest = await readSeedEnrichmentManifest(
+    ctx.repo.cwd,
+    ctx.config,
+    directory,
+    persistence?.bundle
+  );
   if (mode === 'dry-run') {
     await writeSeedEnrichmentBundles(ctx.repo.cwd, ctx.config, [current.synthesis], {
       optionsHash,
+      persistence: persistence?.bundle,
       prContextConsented: opts.prContext === true,
-      directory,
+      directory: bundleDirectory,
       amendment: {
         artifact_id: opts.artifact,
         prior_enrichment_event_id: priorEnrichmentEventId,
@@ -314,7 +385,12 @@ export async function runSeedEnrich(
         pr_context_consented: opts.prContext === true,
       },
     });
-    manifest = await readSeedEnrichmentManifest(ctx.repo.cwd, ctx.config, directory);
+    manifest = await readSeedEnrichmentManifest(
+      ctx.repo.cwd,
+      ctx.config,
+      directory,
+      persistence?.bundle
+    );
   }
   if (
     !manifest ||
@@ -345,13 +421,15 @@ export async function runSeedEnrich(
     optionsHash,
     prContextConsented: opts.prContext === true,
     usePersisted: false,
-    persistAccepted: false,
+    persistAccepted: persistence !== undefined && mode === 'apply',
+    persistence: persistence?.enrichment,
   });
   const bundleFile = manifest.bundles[0]?.filename ?? '';
   const base = {
     mode,
     artifact_id: opts.artifact,
-    bundle_directory: directory,
+    bundle_directory: bundleDirectory,
+    ...(directory !== bundleDirectory ? { authored_directory: directory } : {}),
     bundle_file: bundleFile,
     decision_mode: decisionMode,
     invalid: resolved.report.invalid.map((entry) => ({ file: entry.file, reason: entry.reason })),
@@ -448,35 +526,118 @@ export function renderSeedEnrichResult(result: SeedEnrichResult): string {
     `Amended ${result.totals.amended}; unchanged ${result.totals.unchanged}; ` +
       `invalid ${result.totals.invalid}; failed ${result.totals.failed}.`,
   ];
+  if (result.authored_directory) lines.push(`Authored input: ${result.authored_directory}`);
   for (const invalid of result.invalid) lines.push(`invalid ${invalid.file}: ${invalid.reason}`);
   for (const warning of result.warnings) lines.push(`warning ${warning.file}: ${warning.warning}`);
   for (const failure of result.failures) lines.push(`failed: ${failure}`);
   if (!result.ready) {
-    lines.push('Author the enrichment JSON beside the generated bundle, then rerun the preview.');
+    lines.push(
+      result.authored_directory
+        ? `Author the enrichment JSON in ${result.authored_directory}, then rerun the preview.`
+        : 'Author the enrichment JSON beside the generated bundle, then rerun the preview.'
+    );
   } else if (result.confirmation_required) {
     lines.push('Review the preview, then rerun with `--yes` to append the amendment event.');
   }
   return `${lines.join('\n')}\n`;
 }
 
-export async function seedEnrichAction(opts: SeedEnrichOptions): Promise<void> {
-  let failed = false;
-  try {
-    const ctx = await buildContext();
+export function createDatabaseSeedEnrichAction(dependencies: {
+  resolveContext: typeof resolveDatabaseSeedCommandContext;
+  run: typeof runSeedEnrich;
+  prepareSources: typeof prepareDatabaseSeedEnrichmentSources;
+}) {
+  return async (received: SeedEnrichOptions): Promise<void> => {
+    const json = !!received && typeof received === 'object' && received.json === true;
+    const controller = new AbortController();
+    const interrupt = () => controller.abort();
+    process.on('SIGINT', interrupt);
+    let failed = false;
     try {
-      const result = await withSeedRunLock(ctx.repo, getInvocationEnv(), () =>
-        runSeedEnrich(ctx, opts)
-      );
-      if (opts.json) emitOk(result);
-      else writeTerminalSafeStdout(renderSeedEnrichResult(result));
-      failed = result.totals.invalid > 0 || result.totals.failed > 0;
+      const opts = structuredClone(received);
+      validateSeedEnrichOptions(opts);
+      let waiting = false;
+      const reader = await dependencies.resolveContext({
+        write: false,
+        initialize: false,
+        authoredPayloads: [opts],
+        signal: controller.signal,
+        onWait: () => {
+          if (waiting) return;
+          waiting = true;
+          writeTerminalSafeStderr(
+            'Waiting for seed enrichment on the selected project database; Ctrl-C cancels the wait.\n'
+          );
+        },
+      });
+      let preparedAuthored;
+      try {
+        if (controller.signal.aborted)
+          throw new ProjectDatabaseError('CANCELLED', 'Seed enrichment cancelled.');
+        preparedAuthored = await dependencies.prepareSources({
+          directory:
+            opts.enrichmentDir ??
+            importedArtifactEnrichmentDir(reader.repoRoot, reader.config, opts.artifact),
+          secretAllow: reader.config.redact.allow,
+        });
+      } finally {
+        reader.close();
+      }
+      if (controller.signal.aborted)
+        throw new ProjectDatabaseError('CANCELLED', 'Seed enrichment cancelled.');
+      const context = await dependencies.resolveContext({
+        write: true,
+        initialize: false,
+        authoredPayloads: [opts],
+        signal: controller.signal,
+        onWait: () => {
+          if (waiting) return;
+          waiting = true;
+          writeTerminalSafeStderr(
+            'Waiting for seed enrichment on the selected project database; Ctrl-C cancels the wait.\n'
+          );
+        },
+      });
+      if (controller.signal.aborted) {
+        closeFailedHistoryRead(context);
+        throw new ProjectDatabaseError('CANCELLED', 'Seed enrichment cancelled.');
+      }
+      try {
+        const ctx = databaseSeedEnrichContext({
+          handle: context.database,
+          repo: context.repo,
+          config: context.config,
+          operationOptions: context.operationOptions,
+        });
+        const persistence = databaseSeedEnrichPersistence({
+          handle: context.database,
+          artifactId: opts.artifact,
+          repoRoot: context.repoRoot,
+          directory: importedArtifactEnrichmentDir(context.repoRoot, context.config, opts.artifact),
+          operationOptions: context.operationOptions,
+          secretAllow: context.config.redact.allow,
+          preparedAuthored,
+        });
+        const result = await dependencies.run(ctx, opts, persistence);
+        if (json) emitOk(result);
+        else writeTerminalSafeStdout(renderSeedEnrichResult(result));
+        failed = result.totals.invalid > 0 || result.totals.failed > 0;
+      } finally {
+        context.close();
+      }
+    } catch (error) {
+      if (json) emitError(error);
+      writeErrorLine(error);
+      throw new CliExit(1);
     } finally {
-      ctx.store.close();
+      process.off('SIGINT', interrupt);
     }
-  } catch (error) {
-    if (opts.json) emitError(error);
-    writeErrorLine(error);
-    throw new CliExit(1);
-  }
-  if (failed) throw new CliExit(1);
+    if (failed) throw new CliExit(1);
+  };
 }
+
+export const seedEnrichAction = createDatabaseSeedEnrichAction({
+  resolveContext: resolveDatabaseSeedCommandContext,
+  run: runSeedEnrich,
+  prepareSources: prepareDatabaseSeedEnrichmentSources,
+});

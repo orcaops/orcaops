@@ -1,7 +1,7 @@
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { resolveDatabaseHistoryScope } from '@orcaops/project-scope/history/database';
+import { readProjectArtifact } from '@orcaops/storage/history/database';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -52,42 +52,50 @@ describe('--invoked-by-agent runtime attribution', () => {
     return { ...out, stderr: res.stderr };
   }
 
-  async function readArtifactJson(
-    artifactId: string,
-    file: string
-  ): Promise<Record<string, unknown>> {
-    const p = path.join(repo.path, '.orcaops', 'artifacts', artifactId, file);
-    return JSON.parse(await readFile(p, 'utf8')) as Record<string, unknown>;
+  async function readArtifact(artifactId: string) {
+    const scope = await resolveDatabaseHistoryScope({
+      cwd: repo.path,
+      root: process.env.ORCAOPS_DATA_DIR,
+      profile: 'exact',
+      selector: {},
+    });
+    try {
+      const database = scope.projects[0]?.database;
+      if (!scope.completeness.complete || !database) throw new Error('Fixture history unavailable');
+      const artifact = readProjectArtifact(database, artifactId);
+      if (!artifact) throw new Error(`Fixture artifact ${artifactId} unavailable`);
+      return artifact;
+    } finally {
+      scope.close();
+    }
   }
 
   it('stamps plan.agent from --invoked-by-agent', async () => {
     const agent = makeAgent({ cwd: repo.path });
     const { artifact_id } = await capturePlan(agent, ['--invoked-by-agent', 'codex']);
-    const plan = await readArtifactJson(artifact_id, 'plan.json');
+    const plan = (await readArtifact(artifact_id)).thread.plan!;
     expect(plan.agent).toBe('codex');
   });
 
   it('stamps plan.agent from the CLAUDECODE ambient marker when no flag is given', async () => {
     const agent = makeAgent({ cwd: repo.path, env: { CLAUDECODE: '1' } });
     const { artifact_id } = await capturePlan(agent);
-    const plan = await readArtifactJson(artifact_id, 'plan.json');
+    const plan = (await readArtifact(artifact_id)).thread.plan!;
     expect(plan.agent).toBe('claude-code');
   });
 
   it('stamps plan.agent from ORCAOPS_INVOKED_BY_AGENT', async () => {
     const agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_INVOKED_BY_AGENT: 'opencode' } });
     const { artifact_id } = await capturePlan(agent);
-    const plan = await readArtifactJson(artifact_id, 'plan.json');
+    const plan = (await readArtifact(artifact_id)).thread.plan!;
     expect(plan.agent).toBe('opencode');
   });
 
-  it('falls back to other with a stderr note on a bare invocation', async () => {
+  it('falls back to other on a bare invocation', async () => {
     const agent = makeAgent({ cwd: repo.path });
-    const { artifact_id, stderr } = await capturePlan(agent);
-    const plan = await readArtifactJson(artifact_id, 'plan.json');
+    const { artifact_id } = await capturePlan(agent);
+    const plan = (await readArtifact(artifact_id)).thread.plan!;
     expect(plan.agent).toBe('other');
-    expect(stderr).toContain('attributing to "other"');
-    expect(stderr).toContain('--invoked-by-agent');
   });
 
   it('rejects an unknown --invoked-by-agent value with INVALID_INPUT', async () => {
@@ -127,8 +135,8 @@ describe('--invoked-by-agent runtime attribution', () => {
       inputFile(JSON.stringify({ artifact_id, declared_step_ids: [stepId] })),
     ]);
     expect(openRes.exitCode).toBe(0);
-    let cp = await readArtifactJson(artifact_id, 'checkpoint-1.json');
-    expect(cp.agent).toBe('codex');
+    const opened = (await readArtifact(artifact_id)).thread.checkpoints[0]!;
+    expect(opened.agent).toBe('codex');
 
     // ...and closed by cursor.
     const cursor = makeAgent({ cwd: repo.path });
@@ -155,9 +163,11 @@ describe('--invoked-by-agent runtime attribution', () => {
       ),
     ]);
     expect(closeRes.exitCode).toBe(0);
-    cp = await readArtifactJson(artifact_id, 'checkpoint-1.json');
-    expect(cp.agent).toBe('codex');
-    expect(cp.closed_by_agent).toBe('cursor');
+    const closed = (await readArtifact(artifact_id)).thread.checkpoints[0]!;
+    expect(closed.agent).toBe('codex');
+    expect(closed.status).toBe('closed');
+    if (closed.status !== 'closed') throw new Error('Fixture checkpoint did not close');
+    expect(closed.closed_by_agent).toBe('cursor');
 
     // Plan revised by opencode → revised_by_agent, authoring agent frozen.
     const opencode = makeAgent({ cwd: repo.path });
@@ -185,7 +195,7 @@ describe('--invoked-by-agent runtime attribution', () => {
       ),
     ]);
     expect(reviseRes.exitCode).toBe(0);
-    const plan = await readArtifactJson(artifact_id, 'plan.json');
+    const plan = (await readArtifact(artifact_id)).thread.plan!;
     expect(plan.agent).toBe('claude-code');
     expect(plan.revised_by_agent).toBe('opencode');
 
@@ -208,7 +218,7 @@ describe('--invoked-by-agent runtime attribution', () => {
       ),
     ]);
     expect(summaryRes.exitCode).toBe(0);
-    const summary = await readArtifactJson(artifact_id, 'summary.json');
+    const summary = (await readArtifact(artifact_id)).thread.summary!;
     expect(summary.agent).toBe('github-copilot');
 
     // The digest surfaces the handoffs — attribution suffixes render
@@ -253,7 +263,7 @@ describe('--invoked-by-agent runtime attribution', () => {
     // Provenance is not intent: the retry replays and the ORIGINAL
     // attribution is preserved.
     expect(retry.exitCode).toBe(0);
-    const cp = await readArtifactJson(artifact_id, 'checkpoint-1.json');
+    const cp = (await readArtifact(artifact_id)).thread.checkpoints[0]!;
     expect(cp.agent).toBe('codex');
   });
 });

@@ -83,9 +83,9 @@ function runGitProbe(
  * so trailing newlines are the file's, not ours to strip. Callers that want a
  * single token trim at the call site.
  */
-function runGitText(cwd: string, args: string[]): Promise<string> {
+function runGitText(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn('git', args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     proc.stdout?.setEncoding('utf8');
@@ -104,10 +104,16 @@ function runGitText(cwd: string, args: string[]): Promise<string> {
   });
 }
 
-function runGitCommand(cwd: string, args: string[], stdin?: string): Promise<Buffer> {
+function runGitCommand(
+  cwd: string,
+  args: string[],
+  stdin?: string,
+  env?: NodeJS.ProcessEnv
+): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const proc = spawn('git', args, {
       cwd,
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const stdout: Buffer[] = [];
@@ -158,7 +164,11 @@ function splitDetailedRecord(record: string): Omit<DetailedCommit, 'files'> | nu
   };
 }
 
-async function filesByCommit(cwd: string, shas: readonly string[]): Promise<Map<string, string[]>> {
+async function filesByCommit(
+  cwd: string,
+  shas: readonly string[],
+  env?: NodeJS.ProcessEnv
+): Promise<Map<string, string[]>> {
   const result = new Map<string, string[]>();
   for (const sha of shas) result.set(sha, []);
   if (shas.length === 0) return result;
@@ -175,7 +185,8 @@ async function filesByCommit(cwd: string, shas: readonly string[]): Promise<Map<
       '-z',
       '-M',
     ],
-    `${shas.join('\n')}\n`
+    `${shas.join('\n')}\n`,
+    env
   );
   const known = new Set(shas);
   let current: string | null = null;
@@ -196,7 +207,8 @@ async function readDetailedCommits(
   cwd: string,
   ref: string,
   opts: DetailedLogOptions = {},
-  firstParent = false
+  firstParent = false,
+  env?: NodeJS.ProcessEnv
 ): Promise<DetailedCommit[]> {
   if (opts.maxCount !== undefined && (!Number.isSafeInteger(opts.maxCount) || opts.maxCount <= 0)) {
     throw new RangeError('maxCount must be a positive safe integer');
@@ -213,7 +225,7 @@ async function readDetailedCommits(
     ...(opts.maxCount ? [`--max-count=${opts.maxCount}`] : []),
     ref,
   ];
-  const metadata = await runGitCommand(cwd, args);
+  const metadata = await runGitCommand(cwd, args, undefined, env);
   const commits = metadata
     .toString('utf8')
     .split('\x1e')
@@ -221,7 +233,8 @@ async function readDetailedCommits(
     .filter((commit): commit is Omit<DetailedCommit, 'files'> => commit !== null);
   const files = await filesByCommit(
     cwd,
-    commits.map((commit) => commit.sha)
+    commits.map((commit) => commit.sha),
+    env
   );
   return commits.map((commit) => ({ ...commit, files: files.get(commit.sha) ?? [] }));
 }
@@ -299,10 +312,25 @@ export class Repo {
   /** Memoized git-dir — same lifetime doctrine; see getGitDirAbsolute. */
   private gitDirPromise?: Promise<string>;
 
-  constructor(public readonly cwd: string) {}
+  private readonly env?: NodeJS.ProcessEnv;
+
+  constructor(
+    public readonly cwd: string,
+    options: { env?: NodeJS.ProcessEnv } = {}
+  ) {
+    this.env = options.env === undefined ? undefined : Object.freeze({ ...options.env });
+  }
 
   private runGit(args: string[]): Promise<string> {
-    return runGitText(this.cwd, args);
+    return runGitText(this.cwd, args, this.env);
+  }
+
+  private probeGit(args: string[], env = this.env) {
+    return runGitProbe(this.cwd, args, env);
+  }
+
+  private runGitCommand(args: string[], stdin?: string): Promise<Buffer> {
+    return runGitCommand(this.cwd, args, stdin, this.env);
   }
 
   /**
@@ -419,9 +447,9 @@ export class Repo {
    */
   async listUnmergedPaths(): Promise<string[] | null> {
     // Strip ambient GIT_INDEX_FILE — the probe must read the REAL index.
-    const env: NodeJS.ProcessEnv = { ...process.env };
+    const env: NodeJS.ProcessEnv = { ...(this.env ?? process.env) };
     delete env.GIT_INDEX_FILE;
-    const result = await runGitProbe(this.cwd, ['ls-files', '-u', '-z'], env);
+    const result = await this.probeGit(['ls-files', '-u', '-z'], env);
     if (result.code !== 0) return null;
     return parseUnmergedPathsZ(result.stdout);
   }
@@ -431,12 +459,7 @@ export class Repo {
    * missing-ref status is distinct from an operational/spawn failure.
    */
   async branchPresence(name: string): Promise<GitBranchPresence> {
-    const result = await runGitProbe(this.cwd, [
-      'show-ref',
-      '--verify',
-      '--quiet',
-      `refs/heads/${name}`,
-    ]);
+    const result = await this.probeGit(['show-ref', '--verify', '--quiet', `refs/heads/${name}`]);
     if (result.code === 0) return 'present';
     if (result.code === 1) return 'absent';
     return 'unknown';
@@ -452,7 +475,7 @@ export class Repo {
   }
 
   async resolveMergeBase(refA: string, refB: string): Promise<GitRefResolution> {
-    const result = await runGitProbe(this.cwd, ['merge-base', refA, refB]);
+    const result = await this.probeGit(['merge-base', refA, refB]);
     if (result.code === 0) {
       const sha = result.stdout.trim();
       return sha.length > 0 ? { status: 'resolved', sha } : { status: 'unknown' };
@@ -477,9 +500,25 @@ export class Repo {
     }
   }
 
+  async getCommitParents(commitSha: string): Promise<string[]> {
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commitSha))
+      throw new Error('Commit parent inspection requires a resolved object ID');
+    const object = await this.runGit(['--no-replace-objects', 'cat-file', 'commit', commitSha]);
+    const header = object.split('\n\n', 1)[0];
+    return header
+      .split('\n')
+      .filter((line) => line.startsWith('parent '))
+      .map((line) => {
+        const parent = line.slice(7);
+        if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(parent))
+          throw new Error('Commit has a malformed parent object ID');
+        return parent;
+      });
+  }
+
   async resolveTree(ref: string): Promise<string | null> {
     try {
-      const out = await runGitText(this.cwd, ['rev-parse', '--verify', '--quiet', `${ref}^{tree}`]);
+      const out = await this.runGit(['rev-parse', '--verify', '--quiet', `${ref}^{tree}`]);
       const sha = out.trim();
       return sha.length > 0 ? sha : null;
     } catch {
@@ -496,14 +535,13 @@ export class Repo {
       'commit',
       '',
     ].join('\n');
-    await runGitCommand(this.cwd, ['update-ref', '--stdin'], commands);
+    await this.runGitCommand(['update-ref', '--stdin'], commands);
   }
 
   async resolveTreesBatch(refs: readonly string[]): Promise<Map<string, string>> {
     const unique = [...new Set(refs)];
     if (unique.length === 0) return new Map();
-    const output = await runGitCommand(
-      this.cwd,
+    const output = await this.runGitCommand(
       ['cat-file', '--batch-check=%(objectname) %(objecttype)'],
       `${unique.map((ref) => `${ref}^{tree}`).join('\n')}\n`
     );
@@ -537,7 +575,7 @@ export class Repo {
           '--no-ext-diff',
           '--format=%x00%H%x00',
         ],
-        { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'] }
+        { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'] }
       );
       const result = new Map<string, BoundedCommitDiff>();
       let pairIndex = 0;
@@ -617,12 +655,7 @@ export class Repo {
 
   /** Strict ref resolution for destructive callers. */
   async resolveCommitState(ref: string): Promise<GitRefResolution> {
-    const result = await runGitProbe(this.cwd, [
-      'rev-parse',
-      '--verify',
-      '--quiet',
-      `${ref}^{commit}`,
-    ]);
+    const result = await this.probeGit(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
     if (result.code === 0) {
       const sha = result.stdout.trim();
       return sha.length > 0 ? { status: 'resolved', sha } : { status: 'unknown' };
@@ -774,12 +807,7 @@ export class Repo {
    */
   async checkReachability(ancestor: string, descendant: string): Promise<GitReachability> {
     if (ancestor === descendant) return 'reachable';
-    const result = await runGitProbe(this.cwd, [
-      'merge-base',
-      '--is-ancestor',
-      ancestor,
-      descendant,
-    ]);
+    const result = await this.probeGit(['merge-base', '--is-ancestor', ancestor, descendant]);
     if (result.code === 0) return 'reachable';
     if (result.code === 1) return 'unreachable';
     return 'unknown';
@@ -889,6 +917,7 @@ export class Repo {
     return new Promise((resolve, reject) => {
       const proc = spawn('git', ['config', '--local', ...args], {
         cwd: this.cwd,
+        env: this.env,
         stdio: ['ignore', 'pipe', 'ignore'],
       });
       let stdout = '';
@@ -952,11 +981,7 @@ export class Repo {
 
   /** Strict local-tip enumeration for destructive callers. */
   async listLocalBranchTipsState(): Promise<GitBranchTipEnumeration> {
-    const result = await runGitProbe(this.cwd, [
-      'for-each-ref',
-      '--format=%(objectname)',
-      'refs/heads',
-    ]);
+    const result = await this.probeGit(['for-each-ref', '--format=%(objectname)', 'refs/heads']);
     if (result.code !== 0) return { status: 'unknown' };
     return {
       status: 'known',
@@ -981,11 +1006,11 @@ export class Repo {
     ref: string,
     opts: DetailedLogOptions = {}
   ): Promise<DetailedCommit[]> {
-    return readDetailedCommits(this.cwd, ref, opts, true);
+    return readDetailedCommits(this.cwd, ref, opts, true, this.env);
   }
 
   async logDetailed(ref: string, opts: DetailedLogOptions = {}): Promise<DetailedCommit[]> {
-    return readDetailedCommits(this.cwd, ref, opts);
+    return readDetailedCommits(this.cwd, ref, opts, false, this.env);
   }
 
   /**

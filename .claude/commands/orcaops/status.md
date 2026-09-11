@@ -2,8 +2,8 @@
 name: "orcaops:status"
 description: "Show the artifact thread state for the current branch (machine-readable JSON)."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "0913d166c9a0"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "6c1a1c2b4134"
 tags: ["orcaops", "read-only"]
 ---
 

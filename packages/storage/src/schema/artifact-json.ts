@@ -37,9 +37,7 @@ export type BranchLineageEntry = z.infer<typeof BranchLineageEntrySchema>;
  * every metadata-affecting event.
  *
  * `source_event_id` names the latest event applied to produce this
- * projection; readers compare it against the live event log to detect
- * stale projections (deterministic, never mtimes — see
- * `events/recovery.ts`).
+ * projection so readers can preserve deterministic source identity.
  *
  * Every persisted projection is derived from at least the plan event.
  */

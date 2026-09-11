@@ -10,8 +10,8 @@ import { z } from 'zod';
  * `kind: 'cloud'` references an approved plan pulled from a web review
  * surface — `locator` is the cloud `externalId`, `version` the pinned
  * version (decimal string), and `base_url` + `org_id` embed the origin
- * so the Branch-A push guard can verify org/host **without consulting
- * the pull-cache** (the frozen pin is self-contained). Downstream
+ * so the Branch-A push guard can verify org/host from the self-contained
+ * frozen pin. Downstream
  * consumers stay kind-agnostic: `toSourcePlanContext` and the digest
  * read only kind/locator/version/hash, so the extra cloud fields are
  * ignored everywhere except the push guard.

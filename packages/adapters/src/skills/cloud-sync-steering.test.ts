@@ -33,8 +33,11 @@ describe('CLOUD_SYNC_STEERING content', () => {
     expect(CLOUD_SYNC_STEERING).toContain('orcaops resync --force');
     expect(CLOUD_SYNC_STEERING).not.toContain('ORCAOPS_BASE_URL');
     expect(CLOUD_SYNC_STEERING).not.toContain('--base-url');
-    // the non-retryable content fault steers to scrub+rebuild, NOT resync
-    expect(CLOUD_SYNC_STEERING).toContain('orcaops rebuild');
+    expect(CLOUD_SYNC_STEERING).toContain('orcaops doctor');
+    expect(CLOUD_SYNC_STEERING).toContain('preserve the registered database');
+    expect(CLOUD_SYNC_STEERING).toContain('Do not edit retained event bytes or checksums');
+    expect(CLOUD_SYNC_STEERING).not.toContain('scrub the event log');
+    expect(CLOUD_SYNC_STEERING).not.toContain('orcaops rebuild');
     expect(CLOUD_SYNC_STEERING).toContain('NOT retryable');
     // benign (skipped) reasons are framed as no-action
     expect(CLOUD_SYNC_STEERING).toContain('No action needed');

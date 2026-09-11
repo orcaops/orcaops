@@ -1,11 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { access, mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
+import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
 import { effectiveConfigPath } from '../support/test-helpers.js';
@@ -13,8 +12,7 @@ import { effectiveConfigPath } from '../support/test-helpers.js';
 /**
  * `orcaops configure` — the interactive settings menu. Under test: the menu
  * is a front-end over the existing machinery (apply persists config then runs
- * the update reconcile; archive routes through its backfill-aware toggles;
- * git hooks through their planners), and NOTHING is written until an explicit
+ * the update reconcile; git hooks through their planners), and NOTHING is written until an explicit
  * apply — cancel and discard are guaranteed write-free.
  */
 
@@ -298,39 +296,22 @@ describe('orcaops configure (mocked TTY + clack)', () => {
     expect(agentsMd).not.toContain('orcaops:start');
   });
 
-  it('archive enable routes through the backfill machinery, not a raw config bit', async () => {
-    await agent.runRaw(['init', '--scope', 'project', '--yes', '--json', '--no-llm']);
-    // Something to backfill.
-    const plan = await agent.runRaw([
-      'capture',
-      'plan',
+  it('does not offer the retired archive mirror setting', async () => {
+    const initialized = await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--yes',
+      '--json',
       '--no-llm',
-      '--input',
-      inputFile(
-        JSON.stringify({
-          idempotency_key: `plan-${randomUUID()}`,
-          task: 'configure archive fixture',
-          label: `cfg-arch-${randomUUID().slice(0, 8)}`,
-          plan_steps: [{ text: 's1', label: 's1' }],
-          touched_scope: [],
-        })
-      ),
     ]);
-    expect(plan.exitCode).toBe(0);
-
+    expect(initialized.exitCode, initialized.stdout + initialized.stderr).toBe(0);
     const m = await mocks();
-    prime(m.select, 'discard', 'archive', 'apply');
-    prime(m.confirm, false, true /* enable archive */, true /* apply */);
-
-    const r = await agent.runRaw(['configure']);
-    expect(r.exitCode).toBe(0);
-    const cfg = JSON.parse(await configJson()) as { archive: { enabled: boolean } };
-    expect(cfg.archive.enabled).toBe(true);
-    // The first-enable backfill ran: the archive project dir materialized.
-    const status = await agent.runRaw(['archive', 'status', '--json']);
-    const parsed = JSON.parse(status.stdout) as { project_dir?: string };
-    expect(parsed.project_dir).toBeDefined();
-    await expect(access(parsed.project_dir as string)).resolves.toBeUndefined();
+    const result = await agent.runRaw(['configure']);
+    expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+    const menu = m.select.mock.calls[0]?.[0] as { options: Array<{ value: string }> };
+    expect(menu.options.map((option) => option.value)).toContain('session-hooks');
+    expect(menu.options.map((option) => option.value)).not.toContain('archive');
   });
 
   it('git hooks install and remove through the planners', async () => {
@@ -543,7 +524,6 @@ describe('orcaops configure (mocked TTY + clack)', () => {
       'session-hooks',
       'hints',
       'agents',
-      'archive',
       'install',
       'apply',
       'discard',

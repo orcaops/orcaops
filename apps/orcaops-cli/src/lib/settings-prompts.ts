@@ -170,13 +170,6 @@ export const hintsPrompt = {
   },
 };
 
-export const archivePrompt = {
-  message:
-    'Keep a backup of captured session history in your home directory? It ' +
-    'survives deleting or re-cloning this checkout (turning it on backs up ' +
-    'existing history; turning it off keeps what was already backed up).',
-};
-
 export const gitHooksPrompt = {
   message:
     'Install git hooks that refresh captured history after merges and rebases? ' +

@@ -10,14 +10,15 @@ import {
   type ToolAdapter,
 } from '@orcaops/adapters';
 import { Repo, resolveConfigSource, worktreeConfigLocation } from '@orcaops/core';
+import { readRepositoryRegistration } from '@orcaops/core/history/registration';
 import { assertSafePathSegment } from '@orcaops/storage';
+import { normalizeHistoryRoot } from '@orcaops/storage/history/authority';
 
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../io/output.js';
 import { atomicWriteFile } from '../lib/atomic-write.js';
 import { CLI_VERSION } from '../lib/cli-version.js';
-import { buildContext } from '../lib/context.js';
 import { hooksDirCandidates } from '../lib/git-hooks-dir.js';
 import { planInfoExcludeMutation } from '../lib/git-info-exclude.js';
 import { planRemoveGitignoreEntries } from '../lib/gitignore.js';
@@ -42,7 +43,7 @@ import {
 } from '../lib/install-manifest.js';
 import { evaluateEntryDeleteGuard } from '../lib/install-prune.js';
 import { planRemoveInstructionBlocks } from '../lib/instruction-placement.js';
-import { getInvocationCwd } from '../lib/invocation-context.js';
+import { getInvocationCwd, getInvocationEnv } from '../lib/invocation-context.js';
 import {
   deleteMutation,
   executeMutations,
@@ -62,6 +63,7 @@ import {
   retainedPersonalManifest,
 } from '../lib/personal-manifest.js';
 import { resolveRepoKey } from '../lib/repo-key.js';
+import { resolveInstallCommandContext } from '../lib/repository-context.js';
 import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { resolveOrcaopsRoot } from '../lib/resolve-root.js';
 import { readUserHooksRecord } from '../lib/session-hooks-user.js';
@@ -71,7 +73,7 @@ import { enabledSkillTemplates } from '../lib/skill-set.js';
 export interface UninstallOptions {
   /** Also remove confirm-gated, unverifiable managed entries. */
   force?: boolean;
-  /** Also delete the whole `.orcaops/` directory (config + captured artifacts). */
+  /** Also delete removable `.orcaops/` data while preserving canonical history. */
   purgeData?: boolean;
   /** Plan and print the changes without writing anything. */
   dryRun?: boolean;
@@ -109,24 +111,20 @@ async function resolveRepoKeyOrNull(repo: Repo): Promise<string | null> {
  * confirmation, removed only under `--force`. Excise the managed block from each
  * real instruction file (never deleting the host, unless the file was an
  * orcaops-created block-only file). Remove stamped git hooks and orcaops's
- * `.gitignore` lines. `.orcaops/` (config + captured artifacts) is KEPT unless
- * `--purge-data` is given. `--dry-run` previews and writes nothing.
+ * `.gitignore` lines. `.orcaops/` data is KEPT unless `--purge-data` is given;
+ * canonical history beneath it remains protected. `--dry-run` previews and writes nothing.
  */
 export async function uninstallAction(opts: UninstallOptions = {}): Promise<void> {
   try {
     const runWithLease = async (installLease: { verify(): Promise<void> }): Promise<void> => {
       if (opts.purgeData && (await finishInterruptedEmptyPurge(opts, installLease))) return;
-      const ctx = await buildContext({ cwd: opts.cwd });
-      let storeClosed = false;
-      const closeStore = (): void => {
-        if (!storeClosed) {
-          ctx.store.close();
-          storeClosed = true;
-        }
-      };
-      try {
+      const ctx = await resolveInstallCommandContext({ cwd: opts.cwd });
+      {
         const repoRoot = ctx.repoRoot;
         const config = ctx.config;
+        const protectedHistoryRoots = opts.purgeData
+          ? await resolveProtectedHistoryRoots(repoRoot, ctx.repo)
+          : [];
         // The install set drives reconstruction genFiles + the block-excise file list;
         // the manifest-driven removal below is agent-agnostic.
         const adapters = config.install.agents
@@ -535,6 +533,7 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
         // a phantom ref that would block another repo's last-repo cleanup.
         const mode: MutationMode = opts.dryRun ? 'preview' : 'apply';
         let globalRelease: GlobalInstallResult | null = null;
+        let purgeResult: PurgeResult | null = null;
         let removedDirs: string[] = [];
         const repoId = await resolveRepoKeyOrNull(ctx.repo);
         const globalManifest = await readGlobalManifest();
@@ -554,13 +553,17 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
           // their dir alive naturally.
           removedDirs = await rmdirEmptyAncestors(repoRoot, [...removed, ...sessionHooksRemoved]);
           if (opts.purgeData) {
-            closeStore();
             await installLease.verify();
             // Deliberately leaves `orcaops.projectid` in .git/config: the
             // identity is what reattaches this checkout to its archived
             // history, and archived artifacts survive the purge by design.
             // Unsetting it here would orphan them behind a fresh mint.
-            await purgeProjectData(repoRoot, configContent);
+            purgeResult = await purgeProjectData(
+              repoRoot,
+              configContent,
+              protectedHistoryRoots,
+              mode
+            );
           }
         };
         if (mode === 'preview') {
@@ -573,6 +576,13 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
             assertGlobalReleaseAllowed(globalRelease);
           }
           await executeMutations(mutations, mode);
+          if (opts.purgeData)
+            purgeResult = await purgeProjectData(
+              repoRoot,
+              configContent,
+              protectedHistoryRoots,
+              mode
+            );
         } else if (repoId !== null && hasGlobalRefs) {
           globalRelease = await withGlobalInstallLock(async (scope) => {
             const preview = await releaseGlobalRefs(
@@ -594,6 +604,10 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
           await applyLocal();
         }
         if (globalRelease) warnings.push(...globalRelease.warnings);
+        if (purgeResult?.preservedRoots.length)
+          warnings.push(
+            `preserved canonical history under ${purgeResult.preservedRoots.join(', ')}`
+          );
 
         // 6b. The machine-level registration is NEVER touched by a repo
         // uninstall (other repos rely on it; removal is `orcaops session-hooks
@@ -637,6 +651,7 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
             global_materialized_by: globalRelease?.manifest.materialized_by ?? null,
             user_session_hooks_present: userSessionHooksPresent,
             data_purged: !!opts.purgeData,
+            canonical_data_preserved: purgeResult?.preservedRoots ?? [],
             global: globalRelease
               ? {
                   removed: globalRelease.removed,
@@ -653,6 +668,7 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
           formatHuman({
             dryRun: !!opts.dryRun,
             purgeData: !!opts.purgeData,
+            canonicalDataPreserved: purgeResult?.preservedRoots ?? [],
             removed,
             removedUnverified,
             removedDirs,
@@ -670,8 +686,6 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
             force: !!opts.force,
           })
         );
-      } finally {
-        closeStore();
       }
     };
     if (opts.dryRun) {
@@ -732,6 +746,32 @@ function assertGlobalReleaseAllowed(result: GlobalInstallResult | null): void {
     `${result.warnings[0] ?? 'Global installation ownership belongs to another CLI version.'} ` +
       `No project files were removed. ${remedy}`,
     'global install version'
+  );
+}
+
+async function resolveProtectedHistoryRoots(repoRoot: string, repo: Repo): Promise<string[]> {
+  const [configured, registration] = await Promise.all([
+    normalizeHistoryRoot({ env: getInvocationEnv(), cwd: repoRoot }),
+    repo.getCommonDirAbsolute().then((commonDir) => readRepositoryRegistration({ commonDir })),
+  ]);
+  return [
+    ...new Set(
+      [configured.resolvedRoot, registration?.authority.resolved_root].filter(
+        (root): root is string => root !== undefined
+      )
+    ),
+  ];
+}
+
+interface PurgeResult {
+  preservedRoots: string[];
+}
+
+function containedPath(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return (
+    relative === '' ||
+    (relative !== '..' && !path.isAbsolute(relative) && !relative.startsWith(`..${path.sep}`))
   );
 }
 
@@ -842,6 +882,7 @@ async function finishInterruptedEmptyPurge(
       hooks_unverified: [],
       gitignore_removed: [],
       data_purged: mode === 'apply',
+      canonical_data_preserved: [],
       global: globalRelease
         ? {
             removed: globalRelease.removed,
@@ -868,17 +909,36 @@ async function finishInterruptedEmptyPurge(
  * finish, or null when this worktree never had one (personal scope keeps its
  * config in the git common dir).
  */
-async function purgeProjectData(repoRoot: string, configContent: string | null): Promise<void> {
-  // Deliberately the WORKTREE data directory: purge removes this checkout's
-  // artifacts, cache, and config. A shared personal config lives outside it
-  // and is never reachable from here.
+async function purgeProjectData(
+  repoRoot: string,
+  configContent: string | null,
+  protectedHistoryRoots: readonly string[],
+  mode: MutationMode
+): Promise<PurgeResult> {
+  // Purge targets the worktree `.orcaops`; a canonical root inside it protects
+  // its containing subtree. A shared personal config is outside this boundary.
   const worktreeConfig = worktreeConfigLocation(repoRoot);
   const dataRoot = resolveRepositoryPath(
     path.dirname(worktreeConfig.configPath),
     worktreeConfig.containmentRoot,
     'orcaops data directory'
   );
-  const entries = await readdir(dataRoot);
+  let entries: string[];
+  try {
+    entries = await readdir(dataRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { preservedRoots: [] };
+    throw error;
+  }
+  const activeProtectedRoots = protectedHistoryRoots.filter(
+    (root) =>
+      containedPath(dataRoot, root) &&
+      (root === dataRoot ||
+        entries.some((entry) => containedPath(path.join(dataRoot, entry), root)))
+  );
+  const preservedRoots = activeProtectedRoots
+    .map((root) => path.relative(repoRoot, root) || '.')
+    .sort();
   const rank = (entry: string): number => {
     if (entry === LOCAL_MANIFEST_REL.split(path.sep).at(-1)) return 1;
     if (entry === INSTALL_MANIFEST_REL.split(path.sep).at(-1)) return 2;
@@ -888,19 +948,31 @@ async function purgeProjectData(repoRoot: string, configContent: string | null):
   for (const entry of entries.sort((left, right) => rank(left) - rank(right))) {
     assertSafePathSegment(entry, 'orcaops purge entry');
     if (entry === 'config.json') continue;
+    const entryPath = path.join(dataRoot, entry);
+    if (
+      activeProtectedRoots.some(
+        (root) =>
+          containedPath(dataRoot, root) && (root === dataRoot || containedPath(entryPath, root))
+      )
+    )
+      continue;
+    if (mode === 'preview') continue;
     try {
-      await rm(path.join(dataRoot, entry), { recursive: true, force: false });
+      await rm(entryPath, { recursive: true, force: false });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
 
+  if (mode === 'preview') return { preservedRoots };
+
   const configPath = worktreeConfig.configPath;
   await rm(configPath, { force: configContent === null });
+  if (preservedRoots.length > 0) return { preservedRoots };
   try {
     await rmdir(dataRoot);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { preservedRoots };
     try {
       if (configContent !== null) {
         await restoreConfigIfAbsent(dataRoot, configPath, configContent);
@@ -913,6 +985,7 @@ async function purgeProjectData(repoRoot: string, configContent: string | null):
     }
     throw error;
   }
+  return { preservedRoots };
 }
 
 export async function restoreConfigIfAbsent(
@@ -978,6 +1051,7 @@ async function rmdirEmptyAncestors(repoRoot: string, removedPaths: string[]): Pr
 function formatHuman(r: {
   dryRun: boolean;
   purgeData: boolean;
+  canonicalDataPreserved: string[];
   removed: string[];
   removedUnverified: { path: string; kind: OwnershipKind }[];
   removedDirs: string[];
@@ -1071,7 +1145,9 @@ function formatHuman(r: {
 
   lines.push(
     r.purgeData
-      ? 'Removed the .orcaops directory (config + captured artifacts).'
+      ? r.canonicalDataPreserved.length > 0
+        ? 'Removed noncanonical .orcaops data and preserved canonical history.'
+        : 'Removed the .orcaops directory (config + captured artifacts).'
       : 'Kept .orcaops/ (config + captured artifacts). Re-run with --purge-data to remove it.'
   );
   lines.push('');

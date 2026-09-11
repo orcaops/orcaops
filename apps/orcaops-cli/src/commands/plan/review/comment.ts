@@ -1,13 +1,14 @@
 import { ORCAOPS_CAPABILITIES } from '@orcaops/core';
 import type { OssSourcePlanReviewComment, SourcePlanReviewCommentResponse } from '@orcaops/sdk';
-import {
-  firstForbiddenControlChar,
-  readReviewCandidate,
-  readReviewProposal,
-  sourcePlanCacheDir,
-} from '@orcaops/storage';
+import { firstForbiddenControlChar } from '@orcaops/storage';
 
-import { mapReviewAuthzError, requireRef, withReviewCloud } from './shared.js';
+import type { PlanReviewPersistence } from './persistence.js';
+import {
+  createReviewMutation,
+  mapReviewAuthzError,
+  requireRef,
+  withReviewCloud,
+} from './shared.js';
 import { readBodyInput } from '../../../io/body-input.js';
 import { toCloudErrorEnvelope } from '../../../io/cloud-error-envelope.js';
 import { ErrorCodes, OrcaopsError } from '../../../io/errors.js';
@@ -19,7 +20,7 @@ import {
   writeSecretWarnings,
 } from '../../../lib/cloud-secret-gate.js';
 import { loadSecretAllowlist } from '../../../lib/run-capture.js';
-import { reviewUsageStamp, stampPlanReviewUsage } from '../../../lib/usage-stamp.js';
+import { reviewUsageStamp } from '../../../lib/usage-stamp.js';
 
 export interface ReviewCommentOptions {
   input?: string;
@@ -68,6 +69,7 @@ export interface RunRootCommentArgs extends RunReviewCommentBase {
   disambiguator?: string;
   /** `--proposal <id>` selects the proposal target (else the candidate). */
   proposalId?: string;
+  persistence: PlanReviewPersistence;
 }
 
 /**
@@ -140,20 +142,14 @@ export async function runReviewComment(
     );
   }
 
-  const cacheDir = sourcePlanCacheDir(args.repoRoot);
+  await args.persistence.preflight();
 
   let targetVersionId: string | null = null;
   let targetProposalId: string | null = null;
   let target: 'candidate' | 'proposal';
 
   if (args.proposalId !== undefined) {
-    const prop = await readReviewProposal(
-      cacheDir,
-      args.baseUrl,
-      args.orgId,
-      args.proposalId,
-      args.repoRoot
-    );
+    const prop = await args.persistence.readProposal(args.externalId, args.proposalId);
     if (!prop) {
       throw new OrcaopsError(
         ErrorCodes.NO_INPUT,
@@ -165,13 +161,7 @@ export async function runReviewComment(
     targetProposalId = args.proposalId;
     target = 'proposal';
   } else {
-    const cand = await readReviewCandidate(
-      cacheDir,
-      args.baseUrl,
-      args.orgId,
-      args.externalId,
-      args.repoRoot
-    );
+    const cand = await args.persistence.readCandidate(args.externalId);
     if (!cand || cand.version_id === null) {
       throw new OrcaopsError(
         ErrorCodes.NO_INPUT,
@@ -310,9 +300,13 @@ export async function reviewCommentAction(
     assertNoSecretsOutbound(
       'plan-review-comment',
       [
+        ['external_id', ref],
         ['body', body],
+        ['reply_to', opts.replyTo],
+        ['proposal_id', opts.proposal],
         ['quote', opts.quote],
         ['disambiguator', opts.disambiguator],
+        ['base_url', opts.baseUrl],
       ],
       await loadSecretAllowlist()
     );
@@ -323,12 +317,21 @@ export async function reviewCommentAction(
         requires: [ORCAOPS_CAPABILITIES.SOURCE_PLAN_REVIEW],
         operation: 'plan review comment',
       },
-      (ctx) =>
-        runReviewComment(
+      async (ctx) => {
+        const mutation = createReviewMutation(ctx, {
+          verb: 'comment',
+          externalId: ref,
+          body,
+          replyTo: opts.replyTo ?? null,
+          proposal: opts.proposal ?? null,
+          quote: opts.quote ?? null,
+          disambiguator: opts.disambiguator ?? null,
+        });
+        const result = await runReviewComment(
           opts.replyTo !== undefined
             ? {
                 kind: 'reply',
-                client: ctx.client,
+                client: mutation.client,
                 baseUrl: ctx.baseUrl,
                 orgId: ctx.orgId,
                 externalId: ref,
@@ -337,7 +340,7 @@ export async function reviewCommentAction(
               }
             : {
                 kind: 'root',
-                client: ctx.client,
+                client: mutation.client,
                 repoRoot: ctx.repoRoot,
                 baseUrl: ctx.baseUrl,
                 orgId: ctx.orgId,
@@ -346,11 +349,14 @@ export async function reviewCommentAction(
                 ...(opts.quote !== undefined ? { quote: opts.quote } : {}),
                 ...(opts.disambiguator !== undefined ? { disambiguator: opts.disambiguator } : {}),
                 ...(opts.proposal !== undefined ? { proposalId: opts.proposal } : {}),
+                persistence: mutation.persistence,
               }
-        )
+        );
+        if (mutation.didDispatch())
+          await ctx.stampUsage(reviewUsageStamp('comment', result.external_id, result.comment_id));
+        return result;
+      }
     );
-
-    await stampPlanReviewUsage(reviewUsageStamp('comment', result.external_id, result.comment_id));
 
     writeSecretWarnings(result.secret_warnings);
     if (opts.json) {

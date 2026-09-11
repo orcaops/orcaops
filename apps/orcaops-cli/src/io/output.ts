@@ -6,7 +6,12 @@ import {
   stripTerminalFormatting,
 } from '@orcaops/evaluator-protocol/terminal';
 import { CliAuthError } from '@orcaops/sdk';
-import { ArtifactLockLeaseLostError } from '@orcaops/storage';
+import { ArtifactLockLeaseLostError, ConfigValidationError } from '@orcaops/storage';
+import { HistoryError } from '@orcaops/storage/history/authority';
+import {
+  ProjectDatabaseError,
+  type ProjectDatabaseFailureReason,
+} from '@orcaops/storage/history/database';
 
 import { ErrorCodes, type ErrorEnvelope, OrcaopsError } from './errors.js';
 import { CliExit } from './exit.js';
@@ -20,6 +25,7 @@ import { formatZodIssues, zodIssueHint } from '../lib/zod-issues.js';
  * on which output mode the command used.
  */
 function discloseLeaseLossCause(err: unknown): void {
+  if (err instanceof ProjectDatabaseError || isAuthorityFailure(err)) return;
   const cause = err instanceof Error ? err.cause : undefined;
   if (!(cause instanceof ArtifactLockLeaseLostError)) return;
   process.stderr.write(
@@ -62,7 +68,12 @@ export function emitError(err: unknown, opts?: { exitCode?: number }): never {
  * leave through `toErrorEnvelope`, which is the single scrubbing exit.
  */
 export function writeErrorLine(err: unknown): void {
-  process.stderr.write(stripTerminalFormatting(`Error: ${toErrorEnvelope(err).error.message}\n`));
+  const { error } = toErrorEnvelope(err);
+  const code =
+    err instanceof ProjectDatabaseError || isAuthorityFailure(err)
+      ? `[${error.code}${error.reason ? `; ${error.reason}` : ''}] `
+      : '';
+  process.stderr.write(stripTerminalFormatting(`Error: ${code}${error.message}\n`));
   discloseLeaseLossCause(err);
 }
 
@@ -181,6 +192,19 @@ function scrubErrorDetail(
 }
 
 function buildErrorEnvelope(err: unknown): ErrorEnvelope {
+  if (err instanceof ConfigValidationError) {
+    return { ok: false, error: { code: err.code, message: err.message, path: err.path } };
+  }
+  if (err instanceof ProjectDatabaseError) {
+    const reason = databaseFailureReason(err.reason);
+    return {
+      ok: false,
+      error: { code: err.code, message: err.message, ...(reason ? { reason } : {}) },
+    };
+  }
+  if (isAuthorityFailure(err)) {
+    return { ok: false, error: { code: err.code, message: err.message } };
+  }
   if (err instanceof CliAuthError) {
     return {
       ok: false,
@@ -246,4 +270,38 @@ function buildErrorEnvelope(err: unknown): ErrorEnvelope {
       message: scrubError(String(err)),
     },
   };
+}
+
+function isAuthorityFailure(error: unknown): error is HistoryError {
+  if (!(error instanceof HistoryError)) return false;
+  switch (error.code) {
+    case 'AUTHORITY_MISMATCH':
+    case 'HISTORY_MISSING':
+    case 'HISTORY_INACCESSIBLE':
+    case 'HISTORY_UNWRITABLE':
+    case 'HISTORY_UNEXPECTED_OWNER':
+    case 'HISTORY_FORMAT_UNSUPPORTED':
+    case 'HISTORY_INTEGRITY_REQUIRED':
+    case 'ACTIVATION_PENDING':
+    case 'IDENTITY_CONFLICT':
+    case 'OPERATION_PENDING':
+      return true;
+    default:
+      return false;
+  }
+}
+
+function databaseFailureReason(value: unknown): ProjectDatabaseFailureReason | undefined {
+  switch (value) {
+    case 'contention':
+    case 'read-only':
+    case 'disk-full':
+    case 'integrity':
+    case 'constraint':
+    case 'invalid-sql':
+    case 'io':
+      return value;
+    default:
+      return undefined;
+  }
 }

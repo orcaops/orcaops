@@ -50,10 +50,8 @@ function presentationFor(type: string): EventPresentation | undefined {
 }
 
 /**
- * Human copy for an event type. Every in-repo producer goes through
- * appendEvent, whose input is compile-time typed to EventType, and the
- * validated read path (readEventLog) enforces the strict record schema —
- * but the ticker's tail reader is deliberately permissive, so a torn,
+ * Human copy for an event type. Retained records use the strict EventType,
+ * but the ticker's input is deliberately permissive, so a torn,
  * hand-edited, or foreign log line can surface any string here. The
  * fallback is that guard: it degrades to underscores-to-spaces.
  */

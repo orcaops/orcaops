@@ -1,49 +1,59 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
-import { appendEvent, type AppendEventOptions } from './event-log.js';
 import {
   computeOpenBlocksByRef,
-  loadEventsWithPayloads,
   rebuildArtifactJsonFromEvents,
   rebuildCheckpointFromEvents,
   rebuildEvaluatorLogFromEvents,
   rebuildPlanFromEvents,
   rebuildSummaryFromEvents,
 } from './rebuilders.js';
+import type { EventWithPayload } from './rebuilders.js';
+import { encodeArtifactEvent } from '../history/event-encoding.js';
 import {
   buildDefaultSkippedFingerprintSummary,
   buildDefaultSkippedSnapshotBoundary,
 } from '../schema/diff-fingerprint.js';
 
-/**
- * The rebuilders are pure functions, but the loader uses real disk for
- * sidecar payloads — so each test plants events via `appendEvent` and
- * then loads them back, mirroring the real recovery path.
- */
-describe('rebuilders', () => {
-  let tmpRoot: string;
-  let opts: AppendEventOptions;
+interface EventFixtureOptions {
+  sidecarsDir: string;
+}
 
-  beforeEach(async () => {
-    tmpRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-rebuild-'));
-    opts = {
-      eventLogPath: path.join(tmpRoot, 'events.ndjson'),
-      sidecarsDir: path.join(tmpRoot, 'sidecars'),
-    };
+type EventInput = Parameters<typeof encodeArtifactEvent>[0];
+type EventRecord = ReturnType<typeof encodeArtifactEvent>['record'];
+
+const payloads = new Map<string, unknown>();
+const opts: EventFixtureOptions = { sidecarsDir: 'encoded' };
+
+async function encodeTestEvent(
+  input: EventInput,
+  _options: EventFixtureOptions
+): Promise<EventRecord> {
+  const encoded = encodeArtifactEvent(input);
+  payloads.set(encoded.record.event_id, input.payload);
+  return encoded.record;
+}
+
+async function withPayloads(
+  records: readonly EventRecord[],
+  _options: EventFixtureOptions
+): Promise<EventWithPayload[]> {
+  return records.map((record) => {
+    if (!payloads.has(record.event_id)) throw new Error('test event payload is missing');
+    return { record, payload: payloads.get(record.event_id) };
   });
+}
 
-  afterEach(async () => {
-    await rm(tmpRoot, { recursive: true, force: true });
+describe('rebuilders', () => {
+  beforeEach(() => {
+    payloads.clear();
   });
 
   // ── plan ─────────────────────────────────────────────────────────
 
   describe('rebuildPlanFromEvents', () => {
     it('returns null when the log has no plan_captured event', async () => {
-      const events = await loadEventsWithPayloads([], { sidecarsDir: opts.sidecarsDir });
+      const events = await withPayloads([], { sidecarsDir: opts.sidecarsDir });
       expect(rebuildPlanFromEvents(events)).toBeNull();
     });
 
@@ -71,7 +81,7 @@ describe('rebuilders', () => {
         criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
         prior_plan_event_id: null,
       };
-      const ev = await appendEvent(
+      const ev = await encodeTestEvent(
         {
           type: 'plan_captured',
           ts: planPayload.started_at,
@@ -81,7 +91,7 @@ describe('rebuilders', () => {
         opts
       );
 
-      const loaded = await loadEventsWithPayloads([ev], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([ev], { sidecarsDir: opts.sidecarsDir });
       const result = rebuildPlanFromEvents(loaded);
       expect(result).not.toBeNull();
       expect(result!.plan.task).toBe('do the thing');
@@ -111,7 +121,7 @@ describe('rebuilders', () => {
         criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
         prior_plan_event_id: null,
       };
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'plan_captured',
           ts: '2026-04-26T12:00:00.000Z',
@@ -122,7 +132,7 @@ describe('rebuilders', () => {
       );
       // A plan_revised event with revision_n=1 supersedes the initial
       // plan_captured (latest plan event wins).
-      const e2 = await appendEvent(
+      const e2 = await encodeTestEvent(
         {
           type: 'plan_revised',
           ts: '2026-04-26T12:01:00.000Z',
@@ -141,7 +151,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([e1, e2], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([e1, e2], { sidecarsDir: opts.sidecarsDir });
       const result = rebuildPlanFromEvents(loaded);
       expect(result!.plan.revision_n).toBe(1);
       expect(result!.plan.rationale).toBe('corrected the task description');
@@ -155,13 +165,13 @@ describe('rebuilders', () => {
   describe('rebuildCheckpointFromEvents', () => {
     it('returns null when the log has no opened cp with that n', async () => {
       const events = await openClosePair(opts, { n: 1, summary: 'sum' });
-      const loaded = await loadEventsWithPayloads(events, { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads(events, { sidecarsDir: opts.sidecarsDir });
       expect(rebuildCheckpointFromEvents(loaded, 99)).toBeNull();
     });
 
     it('reconstructs the requested n from its events', async () => {
       const events = await openClosePair(opts, { n: 1, summary: 'first' });
-      const loaded = await loadEventsWithPayloads(events, { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads(events, { sidecarsDir: opts.sidecarsDir });
       const result = rebuildCheckpointFromEvents(loaded, 1);
       expect(result).not.toBeNull();
       if (result!.checkpoint.status !== 'closed') throw new Error('expected closed');
@@ -170,7 +180,7 @@ describe('rebuilders', () => {
     });
 
     it('rejects duplicate close events for the requested n as corruption', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -179,7 +189,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'checkpoint_closed',
           ts: '2026-04-26T12:00:00.000Z',
@@ -188,7 +198,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const e2 = await appendEvent(
+      const e2 = await encodeTestEvent(
         {
           type: 'checkpoint_closed',
           ts: '2026-04-26T12:01:00.000Z',
@@ -197,7 +207,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open, e1, e2], {
+      const loaded = await withPayloads([open, e1, e2], {
         sidecarsDir: opts.sidecarsDir,
       });
       expect(() => rebuildCheckpointFromEvents(loaded, 1)).toThrow(
@@ -206,7 +216,7 @@ describe('rebuilders', () => {
     });
 
     it('rejects duplicate open events for the requested n as corruption', async () => {
-      const first = await appendEvent(
+      const first = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -215,7 +225,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const second = await appendEvent(
+      const second = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T12:00:00.000Z',
@@ -224,7 +234,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([first, second], {
+      const loaded = await withPayloads([first, second], {
         sidecarsDir: opts.sidecarsDir,
       });
 
@@ -235,7 +245,7 @@ describe('rebuilders', () => {
 
     it('rejects close and abandon terminal events for the same checkpoint', async () => {
       const [open, close] = await openClosePair(opts, { n: 1 });
-      const abandon = await appendEvent(
+      const abandon = await encodeTestEvent(
         {
           type: 'checkpoint_abandoned',
           ts: '2026-04-26T12:05:00.000Z',
@@ -252,7 +262,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open, close, abandon], {
+      const loaded = await withPayloads([open, close, abandon], {
         sidecarsDir: opts.sidecarsDir,
       });
 
@@ -262,7 +272,7 @@ describe('rebuilders', () => {
     });
 
     it('rejects duplicate abandon events for the requested n as corruption', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -272,7 +282,7 @@ describe('rebuilders', () => {
         opts
       );
       const abandoned = (idempotency_key: string, abandoned_at: string) =>
-        appendEvent(
+        encodeTestEvent(
           {
             type: 'checkpoint_abandoned',
             ts: abandoned_at,
@@ -291,7 +301,7 @@ describe('rebuilders', () => {
         );
       const first = await abandoned('cp-1-abandon-a', '2026-04-26T12:05:00.000Z');
       const second = await abandoned('cp-1-abandon-b', '2026-04-26T12:06:00.000Z');
-      const loaded = await loadEventsWithPayloads([open, first, second], {
+      const loaded = await withPayloads([open, first, second], {
         sidecarsDir: opts.sidecarsDir,
       });
 
@@ -301,7 +311,7 @@ describe('rebuilders', () => {
     });
 
     it('rejects an abandon event that omits its required head_sha', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -310,7 +320,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const abandon = await appendEvent(
+      const abandon = await encodeTestEvent(
         {
           type: 'checkpoint_abandoned',
           ts: '2026-04-26T12:05:00.000Z',
@@ -326,7 +336,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open, abandon], {
+      const loaded = await withPayloads([open, abandon], {
         sidecarsDir: opts.sidecarsDir,
       });
 
@@ -336,7 +346,7 @@ describe('rebuilders', () => {
     it('isolates n=1 vs n=2 (no cross-contamination)', async () => {
       const ev1 = await openClosePair(opts, { n: 1, summary: 'one' });
       const ev2 = await openClosePair(opts, { n: 2, summary: 'two' });
-      const loaded = await loadEventsWithPayloads([...ev1, ...ev2], {
+      const loaded = await withPayloads([...ev1, ...ev2], {
         sidecarsDir: opts.sidecarsDir,
       });
       const r1 = rebuildCheckpointFromEvents(loaded, 1);
@@ -349,7 +359,7 @@ describe('rebuilders', () => {
     });
 
     it('returns the open projection when no close has been written yet', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -358,7 +368,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([open], { sidecarsDir: opts.sidecarsDir });
       const result = rebuildCheckpointFromEvents(loaded, 1);
       expect(result!.checkpoint.status).toBe('open');
       if (result!.checkpoint.status !== 'open') throw new Error('expected open');
@@ -366,7 +376,7 @@ describe('rebuilders', () => {
     });
 
     it('returns the abandoned projection when an abandon event follows the open', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -375,7 +385,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const abandon = await appendEvent(
+      const abandon = await encodeTestEvent(
         {
           type: 'checkpoint_abandoned',
           ts: '2026-04-26T12:05:00.000Z',
@@ -393,7 +403,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open, abandon], {
+      const loaded = await withPayloads([open, abandon], {
         sidecarsDir: opts.sidecarsDir,
       });
       const result = rebuildCheckpointFromEvents(loaded, 1);
@@ -402,7 +412,7 @@ describe('rebuilders', () => {
     });
 
     it('carries the open-time invoking agent into every projection variant', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -411,14 +421,14 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const openOnly = await loadEventsWithPayloads([open], { sidecarsDir: opts.sidecarsDir });
+      const openOnly = await withPayloads([open], { sidecarsDir: opts.sidecarsDir });
       const openResult = rebuildCheckpointFromEvents(openOnly, 1);
       if (openResult!.checkpoint.status !== 'open') throw new Error('expected open');
       expect(openResult!.checkpoint.agent).toBe('claude-code');
 
       // Cross-agent handoff: a DIFFERENT agent closes — the open-time
       // agent is carried forward, the close stamps its own attribution.
-      const close = await appendEvent(
+      const close = await encodeTestEvent(
         {
           type: 'checkpoint_closed',
           ts: '2026-04-26T12:00:00.000Z',
@@ -427,7 +437,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open, close], {
+      const loaded = await withPayloads([open, close], {
         sidecarsDir: opts.sidecarsDir,
       });
       const result = rebuildCheckpointFromEvents(loaded, 1);
@@ -437,7 +447,7 @@ describe('rebuilders', () => {
     });
 
     it('carries the abandon-time invoking agent onto the abandoned projection', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -446,7 +456,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const abandon = await appendEvent(
+      const abandon = await encodeTestEvent(
         {
           type: 'checkpoint_abandoned',
           ts: '2026-04-26T12:05:00.000Z',
@@ -463,7 +473,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open, abandon], {
+      const loaded = await withPayloads([open, abandon], {
         sidecarsDir: opts.sidecarsDir,
       });
       const result = rebuildCheckpointFromEvents(loaded, 1);
@@ -475,7 +485,7 @@ describe('rebuilders', () => {
     it('rejects an open event without invoking-agent attribution', async () => {
       const payload = makeOpenPayload({ n: 1 });
       delete payload.agent;
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -484,12 +494,12 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([open], { sidecarsDir: opts.sidecarsDir });
       expect(() => rebuildCheckpointFromEvents(loaded, 1)).toThrow(/agent/);
     });
 
     it('rejects a close event without invoking-agent attribution', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -500,7 +510,7 @@ describe('rebuilders', () => {
       );
       const payload = makeCheckpointPayload({ n: 1 });
       delete payload.closed_by_agent;
-      const close = await appendEvent(
+      const close = await encodeTestEvent(
         {
           type: 'checkpoint_closed',
           ts: '2026-04-26T12:00:00.000Z',
@@ -509,14 +519,14 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open, close], {
+      const loaded = await withPayloads([open, close], {
         sidecarsDir: opts.sidecarsDir,
       });
       expect(() => rebuildCheckpointFromEvents(loaded, 1)).toThrow(/closed_by_agent/);
     });
 
     it('rejects an abandon event without invoking-agent attribution', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -525,7 +535,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const abandon = await appendEvent(
+      const abandon = await encodeTestEvent(
         {
           type: 'checkpoint_abandoned',
           ts: '2026-04-26T12:05:00.000Z',
@@ -541,7 +551,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open, abandon], {
+      const loaded = await withPayloads([open, abandon], {
         sidecarsDir: opts.sidecarsDir,
       });
       expect(() => rebuildCheckpointFromEvents(loaded, 1)).toThrow(/abandoned_by_agent/);
@@ -550,7 +560,7 @@ describe('rebuilders', () => {
     it('rejects a v4 open payload missing a launch-required key with its exact field path', async () => {
       const payload = makeOpenPayload({ n: 1 });
       delete payload.policy_exceptions;
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -559,7 +569,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([open], { sidecarsDir: opts.sidecarsDir });
       try {
         rebuildCheckpointFromEvents(loaded, 1);
         expect.unreachable('rebuild must reject the payload');
@@ -570,7 +580,7 @@ describe('rebuilders', () => {
     });
 
     it('rejects a v4 close payload missing a launch-required key with its exact field path', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -581,7 +591,7 @@ describe('rebuilders', () => {
       );
       const closePayload = makeCheckpointPayload({ n: 1, summary: 'strict' });
       delete closePayload.files_changed;
-      const close = await appendEvent(
+      const close = await encodeTestEvent(
         {
           type: 'checkpoint_closed',
           ts: '2026-04-26T12:00:00.000Z',
@@ -590,7 +600,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open, close], {
+      const loaded = await withPayloads([open, close], {
         sidecarsDir: opts.sidecarsDir,
       });
       try {
@@ -603,7 +613,7 @@ describe('rebuilders', () => {
     });
 
     it('throws on a checkpoint_closed without a matching prior checkpoint_opened', async () => {
-      const orphan = await appendEvent(
+      const orphan = await encodeTestEvent(
         {
           type: 'checkpoint_closed',
           ts: '2026-04-26T12:00:00.000Z',
@@ -612,14 +622,14 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([orphan], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([orphan], { sidecarsDir: opts.sidecarsDir });
       expect(() => rebuildCheckpointFromEvents(loaded, 5)).toThrow(/log corruption/);
     });
 
     // ── v4 fingerprint manifest folding ────────────────────────────
 
     it('inline path: small close payload with explicit close_snapshot + summary round-trips', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -646,7 +656,7 @@ describe('rebuilders', () => {
         manifest_hash_algorithm: 'blake3-xof-256-jcs-rfc8785-base64url-nopad-v1',
         error_reason: null,
       };
-      const close = await appendEvent(
+      const close = await encodeTestEvent(
         {
           type: 'checkpoint_closed',
           ts: '2026-04-26T12:00:00.000Z',
@@ -655,7 +665,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open, close], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([open, close], { sidecarsDir: opts.sidecarsDir });
       const result = rebuildCheckpointFromEvents(loaded, 1);
       expect(result).not.toBeNull();
       if (!result || result.checkpoint.status !== 'closed') throw new Error('expected closed');
@@ -670,8 +680,8 @@ describe('rebuilders', () => {
       );
     });
 
-    it('sidecar spill path: large diff_fingerprint_manifest payload reads back via loadEventPayload', async () => {
-      const open = await appendEvent(
+    it('rebuilds a checkpoint from a large encoded manifest payload', async () => {
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -738,7 +748,7 @@ describe('rebuilders', () => {
       // Sanity check: the synthetic payload exceeds the 8 KB inline budget.
       const payloadBytes = Buffer.byteLength(JSON.stringify(closePayload), 'utf8');
       expect(payloadBytes).toBeGreaterThan(8 * 1024);
-      const close = await appendEvent(
+      const close = await encodeTestEvent(
         {
           type: 'checkpoint_closed',
           ts: '2026-04-26T12:00:00.000Z',
@@ -747,9 +757,9 @@ describe('rebuilders', () => {
         },
         opts
       );
-      // The event record itself should reference a sidecar (no inline payload).
+      // Large payloads retain the same sidecar wire record while tests pass the decoded payload directly.
       expect('sidecar_sha256' in close).toBe(true);
-      const loaded = await loadEventsWithPayloads([open, close], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([open, close], { sidecarsDir: opts.sidecarsDir });
       const result = rebuildCheckpointFromEvents(loaded, 1);
       if (!result || result.checkpoint.status !== 'closed') throw new Error('expected closed');
       expect(result.checkpoint.diff_fingerprint_summary.manifest_hash).toBe(
@@ -757,91 +767,19 @@ describe('rebuilders', () => {
       );
     });
 
-    it('corrupt sidecar: integrity check drops the close event, rebuilder degrades to open-only', async () => {
-      const open = await appendEvent(
+    it('keeps a checkpoint open when no close event is present', async () => {
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
-          idempotency_key: 'cp-fp-corrupt-open',
+          idempotency_key: 'cp-open-only',
           payload: makeOpenPayload({ n: 1 }),
         },
         opts
       );
-      // Build the same large close payload that spills to a sidecar.
-      const closePayload = makeCheckpointPayload({ n: 1, summary: 'corrupt cp' });
-      closePayload.diff_fingerprint_manifest = {
-        schema_version: 1,
-        artifact_id: '01999999-9999-7000-8000-000000000001',
-        checkpoint_n: 1,
-        open_tree_sha: 'a'.repeat(40),
-        close_tree_sha: 'b'.repeat(40),
-        status: 'captured',
-        hunk_count: 1,
-        captured_hunk_count: 1,
-        truncated: false,
-        error_reason: null,
-        normalization_version: 'orcaops-line-normalization-v1',
-        diff_algorithm: 'git-diff-unified-v1',
-        diff_options: { unified: 3, find_renames: true, no_ext_diff: true },
-        limits: { max_diff_bytes: 2_000_000 },
-        hash_encoding: 'base64url-nopad',
-        line_hash_algorithm: 'blake3-xof-96-base64url-nopad-v2',
-        patch_hash_algorithm: 'blake3-xof-128-base64url-nopad-v1',
-        hunk_header_hash_algorithm: 'blake3-xof-128-base64url-nopad-v1',
-        manifest_hash_algorithm: 'blake3-xof-256-jcs-rfc8785-base64url-nopad-v1',
-        // One enormous hunk so we definitely spill (lots of redundant data).
-        hunks: [
-          {
-            hunk_index: 0,
-            file_before: 'src/foo.ts',
-            file_after: 'src/foo.ts',
-            change_type: 'modify',
-            binary: false,
-            old_start: 1,
-            old_lines: 100,
-            new_start: 1,
-            new_lines: 100,
-            patch_hash: 'p'.repeat(64),
-            added_line_hashes: Array.from({ length: 200 }, (_y, j) => `add-${j}`.padEnd(32, 'a')),
-            deleted_line_hashes: Array.from({ length: 200 }, (_y, j) => `del-${j}`.padEnd(32, 'd')),
-            hunk_header_hash: 'h'.repeat(32),
-            added_line_count: 200,
-            deleted_line_count: 200,
-          },
-        ],
-      };
-      const close = await appendEvent(
-        {
-          type: 'checkpoint_closed',
-          ts: '2026-04-26T12:00:00.000Z',
-          idempotency_key: 'cp-fp-corrupt-close',
-          payload: closePayload,
-        },
-        opts
-      );
-      // Mutate the sidecar on disk to corrupt the SHA-256 integrity check.
-      expect('sidecar_sha256' in close).toBe(true);
-      const sidecarPath = path.join(opts.sidecarsDir, `${close.event_id}.json`);
-      const { writeFile } = await import('node:fs/promises');
-      await writeFile(sidecarPath, '{"corrupted":true}', 'utf8');
-      // readEventLog's integrity check drops the close event entirely.
-      const { readEventLog } = await import('./event-log.js');
-      const reloaded = await readEventLog({
-        eventLogPath: opts.eventLogPath,
-        sidecarsDir: opts.sidecarsDir,
-      });
-      const validRecords = reloaded.events.filter((r) => r.event_id !== close.event_id);
-      const reloadedOpen = validRecords.find((r) => r.event_id === open.event_id);
-      expect(reloadedOpen).toBeDefined();
-      const corrupt = reloaded.corrupt.find((c) => c.event_id === close.event_id);
-      expect(corrupt).toBeDefined();
-      // Rebuilder degrades to open-only (the close is missing).
-      const loaded = await loadEventsWithPayloads([open], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([open], opts);
       const result = rebuildCheckpointFromEvents(loaded, 1);
-      if (!result || result.checkpoint.status !== 'open') {
-        throw new Error('expected open (close was corrupted)');
-      }
-      expect(result.checkpoint.status).toBe('open');
+      expect(result?.checkpoint.status).toBe('open');
     });
   });
 
@@ -849,12 +787,12 @@ describe('rebuilders', () => {
 
   describe('rebuildSummaryFromEvents', () => {
     it('returns null without a summary_captured event', async () => {
-      const loaded = await loadEventsWithPayloads([], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([], { sidecarsDir: opts.sidecarsDir });
       expect(rebuildSummaryFromEvents(loaded)).toBeNull();
     });
 
     it('reconstructs from the latest summary_captured event', async () => {
-      const ev = await appendEvent(
+      const ev = await encodeTestEvent(
         {
           type: 'summary_captured',
           ts: '2026-04-26T12:30:00.000Z',
@@ -873,7 +811,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([ev], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([ev], { sidecarsDir: opts.sidecarsDir });
       const result = rebuildSummaryFromEvents(loaded);
       expect(result!.summary.outcome).toBe('shipped');
       expect(result!.summary.source_event_id).toBe(ev.event_id);
@@ -946,12 +884,12 @@ describe('rebuilders', () => {
 
   describe('rebuildEvaluatorLogFromEvents', () => {
     it('returns null with no evaluator-related events', async () => {
-      const loaded = await loadEventsWithPayloads([], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([], { sidecarsDir: opts.sidecarsDir });
       expect(rebuildEvaluatorLogFromEvents(loaded, 'a-1')).toBeNull();
     });
 
     it('folds standalone evaluator_run_recorded events into runs[] with order_key', async () => {
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -960,7 +898,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const e2 = await appendEvent(
+      const e2 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:31:00.000Z',
@@ -969,7 +907,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([e1, e2], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([e1, e2], { sidecarsDir: opts.sidecarsDir });
       const r = rebuildEvaluatorLogFromEvents(loaded, 'a-1');
       expect(r).not.toBeNull();
       expect(r!.log.runs).toHaveLength(2);
@@ -980,7 +918,7 @@ describe('rebuilders', () => {
     });
 
     it('materializes disposition as `unresolved` for a blocking-eligible run with no disposition row', async () => {
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -989,13 +927,13 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([e1], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([e1], { sidecarsDir: opts.sidecarsDir });
       const r = rebuildEvaluatorLogFromEvents(loaded, 'a-1');
       expect(r!.log.runs[0].disposition).toBe('unresolved');
     });
 
     it('materializes disposition as the disposition row when one targets the run', async () => {
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1004,7 +942,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const e2 = await appendEvent(
+      const e2 = await encodeTestEvent(
         {
           type: 'evaluator_disposition_recorded',
           ts: '2026-05-12T20:35:00.000Z',
@@ -1013,7 +951,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([e1, e2], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([e1, e2], { sidecarsDir: opts.sidecarsDir });
       const r = rebuildEvaluatorLogFromEvents(loaded, 'a-1');
       expect(r!.log.runs[0].disposition).toBe('acknowledged');
       expect(r!.log.dispositions).toHaveLength(1);
@@ -1022,7 +960,7 @@ describe('rebuilders', () => {
     });
 
     it('materializes disposition as null for non-blocking-eligible runs (pass)', async () => {
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1035,13 +973,13 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([e1], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([e1], { sidecarsDir: opts.sidecarsDir });
       const r = rebuildEvaluatorLogFromEvents(loaded, 'a-1');
       expect(r!.log.runs[0].disposition).toBeNull();
     });
 
     it('materializes disposition as null for errored runs even with severity=block', async () => {
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1056,13 +994,13 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([e1], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([e1], { sidecarsDir: opts.sidecarsDir });
       const r = rebuildEvaluatorLogFromEvents(loaded, 'a-1');
       expect(r!.log.runs[0].disposition).toBeNull();
     });
 
     it('unfolds checkpoint_opened.gate_audit.runs[] with order_key (i, 0, n)', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1111,7 +1049,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([open], { sidecarsDir: opts.sidecarsDir });
       const r = rebuildEvaluatorLogFromEvents(loaded, 'a-1');
       expect(r!.log.runs).toHaveLength(2);
       // local_index reflects the unfold position within gate_audit.runs[].
@@ -1134,12 +1072,12 @@ describe('rebuilders', () => {
 
   describe('computeOpenBlocksByRef', () => {
     it('an empty event log yields no open blocks', async () => {
-      const loaded = await loadEventsWithPayloads([], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([], { sidecarsDir: opts.sidecarsDir });
       expect(computeOpenBlocksByRef(loaded).size).toBe(0);
     });
 
     it('a violating run opens a block for its ref', async () => {
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1148,12 +1086,12 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([e1], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([e1], { sidecarsDir: opts.sidecarsDir });
       expect(computeOpenBlocksByRef(loaded).has('core/api-stability')).toBe(true);
     });
 
     it('a subsequent pass run clears the block', async () => {
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1162,7 +1100,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const e2 = await appendEvent(
+      const e2 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:31:00.000Z',
@@ -1171,12 +1109,12 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([e1, e2], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([e1, e2], { sidecarsDir: opts.sidecarsDir });
       expect(computeOpenBlocksByRef(loaded).size).toBe(0);
     });
 
     it('an acknowledgement targeting the current run clears the block', async () => {
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1185,7 +1123,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const e2 = await appendEvent(
+      const e2 = await encodeTestEvent(
         {
           type: 'evaluator_disposition_recorded',
           ts: '2026-05-12T20:35:00.000Z',
@@ -1194,14 +1132,14 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([e1, e2], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([e1, e2], { sidecarsDir: opts.sidecarsDir });
       expect(computeOpenBlocksByRef(loaded).size).toBe(0);
     });
 
     it('a stale-targeted disposition does NOT clear the current block', async () => {
       // r1 violates → block. r2 violates (supersedes r1) → block still on.
       // Disposition targets r1 (stale): no effect on block state.
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1210,7 +1148,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const e2 = await appendEvent(
+      const e2 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:31:00.000Z',
@@ -1219,7 +1157,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const e3 = await appendEvent(
+      const e3 = await encodeTestEvent(
         {
           type: 'evaluator_disposition_recorded',
           ts: '2026-05-12T20:35:00.000Z',
@@ -1228,14 +1166,14 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([e1, e2, e3], {
+      const loaded = await withPayloads([e1, e2, e3], {
         sidecarsDir: opts.sidecarsDir,
       });
       expect(computeOpenBlocksByRef(loaded).has('core/api-stability')).toBe(true);
     });
 
     it('a block evaluator error supersedes a violation and remains blocking through a skip', async () => {
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1244,7 +1182,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const e2 = await appendEvent(
+      const e2 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:31:00.000Z',
@@ -1259,7 +1197,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const e3 = await appendEvent(
+      const e3 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:32:00.000Z',
@@ -1273,14 +1211,14 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([e1, e2, e3], {
+      const loaded = await withPayloads([e1, e2, e3], {
         sidecarsDir: opts.sidecarsDir,
       });
       expect(computeOpenBlocksByRef(loaded).has('core/api-stability')).toBe(true);
     });
 
     it('a block evaluator error opens a block and a later pass clears it', async () => {
-      const errorRun = await appendEvent(
+      const errorRun = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1295,7 +1233,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const passingRun = await appendEvent(
+      const passingRun = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:31:00.000Z',
@@ -1305,19 +1243,19 @@ describe('rebuilders', () => {
         opts
       );
 
-      const errored = await loadEventsWithPayloads([errorRun], {
+      const errored = await withPayloads([errorRun], {
         sidecarsDir: opts.sidecarsDir,
       });
       expect(computeOpenBlocksByRef(errored).has('core/api-stability')).toBe(true);
 
-      const recovered = await loadEventsWithPayloads([errorRun, passingRun], {
+      const recovered = await withPayloads([errorRun, passingRun], {
         sidecarsDir: opts.sidecarsDir,
       });
       expect(computeOpenBlocksByRef(recovered).size).toBe(0);
     });
 
     it('a disposition cannot clear the current block evaluator error', async () => {
-      const violationRun = await appendEvent(
+      const violationRun = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1326,7 +1264,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const errorRun = await appendEvent(
+      const errorRun = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:31:00.000Z',
@@ -1341,7 +1279,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const staleDisposition = await appendEvent(
+      const staleDisposition = await encodeTestEvent(
         {
           type: 'evaluator_disposition_recorded',
           ts: '2026-05-12T20:32:00.000Z',
@@ -1351,14 +1289,14 @@ describe('rebuilders', () => {
         opts
       );
 
-      const loaded = await loadEventsWithPayloads([violationRun, errorRun, staleDisposition], {
+      const loaded = await withPayloads([violationRun, errorRun, staleDisposition], {
         sidecarsDir: opts.sidecarsDir,
       });
       expect(computeOpenBlocksByRef(loaded).has('core/api-stability')).toBe(true);
     });
 
     it('a non-block severity violation does NOT trigger a block', async () => {
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'evaluator_run_recorded',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1367,12 +1305,12 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([e1], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([e1], { sidecarsDir: opts.sidecarsDir });
       expect(computeOpenBlocksByRef(loaded).size).toBe(0);
     });
 
     it('gate_audit unfold contributes to block state', async () => {
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1402,7 +1340,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([open], { sidecarsDir: opts.sidecarsDir });
       expect(computeOpenBlocksByRef(loaded).has('core/scope-density')).toBe(true);
     });
 
@@ -1411,7 +1349,7 @@ describe('rebuilders', () => {
       // order_key ordering puts runs first (local_kind_rank=0) then
       // dispositions (1), so the disposition sees r1 in
       // openBlockByRef and clears it.
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-05-12T20:30:00.000Z',
@@ -1450,7 +1388,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([open], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([open], { sidecarsDir: opts.sidecarsDir });
       expect(computeOpenBlocksByRef(loaded).size).toBe(0);
     });
   });
@@ -1459,12 +1397,12 @@ describe('rebuilders', () => {
 
   describe('rebuildArtifactJsonFromEvents', () => {
     it('returns null when there is no plan_captured event', async () => {
-      const loaded = await loadEventsWithPayloads([], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([], { sidecarsDir: opts.sidecarsDir });
       expect(rebuildArtifactJsonFromEvents(loaded)).toBeNull();
     });
 
     it('seeds artifact metadata from plan_captured (state=planned, lineage=created)', async () => {
-      const ev = await appendEvent(
+      const ev = await encodeTestEvent(
         {
           type: 'plan_captured',
           ts: '2026-04-26T12:00:00.000Z',
@@ -1485,7 +1423,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([ev], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([ev], { sidecarsDir: opts.sidecarsDir });
       const result = rebuildArtifactJsonFromEvents(loaded);
       expect(result!.json).toMatchObject({
         schema_version: 1,
@@ -1506,7 +1444,7 @@ describe('rebuilders', () => {
       const ev = await appendPlanEvent(opts, '01999999-9999-7000-8000-000000000002', {
         source_plan: sourcePlan,
       });
-      const loaded = await loadEventsWithPayloads([ev], { sidecarsDir: opts.sidecarsDir });
+      const loaded = await withPayloads([ev], { sidecarsDir: opts.sidecarsDir });
       return rebuildArtifactJsonFromEvents(loaded)!;
     };
 
@@ -1570,7 +1508,7 @@ describe('rebuilders', () => {
 
     it('pre_pr_checked sets the passed-marker fields, pinned to the event id (current)', async () => {
       const planEv = await appendPlanEvent(opts, '01999999-9999-7000-8000-000000000001');
-      const prePr = await appendEvent(
+      const prePr = await encodeTestEvent(
         {
           type: 'pre_pr_checked',
           ts: '2026-04-26T13:00:00.000Z',
@@ -1579,7 +1517,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([planEv, prePr], {
+      const loaded = await withPayloads([planEv, prePr], {
         sidecarsDir: opts.sidecarsDir,
       });
       const result = rebuildArtifactJsonFromEvents(loaded)!;
@@ -1591,7 +1529,7 @@ describe('rebuilders', () => {
 
     it('retains a warning review without advancing the passed marker', async () => {
       const planEv = await appendPlanEvent(opts, '01999999-9999-7000-8000-000000000001');
-      const prePr = await appendEvent(
+      const prePr = await encodeTestEvent(
         {
           type: 'pre_pr_checked',
           ts: '2026-04-26T13:00:00.000Z',
@@ -1607,7 +1545,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([planEv, prePr], {
+      const loaded = await withPayloads([planEv, prePr], {
         sidecarsDir: opts.sidecarsDir,
       });
       const result = rebuildArtifactJsonFromEvents(loaded)!;
@@ -1618,7 +1556,7 @@ describe('rebuilders', () => {
 
     it('a later event makes the pre-pr marker stale (source_event_id moves past it)', async () => {
       const planEv = await appendPlanEvent(opts, '01999999-9999-7000-8000-000000000001');
-      const prePr = await appendEvent(
+      const prePr = await encodeTestEvent(
         {
           type: 'pre_pr_checked',
           ts: '2026-04-26T13:00:00.000Z',
@@ -1627,7 +1565,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const later = await appendEvent(
+      const later = await encodeTestEvent(
         {
           type: 'branch_lineage_updated',
           ts: '2026-04-26T13:05:00.000Z',
@@ -1641,7 +1579,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([planEv, prePr, later], {
+      const loaded = await withPayloads([planEv, prePr, later], {
         sidecarsDir: opts.sidecarsDir,
       });
       const result = rebuildArtifactJsonFromEvents(loaded)!;
@@ -1655,7 +1593,7 @@ describe('rebuilders', () => {
     it('moves to state=active and increments checkpoint_count on checkpoint_closed', async () => {
       const planEv = await appendPlanEvent(opts, '01999999-9999-7000-8000-000000000001');
       const [open, close] = await openClosePair(opts, { n: 1, summary: 'one' });
-      const loaded = await loadEventsWithPayloads([planEv, open, close], {
+      const loaded = await withPayloads([planEv, open, close], {
         sidecarsDir: opts.sidecarsDir,
       });
       const result = rebuildArtifactJsonFromEvents(loaded);
@@ -1667,7 +1605,7 @@ describe('rebuilders', () => {
 
     it('counts repeated cp.n only once (idempotent replay does not double-count)', async () => {
       const planEv = await appendPlanEvent(opts, '01999999-9999-7000-8000-000000000001');
-      const open = await appendEvent(
+      const open = await encodeTestEvent(
         {
           type: 'checkpoint_opened',
           ts: '2026-04-26T11:59:00.000Z',
@@ -1676,7 +1614,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const cp1a = await appendEvent(
+      const cp1a = await encodeTestEvent(
         {
           type: 'checkpoint_closed',
           ts: '2026-04-26T12:01:00.000Z',
@@ -1685,7 +1623,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const cp1b = await appendEvent(
+      const cp1b = await encodeTestEvent(
         {
           type: 'checkpoint_closed',
           ts: '2026-04-26T12:02:00.000Z',
@@ -1694,7 +1632,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([planEv, open, cp1a, cp1b], {
+      const loaded = await withPayloads([planEv, open, cp1a, cp1b], {
         sidecarsDir: opts.sidecarsDir,
       });
       const result = rebuildArtifactJsonFromEvents(loaded);
@@ -1703,7 +1641,7 @@ describe('rebuilders', () => {
 
     it('appends branch_lineage_updated events to artifact.branch_lineage', async () => {
       const planEv = await appendPlanEvent(opts, '01999999-9999-7000-8000-000000000001');
-      const lineageEv = await appendEvent(
+      const lineageEv = await encodeTestEvent(
         {
           type: 'branch_lineage_updated',
           ts: '2026-04-26T12:30:00.000Z',
@@ -1717,7 +1655,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([planEv, lineageEv], {
+      const loaded = await withPayloads([planEv, lineageEv], {
         sidecarsDir: opts.sidecarsDir,
       });
       const result = rebuildArtifactJsonFromEvents(loaded);
@@ -1738,7 +1676,7 @@ describe('rebuilders', () => {
         ts: '2026-04-26T12:30:00.000Z',
         event: 'rebased' as const,
       };
-      const e1 = await appendEvent(
+      const e1 = await encodeTestEvent(
         {
           type: 'branch_lineage_updated',
           ts: lineageEntry.ts,
@@ -1747,7 +1685,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const e2 = await appendEvent(
+      const e2 = await encodeTestEvent(
         {
           type: 'branch_lineage_updated',
           ts: '2026-04-26T12:31:00.000Z',
@@ -1756,7 +1694,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([planEv, e1, e2], {
+      const loaded = await withPayloads([planEv, e1, e2], {
         sidecarsDir: opts.sidecarsDir,
       });
       const result = rebuildArtifactJsonFromEvents(loaded);
@@ -1766,7 +1704,7 @@ describe('rebuilders', () => {
 
     it('moves to state=summarized on summary_captured', async () => {
       const planEv = await appendPlanEvent(opts, '01999999-9999-7000-8000-000000000001');
-      const sumEv = await appendEvent(
+      const sumEv = await encodeTestEvent(
         {
           type: 'summary_captured',
           ts: '2026-04-26T13:00:00.000Z',
@@ -1785,7 +1723,7 @@ describe('rebuilders', () => {
         },
         opts
       );
-      const loaded = await loadEventsWithPayloads([planEv, sumEv], {
+      const loaded = await withPayloads([planEv, sumEv], {
         sidecarsDir: opts.sidecarsDir,
       });
       const result = rebuildArtifactJsonFromEvents(loaded);
@@ -1853,10 +1791,10 @@ function makeOpenPayload(over: {
  * for the given `n`. Returns both event records in append order.
  */
 async function openClosePair(
-  o: AppendEventOptions,
+  o: EventFixtureOptions,
   spec: { n: number; summary?: string; declared?: string[]; completed?: string[] }
 ) {
-  const open = await appendEvent(
+  const open = await encodeTestEvent(
     {
       type: 'checkpoint_opened',
       ts: '2026-04-26T11:59:00.000Z',
@@ -1865,7 +1803,7 @@ async function openClosePair(
     },
     o
   );
-  const close = await appendEvent(
+  const close = await encodeTestEvent(
     {
       type: 'checkpoint_closed',
       ts: '2026-04-26T12:00:00.000Z',
@@ -1882,11 +1820,11 @@ async function openClosePair(
 }
 
 async function appendPlanEvent(
-  opts: AppendEventOptions,
+  opts: EventFixtureOptions,
   artifactId: string,
   extra: Record<string, unknown> = {}
-): Promise<Awaited<ReturnType<typeof appendEvent>>> {
-  return appendEvent(
+): Promise<Awaited<ReturnType<typeof encodeTestEvent>>> {
+  return encodeTestEvent(
     {
       type: 'plan_captured',
       ts: '2026-04-26T12:00:00.000Z',

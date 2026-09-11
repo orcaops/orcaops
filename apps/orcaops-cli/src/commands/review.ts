@@ -1,7 +1,7 @@
 import { reviewRuntimeDescriptorFromModule, runReview } from '@orcaops/review-engine';
 
 import { CliExit } from '../io/exit.js';
-import { getInvocationEnv } from '../lib/invocation-context.js';
+import { getInvocationCwd, getInvocationEnv } from '../lib/invocation-context.js';
 
 /**
  * `orcaops review <data|journal|comments|comment|anchor> …`
@@ -21,7 +21,9 @@ export async function reviewAction(
 ): Promise<void> {
   const argv = ['review', ...passThroughArgs];
   if (root !== undefined && root !== '') argv.push('--root', root);
+  const cwd = getInvocationCwd();
+  const env = { ...getInvocationEnv() };
   const runtime = await reviewRuntimeDescriptorFromModule(import.meta.url);
-  const code = await runReview(argv, getInvocationEnv(), undefined, runtime);
+  const code = await runReview(argv, env, cwd, runtime);
   if (code !== 0) throw new CliExit(code);
 }

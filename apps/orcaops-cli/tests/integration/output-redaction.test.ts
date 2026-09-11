@@ -1,10 +1,11 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
-import { ArtifactStore, getDefaultConfig } from '@orcaops/storage';
-import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
+import { readProjectArtifact } from '@orcaops/storage/history/database';
+import { gitClient, inputFile } from '@orcaops/test-harness';
 
+import { fixture, inventory } from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
 import { effectiveConfigPath } from '../support/test-helpers.js';
 
@@ -16,18 +17,21 @@ import { effectiveConfigPath } from '../support/test-helpers.js';
 const FAKE_JWT =
   'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjb3JwdXMtdXNlciJ9.0000000000000000000000000000000000000000000';
 
-describe('output redaction: digest / resume / why / search', () => {
-  let repo: TempRepo;
+describe('output redaction: digest / resume / why / search', { timeout: 60_000 }, () => {
+  let f: Awaited<ReturnType<typeof fixture>>;
   let agent: ReturnType<typeof makeAgent>;
 
   beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    agent = makeAgent({ cwd: repo.path });
-    await agent.init({ noLlm: true });
-  });
-
-  afterEach(async () => {
-    await repo.cleanup();
+    f = await fixture();
+    await mkdir(path.join(f.main, '.orcaops'), { recursive: true });
+    await writeFile(
+      path.join(f.main, '.orcaops', 'config.json'),
+      JSON.stringify({ schema_version: 6 })
+    );
+    agent = makeAgent({
+      cwd: f.main,
+      env: { ORCAOPS_DATA_DIR: f.root, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
   });
 
   it('neutralizes carriage returns only at human terminal boundaries', async () => {
@@ -102,10 +106,7 @@ describe('output redaction: digest / resume / why / search', () => {
       ).exitCode
     ).toBe(0);
 
-    for (const args of [
-      ['digest', '--artifact', plan.artifact_id],
-      ['resume', '--artifact', plan.artifact_id],
-    ]) {
+    for (const args of [['digest', '--artifact', plan.artifact_id]]) {
       const result = await agent.runRaw(args);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain('\r');
@@ -113,6 +114,7 @@ describe('output redaction: digest / resume / why / search', () => {
     }
 
     for (const args of [
+      ['resume', '--artifact', plan.artifact_id],
       ['search', 'unique-terminal-boundary-marker'],
       ['list'],
       ['show', plan.artifact_id],
@@ -126,11 +128,11 @@ describe('output redaction: digest / resume / why / search', () => {
       expect(result.stdout).toContain('spoofed');
     }
 
-    const cached = await readFile(
-      path.join(repo.path, '.orcaops', 'artifacts', plan.artifact_id, 'digest.md'),
-      'utf8'
-    );
-    expect(cached).toContain(task);
+    const out = path.join(f.temporary, 'digest.md');
+    expect(
+      (await agent.runRaw(['digest', '--artifact', plan.artifact_id, '--out', out])).exitCode
+    ).toBe(0);
+    expect(await readFile(out, 'utf8')).toContain(task);
   });
 
   it('redacts a carriage-return-split secret before terminal output', async () => {
@@ -167,46 +169,27 @@ describe('output redaction: digest / resume / why / search', () => {
     }
   });
 
-  it('redacts a refuse-tier secret from an artifact written before the payload gate', async () => {
+  it('redacts a previously permitted secret under the current output policy', async () => {
     const token = 'ghp_ABCDEF1234567890abcdef1234567890ABCDEF';
-    const artifactId = '01a03014-0000-7000-8000-000000000010';
-    const stepId = '01a03014-0000-7000-8000-000000000011';
-    const store = new ArtifactStore({ repoRoot: repo.path, config: getDefaultConfig() });
-    try {
-      await store.writePlan(
-        {
-          schema_version: 4,
-          artifact_id: artifactId,
-          branch: 'main',
-          base_sha: 'a'.repeat(40),
-          agent: 'other',
-          agent_session_id: null,
-          task: `legacy artifact containing ${token}`,
-          label: 'legacy-secret-artifact',
-          plan_steps: [
-            {
-              step_id: stepId,
-              text: 'render safely',
-              label: 'render-safely',
-              acceptance_criteria: [],
-            },
-          ],
-          touched_scope: [],
-          non_goals: [],
-          decisions: [],
-          started_at: '2026-08-31T00:00:00.000Z',
-          revision_n: 0,
-          revised_at: null,
-          rationale: null,
-          step_lineage: { added: [], dropped: [], unchanged: [], rewritten: [] },
-          criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
-          prior_plan_event_id: null,
-        },
-        { idempotencyKey: 'legacy-secret-plan' }
-      );
-    } finally {
-      store.close();
-    }
+    const configPath = path.join(f.main, '.orcaops', 'config.json');
+    await writeFile(configPath, JSON.stringify({ schema_version: 6, redact: { allow: [token] } }));
+    const planned = await agent.runRaw([
+      'capture',
+      'plan',
+      '--no-llm',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          task: `previously permitted artifact containing ${token}`,
+          label: 'permitted-secret-artifact',
+          plan_steps: [{ text: 'render safely', label: 'render-safely' }],
+        })
+      ),
+    ]);
+    expect(planned.exitCode, planned.stdout).toBe(0);
+    const { artifact_id: artifactId } = JSON.parse(planned.stdout) as { artifact_id: string };
+    expect(readProjectArtifact(f.writer, artifactId)?.thread.plan?.task).toContain(token);
+    await writeFile(configPath, JSON.stringify({ schema_version: 6 }));
 
     const result = await agent.runRaw(['digest', '--artifact', artifactId, '--json']);
     expect(result.exitCode).toBe(0);
@@ -241,7 +224,7 @@ describe('output redaction: digest / resume / why / search', () => {
       expect(d.markdown).not.toContain(FAKE_JWT);
     });
 
-    it('writes the redacted markdown to the cached digest.md (cache mirrors output)', async () => {
+    it('writes redacted markdown only to the explicitly requested digest file', async () => {
       const planRes = await agent.runRaw([
         'capture',
         'plan',
@@ -255,15 +238,15 @@ describe('output redaction: digest / resume / why / search', () => {
         ),
       ]);
       const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
-      await agent.runRaw(['digest', '--artifact', plan.artifact_id, '--json']);
-      const cached = await readFile(
-        path.join(repo.path, '.orcaops', 'artifacts', plan.artifact_id, 'digest.md'),
-        'utf8'
-      );
-      expect(cached).not.toContain(FAKE_JWT);
+      const out = path.join(f.temporary, 'digest.md');
+      const result = await agent.runRaw(['digest', '--artifact', plan.artifact_id, '--out', out]);
+      expect(result.exitCode, result.stdout).toBe(0);
+      const rendered = await readFile(out, 'utf8');
+      expect(rendered).not.toContain(FAKE_JWT);
+      expect(rendered).toContain('[REDACTED_SECRET]');
     });
 
-    it('writes the secret unmodified to events.ndjson (capture payload, not output)', async () => {
+    it('retains the original warn-tier secret in canonical event bytes', async () => {
       const planRes = await agent.runRaw([
         'capture',
         'plan',
@@ -277,21 +260,16 @@ describe('output redaction: digest / resume / why / search', () => {
         ),
       ]);
       const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
-      const events = await readFile(
-        path.join(repo.path, '.orcaops', 'artifacts', plan.artifact_id, 'events.ndjson'),
-        'utf8'
-      );
-      // Capture payloads are NEVER mutated — the canonical event log
-      // keeps the agent-supplied original. Redaction is output-only.
-      expect(events).toContain(FAKE_JWT);
+      const retained = readProjectArtifact(f.writer, plan.artifact_id);
+      expect(retained?.thread.plan?.task).toContain(FAKE_JWT);
+      expect(JSON.stringify(retained?.thread.events)).toContain(FAKE_JWT);
     });
 
     it('config.digest.redact_secrets=false disables redaction (opt-out works)', async () => {
-      const cfgPath = await effectiveConfigPath(repo.path);
+      const cfgPath = await effectiveConfigPath(f.main);
       const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as {
         digest: { redact_secrets: boolean };
       };
-      // Init writes a minimal delta — the digest subtree is absent by default.
       cfg.digest = { ...(cfg.digest ?? {}), redact_secrets: false };
       await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
 
@@ -391,15 +369,14 @@ describe('output redaction: digest / resume / why / search', () => {
       const r = JSON.parse(res.stdout) as { artifact: { artifact_id: string } };
       const serialized = JSON.stringify(r.artifact);
       expect(serialized).not.toContain(FAKE_JWT);
-      const cached = await readFile(
-        path.join(repo.path, '.orcaops', 'artifacts', plan.artifact_id, 'resume.md'),
-        'utf8'
-      );
-      expect(cached).not.toContain(FAKE_JWT);
-      expect(cached).toContain('[REDACTED_SECRET]');
+      expect(serialized).toContain('[REDACTED_SECRET]');
+      const human = await agent.runRaw(['resume', '--artifact', plan.artifact_id]);
+      expect(human.exitCode).toBe(0);
+      expect(human.stdout).not.toContain(FAKE_JWT);
+      expect(human.stdout).toContain('[REDACTED_SECRET]');
     });
 
-    it('writes the redacted markdown to the cached resume.md', async () => {
+    it('renders a redacted resume without publishing a cache', async () => {
       const planRes = await agent.runRaw([
         'capture',
         'plan',
@@ -413,12 +390,12 @@ describe('output redaction: digest / resume / why / search', () => {
         ),
       ]);
       const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
-      await agent.runRaw(['resume', '--artifact', plan.artifact_id, '--json']);
-      const cached = await readFile(
-        path.join(repo.path, '.orcaops', 'artifacts', plan.artifact_id, 'resume.md'),
-        'utf8'
-      );
-      expect(cached).not.toContain(FAKE_JWT);
+      const before = await inventory(f.temporary);
+      const result = await agent.runRaw(['resume', '--artifact', plan.artifact_id]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).not.toContain(FAKE_JWT);
+      expect(result.stdout).toContain('[REDACTED_SECRET]');
+      expect(await inventory(f.temporary)).toEqual(before);
     });
   });
 
@@ -466,8 +443,8 @@ describe('output redaction: digest / resume / why / search', () => {
         artifact_id: string;
         plan_steps: Array<{ step_id: string }>;
       };
-      await writeFile(path.join(repo.path, 'targeted.ts'), 'export const x = 1;\n', 'utf8');
-      const git = gitClient(repo.path);
+      await writeFile(path.join(f.main, 'targeted.ts'), 'export const x = 1;\n', 'utf8');
+      const git = gitClient(f.main);
       await git.add('targeted.ts');
       await git.commit('add targeted file');
       const headSha = (await git.revparse(['HEAD'])).trim();
@@ -501,14 +478,17 @@ describe('output redaction: digest / resume / why / search', () => {
         ),
       ]);
 
-      const wRes = await agent.runRaw(['why', 'targeted.ts:1', '--json']);
+      const wRes = await agent.runRaw(['why', 'targeted.ts:1', '--json', '--details']);
       expect(wRes.exitCode).toBe(0);
       const w = JSON.parse(wRes.stdout) as {
-        best: { task: string; checkpoint_summary: string } | null;
+        results: Array<{
+          plan_support: { plan: { task: string } };
+          checkpoint: { summary: string };
+        }>;
       };
-      expect(w.best).not.toBeNull();
-      expect(w.best?.task).not.toContain(FAKE_JWT);
-      expect(w.best?.checkpoint_summary).not.toContain(FAKE_JWT);
+      expect(w.results).not.toHaveLength(0);
+      expect(w.results[0].plan_support.plan.task).not.toContain(FAKE_JWT);
+      expect(w.results[0].checkpoint.summary).not.toContain(FAKE_JWT);
 
       const human = await agent.runRaw(['why', 'targeted.ts:1']);
       expect(human.exitCode).toBe(0);

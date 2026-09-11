@@ -5,10 +5,12 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CloudWireError, type SourcePlanReviewPullResponse, TrpcRequestError } from '@orcaops/sdk';
-import { readReviewCandidate, readReviewProposal, sourcePlanCacheDir } from '@orcaops/storage';
 
 import { parseVersionFlag, type ReviewPullClient, runReviewPull } from './pull.js';
-import { seedCandidate } from './test-helpers.js';
+import {
+  createMemoryPlanReviewPersistence,
+  seedCandidate,
+} from '../../../../tests/support/plan-review-persistence.js';
 
 const sha = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex');
 
@@ -49,7 +51,9 @@ function client(reviewPull: ReviewPullClient['sourcePlan']['reviewPull']): Revie
 
 describe('runReviewPull', () => {
   let repoRoot: string;
+  let persistence: ReturnType<typeof createMemoryPlanReviewPersistence>;
   beforeEach(async () => {
+    persistence = createMemoryPlanReviewPersistence();
     repoRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-review-pull-'));
   });
   afterEach(async () => {
@@ -57,6 +61,7 @@ describe('runReviewPull', () => {
   });
 
   const base = (root: string) => ({
+    persistence,
     repoRoot: root,
     baseUrl: 'https://cloud.example',
     orgId: 'org_1',
@@ -75,12 +80,7 @@ describe('runReviewPull', () => {
     expect(result.ref).toBe('ext-1');
     // The resolved base rides the result for origin-keyed cache identity.
     expect(result.base_url).toBe('https://cloud.example');
-    const rec = await readReviewCandidate(
-      sourcePlanCacheDir(repoRoot),
-      'https://cloud.example',
-      'org_1',
-      'ext-1'
-    );
+    const rec = await persistence.readCandidate('ext-1');
     expect(rec?.body).toBe(body);
     expect(rec?.version_id).toBe('ver_4');
   });
@@ -94,12 +94,7 @@ describe('runReviewPull', () => {
     });
     expect(result.target).toBe('proposal');
     expect(result.proposal_id).toBe('prop_9');
-    const rec = await readReviewProposal(
-      sourcePlanCacheDir(repoRoot),
-      'https://cloud.example',
-      'org_1',
-      'prop_9'
-    );
+    const rec = await persistence.readProposal('ext-1', 'prop_9');
     expect(rec?.body).toBe(body);
   });
 
@@ -210,18 +205,13 @@ describe('runReviewPull', () => {
   });
 
   it('--version writes NO record and does NOT clobber a seeded candidate (not a CAS base)', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     await runReviewPull({
       client: client(vi.fn(async () => versionResp(2, 'sealed v2'))),
       versionNumber: 2,
       ...base(repoRoot),
     });
-    const rec = await readReviewCandidate(
-      sourcePlanCacheDir(repoRoot),
-      'https://cloud.example',
-      'org_1',
-      'ext-1'
-    );
+    const rec = await persistence.readCandidate('ext-1');
     // The CAS token is untouched: still the seeded candidate, not the sealed v2.
     expect(rec?.version_id).toBe('ver_4');
     expect(rec?.version_number).toBe(4);
@@ -281,12 +271,7 @@ describe('runReviewPull', () => {
         ...base(repoRoot),
       })
     ).rejects.toThrow(/Unexpected wire response/);
-    const rec = await readReviewCandidate(
-      sourcePlanCacheDir(repoRoot),
-      'https://cloud.example',
-      'org_1',
-      'ext-1'
-    );
+    const rec = await persistence.readCandidate('ext-1');
     expect(rec).toBeNull();
   });
 
@@ -305,7 +290,7 @@ describe('runReviewPull', () => {
 
   it('FILE-FIRST: a failed --out leaves NO cached record (fail-closed, inverse of plan pull)', async () => {
     // An outPath whose parent is a FILE → atomicWriteFile fails with ENOTDIR
-    // BEFORE writeReviewPullRecord runs. The record must NOT advance — so a later
+    // BEFORE persistence.writeRecord runs. The record must NOT advance — so a later
     // push has no stale CAS token and is forced to re-pull.
     const blocker = path.join(repoRoot, 'blocker');
     await writeFile(blocker, 'x', 'utf8');
@@ -317,12 +302,7 @@ describe('runReviewPull', () => {
         ...base(repoRoot),
       })
     ).rejects.toThrow();
-    const rec = await readReviewCandidate(
-      sourcePlanCacheDir(repoRoot),
-      'https://cloud.example',
-      'org_1',
-      'ext-1'
-    );
+    const rec = await persistence.readCandidate('ext-1');
     expect(rec).toBeNull();
   });
 });

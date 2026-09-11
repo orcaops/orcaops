@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { ArtifactNotFoundError, MissingGitRemoteError } from '@orcaops/core';
+import {
+  ArtifactNotFoundError,
+  MissingGitRemoteError,
+  SourcePlanIntegrityError,
+} from '@orcaops/core';
 import { TrpcRequestError } from '@orcaops/sdk';
 import { PathContainmentError } from '@orcaops/storage';
+import { ProjectDatabaseError } from '@orcaops/storage/history/database';
 
 import { toCloudErrorEnvelope } from './cloud-error-envelope.js';
 import { ErrorCodes, OrcaopsError } from './errors.js';
@@ -43,6 +48,27 @@ describe('toCloudErrorEnvelope', () => {
   it('maps MissingGitRemoteError to MISSING_GIT_REMOTE', () => {
     const out = toCloudErrorEnvelope(new MissingGitRemoteError()) as OrcaopsError;
     expect(out.code).toBe(ErrorCodes.MISSING_GIT_REMOTE);
+  });
+
+  it('preserves database cancellation and stale-context codes', () => {
+    for (const code of ['CANCELLED', 'STALE_CONTEXT'] as const) {
+      const error = new ProjectDatabaseError(code, `${code} detail`);
+      expect(toCloudErrorEnvelope(error)).toBe(error);
+    }
+  });
+
+  it('maps retained Source Plan drift to history integrity repair', () => {
+    const out = toCloudErrorEnvelope(
+      new SourcePlanIntegrityError('artifact', 'expected', 'actual')
+    ) as OrcaopsError;
+    expect(out.code).toBe('HISTORY_INTEGRITY_REQUIRED');
+  });
+
+  it('preserves authenticated target changes', () => {
+    const out = toCloudErrorEnvelope(
+      Object.assign(new Error('target changed'), { code: 'CLOUD_TARGET_CHANGED' })
+    ) as OrcaopsError;
+    expect(out.code).toBe('CLOUD_TARGET_CHANGED');
   });
 
   it('maps a local containment refusal to INTERNAL instead of CLOUD_ERROR', () => {

@@ -1,9 +1,18 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { Store } from '@orcaops/storage';
+import { requireDatabaseExecutionContext } from '@orcaops/core/history/database-capture';
+import { CapturePlanReviseInputSchema, prepareArtifactDraft, uuidv7 } from '@orcaops/storage';
+import {
+  appendProjectExecutionCapture,
+  openProjectDatabase,
+  readProjectArtifact,
+  readProjectExecution,
+  readProjectLifecycleCompletions,
+} from '@orcaops/storage/history/database';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -12,7 +21,7 @@ import { makeAgent } from '../support/test-agent.js';
  * Append-only plan revision e2e — full-supersede payloads, six
  * validation gates, and the optimistic-concurrency token on cp-open.
  *
- * Spec: `packages/storage/src/artifacts/store.ts:revisePlan`.
+ * Spec: `ArtifactSemantics.revisePlan`.
  *
  * Coverage:
  *   - happy path: capture → revise (add step) → cp on new step
@@ -209,15 +218,77 @@ async function abandon(
 describe('plan revision e2e', () => {
   let repo: TempRepo;
   let agent: ReturnType<typeof makeAgent>;
+  let dataRoot: string;
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
-    agent = makeAgent({ cwd: repo.path });
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-plan-revision-history-'));
+    agent = makeAgent({
+      cwd: repo.path,
+      env: { ORCAOPS_DATA_DIR: dataRoot, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
   });
 
   afterEach(async () => {
     await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
   });
+
+  async function openDatabase(mode: 'reader' | 'writer' = 'reader') {
+    const context = await requireDatabaseExecutionContext({ cwd: repo.path, root: dataRoot });
+    return openProjectDatabase({ authority: context.authority, mode });
+  }
+
+  async function appendRevisionWithoutLifecycle(
+    key: string,
+    payload: Record<string, unknown>
+  ): Promise<void> {
+    const database = await openDatabase('writer');
+    try {
+      const input = CapturePlanReviseInputSchema.parse({
+        idempotency_key: key,
+        label: 'revise-label',
+        ...payload,
+      });
+      const artifactId = input.artifact_id!;
+      const retained = readProjectArtifact(database, artifactId);
+      const execution = readProjectExecution(database, artifactId);
+      if (!retained || !execution?.state.current_binding)
+        throw new Error('revision fixture requires an active retained artifact');
+      const prepared = await prepareArtifactDraft(
+        {
+          artifactId,
+          priorEvents: retained.thread.events,
+          authoredPayload: { kind: 'plan_revision', input },
+          secretAllow: [],
+          idempotencyBlocks: [],
+        },
+        (semantics) => semantics.revisePlan(input, { idempotencyKey: key, invokedByAgent: 'codex' })
+      );
+      if (prepared.evaluation.kind === 'threw') throw prepared.evaluation.error;
+      if (!prepared.events.length || prepared.idempotencyChanges.length)
+        throw new Error('revision fixture did not prepare one append');
+      await appendProjectExecutionCapture(database, {
+        artifactId,
+        operationId: uuidv7(),
+        expectedRevision: retained.revision,
+        eventBytes: Buffer.concat(prepared.events.map((event) => event.eventBytes)),
+        sidecarPayloads: prepared.events.flatMap((event) =>
+          event.sidecar ? [{ eventId: event.record.event_id, bytes: event.sidecar.bytes }] : []
+        ),
+        secretAllow: [],
+        execution: {
+          kind: 'task',
+          context: execution.state.current_binding,
+          expectedVersion: execution.version,
+          expectedGeneration: execution.state.binding_generation,
+          explicitTarget: true,
+        },
+      });
+    } finally {
+      database.close();
+    }
+  }
 
   it('happy path: capture → revise (add step) → cp on new step', async () => {
     const cap = await capturePlan(agent, ['step a', 'step b']);
@@ -366,7 +437,7 @@ describe('plan revision e2e', () => {
     }
   });
 
-  it('does not let an older revision completion marker mask an incomplete newer revision', async () => {
+  it('resumes an incomplete newer revision lifecycle despite an older completion', async () => {
     const cap = await capturePlan(agent, ['a']);
     const aId = cap.plan_steps[0].step_id;
     const firstKey = `first-${randomUUID()}`;
@@ -392,38 +463,21 @@ describe('plan revision e2e', () => {
       touched_scope: ['second'],
       non_goals: [],
     };
-    const second = parseOk<CapturePlanReviseResponse>(
-      await reviseWithKey(agent, secondKey, secondPayload)
-    );
-    expect(second.revision_n).toBe(2);
-
-    const cache = new Store(path.join(repo.path, '.orcaops', 'cache', 'orcaops.db'));
-    try {
-      cache.db
-        .prepare(
-          `DELETE FROM evaluator_lifecycles
-           WHERE artifact_id = ? AND fires_at = 'post-plan-revision' AND cp_n = 2`
-        )
-        .run(cap.artifact_id);
-    } finally {
-      cache.close();
-    }
+    await appendRevisionWithoutLifecycle(secondKey, secondPayload);
 
     const replay = parseOk<OkEnvelope & { message: string }>(
       await reviseWithKey(agent, secondKey, secondPayload)
     );
     expect(replay.message).toContain('missing post-event evaluator work was resumed');
 
-    const afterReplay = new Store(path.join(repo.path, '.orcaops', 'cache', 'orcaops.db'));
+    const reader = await openDatabase();
     try {
-      afterReplay.db
-        .prepare(
-          `DELETE FROM evaluator_lifecycles
-           WHERE artifact_id = ? AND fires_at = 'post-plan-revision' AND cp_n = 1`
-        )
-        .run(cap.artifact_id);
+      const revisions = readProjectLifecycleCompletions(reader, cap.artifact_id)
+        .records.filter((entry) => entry.record.fires_at === 'post-plan-revision')
+        .map((entry) => entry.record.cp_n);
+      expect(revisions).toEqual([1, 2]);
     } finally {
-      afterReplay.close();
+      reader.close();
     }
     const historical = parseOk<OkEnvelope & { message: string; idempotency_status: string }>(
       await reviseWithKey(agent, firstKey, firstPayload)
@@ -494,28 +548,17 @@ describe('plan revision e2e', () => {
     expect(replay.revision_n).toBe(created.revision_n);
     expect(replay.idempotency_status).toBe('replay');
 
-    const projectedPlan = JSON.parse(
-      await readFile(
-        path.join(repo.path, '.orcaops', 'artifacts', cap.artifact_id, 'plan.json'),
-        'utf8'
-      )
-    ) as { agent_session_id: string | null };
-    expect(projectedPlan.agent_session_id).toBeNull();
-    const events = (
-      await readFile(
-        path.join(repo.path, '.orcaops', 'artifacts', cap.artifact_id, 'events.ndjson'),
-        'utf8'
-      )
-    )
-      .trim()
-      .split('\n')
-      .map(
-        (line) => JSON.parse(line) as { type: string; idempotency_key: string; payload: object }
+    const reader = await openDatabase();
+    try {
+      const retained = readProjectArtifact(reader, cap.artifact_id);
+      expect(retained?.thread.plan?.agent_session_id).toBeNull();
+      const event = retained?.thread.events.find(
+        (item) => item.record.type === 'plan_revised' && item.record.idempotency_key === key
       );
-    const event = events.find(
-      (item) => item.type === 'plan_revised' && item.idempotency_key === key
-    );
-    expect(event?.payload).not.toHaveProperty('agent_session_id_intent');
+      expect(event?.payload).not.toHaveProperty('agent_session_id_intent');
+    } finally {
+      reader.close();
+    }
   });
 
   it('keeps an omitted session stable across hard-rejected retries', async () => {

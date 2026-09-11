@@ -5,7 +5,7 @@ import { identifierText } from '../text/control-chars.js';
 
 /**
  * Schemas for the repo-level **usage ledger** — the coding agent's own token
- * usage, kept separate from artifact event semantics (see `usage/ledger.ts`).
+ * usage, kept separate from artifact event semantics.
  *
  * The ledger has its OWN event types and record envelope (NOT the artifact
  * `EventTypeSchema`): usage is session-derived external state, recordable

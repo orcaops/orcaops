@@ -10,6 +10,42 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./history": {
+      "types": "./dist/history/index.d.ts",
+      "default": "./dist/history/index.js"
+    },
+    "./history/search": {
+      "types": "./dist/history/search/index.d.ts",
+      "default": "./dist/history/search/index.js"
+    },
+    "./history/registration": {
+      "types": "./dist/history/registration-files.d.ts",
+      "default": "./dist/history/registration-files.js"
+    },
+    "./history/database-setup": {
+      "types": "./dist/history/database-setup-api.d.ts",
+      "default": "./dist/history/database-setup-api.js"
+    },
+    "./history/database-read": {
+      "types": "./dist/history/database-read-api.d.ts",
+      "default": "./dist/history/database-read-api.js"
+    },
+    "./history/database-retention": {
+      "types": "./dist/history/database-retention-api.d.ts",
+      "default": "./dist/history/database-retention-api.js"
+    },
+    "./history/database-checkout": {
+      "types": "./dist/history/database-checkout-api.d.ts",
+      "default": "./dist/history/database-checkout-api.js"
+    },
+    "./history/database-capture": {
+      "types": "./dist/history/database-capture-api.d.ts",
+      "default": "./dist/history/database-capture-api.js"
+    },
+    "./history/database-push": {
+      "types": "./dist/history/database-push-api.d.ts",
+      "default": "./dist/history/database-push-api.js"
     }
   },
   "files": [

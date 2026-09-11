@@ -9,6 +9,11 @@ import { defineConfig } from 'vitest/config';
 //   • Smoke: `tests/smoke/` — spawn the real `bin/orcaops.js`; reserved
 //     for surface that only spawn can observe (stdin pipes, exit codes
 //     from the real process, human-format flush). Run in `smoke`.
+//   • Packaged: `tests/packaged/` — spawn `bin/orcaops.js` and the
+//     compiled Watch sidecar and drive real OS-level suspension, death
+//     and concurrency against them. Run in `packaged`, single-worker,
+//     because the scenarios are contention experiments whose oracle is
+//     which process is blocked on which lock.
 //
 // `pool: 'forks'` is vitest's default but pinned explicitly so the
 // in-process harness's global `process.stdout.write` patches stay safe
@@ -20,11 +25,11 @@ export default defineConfig({
         test: {
           name: 'cli',
           include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
-          exclude: ['tests/smoke/**', 'node_modules/**', 'dist/**'],
-          // In-process calls run in milliseconds, so 10s is generous
-          // headroom over the observed floor (per-test medians under
-          // 100ms).
-          testTimeout: 10_000,
+          exclude: ['tests/smoke/**', 'tests/packaged/**', 'node_modules/**', 'dist/**'],
+          // Workflows initialize durable Git and SQLite state; coverage and concurrent
+          // CI need headroom for those filesystem operations, including fixture setup.
+          testTimeout: 30_000,
+          hookTimeout: 30_000,
           pool: 'forks',
           setupFiles: ['./vitest.cli-setup.ts'],
         },
@@ -38,6 +43,29 @@ export default defineConfig({
           // Smoke tests spawn `bin/orcaops.js` per call, so they need a
           // generous timeout.
           testTimeout: 30_000,
+          pool: 'forks',
+        },
+      },
+      {
+        test: {
+          name: 'packaged',
+          include: ['tests/packaged/**/*.test.ts'],
+          exclude: ['node_modules/**', 'dist/**'],
+          setupFiles: ['./vitest.cli-setup.ts'],
+          // The scenarios drive real suspension, death and multi-process
+          // contention against one disposable store each. Two of them
+          // running at once would contend on the machine rather than on
+          // the lock under test, so the project is pinned to one worker
+          // in-config — `--maxWorkers=1` on the command line is then a
+          // restatement, not the thing that makes it correct.
+          maxWorkers: 1,
+          minWorkers: 1,
+          fileParallelism: false,
+          // ceilings.testTimeoutMs. Every other fixed ceiling the
+          // scenarios use lives in tests/packaged/support/ceilings.ts so
+          // the boundaries report can name each one and its source.
+          testTimeout: 60_000,
+          hookTimeout: 60_000,
           pool: 'forks',
         },
       },

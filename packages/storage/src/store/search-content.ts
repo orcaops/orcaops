@@ -1,8 +1,7 @@
 /**
  * Build the FTS search content for a plan revision.
  *
- * Shared by the live write paths (initial capture + revise in
- * `artifacts/store.ts`) and the disk rebuild path (`rebuild.ts`) so the three
+ * Shared by canonical draft preparation and database query indexing so the two
  * stay in lockstep. The content leads `label · task · step-texts`; the label
  * must be indexed because it is the one field enrichment and revisions aim
  * intent-level wording at — without it an enriched imported artifact is

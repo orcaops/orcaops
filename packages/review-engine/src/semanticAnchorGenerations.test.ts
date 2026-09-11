@@ -1,20 +1,16 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { type AccountProjection, DOSSIER_SCHEMA_VERSION } from './dossier.js';
 import {
-  loadCurrentSemanticAnchorGeneration,
   normalizeSemanticAnchorSubmission,
-  SEMANTIC_ANCHOR_CURRENT_FILE,
   SEMANTIC_ANCHOR_MANIFEST_FILE,
   SEMANTIC_ANCHOR_MODEL_FILE,
   semanticAnchorAttemptSchema,
   semanticAnchorCurrentPointerSchema,
   semanticAnchorDisplayTitle,
   semanticAnchorManifestSchema,
+  semanticAnchorModelSchema,
   type SemanticAnchorSubmission,
   type SemanticAnchorSubmissionCatalog,
   validateSemanticAnchorSubmission,
@@ -408,98 +404,54 @@ describe('semantic anchor v3 generation validation', () => {
   });
 });
 
-const roots: string[] = [];
-afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
-
-describe('current semantic anchor v3 reader', () => {
-  it('ignores a historical v2 pointer when no current pointer exists', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'semantic-current-v2-'));
-    roots.push(root);
-    const anchors = path.join(root, 'anchors');
-    await mkdir(anchors, { recursive: true });
-    await writeFile(
-      path.join(anchors, 'current-v2.json'),
-      JSON.stringify({ schema_version: 2, run_id: runId, generation_id: generationId })
-    );
-    const loaded = await loadCurrentSemanticAnchorGeneration(root);
-    expect(loaded).toEqual({ status: 'ABSENT' });
-  });
-
-  it('ignores a historical v1 pointer when no current pointer exists', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'semantic-current-v1-'));
-    roots.push(root);
-    const anchors = path.join(root, 'anchors');
-    await mkdir(anchors, { recursive: true });
-    await writeFile(
-      path.join(anchors, 'current-v1.json'),
-      JSON.stringify({ schema_version: 1, run_id: runId, generation_id: generationId })
-    );
-    const loaded = await loadCurrentSemanticAnchorGeneration(root);
-    expect(loaded).toEqual({ status: 'ABSENT' });
-  });
-
-  it('treats a wrong-version current pointer as invalid', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'semantic-current-invalid-'));
-    roots.push(root);
-    const anchors = path.join(root, 'anchors');
-    await mkdir(anchors, { recursive: true });
-    await writeFile(
-      path.join(anchors, SEMANTIC_ANCHOR_CURRENT_FILE),
-      JSON.stringify({ schema_version: 2, run_id: runId, generation_id: generationId })
-    );
-    expect(await loadCurrentSemanticAnchorGeneration(root)).toEqual({
-      status: 'INVALID',
-      reason: 'current pointer schema is invalid',
+describe('semantic run identities', () => {
+  it('preserves non-UUID run identities through compilation and persisted codecs', () => {
+    const exactRunId = 'run-imported-original';
+    const validation = validateSemanticAnchorSubmission({
+      raw: allAssessedUnanchored(),
+      generationId,
+      runId: exactRunId,
+      floorInputHash: 'floor-1',
+      preparedPayloadSha256: payloadSha,
+      projection: projection(),
+      catalog: catalog(),
     });
-  });
-
-  it('surfaces corrupt v3 current instead of falling back to historical v2', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'semantic-current-v3-'));
-    roots.push(root);
-    const anchors = path.join(root, 'anchors');
-    const generationDir = path.join(anchors, 'generations', generationId);
-    await mkdir(generationDir, { recursive: true });
-    await writeFile(path.join(anchors, 'current-v2.json'), '{}');
-
-    const startedAt = new Date().toISOString();
+    expect(validation.accepted).toBe(true);
+    if (!validation.accepted) throw new Error('Expected valid original submission');
+    expect(validation.model.run_id).toBe(exactRunId);
+    const model = semanticAnchorModelSchema.parse(validation.model);
+    const normalized = normalizeSemanticAnchorSubmission(JSON.stringify(allAssessedUnanchored()));
+    const at = '2026-01-01T00:00:00.000Z';
     const attempt = semanticAnchorAttemptSchema.parse({
       schema_version: 3,
       generation_id: generationId,
-      run_id: runId,
+      run_id: exactRunId,
       attempt: 1,
-      started_at: startedAt,
-      submitted_at: startedAt,
+      started_at: at,
+      submitted_at: at,
       elapsed_ms: 0,
       runtime_identity: null,
       declared_profile: 'semantic-anchor-profile-v1',
       profile_source: 'CALLER_DECLARED',
-      normalization: 'CLEAN_JSON',
-      raw_submission_sha256: '1'.repeat(64),
-      normalized_submission_sha256: normalizeSemanticAnchorSubmission(
-        JSON.stringify(allAssessedUnanchored())
-      ).normalized_sha256,
-      normalized_submission: allAssessedUnanchored(),
+      normalization: normalized.normalization,
+      raw_submission_sha256: normalized.raw_sha256,
+      normalized_submission_sha256: normalized.normalized_sha256,
+      normalized_submission: normalized.canonical,
       accepted: true,
       outcome: 'ACCEPTED_CLEAN_FIRST_PASS',
       has_focus_warnings: false,
       diagnostics: [],
       warnings: [],
     });
-    const attemptBytes = `${JSON.stringify(attempt, null, 2)}\n`;
-    await writeFile(path.join(generationDir, 'attempt-1-v3.json'), attemptBytes);
-
-    const corruptModel = '{"schema_version":3,"broken":true}\n';
-    const createdAt = new Date().toISOString();
+    const attemptSha = sha256(JSON.stringify(attempt));
     const manifest = semanticAnchorManifestSchema.parse({
       schema_version: 3,
       generation_id: generationId,
-      run_id: runId,
+      run_id: exactRunId,
       status: 'VALID',
-      created_at: createdAt,
-      lifecycle_started_at: startedAt,
-      lifecycle_elapsed_ms: Date.parse(createdAt) - Date.parse(startedAt),
+      created_at: at,
+      lifecycle_started_at: at,
+      lifecycle_elapsed_ms: 0,
       runtime_identity: null,
       attempt_count: 1,
       declared_profile: 'semantic-anchor-profile-v1',
@@ -521,32 +473,30 @@ describe('current semantic anchor v3 reader', () => {
       },
       prepared_receipt_sha256: 'e'.repeat(64),
       prepared_payload_sha256: payloadSha,
-      attempt_sha256s: [sha256(attemptBytes)],
-      accepted_attempt_sha256: sha256(attemptBytes),
-      model_sha256: sha256(corruptModel),
+      attempt_sha256s: [attemptSha],
+      accepted_attempt_sha256: attemptSha,
+      model_sha256: sha256(JSON.stringify(model)),
       diagnostic_codes: [],
       warning_codes: [],
       final_attempt_outcome: 'ACCEPTED_CLEAN_FIRST_PASS',
     });
-    const manifestBytes = `${JSON.stringify(manifest, null, 2)}\n`;
-    await writeFile(path.join(generationDir, SEMANTIC_ANCHOR_MODEL_FILE), corruptModel);
-    await writeFile(path.join(generationDir, SEMANTIC_ANCHOR_MANIFEST_FILE), manifestBytes);
-    await writeFile(
-      path.join(anchors, SEMANTIC_ANCHOR_CURRENT_FILE),
-      `${JSON.stringify(
-        semanticAnchorCurrentPointerSchema.parse({
-          schema_version: 3,
-          run_id: runId,
-          generation_id: generationId,
-          manifest_file: SEMANTIC_ANCHOR_MANIFEST_FILE,
-          manifest_sha256: sha256(manifestBytes),
-        })
-      )}\n`
-    );
-
-    const loaded = await loadCurrentSemanticAnchorGeneration(root);
-    expect(loaded.status).toBe('INVALID');
-    if (loaded.status === 'INVALID') expect(loaded.reason).toContain('corrupt');
-    expect(await readFile(path.join(anchors, 'current-v2.json'), 'utf8')).toBe('{}');
+    const pointer = semanticAnchorCurrentPointerSchema.parse({
+      schema_version: 3,
+      generation_id: generationId,
+      run_id: exactRunId,
+      manifest_file: SEMANTIC_ANCHOR_MANIFEST_FILE,
+      manifest_sha256: sha256(JSON.stringify(manifest)),
+    });
+    for (const [schema, value] of [
+      [semanticAnchorModelSchema, model],
+      [semanticAnchorAttemptSchema, attempt],
+      [semanticAnchorManifestSchema, manifest],
+      [semanticAnchorCurrentPointerSchema, pointer],
+    ] as const) {
+      expect(value.run_id).toBe(exactRunId);
+      expect(schema.safeParse({ ...value, run_id: '' }).success).toBe(false);
+      expect(schema.safeParse({ ...value, generation_id: exactRunId }).success).toBe(false);
+      expect(schema.safeParse({ ...value, schema_version: 4 }).success).toBe(false);
+    }
   });
 });

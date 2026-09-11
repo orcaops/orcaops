@@ -2,8 +2,8 @@
 name: "Orcaops: recap (standup / changelog / journal)"
 description: "Summarize captured work over a time window or git range as a standup, changelog, or journal. Use for \"what did I do yesterday?\", \"changelog since v1.2\", \"draft the release notes\", or \"journal today\"."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "445646cb3d61"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "cd9eedc937ee"
 ---
 
 # When to use
@@ -39,7 +39,7 @@ Skip when:
    `--since` (started_at):
 
    ```bash
-   orcaops list --all-branches --active-since <since> --active-until <until> --json
+   orcaops list --scope project --active-since <since> --active-until <until> --json
    ```
 
    Activity uses interval-overlap semantics: a checkpoint occupies
@@ -47,18 +47,12 @@ Skip when:
    now, so a long-running artifact checkpointed across the window and a
    yesterday+today artifact both show up in a "yesterday" report.
 
-   **Cross-project mode (archive):** when the report should span EVERY
-   project on this machine (not just this repo), swap in
-   `--all-projects` — it implies all branches (drop
-   `--all-branches`/`--branch`), works from outside any repo, and tags
-   each row with its `project`. From inside a repo or linked worktree, the
-   current project includes both hot and retained archive history; duplicate
-   artifact IDs use the freshest projection (archive only when strictly newer,
-   tie to hot). Group the rendered report by project.
-   Needs `archive.enabled`; per-artifact detail for OTHER projects comes
-   from `orcaops decisions --all-projects --json` /
-   `orcaops loose-ends --all-projects --json` rather than
-   `orcaops show` (which reads the current repo only).
+   **Cross-project mode:** when the report should span EVERY catalogued
+   project (not just this repo), swap in
+   `--scope all-projects`. It works outside a repository and identifies the
+   project for each row. Branches are unrestricted unless `--branch` is supplied.
+   Group the report by project. Read exact details with
+   `orcaops show <artifact-id> --project <project-id> --json`.
 
 # Imported-history discipline
 
@@ -100,12 +94,12 @@ orcaops show <id> --json                       # per matched artifact: summary +
 ```
 
 Two-dot ranges only. `--between` is branch-agnostic (never combine with
-`--branch`/`--all-branches` or window flags — rejected). Matching is on
+`--branch`/`--scope project` or window flags — rejected). Matching is on
 recorded head shas (checkpoint close / summary / pre-pr) ∩
 `git rev-list ref1..ref2`; `matched_shas` entries mean "close-time or
 summary-time HEAD landed in range", NOT "this checkpoint's own commit".
 Run it inside the target repository because the refs are resolved there. The
-artifact feed still includes retained archive history for that identified
+artifact feed still includes retained canonical history for that identified
 project.
 
 1. One bullet per `matched` artifact: lead with the LABEL (user-intent
@@ -122,9 +116,9 @@ project.
 # Format: journal (dated entry appended to a notes file the user owns)
 
 ```bash
-orcaops list --all-branches --active-since <ISO> --active-until <ISO> --json
-orcaops decisions --all-branches --active-since <ISO> --active-until <ISO> --json
-orcaops loose-ends --all-branches --json
+orcaops list --scope project --active-since <ISO> --active-until <ISO> --json
+orcaops decisions --scope project --active-since <ISO> --active-until <ISO> --json
+orcaops loose-ends --scope project --json
 ```
 
 Same local-window-to-UTC discipline as standup (interval-overlap activity). decisions

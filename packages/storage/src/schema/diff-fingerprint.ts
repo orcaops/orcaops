@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+
 // Storage-side surface for the checkpoint diff-fingerprint schemas.
 //
 // Re-exports the four primary schemas (CheckpointSnapshotBoundary,
@@ -14,7 +16,7 @@
 // storage-specific materialized helpers on top.
 //
 // This module ALSO owns two storage-side default-builder helpers used
-// exclusively by the WRITE path in `packages/storage/src/artifacts/store.ts`:
+// exclusively by checkpoint write preparation:
 //
 //   * `buildDefaultSkippedSnapshotBoundary()` — the deliberate-skip
 //     boundary (all-null ref/tree/commit + `snapshot_error_reason: null`)
@@ -58,6 +60,57 @@ export type {
 } from '@orcaops/diff-fingerprint';
 
 import type { CheckpointSnapshotBoundary, DiffFingerprintSummary } from '@orcaops/diff-fingerprint';
+import {
+  computeDiffFingerprintManifestHash,
+  type DiffFingerprintManifest,
+  DiffFingerprintManifestSchema,
+  summarizeManifest,
+} from '@orcaops/diff-fingerprint';
+
+export type CheckpointFingerprintManifestValidation =
+  | { available: true; manifest: DiffFingerprintManifest }
+  | { available: false; reason: 'malformed' | 'mismatched' };
+
+export async function validateCheckpointFingerprintManifest(input: {
+  artifactId: string;
+  checkpointN: number;
+  openTreeSha: string | null;
+  closeTreeSha: string | null;
+  summary: DiffFingerprintSummary;
+  manifest: unknown;
+  recoveredOpenTreeSha?: string | null;
+}): Promise<CheckpointFingerprintManifestValidation> {
+  const parsed = DiffFingerprintManifestSchema.safeParse(input.manifest);
+  if (!parsed.success) return { available: false, reason: 'malformed' };
+  const manifest = parsed.data;
+  let hash: string;
+  try {
+    hash = await computeDiffFingerprintManifestHash(manifest);
+  } catch {
+    return { available: false, reason: 'mismatched' };
+  }
+  // Empty-fence recovery intentionally fingerprints from an earlier HWM or seed tree while
+  // retaining the equal physical open/close boundaries on the checkpoint projection.
+  const recoveredOpenTree =
+    input.recoveredOpenTreeSha !== undefined &&
+    input.recoveredOpenTreeSha !== null &&
+    input.openTreeSha !== null &&
+    input.closeTreeSha !== null &&
+    input.openTreeSha === input.closeTreeSha &&
+    manifest.close_tree_sha === input.closeTreeSha &&
+    manifest.open_tree_sha === input.recoveredOpenTreeSha;
+  if (
+    manifest.artifact_id !== input.artifactId ||
+    manifest.checkpoint_n !== input.checkpointN ||
+    (input.openTreeSha !== null &&
+      manifest.open_tree_sha !== input.openTreeSha &&
+      !recoveredOpenTree) ||
+    (input.closeTreeSha !== null && manifest.close_tree_sha !== input.closeTreeSha) ||
+    !isDeepStrictEqual(summarizeManifest(manifest, hash), input.summary)
+  )
+    return { available: false, reason: 'mismatched' };
+  return { available: true, manifest };
+}
 
 /**
  * The deliberate-skip snapshot boundary: every reference field is null

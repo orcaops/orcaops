@@ -2,21 +2,18 @@ import path from 'node:path';
 
 import { ORCAOPS_CAPABILITIES } from '@orcaops/core';
 import type { OssSourcePlanReviewPull, SourcePlanReviewPullResponse } from '@orcaops/sdk';
-import {
-  type ReviewPullRecord,
-  sha256Hex,
-  sourcePlanCacheDir,
-  writeReviewPullRecord,
-} from '@orcaops/storage';
+import { type ReviewPullRecord, sha256Hex } from '@orcaops/storage';
 
+import type { PlanReviewPersistence } from './persistence.js';
 import { mapPlanCloudReadError, requireRef, withReviewCloud } from './shared.js';
 import { toCloudErrorEnvelope } from '../../../io/cloud-error-envelope.js';
 import { ErrorCodes, OrcaopsError } from '../../../io/errors.js';
 import { emitError, emitOk, writeTerminalSafeStdout } from '../../../io/output.js';
 import { atomicWriteFile } from '../../../lib/atomic-write.js';
+import { createDatabasePlanReviewPersistence } from '../../../lib/database-source-plan-review.js';
 import { getInvocationCwd } from '../../../lib/invocation-context.js';
 import { parseDigitInt } from '../../../lib/strict-int.js';
-import { reviewUsageStamp, stampPlanReviewUsage } from '../../../lib/usage-stamp.js';
+import { reviewUsageStamp } from '../../../lib/usage-stamp.js';
 
 export interface ReviewPullOptions {
   proposal?: string;
@@ -49,6 +46,7 @@ export interface ReviewPullResult {
 }
 
 export interface RunReviewPullArgs {
+  persistence: PlanReviewPersistence;
   client: ReviewPullClient;
   repoRoot: string;
   baseUrl: string;
@@ -75,6 +73,7 @@ export interface RunReviewPullArgs {
  * a wrong-body diff.
  */
 export async function runReviewPull(args: RunReviewPullArgs): Promise<ReviewPullResult> {
+  await args.persistence.preflight();
   let res: SourcePlanReviewPullResponse;
   try {
     res = await args.client.sourcePlan.reviewPull({
@@ -168,7 +167,7 @@ export async function runReviewPull(args: RunReviewPullArgs): Promise<ReviewPull
       org_id: args.orgId,
       pulled_at: args.pulledAt,
     };
-    await writeReviewPullRecord(sourcePlanCacheDir(args.repoRoot), record, args.repoRoot);
+    await args.persistence.writeRecord(record);
   }
 
   return {
@@ -198,12 +197,12 @@ export function parseVersionFlag(raw: string, flag: string, inputPath: string): 
 }
 
 /**
- * Pull the under-review candidate (or `--proposal <id>` a proposal) into the
- * local review-pull cache so a subsequent `propose` / `push` / `comment` can
+ * Pull the under-review candidate (or `--proposal <id>` a proposal) into
+ * project history so a subsequent `propose` / `push` / `comment` can
  * echo its `version_id` without a re-pull. Verifies `sha256(body) ===
- * contentHash` before caching. With `--out`, also writes the body to a file
+ * contentHash` before publication. With `--out`, also writes the body to a file
  * (file-first; see `runReviewPull`). `--version <n>` fetches a sealed
- * HISTORICAL version instead — read-only, never cached, NOT a push base (it
+ * HISTORICAL version instead — read-only, not retained, NOT a push base (it
  * exists for "what changed since vN?" diffs). This is the REVIEW track — its
  * body is NOT pinnable as a `cloud:<id>@<n>` conformance anchor (that is
  * `plan pull`).
@@ -232,8 +231,16 @@ export async function reviewPullAction(ref: string, opts: ReviewPullOptions = {}
             : [ORCAOPS_CAPABILITIES.SOURCE_PLAN_REVIEW],
         operation: 'plan review pull',
       },
-      (ctx) =>
-        runReviewPull({
+      async (ctx) => {
+        const persistence = createDatabasePlanReviewPersistence({
+          reader: ctx.reader,
+          target: ctx.target,
+          secretAllow: ctx.secretAllow,
+          openWriter: ctx.openWriter,
+          signal: ctx.signal,
+          onWait: ctx.onWait,
+        });
+        const result = await runReviewPull({
           client: ctx.client,
           repoRoot: ctx.repoRoot,
           baseUrl: ctx.baseUrl,
@@ -243,10 +250,12 @@ export async function reviewPullAction(ref: string, opts: ReviewPullOptions = {}
           ...(versionNumber !== undefined ? { versionNumber } : {}),
           ...(outPath ? { outPath } : {}),
           pulledAt: new Date().toISOString(),
-        })
+          persistence,
+        });
+        await ctx.stampUsage(reviewUsageStamp('pull', result.external_id, result.target));
+        return result;
+      }
     );
-
-    await stampPlanReviewUsage(reviewUsageStamp('pull', result.external_id, result.target));
 
     if (opts.json) {
       emitOk(result);

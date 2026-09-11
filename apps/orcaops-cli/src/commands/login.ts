@@ -8,7 +8,6 @@ import {
   createHardenedFetch,
   envTokenIsSet,
   FileStore,
-  flushPendingPushes,
   resolveCloudTarget,
   resolveCredentialStore,
   scrubAndBound,
@@ -28,6 +27,7 @@ import {
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { emitError, emitOk, writeTerminalSafeStdout } from '../io/output.js';
 import { CLI_VERSION } from '../lib/cli-version.js';
+import { drainDatabaseAfterLogin } from '../lib/database-login-drain.js';
 import { getInvocationEnv } from '../lib/invocation-context.js';
 
 const CLIENT_ID = 'orcaops-cli';
@@ -251,18 +251,11 @@ export async function loginAction(opts: LoginOptions): Promise<void> {
       loopback.shutdown();
     }
 
-    // Best-effort push-on-login: drain pending artifacts whose prior push
-    // (if any) targeted the just-authenticated org. Skips silently when not
-    // in an orcaops-init'd repo (login can run from anywhere) or when the
-    // git remote isn't configured. Threads the just-resolved (store,
-    // baseUrl) through so flushPendingPushes resolves the same credential
-    // store that this login wrote to — without the explicit thread,
-    // `resolveCredentialStore()` inside flushPendingPushes could pick a
-    // different store in a multi-store env, and the cross-org filter
-    // would key off the wrong orgId.
-    const drainResult = await drainAfterLogin({
+    // Only the just-authenticated account may receive this optional drain.
+    const drainResult = await drainDatabaseAfterLogin({
       baseUrl,
       orgId: credentials.orgId,
+      accountId: credentials.userId,
       credentialStore: store,
     });
 
@@ -293,83 +286,17 @@ export async function loginAction(opts: LoginOptions): Promise<void> {
         `Use \`orcaops org switch\` to re-authorize for a different org.`
     );
     if (drainResult && drainResult.attempted > 0) {
-      writeStdout(`Pushed ${drainResult.attempted} pending artifact(s).`);
+      writeStdout(`Attempted ${drainResult.attempted} pending upload(s).`);
     }
     reportCloudSkills(cloudSkills);
     if (drainResult && drainResult.skippedForeignOrg > 0) {
-      // Cross-tenant guard fired — surface so the user knows the drain
-      // didn't push EVERYTHING in the local queue. Common case: user
-      // switched orgs and re-logged in; the previous org's captures stay
-      // pinned to that org until the user logs back into it.
       writeStdout(
-        `Skipped ${drainResult.skippedForeignOrg} artifact(s) from another org ` +
-          `(re-login to the original org to push them).`
+        `Skipped ${drainResult.skippedForeignOrg} artifact(s) recorded for another cloud account ` +
+          `(re-login to the original account and org to push them).`
       );
     }
   } catch (err) {
     emitError(err);
-  }
-}
-
-interface DrainSummary {
-  attempted: number;
-  timedOut: boolean;
-  /**
-   * Count of artifacts skipped because their last cloud push targeted a
-   * DIFFERENT org than the one this login just authenticated against. The
-   * cross-tenant guard at the drain candidate query (sqlite.ts
-   * findArtifactsForCloudSyncDrain with orgIdFilter) excludes them.
-   * Fresh (never-pushed) artifacts are always included; only previously-
-   * pushed-to-other-org rows count here.
-   */
-  skippedForeignOrg: number;
-}
-
-interface DrainAfterLoginOptions {
-  baseUrl: string;
-  orgId: string;
-  credentialStore: CredentialStore;
-}
-
-async function drainAfterLogin(opts: DrainAfterLoginOptions): Promise<DrainSummary | null> {
-  // Honor the kill-switch BEFORE buildContext: flushPendingPushes would skip
-  // anyway, but buildContext itself is side-effectful: it resolves the repo
-  // root from the invocation cwd and can rebuild a missing or interrupted
-  // cache. A disabled drain must not touch whatever repo the process happens
-  // to be sitting in.
-  if (getInvocationEnv().ORCAOPS_DISABLE_DRAIN === '1') return null;
-  let ctx;
-  try {
-    const { buildContext } = await import('../lib/context.js');
-    ctx = await buildContext();
-  } catch {
-    return null;
-  }
-  try {
-    // Thread baseUrl + credentialStore through so flushPendingPushes's
-    // internal `resolveAuthedOrgId` reads the same store this login just
-    // wrote credentials to. Without the explicit thread, the helper would
-    // call `resolveCredentialStore()` itself, which in a multi-store env
-    // (FileStore + KeyringStore both present) could return a different
-    // store — the cross-org filter would key off whichever orgId that
-    // store happens to hold, defeating the guard.
-    const result = await flushPendingPushes({
-      store: ctx.store,
-      repo: ctx.repo,
-      repoRoot: ctx.repoRoot,
-      credentialStore: opts.credentialStore,
-      baseUrl: opts.baseUrl,
-    });
-    if (result.skipped) return null;
-    return {
-      attempted: result.attempted,
-      timedOut: result.timedOut,
-      skippedForeignOrg: result.skippedForeignOrg,
-    };
-  } catch {
-    return null;
-  } finally {
-    ctx.store.close();
   }
 }
 
@@ -401,15 +328,13 @@ type CloudSkillsOutcome =
  * error here is swallowed into the returned outcome instead.
  */
 async function materializeCloudSkillsAfterLogin(): Promise<CloudSkillsOutcome> {
-  // Checked before buildContext, which resolves a repo root from the invocation
-  // cwd and can write a config migration: a disabled hook touches nothing.
   if (getInvocationEnv().ORCAOPS_DISABLE_DRAIN === '1') {
     return { status: 'skipped', reason: 'disabled' };
   }
   let ctx;
   try {
-    const { buildContext } = await import('../lib/context.js');
-    ctx = await buildContext();
+    const { resolveInstallCommandContext } = await import('../lib/repository-context.js');
+    ctx = await resolveInstallCommandContext();
   } catch {
     return { status: 'skipped', reason: 'no-repo' };
   }
@@ -454,8 +379,6 @@ async function materializeCloudSkillsAfterLogin(): Promise<CloudSkillsOutcome> {
       status: 'failed',
       error: scrubAndBound(err instanceof Error ? err.message : String(err), 512),
     };
-  } finally {
-    ctx.store.close();
   }
 }
 

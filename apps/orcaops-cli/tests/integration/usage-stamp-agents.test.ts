@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { Store } from '@orcaops/storage';
+import { requireDatabaseExecutionContext } from '@orcaops/core/history/database-capture';
+import { openProjectDatabase } from '@orcaops/storage/history/database';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -63,10 +64,14 @@ interface SnapshotRow {
 describe('agent-aware usage stamping (codex / opencode / github-copilot)', () => {
   let repo: TempRepo;
   let fixtureDirs: string[];
+  let dataRoot: string;
+  let homeRoot: string;
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
     fixtureDirs = [];
+    dataRoot = await createIsolatedDir('history');
+    homeRoot = await createIsolatedDir('home');
   });
   afterEach(async () => {
     vi.unstubAllEnvs();
@@ -74,13 +79,53 @@ describe('agent-aware usage stamping (codex / opencode / github-copilot)', () =>
     await Promise.all(fixtureDirs.map((d) => rm(d, { recursive: true, force: true })));
   });
 
-  function readSnapshots(artifactId: string): SnapshotRow[] {
-    const dbPath = path.join(repo.path, '.orcaops', 'cache', 'orcaops.db');
-    const store = new Store(dbPath);
+  function isolatedEnv(extras: Record<string, string> = {}): Record<string, string> {
+    return cleanSessionEnv({
+      HOME: homeRoot,
+      ORCAOPS_DATA_DIR: dataRoot,
+      ORCAOPS_DISABLE_DRAIN: '1',
+      ...extras,
+    });
+  }
+
+  async function readSnapshots(artifactId: string): Promise<SnapshotRow[]> {
+    const context = await requireDatabaseExecutionContext({ cwd: repo.path, root: dataRoot });
+    const database = await openProjectDatabase({ authority: context.authority, mode: 'reader' });
     try {
-      return store.readUsageSnapshots(artifactId) as unknown as SnapshotRow[];
+      return database.read((view) =>
+        view
+          .all<{
+            lifecycle_event: string;
+            session_id: string;
+            agent: string;
+            record_count: number;
+            cumulative_json: string;
+            model_breakdown_json: string;
+          }>(
+            `SELECT lifecycle_event,session_id,agent,record_count,cumulative_json,model_breakdown_json
+             FROM usage_snapshots WHERE artifact_id=? ORDER BY as_of,snapshot_id`,
+            artifactId
+          )
+          .map((row) => {
+            const cumulative = JSON.parse(row.cumulative_json) as {
+              input_tokens: number;
+              output_tokens: number;
+              cache_read_input_tokens: number;
+            };
+            return {
+              lifecycle_event: row.lifecycle_event,
+              session_id: row.session_id,
+              agent: row.agent,
+              cumulative_input_tokens: cumulative.input_tokens,
+              cumulative_output_tokens: cumulative.output_tokens,
+              cumulative_cache_read_input_tokens: cumulative.cache_read_input_tokens,
+              record_count: row.record_count,
+              model_breakdown: row.model_breakdown_json,
+            };
+          })
+      ).value;
     } finally {
-      store.close();
+      database.close();
     }
   }
 
@@ -190,10 +235,10 @@ describe('agent-aware usage stamping (codex / opencode / github-copilot)', () =>
     await writeCodexFixture({ home: codexHome, sid, cwd: repo.path });
     vi.stubEnv('CODEX_HOME', codexHome);
 
-    const agent = makeAgent({ cwd: repo.path, env: cleanSessionEnv(), timeoutMs: 60_000 });
+    const agent = makeAgent({ cwd: repo.path, env: isolatedEnv(), timeoutMs: 60_000 });
     const artifactId = await initAndPlan(agent, 'codex');
 
-    const snaps = readSnapshots(artifactId).filter((s) => s.lifecycle_event === 'plan');
+    const snaps = (await readSnapshots(artifactId)).filter((s) => s.lifecycle_event === 'plan');
     expect(snaps).toHaveLength(1);
     expect(snaps[0].agent).toBe('codex');
     expect(snaps[0].session_id).toBe(sid);
@@ -213,13 +258,13 @@ describe('agent-aware usage stamping (codex / opencode / github-copilot)', () =>
 
     const agent = makeAgent({
       cwd: repo.path,
-      env: cleanSessionEnv({ CODEX_SESSION_ID: sid }),
+      env: isolatedEnv({ CODEX_SESSION_ID: sid }),
       timeoutMs: 60_000,
     });
     // Config agent is claude-code (default) — env evidence must still win.
     const artifactId = await initAndPlan(agent, 'claude-code');
 
-    const snaps = readSnapshots(artifactId).filter((s) => s.lifecycle_event === 'plan');
+    const snaps = (await readSnapshots(artifactId)).filter((s) => s.lifecycle_event === 'plan');
     expect(snaps).toHaveLength(1);
     expect(snaps[0].agent).toBe('codex');
     expect(snaps[0].session_id).toBe(sid);
@@ -248,12 +293,12 @@ describe('agent-aware usage stamping (codex / opencode / github-copilot)', () =>
 
     const agent = makeAgent({
       cwd: repo.path,
-      env: cleanSessionEnv({ CODEX_THREAD_ID: child }),
+      env: isolatedEnv({ CODEX_THREAD_ID: child }),
       timeoutMs: 60_000,
     });
     const artifactId = await initAndPlan(agent, 'claude-code');
 
-    const snaps = readSnapshots(artifactId).filter(
+    const snaps = (await readSnapshots(artifactId)).filter(
       (snapshot) => snapshot.lifecycle_event === 'plan'
     );
     expect(snaps).toHaveLength(1);
@@ -272,13 +317,13 @@ describe('agent-aware usage stamping (codex / opencode / github-copilot)', () =>
     vi.stubEnv('CODEX_HOME', codexHome);
     const agent = makeAgent({
       cwd: repo.path,
-      env: cleanSessionEnv({ CODEX_THREAD_ID: randomUUID() }),
+      env: isolatedEnv({ CODEX_THREAD_ID: randomUUID() }),
       timeoutMs: 60_000,
     });
 
     const artifactId = await initAndPlan(agent, 'codex');
 
-    expect(readSnapshots(artifactId)).toEqual([]);
+    expect(await readSnapshots(artifactId)).toEqual([]);
   });
 
   it('opencode via config-agent discovery against a SQLite fixture', async () => {
@@ -317,10 +362,10 @@ describe('agent-aware usage stamping (codex / opencode / github-copilot)', () =>
     }
     vi.stubEnv('OPENCODE_DATA_DIR', dataDir);
 
-    const agent = makeAgent({ cwd: repo.path, env: cleanSessionEnv(), timeoutMs: 60_000 });
+    const agent = makeAgent({ cwd: repo.path, env: isolatedEnv(), timeoutMs: 60_000 });
     const artifactId = await initAndPlan(agent, 'opencode');
 
-    const snaps = readSnapshots(artifactId).filter((s) => s.lifecycle_event === 'plan');
+    const snaps = (await readSnapshots(artifactId)).filter((s) => s.lifecycle_event === 'plan');
     expect(snaps).toHaveLength(1);
     expect(snaps[0].agent).toBe('opencode');
     expect(snaps[0].session_id).toBe(sid);
@@ -353,18 +398,17 @@ describe('agent-aware usage stamping (codex / opencode / github-copilot)', () =>
       'utf8'
     );
     // The explicit exporter path alone must be enough; the conventional
-    // $HOME/.copilot/otel dir (real HOME, possibly holding real exports) is
-    // still scanned but its records are filtered out by the random session id.
+    // $HOME/.copilot/otel path remains empty in the isolated fixture home.
     vi.stubEnv('COPILOT_OTEL_FILE_EXPORTER_PATH', otelFile);
 
     const agent = makeAgent({
       cwd: repo.path,
-      env: cleanSessionEnv({ COPILOT_AGENT_SESSION_ID: sid }),
+      env: isolatedEnv({ COPILOT_AGENT_SESSION_ID: sid }),
       timeoutMs: 60_000,
     });
     const artifactId = await initAndPlan(agent, 'github-copilot');
 
-    const snaps = readSnapshots(artifactId).filter((s) => s.lifecycle_event === 'plan');
+    const snaps = (await readSnapshots(artifactId)).filter((s) => s.lifecycle_event === 'plan');
     expect(snaps).toHaveLength(1);
     expect(snaps[0].agent).toBe('github-copilot');
     expect(snaps[0].session_id).toBe(sid);
@@ -377,9 +421,9 @@ describe('agent-aware usage stamping (codex / opencode / github-copilot)', () =>
     const codexHome = await createIsolatedDir('codex-home-empty');
     vi.stubEnv('CODEX_HOME', codexHome);
 
-    const agent = makeAgent({ cwd: repo.path, env: cleanSessionEnv(), timeoutMs: 60_000 });
+    const agent = makeAgent({ cwd: repo.path, env: isolatedEnv(), timeoutMs: 60_000 });
     const artifactId = await initAndPlan(agent, 'codex'); // verb succeeds…
-    expect(readSnapshots(artifactId)).toHaveLength(0); // …with zero usage rows
+    expect(await readSnapshots(artifactId)).toHaveLength(0); // …with zero usage rows
   });
 
   /** Isolated per-test fixture dir, removed in afterEach. */

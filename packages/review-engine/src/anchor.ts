@@ -26,22 +26,18 @@
 //   exit 1  usage / precondition error (no cached diff, no changed lines in
 //           range, bad enum, missing flags)
 
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
-
 import {
   FINDING_KIND,
   FINDING_ORIGIN,
   FINDING_SCOPE,
   findingKey,
-  type Floor,
-  floorSchema,
   isTrivialAnchorBody,
   lineHash,
-  slugifyBranch,
 } from '@orcaops/review-core';
 
 import { parsePatchHunks, type PatchHunk, positionKey } from './comments.js';
+import { loadCanonicalFloorSource } from './floorSource.js';
+import { writeReviewError, writeReviewOutput } from './reviewFiles.js';
 import type { ReviewArgs } from './run.js';
 
 const encoder = new TextEncoder();
@@ -65,7 +61,7 @@ interface AnchorOutput {
 }
 
 function fail(message: string): number {
-  process.stderr.write(`review anchor: ${message}\n${USAGE}`);
+  writeReviewError(`review anchor: ${message}\n${USAGE}`);
   return 1;
 }
 
@@ -75,12 +71,11 @@ function inEnum(value: string, allowed: Record<string, string>): boolean {
 
 /** Load + position-index the cached floor's coverage, or null when absent. */
 async function loadFloorIndex(
-  dir: string
+  branch: string,
+  root: string
 ): Promise<{ byPosition: Map<string, string>; byHunkKey: Map<string, { file: string }> } | null> {
   try {
-    const floor: Floor = floorSchema.parse(
-      JSON.parse(await readFile(path.join(dir, 'floor.json'), 'utf8'))
-    );
+    const floor = (await loadCanonicalFloorSource(branch, { cwd: root })).floor;
     const byPosition = new Map<string, string>();
     const byHunkKey = new Map<string, { file: string }>();
     for (const item of floor.coverage.items) {
@@ -114,7 +109,7 @@ function patchHunkFor(
 /** Run `review anchor`. Returns the process exit code. */
 export async function runAnchor(args: ReviewArgs, root: string): Promise<number> {
   if (args.help === true) {
-    process.stdout.write(USAGE);
+    writeReviewOutput(USAGE);
     return 0;
   }
   if (!args.branch) return fail('--branch <branch> is required');
@@ -128,7 +123,6 @@ export async function runAnchor(args: ReviewArgs, root: string): Promise<number>
 
   const out: AnchorOutput = {};
   const refs: string[] = [...(args.refs ?? [])];
-  const dir = path.join(root, '.orcaops', 'reviews', slugifyBranch(args.branch));
 
   // --hunk: auto-pick the anchor line — the hunk's first non-trivial changed
   // line (adds preferred over deletes, matching the TUI's comment anchoring).
@@ -136,11 +130,9 @@ export async function runAnchor(args: ReviewArgs, root: string): Promise<number>
     if (args.file !== undefined || args.start !== undefined) {
       return fail('--hunk auto-picks the line — do not combine with --file/--start');
     }
-    const index = await loadFloorIndex(dir);
+    const index = await loadFloorIndex(args.branch, root);
     if (index === null) {
-      return fail(
-        `no valid cached floor at ${path.join(dir, 'floor.json')} — run \`review data --branch <b>\` first`
-      );
+      return fail('no selected floor for this review — run `review data --branch <b>` first');
     }
     const item = index.byHunkKey.get(args.hunk!);
     if (item === undefined) {
@@ -148,11 +140,9 @@ export async function runAnchor(args: ReviewArgs, root: string): Promise<number>
     }
     let diffText: string;
     try {
-      diffText = await readFile(path.join(dir, 'diff.patch'), 'utf8');
+      diffText = (await loadCanonicalFloorSource(args.branch, { cwd: root })).diffText;
     } catch {
-      return fail(
-        `no cached diff at ${path.join(dir, 'diff.patch')} — run \`review data --branch <b>\` first`
-      );
+      return fail('no retained review diff — run `review data --branch <b>` first');
     }
     const carrier = patchHunkFor(
       parsePatchHunks(diffText, new Set([item.file])),
@@ -195,11 +185,9 @@ export async function runAnchor(args: ReviewArgs, root: string): Promise<number>
 
     let diffText: string;
     try {
-      diffText = await readFile(path.join(dir, 'diff.patch'), 'utf8');
+      diffText = (await loadCanonicalFloorSource(args.branch, { cwd: root })).diffText;
     } catch {
-      return fail(
-        `no cached diff at ${path.join(dir, 'diff.patch')} — run \`review data --branch <b>\` first`
-      );
+      return fail('no retained review diff — run `review data --branch <b>` first');
     }
     const hunks = parsePatchHunks(diffText, new Set([args.file]));
     const side = args.side;
@@ -230,7 +218,7 @@ export async function runAnchor(args: ReviewArgs, root: string): Promise<number>
     // Resolve the floor hunkKey by position-matching the carrying patch hunk.
     // No valid floor cached → the anchor still stands, keyless.
     out.hunkKey = null;
-    const index = await loadFloorIndex(dir);
+    const index = await loadFloorIndex(args.branch, root);
     if (index !== null) {
       const carrier = picked[0]!.hunk;
       out.hunkKey =
@@ -275,6 +263,6 @@ export async function runAnchor(args: ReviewArgs, root: string): Promise<number>
     });
   }
 
-  process.stdout.write(`${JSON.stringify(out)}\n`);
+  writeReviewOutput(`${JSON.stringify(out)}\n`);
   return 0;
 }

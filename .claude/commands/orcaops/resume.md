@@ -2,8 +2,8 @@
 name: "orcaops:resume"
 description: "Show progress on the active artifact + a paste-ready prompt for picking work back up."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "0a85b04844ba"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "74c307610f63"
 tags: ["orcaops", "read-only"]
 ---
 

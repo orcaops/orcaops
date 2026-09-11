@@ -25,7 +25,9 @@ describe('task-review routine two-lens program', () => {
       "orcaops review routine-submit --branch <b> --run <run-id> --lane account --isolation sequential --input - --json <<'EOF'"
     );
     // The acceptance responses chain the program: account input, then finalize.
-    expect(body).toContain('response carries the ACCOUNT payload path');
+    expect(body).toContain('response carries the ACCOUNT `payload_path` + `contract`');
+    expect(body).toContain('under its `account`\nfield');
+    expect(body).toContain('account.payload_path');
     expect(body).toContain('never write\npayload files');
     expect(body).toContain('never invent commands');
     expect(body).toContain('the same response finalizes the run');
@@ -194,15 +196,20 @@ describe('task-review routine two-lens program', () => {
     for (const state of ['READY', 'TOO_LARGE', 'NOT_ELIGIBLE', 'UNAVAILABLE'])
       expect(body, state).toContain(state);
     expect(body).toContain(
-      '.orcaops/reviews/<branch-slug>/twolane/<run-id>/semantic-anchor-input-v4.md'
+      'orcaops review run-show --branch <b> --run <run-id> --semantic-input --json'
     );
+    expect(body).toContain('read exactly `payload_content`');
+    expect(body).toContain('retain its `publication_id`');
+    expect(body).toContain('including in a\nlater session');
+    expect(body).toContain('its `payload_file`\nis only a basename');
+    expect(body).toContain('null: the run is not finalized; stop semantic anchoring');
     expect(body).toContain(
       'complete policy-eligible diff annotated with deterministic change blocks'
     );
     expect(body).toContain('per-file\ninventory of paths excluded by explicit review policy');
     expect(body).toContain('never implies that a citation refers to excluded\ncode');
-    expect(body).toContain('Stop on zero or multiple matches');
-    expect(body).toContain('single ordered pass, in full');
+    expect(body).toContain('says the run is not retained or refuses evidence integrity, stop');
+    expect(body).toContain('Read that `payload_content` once, in a single ordered pass, in full');
     for (const kind of [
       'PLAN_DECISION',
       'PLAN_ALTERNATIVE',
@@ -267,7 +274,8 @@ describe('task-review routine two-lens program', () => {
     expect(body).not.toContain('packages/llm');
     expect(body).not.toContain("from '@orcaops/");
     expect(body).toContain('it never calls a model, and\nyou never call one through any other CLI');
-    expect(body).toContain('Never edit files under\n.orcaops/reviews/ by hand');
+    expect(body).toContain('Never edit retained review state by\nhand');
+    expect(body).not.toContain('.orcaops/reviews/');
   });
 
   it('keeps the comment loop (Mode B) on the public comment surface', () => {

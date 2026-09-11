@@ -122,16 +122,12 @@ async function checkVersionedFacts() {
     run: await readRepo('packages/review-engine/src/twolaneRunFile.ts'),
     slice: await readRepo('packages/review-engine/src/twolaneSlice.ts'),
     model: await readRepo('packages/review-engine/src/storyReviewModel.ts'),
-    pointer: await readRepo('packages/review-engine/src/currentStory.ts'),
-    state: await readRepo('packages/review-engine/src/reviewState.ts'),
     floor: await readRepo('packages/review-engine/src/floor.ts'),
   };
   const expected =
     `Current routine contract versions are run schema ${sourceConstant(sources.run, 'TWOLANE_RUN_SCHEMA_VERSION')}, ` +
     `slice state schema ${sourceConstant(sources.slice, 'SLICE_SCHEMA_VERSION')}, Story review model schema ` +
-    `${sourceConstant(sources.model, 'STORY_REVIEW_MODEL_SCHEMA_VERSION')}, current Story pointer schema ` +
-    `${sourceConstant(sources.pointer, 'CURRENT_STORY_POINTER_SCHEMA_VERSION')}, durable review-state version ` +
-    `${sourceConstant(sources.state, 'REVIEW_STATE_VERSION')}, and floor producer version ` +
+    `${sourceConstant(sources.model, 'STORY_REVIEW_MODEL_SCHEMA_VERSION')}, and floor producer version ` +
     `${sourceConstant(sources.floor, 'FLOOR_PRODUCER_VERSION')}.`;
   const protocol = (await readDocs('content/task-review-protocol.md')).replace(/\s+/g, ' ');
   if (!protocol.includes(expected))

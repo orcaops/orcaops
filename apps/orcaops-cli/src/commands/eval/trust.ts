@@ -18,7 +18,6 @@ import {
   writeTerminalSafeStderr,
   writeTerminalSafeStdout,
 } from '../../io/output.js';
-import { buildContext } from '../../lib/context.js';
 import {
   discoverEvaluatorsForCli,
   untrustworthyCapabilities,
@@ -31,6 +30,7 @@ import {
 } from '../../lib/evaluator-grants.js';
 import { CLI_ROOT, readEvaluatorsConfig } from '../../lib/evaluators-config.js';
 import { getInvocationEnv } from '../../lib/invocation-context.js';
+import { resolveInstallCommandContext } from '../../lib/repository-context.js';
 
 export interface EvalTrustOptions {
   /** Config-side pack id (`packages[].id`). */
@@ -57,174 +57,170 @@ export interface EvalTrustOptions {
  */
 export async function evalTrustAction(opts: EvalTrustOptions): Promise<void> {
   try {
-    const ctx = await buildContext();
-    try {
-      if (opts.revoke) {
-        const removed = await revokeGrant(opts.packId, { repoRoot: ctx.repoRoot });
-        const out = { ok: true as const, pack: opts.packId, revoked: removed };
-        if (opts.json) {
-          emitOk(out);
-          return;
-        }
-        writeTerminalSafeStdout(
-          removed
-            ? `Revoked the user-local grant for "${opts.packId}".\n`
-            : `No user-local grant existed for "${opts.packId}".\n`
-        );
+    const ctx = await resolveInstallCommandContext();
+    if (opts.revoke) {
+      const removed = await revokeGrant(opts.packId, { repoRoot: ctx.repoRoot });
+      const out = { ok: true as const, pack: opts.packId, revoked: removed };
+      if (opts.json) {
+        emitOk(out);
         return;
       }
-
-      const config = await readEvaluatorsConfig(ctx.repoRoot);
-      const entry = config?.packages.find((p) => p.id === opts.packId);
-      if (entry === undefined) {
-        throw new OrcaopsError(
-          ErrorCodes.INVALID_INPUT,
-          `No pack "${opts.packId}" is registered in .orcaops/evaluators.yaml — ` +
-            `run \`orcaops eval add-pack\` first.`,
-          'pack'
-        );
-      }
-
-      if (opts.dev && entry.source.kind !== 'path') {
-        throw new OrcaopsError(
-          ErrorCodes.INVALID_INPUT,
-          `--dev is for mutable path-source (workspace) packs; "${opts.packId}" resolves from ` +
-            `a ${entry.source.kind} source, which stays fingerprint-bound.`,
-          'dev'
-        );
-      }
-      const resolved = resolvePackSource(entry.source, {
-        repoRoot: ctx.repoRoot,
-        cliRoot: CLI_ROOT,
-      });
-      // Classify with the effective provider the dispatch gate will see;
-      // otherwise an implicit-codex evaluator's file-reading capability is
-      // never offered for consent and the pack is ungrantable.
-      const defaultLlmProvider = await resolveDefaultProvider(ctx.config.llm, getInvocationEnv());
-      const validation = await validatePack(resolved, { defaultLlmProvider });
-      if (!validation.ok) {
-        throw new OrcaopsError(
-          ErrorCodes.PACK_VALIDATION,
-          `Pack failed validation; refusing to grant trust to a broken pack.`
-        );
-      }
-      const discovered = await discoverEvaluatorsForCli(ctx.repoRoot);
-      // Scoped to this pack: another pack's breakage cannot narrow THIS
-      // pack's capability set, and refusing over it would block a grant the
-      // user can do nothing about from here.
-      const untrustworthy = untrustworthyCapabilities(opts.packId, discovered.errors);
-      if (untrustworthy !== null) throw untrustworthy;
-      const effectiveCapabilities = requiredTrustCapabilitiesForEngines(
-        discovered.evaluators
-          .filter((evaluator) => evaluator.enabled && evaluator.package_id === opts.packId)
-          .map((evaluator) => evaluator.engine),
-        defaultLlmProvider
+      writeTerminalSafeStdout(
+        removed
+          ? `Revoked the user-local grant for "${opts.packId}".\n`
+          : `No user-local grant existed for "${opts.packId}".\n`
       );
-      const capabilities = [
-        ...new Set([
-          ...validation.warnings.map((w) => w.code).filter(isTrustCapability),
-          ...effectiveCapabilities,
-        ]),
-      ];
-      const { fingerprint } = await computePackSourceFingerprint(resolved);
+      return;
+    }
 
-      if (capabilities.length === 0) {
-        const out = {
-          ok: true as const,
-          pack: opts.packId,
-          granted: false,
-          reason: 'no capability-requiring evaluators; no grant needed',
-        };
-        if (opts.json) {
-          emitOk(out);
-          return;
-        }
-        writeTerminalSafeStdout(
-          `Pack "${opts.packId}" ships no command or LLM evaluators — nothing to grant.\n`
-        );
-        return;
-      }
+    const config = await readEvaluatorsConfig(ctx.repoRoot);
+    const entry = config?.packages.find((p) => p.id === opts.packId);
+    if (entry === undefined) {
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        `No pack "${opts.packId}" is registered in .orcaops/evaluators.yaml — ` +
+          `run \`orcaops eval add-pack\` first.`,
+        'pack'
+      );
+    }
 
-      const manifest = readTrustManifest(CLI_ROOT);
-      if (trustManifestCovers(manifest, entry.source, fingerprint, capabilities)) {
-        const out = {
-          ok: true as const,
-          pack: opts.packId,
-          granted: false,
-          reason: 'covered by the installation trust manifest',
-        };
-        if (opts.json) {
-          emitOk(out);
-          return;
-        }
-        writeTerminalSafeStdout(
-          `Pack "${opts.packId}" matches this installation's built-in trust manifest — no grant needed.\n`
-        );
-        return;
-      }
+    if (opts.dev && entry.source.kind !== 'path') {
+      throw new OrcaopsError(
+        ErrorCodes.INVALID_INPUT,
+        `--dev is for mutable path-source (workspace) packs; "${opts.packId}" resolves from ` +
+          `a ${entry.source.kind} source, which stays fingerprint-bound.`,
+        'dev'
+      );
+    }
+    const resolved = resolvePackSource(entry.source, {
+      repoRoot: ctx.repoRoot,
+      cliRoot: CLI_ROOT,
+    });
+    // Classify with the effective provider the dispatch gate will see;
+    // otherwise an implicit-codex evaluator's file-reading capability is
+    // never offered for consent and the pack is ungrantable.
+    const defaultLlmProvider = await resolveDefaultProvider(ctx.config.llm, getInvocationEnv());
+    const validation = await validatePack(resolved, { defaultLlmProvider });
+    if (!validation.ok) {
+      throw new OrcaopsError(
+        ErrorCodes.PACK_VALIDATION,
+        `Pack failed validation; refusing to grant trust to a broken pack.`
+      );
+    }
+    const discovered = await discoverEvaluatorsForCli(ctx.repoRoot);
+    // Scoped to this pack: another pack's breakage cannot narrow THIS
+    // pack's capability set, and refusing over it would block a grant the
+    // user can do nothing about from here.
+    const untrustworthy = untrustworthyCapabilities(opts.packId, discovered.errors);
+    if (untrustworthy !== null) throw untrustworthy;
+    const effectiveCapabilities = requiredTrustCapabilitiesForEngines(
+      discovered.evaluators
+        .filter((evaluator) => evaluator.enabled && evaluator.package_id === opts.packId)
+        .map((evaluator) => evaluator.engine),
+      defaultLlmProvider
+    );
+    const capabilities = [
+      ...new Set([
+        ...validation.warnings.map((w) => w.code).filter(isTrustCapability),
+        ...effectiveCapabilities,
+      ]),
+    ];
+    const { fingerprint } = await computePackSourceFingerprint(resolved);
 
-      if (!opts.yes) {
-        if (opts.json) {
-          throw new OrcaopsError(
-            ErrorCodes.INVALID_INPUT,
-            'Trust must be granted explicitly; re-run with --yes under --json.',
-            'yes'
-          );
-        }
-        const accepted = await promptForGrant(opts.packId, capabilities, resolved.pack_root);
-        if (!accepted) {
-          throw new OrcaopsError(ErrorCodes.INVALID_INPUT, 'Aborted: trust not granted.', 'yes');
-        }
-      }
-
-      const granted_at = new Date().toISOString();
-      if (opts.dev) {
-        await writeGrant(
-          {
-            kind: 'workspace-dev',
-            package_id: opts.packId,
-            resolved_path: resolved.pack_root,
-            capabilities,
-            granted_at,
-          },
-          { repoRoot: ctx.repoRoot }
-        );
-      } else {
-        await writeGrant(
-          {
-            kind: 'fingerprint',
-            package_id: opts.packId,
-            source_fingerprint: fingerprint,
-            capabilities,
-            granted_at,
-          },
-          { repoRoot: ctx.repoRoot }
-        );
-      }
-
+    if (capabilities.length === 0) {
       const out = {
         ok: true as const,
         pack: opts.packId,
-        granted: true,
-        kind: opts.dev ? ('workspace-dev' as const) : ('fingerprint' as const),
-        capabilities,
-        ...(opts.dev ? { resolved_path: resolved.pack_root } : { source_fingerprint: fingerprint }),
+        granted: false,
+        reason: 'no capability-requiring evaluators; no grant needed',
       };
       if (opts.json) {
         emitOk(out);
         return;
       }
       writeTerminalSafeStdout(
-        `Granted ${opts.dev ? 'a workspace-dev' : 'a fingerprint-bound'} trust grant for ` +
-          `"${opts.packId}" (${capabilities.join(', ')}).\n` +
-          (opts.dev
-            ? `Bound to path: ${resolved.pack_root}\n`
-            : `Bound to declared pack-file fingerprint: ${fingerprint}\n` +
-              `A covered pack-file change invalidates it.\n`)
+        `Pack "${opts.packId}" ships no command or LLM evaluators — nothing to grant.\n`
       );
-    } finally {
-      ctx.store.close();
+      return;
     }
+
+    const manifest = readTrustManifest(CLI_ROOT);
+    if (trustManifestCovers(manifest, entry.source, fingerprint, capabilities)) {
+      const out = {
+        ok: true as const,
+        pack: opts.packId,
+        granted: false,
+        reason: 'covered by the installation trust manifest',
+      };
+      if (opts.json) {
+        emitOk(out);
+        return;
+      }
+      writeTerminalSafeStdout(
+        `Pack "${opts.packId}" matches this installation's built-in trust manifest — no grant needed.\n`
+      );
+      return;
+    }
+
+    if (!opts.yes) {
+      if (opts.json) {
+        throw new OrcaopsError(
+          ErrorCodes.INVALID_INPUT,
+          'Trust must be granted explicitly; re-run with --yes under --json.',
+          'yes'
+        );
+      }
+      const accepted = await promptForGrant(opts.packId, capabilities, resolved.pack_root);
+      if (!accepted) {
+        throw new OrcaopsError(ErrorCodes.INVALID_INPUT, 'Aborted: trust not granted.', 'yes');
+      }
+    }
+
+    const granted_at = new Date().toISOString();
+    if (opts.dev) {
+      await writeGrant(
+        {
+          kind: 'workspace-dev',
+          package_id: opts.packId,
+          resolved_path: resolved.pack_root,
+          capabilities,
+          granted_at,
+        },
+        { repoRoot: ctx.repoRoot }
+      );
+    } else {
+      await writeGrant(
+        {
+          kind: 'fingerprint',
+          package_id: opts.packId,
+          source_fingerprint: fingerprint,
+          capabilities,
+          granted_at,
+        },
+        { repoRoot: ctx.repoRoot }
+      );
+    }
+
+    const out = {
+      ok: true as const,
+      pack: opts.packId,
+      granted: true,
+      kind: opts.dev ? ('workspace-dev' as const) : ('fingerprint' as const),
+      capabilities,
+      ...(opts.dev ? { resolved_path: resolved.pack_root } : { source_fingerprint: fingerprint }),
+    };
+    if (opts.json) {
+      emitOk(out);
+      return;
+    }
+    writeTerminalSafeStdout(
+      `Granted ${opts.dev ? 'a workspace-dev' : 'a fingerprint-bound'} trust grant for ` +
+        `"${opts.packId}" (${capabilities.join(', ')}).\n` +
+        (opts.dev
+          ? `Bound to path: ${resolved.pack_root}\n`
+          : `Bound to declared pack-file fingerprint: ${fingerprint}\n` +
+            `A covered pack-file change invalidates it.\n`)
+    );
   } catch (err) {
     if (opts.json) emitError(err);
     if (err instanceof OrcaopsError) {

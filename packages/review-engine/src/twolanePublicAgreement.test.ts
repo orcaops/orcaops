@@ -3,9 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { CURRENT_STORY_POINTER_SCHEMA_VERSION } from './currentStory.js';
 import { FLOOR_PRODUCER_VERSION } from './floor.js';
-import { REVIEW_STATE_VERSION } from './reviewState.js';
 import { STORY_REVIEW_MODEL_SCHEMA_VERSION } from './storyReviewModel.js';
 import { TWOLANE_FINALIZE_ERROR_CODES, TWOLANE_RUN_SCHEMA_VERSION } from './twolaneRunCli.js';
 import { SLICE_DIAGNOSTIC_CODES, SLICE_SCHEMA_VERSION } from './twolaneSlice.js';
@@ -28,8 +26,6 @@ describe('public two-lane routine agreement', () => {
       `run schema ${TWOLANE_RUN_SCHEMA_VERSION}`,
       `slice state schema ${SLICE_SCHEMA_VERSION}`,
       `Story review model schema ${STORY_REVIEW_MODEL_SCHEMA_VERSION}`,
-      `current Story pointer schema ${CURRENT_STORY_POINTER_SCHEMA_VERSION}`,
-      `durable review-state version ${REVIEW_STATE_VERSION}`,
       `floor producer version ${FLOOR_PRODUCER_VERSION}`,
     ];
 
@@ -50,10 +46,13 @@ describe('public two-lane routine agreement', () => {
       text('.claude/skills/orcaops-task-review/SKILL.md'),
     ]);
 
-    expect(docs).toContain('.orcaops/reviews/<branch-slug>/twolane/<run-id>/');
-    expect(docs).toContain('run-record-v1.json');
-    expect(docs).toContain('current-story-v1.json');
-    expect(docs).toContain('story-review-model-v4.json');
+    expect(docs).toContain(
+      'The project database retains run identity, pinned inputs, served-input receipts'
+    );
+    expect(docs).toContain('Floor and Story evidence are immutable files');
+    expect(docs).not.toContain('.orcaops/reviews/<branch-slug>/twolane/<run-id>/');
+    expect(docs).not.toContain('restore the run directory');
+    expect(docs).toContain('selected Story publication');
     for (const instructions of [sourceSkill, agentsSkill, claudeSkill]) {
       expect(instructions).toContain('BOUNDED ROUTINE REVIEW');
       expect(instructions).toContain('never calls a model');

@@ -1,6 +1,30 @@
-import { type BranchLineageEntry } from '@orcaops/storage';
+import { isDeepStrictEqual } from 'node:util';
 
-import { buildContext } from '../lib/context.js';
+import {
+  assertNoSecretsInPayload,
+  type BranchLineageEntry,
+  BranchLineageEntrySchema,
+  prepareArtifactDraft,
+  uuidv7,
+} from '@orcaops/storage';
+import {
+  type AppendProjectArtifactEvents,
+  appendProjectArtifactEvents,
+  openProjectDatabase,
+  ProjectDatabaseError,
+  queryProjectArtifacts,
+  readProjectArtifact,
+} from '@orcaops/storage/history/database';
+
+import { ErrorCodes, OrcaopsError } from '../io/errors.js';
+import { writeTerminalSafeStderr } from '../io/output.js';
+import {
+  createContextRevalidator,
+  historyRepository,
+  requireRepositoryScope,
+} from '../lib/database-branch-history.js';
+import { resolveDatabaseHistoryCommandContext } from '../lib/database-history-context.js';
+import { historyScopeCommandError } from '../lib/history-scope-error.js';
 import { runCapture } from '../lib/run-capture.js';
 
 export interface LineageOptions {
@@ -25,41 +49,30 @@ interface LineageResult extends Record<string, unknown> {
   }>;
 }
 
-/**
- * `orcaops lineage` — keep `branch_lineage[]` truthful after rebases,
- * amends, or merges. Two passes:
- *
- *   1. **Rebase / amend** — for every artifact whose latest lineage
- *      entry is on the current branch but whose recorded SHA is no
- *      longer HEAD, append a `rebased` entry pointing at HEAD.
- *      O(matches) via the `lineage_by_latest_sha` index.
- *
- *   2. **Merge detection** — for every artifact whose
- *      latest entry is on a *different* branch but whose recorded
- *      SHA is reachable from current HEAD, append a `merged` entry
- *      recording (current_branch, current_HEAD). One
- *      `git merge-base --is-ancestor` invocation per non-current
- *      candidate; the index update from the first run "moves" the
- *      artifact's latest-entry branch to current, so subsequent runs
- *      no-op naturally.
- *
- * Idempotent: a no-op pass on an in-sync branch produces zero
- * updates, zero merges.
- *
- * **Caveat for merge detection:** the recorded SHA is current HEAD,
- * not the specific merge commit. For squash-merges (no merge commit
- * exists) and for descendant-branch cases (e.g. feat/y branched from
- * feat/x without a real merge), the entry is still added — the
- * artifact then appears under the descendant branch in list / status.
- */
-export async function lineageAction(opts: LineageOptions = {}): Promise<void> {
+/** Lineage records observed Git ancestry; it never adopts or reopens artifact execution. */
+export async function lineageAction(received: LineageOptions = {}): Promise<void> {
   await runCapture(async () => {
-    const ctx = await buildContext({ mintArchiveIdentity: false });
+    const opts = structuredClone(received);
+    if (
+      opts.branch !== undefined &&
+      (typeof opts.branch !== 'string' || !opts.branch.trim() || /[\r\n\0]/u.test(opts.branch))
+    )
+      throw new OrcaopsError(ErrorCodes.INVALID_INPUT, 'Provide a nonempty branch name.', 'branch');
+    const controller = new AbortController();
+    const interrupt = () => controller.abort();
+    process.on('SIGINT', interrupt);
+    let context: Awaited<ReturnType<typeof resolveDatabaseHistoryCommandContext>> | undefined;
     try {
-      const branch = opts.branch ?? (await ctx.repo.getCurrentBranch());
-      const headSha = await ctx.repo.getHeadSha();
+      context = await resolveDatabaseHistoryCommandContext({ profile: 'git-history' });
+      const selected = requireRepositoryScope(context.scope);
+      const repo = historyRepository(selected.git.worktreeRoot);
+      const branch = opts.branch ?? selected.git.branch ?? 'HEAD';
+      const headSha = selected.git.headOid;
+      if (!headSha)
+        throw new OrcaopsError(ErrorCodes.INVALID_INPUT, 'Lineage requires a committed Git HEAD.');
       const ts = new Date().toISOString();
-
+      assertNoSecretsInPayload({ ...opts, branch, headSha }, context.config.redact.allow);
+      const revalidate = createContextRevalidator(context.scope);
       const result: LineageResult = {
         branch,
         head_sha: headSha,
@@ -67,76 +80,141 @@ export async function lineageAction(opts: LineageOptions = {}): Promise<void> {
         skipped: [],
         merged: [],
       };
-
-      // ── Pass 1: rebase / amend ─────────────────────────────────────
-      const allOnBranch = ctx.store.store.db
-        .prepare(
-          `SELECT artifact_id, latest_lineage_sha, branch_name
-           FROM lineage_by_latest_sha
-           WHERE branch_name = ?`
-        )
-        .all(branch) as Array<{
-        artifact_id: string;
-        latest_lineage_sha: string;
-        branch_name: string;
-      }>;
-
-      for (const row of allOnBranch) {
-        if (row.latest_lineage_sha === headSha) {
-          result.skipped.push({ artifact_id: row.artifact_id, reason: 'already-current' });
+      const prepared: Array<{
+        request: AppendProjectArtifactEvents;
+        prior: BranchLineageEntry;
+        event: 'rebased' | 'merged';
+      }> = [];
+      const rows = queryProjectArtifacts(selected.database, { profile: 'details' }).rows;
+      for (const row of rows) {
+        if (controller.signal.aborted)
+          throw new ProjectDatabaseError('CANCELLED', 'Lineage synchronization cancelled.');
+        let lineage: BranchLineageEntry[];
+        try {
+          lineage = BranchLineageEntrySchema.array().parse(
+            JSON.parse(row.detailsJson!).branchLineage
+          );
+        } catch (cause) {
+          throw new ProjectDatabaseError(
+            'HISTORY_INTEGRITY_REQUIRED',
+            'Retained lineage metadata is invalid; preserve history for explicit repair.',
+            { cause }
+          );
+        }
+        const revision = {
+          generation: row.generation,
+          orderedHash: row.orderedHash,
+          eventCount: row.eventCount,
+          byteLength: row.byteLength,
+          tailEventId: row.tailEventId,
+        };
+        const retained = readProjectArtifact(selected.database, row.artifactId, revision);
+        if (!retained)
+          throw new ProjectDatabaseError(
+            'STALE_CONTEXT',
+            'Selected lineage history changed; repeat the original command.'
+          );
+        if (!isDeepStrictEqual(retained.thread.artifactJson!.branch_lineage, lineage))
+          throw new ProjectDatabaseError(
+            'HISTORY_INTEGRITY_REQUIRED',
+            'Lineage metadata disagrees with retained history; explicitly rebuild the derived rows.'
+          );
+        const prior = retained.thread.artifactJson!.branch_lineage.at(-1);
+        if (!prior) continue;
+        if (prior.head_sha === headSha) {
+          if (prior.branch === branch)
+            result.skipped.push({ artifact_id: row.artifactId, reason: 'already-current' });
           continue;
         }
-        const entry: BranchLineageEntry = {
-          branch,
-          head_sha: headSha,
-          ts,
-          event: 'rebased',
-        };
-        await ctx.store.appendBranchLineage(row.artifact_id, entry);
-        result.updated.push({
-          artifact_id: row.artifact_id,
-          prior_sha: row.latest_lineage_sha,
-          new_sha: headSha,
+        const event = prior.branch === branch ? 'rebased' : 'merged';
+        if (event === 'merged') {
+          const ancestry = await repo.checkReachability(prior.head_sha, headSha);
+          if (ancestry === 'unknown')
+            throw new OrcaopsError(
+              ErrorCodes.INVALID_INPUT,
+              'Cannot determine retained commit ancestry. Run `orcaops doctor` and restore the unavailable Git evidence.'
+            );
+          if (ancestry === 'unreachable') continue;
+        }
+        const entry = BranchLineageEntrySchema.parse({ branch, head_sha: headSha, ts, event });
+        const operationId = uuidv7();
+        const draft = await prepareArtifactDraft(
+          {
+            artifactId: row.artifactId,
+            priorEvents: retained.thread.events,
+            authoredPayload: entry,
+            secretAllow: context.config.redact.allow,
+            idempotencyBlocks: [],
+          },
+          (semantics) =>
+            semantics.appendBranchLineage(row.artifactId, entry, { idempotencyKey: operationId })
+        );
+        if (draft.evaluation.kind === 'threw') throw draft.evaluation.error;
+        prepared.push({
+          prior,
+          event,
+          request: {
+            operationId,
+            artifactId: row.artifactId,
+            expectedRevision: revision,
+            eventBytes: Buffer.concat(draft.events.map((event) => event.eventBytes)),
+            sidecarPayloads: draft.events.flatMap((event) =>
+              event.sidecar ? [{ eventId: event.record.event_id, bytes: event.sidecar.bytes }] : []
+            ),
+            secretAllow: [...context.config.redact.allow],
+          },
         });
       }
-
-      // ── Pass 2: merge detection ────────────────────────────────────
-      // Artifacts whose latest lineage entry is on a different branch
-      // but whose recorded SHA is reachable from current HEAD have
-      // (effectively) been merged into the current branch.
-      const mergeCandidates = ctx.store.store.db
-        .prepare(
-          `SELECT artifact_id, latest_lineage_sha, branch_name
-           FROM lineage_by_latest_sha
-           WHERE branch_name != ?`
-        )
-        .all(branch) as Array<{
-        artifact_id: string;
-        latest_lineage_sha: string;
-        branch_name: string;
-      }>;
-
-      for (const row of mergeCandidates) {
-        if (row.latest_lineage_sha === headSha) continue;
-        if (!(await ctx.repo.isAncestor(row.latest_lineage_sha, headSha))) continue;
-        const entry: BranchLineageEntry = {
-          branch,
-          head_sha: headSha,
-          ts,
-          event: 'merged',
-        };
-        await ctx.store.appendBranchLineage(row.artifact_id, entry);
-        result.merged.push({
-          artifact_id: row.artifact_id,
-          source_branch: row.branch_name,
-          source_sha: row.latest_lineage_sha,
-          new_sha: headSha,
-        });
+      if (controller.signal.aborted)
+        throw new ProjectDatabaseError('CANCELLED', 'Lineage synchronization cancelled.');
+      if (!prepared.length) return result;
+      await revalidate();
+      if (controller.signal.aborted)
+        throw new ProjectDatabaseError(
+          'CANCELLED',
+          'Lineage synchronization cancelled before writer open.'
+        );
+      const writer = await openProjectDatabase({
+        authority: selected.authority,
+        mode: 'writer',
+        signal: controller.signal,
+      });
+      let waiting = false;
+      try {
+        for (const item of prepared) {
+          await appendProjectArtifactEvents(writer, item.request, {
+            signal: controller.signal,
+            onWait: () => {
+              if (waiting) return;
+              waiting = true;
+              writeTerminalSafeStderr(
+                'Waiting for lineage synchronization on the selected project database; Ctrl-C cancels the wait.\n'
+              );
+            },
+          });
+          if (item.event === 'rebased')
+            result.updated.push({
+              artifact_id: item.request.artifactId,
+              prior_sha: item.prior.head_sha,
+              new_sha: headSha,
+            });
+          else
+            result.merged.push({
+              artifact_id: item.request.artifactId,
+              source_branch: item.prior.branch,
+              source_sha: item.prior.head_sha,
+              new_sha: headSha,
+            });
+        }
+      } finally {
+        writer.close();
       }
-
       return result;
+    } catch (cause) {
+      throw historyScopeCommandError(cause);
     } finally {
-      ctx.store.close();
+      context?.scope.close();
+      process.off('SIGINT', interrupt);
     }
   });
 }

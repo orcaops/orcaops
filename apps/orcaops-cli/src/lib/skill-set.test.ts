@@ -44,18 +44,17 @@ describe('skill-set (Config → enabled templates choke point)', () => {
     expect(resolved.disabled.find((d) => d.template.id === 'finish')).toBeUndefined();
   });
 
-  it('currentSkillCapabilities keys archive and fingerprint capabilities independently', () => {
+  it('currentSkillCapabilities keys snapshot capabilities to fingerprint collection', () => {
     // snapshot-checkout + matcher ride the SAME kill-switch as
     // diff-fingerprint — with it off, no refs exist and no manifests match.
     expect(currentSkillCapabilities(getDefaultConfig(), NO_CLOUD)).toEqual([
       'diff-fingerprint',
-      'archive',
       'snapshot-checkout',
       'matcher',
     ]);
     expect(
       currentSkillCapabilities(resolveConfig({ diff_fingerprint: { enabled: false } }), NO_CLOUD)
-    ).toEqual(['archive']);
+    ).toEqual([]);
   });
 
   it('the cloud capability comes from the gate, not from config', () => {

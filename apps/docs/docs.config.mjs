@@ -36,6 +36,7 @@ export const sections = [
       { slug: 'data-configuration', title: 'Capture and data' },
       { slug: 'troubleshooting', title: 'Troubleshooting' },
       { slug: 'command-reference', title: 'Command reference' },
+      { slug: 'provenance-json', title: 'Provenance JSON' },
       { slug: 'glossary', title: 'Glossary' },
       { slug: 'authoring-evaluator-packs', title: 'Authoring evaluator packs' },
       { slug: 'task-review-protocol', title: 'Task Review protocol' },

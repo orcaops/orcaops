@@ -1,6 +1,6 @@
 import type { WatchCheckpoint, WatchThread } from '@orcaops/watch-data/ui';
 
-import { ago, fmtTokens } from '../../core/format';
+import { ago, fmtSessionTokenValue, summarizeSessionTokens } from '../../core/format';
 import { useCockpitTheme } from '../ThemeProvider';
 import { type DetailAction, type DetailLine, type DetailTone, wrapDetailText } from '../detail';
 import { EVENT_FAMILY_THEME } from '../eventPresentation';
@@ -36,7 +36,7 @@ function reasonLine(
   nowMs: number
 ): { text: string; color: string } | null {
   const steps = thread.steps ? `${thread.steps.completed}/${thread.steps.total} steps` : null;
-  if (thread.openComments > 0) {
+  if (thread.openComments !== null && thread.openComments > 0) {
     return {
       text: `${thread.openComments} open review comment${thread.openComments === 1 ? '' : 's'} · action needed`,
       color: theme.AMBER,
@@ -407,7 +407,7 @@ export function DetailPane({
   }
 
   const color = COLOR[thread.state];
-  const tokens = thread.sessions.reduce((total, session) => total + session.tokens, 0);
+  const tokenSummary = summarizeSessionTokens(thread.sessions);
   const steps = thread.steps;
   const inner = Math.min(112, Math.max(12, width - 2));
   const open = Math.max(
@@ -437,7 +437,7 @@ export function DetailPane({
   const pillLabel = ` ${GLYPH[thread.state]} ${STATE_LABEL[thread.state]} `;
   const pillWidth = displayLen(pillLabel);
   const breadcrumbWidth = Math.max(6, inner - pillWidth - (canGoBack ? 11 : 2));
-  const identity = `${thread.agent} · ${thread.source}${
+  const identity = `${thread.agent}${
     thread.isCurrentCheckout ? ' · current checkout' : ''
   } · ${thread.artifactStatus} · ${sessionCount} session${sessionCount === 1 ? '' : 's'} · ${thread.artifactId.slice(
     0,
@@ -450,7 +450,13 @@ export function DetailPane({
         lastClosedUncertainties > 0 ? ` (${lastClosedUncertainties} uncertainties)` : ''
       }`
     : '';
-  const metrics = `${ago(thread.lastWriteMs, nowMs)} · ${fmtTokens(tokens)} session tokens${
+  const tokenMetric =
+    tokenSummary.status === 'exact'
+      ? `${fmtSessionTokenValue(tokenSummary)} session tokens`
+      : tokenSummary.status === 'incomplete' && tokenSummary.tokens !== 0
+        ? `${fmtSessionTokenValue(tokenSummary)} observed session tokens`
+        : 'session token total unavailable';
+  const metrics = `${ago(thread.lastWriteMs, nowMs)} · ${tokenMetric}${
     steps ? ` · ${steps.completed}/${steps.total} steps` : ''
   } · ${thread.checkpoints.length} checkpoint${thread.checkpoints.length === 1 ? '' : 's'}${
     open > 0 ? ` (${open} open)` : ''

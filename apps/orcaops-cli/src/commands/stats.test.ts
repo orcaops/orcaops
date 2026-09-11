@@ -1,13 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import type { CodingSessionRow, EvaluatorRunStatsRow } from '@orcaops/storage';
+import type { EvaluatorRunStatsRow } from '@orcaops/storage';
 
 import {
   computeDurationStats,
   computeEvaluatorRates,
   computeRevisionChurn,
-  mergeCodingSessions,
-} from './stats.js';
+} from '../lib/history-views.js';
 
 /** Pure stats collectors. Raw-row sources are store-tested. */
 
@@ -103,46 +102,5 @@ describe('computeDurationStats', () => {
       median_ms: null,
       p90_ms: null,
     });
-  });
-});
-
-describe('mergeCodingSessions', () => {
-  const session = (over: Partial<CodingSessionRow>): CodingSessionRow => ({
-    agent: 'codex',
-    session_id: 'session-1',
-    cumulative_input_tokens: 0,
-    cumulative_output_tokens: 0,
-    cumulative_cache_creation_input_tokens: 0,
-    cumulative_cache_read_input_tokens: 0,
-    as_of: '2026-08-01T00:00:00.000Z',
-    record_count: 1,
-    ...over,
-  });
-
-  it('deduplicates mirrored identities with fieldwise cumulative maxima', () => {
-    expect(
-      mergeCodingSessions([
-        [session({ cumulative_input_tokens: 10, cumulative_output_tokens: 30 })],
-        [
-          session({
-            cumulative_input_tokens: 20,
-            cumulative_output_tokens: 25,
-            cumulative_cache_read_input_tokens: 40,
-            as_of: '2026-08-02T00:00:00.000Z',
-            record_count: 2,
-          }),
-          session({ session_id: 'session-2', cumulative_input_tokens: 5 }),
-        ],
-      ])
-    ).toEqual([
-      session({
-        cumulative_input_tokens: 20,
-        cumulative_output_tokens: 30,
-        cumulative_cache_read_input_tokens: 40,
-        as_of: '2026-08-02T00:00:00.000Z',
-        record_count: 2,
-      }),
-      session({ session_id: 'session-2', cumulative_input_tokens: 5 }),
-    ]);
   });
 });

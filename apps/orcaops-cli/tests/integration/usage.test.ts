@@ -1,193 +1,121 @@
-import { randomUUID } from 'node:crypto';
-import { appendFile, mkdir, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import Database from 'better-sqlite3';
+import { rm } from 'node:fs/promises';
+import { describe, expect, it } from 'vitest';
 
-import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
+import { projectDatabasePath } from '@orcaops/storage/history/database';
 
+import type { readDatabaseUsage } from '../../src/lib/database-usage.js';
+import { fixture, git, inventory } from '../helpers/database-history.js';
+import { tokens, usageObservation } from '../helpers/database-usage.js';
 import { makeAgent } from '../support/test-agent.js';
 
-/**
- * `orcaops usage` end to end: empty-store repo scope,
- * UNKNOWN_ARTIFACT, and the artifact scope (exact session totals, labelled
- * attribution estimate, per-model aggregates, per-checkpoint high-water
- * spans) against a synthetic Claude Code transcript. Pure aggregation math
- * is unit-tested in `commands/usage.test.ts`.
- */
-
-interface CliResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
-
-function parseOk<T>(r: CliResult): T & { ok: true } {
-  expect(r.exitCode, r.stdout || r.stderr).toBe(0);
-  const parsed = JSON.parse(r.stdout) as { ok: boolean };
-  expect(parsed.ok).toBe(true);
-  return parsed as T & { ok: true };
-}
-
-interface RepoUsageOk {
-  scope: 'repo';
-  sessions: {
-    total: number;
-    tokens: { input_tokens: number; output_tokens: number };
-    per_session: Array<{ agent: string; session_id: string }>;
-  };
-  models: Array<{ model: string; input_tokens: number; output_tokens: number }>;
-  note: string;
-}
-
-interface ArtifactUsageOk {
-  scope: 'artifact';
-  artifact_id: string;
-  session_totals_exact: Array<{ agent: string; session_id: string }>;
-  attributed_estimate: { input_tokens: number };
-  note: string;
-  models: Array<{ model: string; input_tokens: number }>;
-  checkpoints: Array<{
-    checkpoint_n: number;
-    agent: string;
-    session_id: string;
-    lifecycle_event: string;
-    deltas: { input_tokens: number; output_tokens: number };
-  }>;
-  checkpoints_note: string;
-}
-
-const transcriptLine = (sid: string, n: number): string =>
-  JSON.stringify({
-    type: 'assistant',
-    sessionId: sid,
-    requestId: `req-${n}`,
-    uuid: `uuid-${n}`,
-    isSidechain: false,
-    timestamp: '2024-01-01T00:00:00.000Z',
-    message: {
-      id: `msg-${n}`,
-      role: 'assistant',
-      model: 'claude-opus-4-8',
-      usage: {
-        input_tokens: 100 * n,
-        output_tokens: 40 * n,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-      },
-    },
+async function usage(f: { main: string; root: string }, flags: string[] = []) {
+  const agent = makeAgent({
+    cwd: f.main,
+    env: { ORCAOPS_DATA_DIR: f.root, ORCAOPS_DISABLE_DRAIN: '1' },
   });
-
-describe('orcaops usage', () => {
-  let repo: TempRepo;
-  let agent: ReturnType<typeof makeAgent>;
-  let sid: string;
-  let transcriptPath: string;
-
-  beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    sid = `sess-${randomUUID()}`;
-    const claudeBase = path.join(repo.path, 'claude-config');
-    const dir = path.join(claudeBase, 'projects', 'proj');
-    await mkdir(dir, { recursive: true });
-    transcriptPath = path.join(dir, `${sid}.jsonl`);
-    await writeFile(
-      transcriptPath,
-      `${transcriptLine(sid, 1)}\n${transcriptLine(sid, 2)}\n`,
-      'utf8'
-    );
-    // The usage source reads CLAUDE_CONFIG_DIR from process.env directly.
-    vi.stubEnv('CLAUDE_CONFIG_DIR', claudeBase);
-    agent = makeAgent({
-      cwd: repo.path,
-      env: { CLAUDE_CODE_SESSION_ID: sid, ORCAOPS_DISABLE_DRAIN: '1' },
-      timeoutMs: 60_000,
+  const raw = await agent.runRaw(['usage', '--json', ...flags]);
+  expect(raw.exitCode, raw.stderr || raw.stdout).toBe(0);
+  return JSON.parse(raw.stdout) as ReturnType<typeof readDatabaseUsage>;
+}
+describe('registered database usage', { timeout: 30_000 }, () => {
+  it('keeps exact session totals, model dimensions and checkpoint attribution separate', async () => {
+    const f = await fixture();
+    const id = await f.capture();
+    await usageObservation(f.writer, id, 10);
+    await usageObservation(f.writer, id, 20, {
+      baseline_kind: 'checkpoint_open',
+      delta_usage: tokens(10),
     });
-    await agent.runRaw(['init', '--json', '--no-llm']);
+    await usageObservation(f.writer, id, 30, {
+      baseline_kind: 'checkpoint_open',
+      delta_usage: tokens(20),
+    });
+    const before = await inventory(f.temporary);
+    const result = await usage(f, ['--artifact', id.slice(0, 24)]);
+    expect(result).toMatchObject({
+      schema_version: 3,
+      artifact_id: id,
+      completeness: { complete: true },
+      usage: {
+        accounting: { status: 'exact', totals: tokens(30) },
+        model_totals: [{ model: 'model', speed: 'fast', ...tokens(30) }],
+        estimates: [
+          {
+            artifact_id: id,
+            estimate: {
+              kind: 'estimate',
+              totals: tokens(20),
+              checkpoints: [{ checkpoint_n: 1, deltas: tokens(20) }],
+            },
+          },
+        ],
+      },
+    });
+    expect(result.usage.projects[0].write_sequence).toBeGreaterThan(0);
+    expect(await inventory(f.temporary)).toEqual(before);
   });
-
-  afterEach(async () => {
-    vi.unstubAllEnvs();
-    await repo.cleanup();
+  it('merges complete session observations across projects after literal branch selection', async () => {
+    const a = await fixture();
+    const b = await fixture(a.root);
+    const first = await a.capture();
+    await git(b.main, ['checkout', '-qb', 'other']);
+    const second = await b.capture();
+    await usageObservation(a.writer, first, 10);
+    await usageObservation(b.writer, second, 20);
+    await usageObservation(b.writer, second, 40, { agent: 'cursor' });
+    const before = [await inventory(a.temporary), await inventory(b.temporary)];
+    const result = await usage(a, ['--scope', 'all-projects', '--branch', 'main']);
+    expect(result.usage.accounting).toMatchObject({ status: 'exact', totals: tokens(20) });
+    expect(result.usage.accounting.sessions).toHaveLength(1);
+    expect(result.usage.projects).toHaveLength(2);
+    expect(
+      (await usage(a, ['--scope', 'all-projects', '--branch', 'ma*'])).usage.accounting.totals
+    ).toBeNull();
+    expect([await inventory(a.temporary), await inventory(b.temporary)]).toEqual(before);
   });
-
-  it('repo scope on an empty store: zero sessions, empty models', async () => {
-    // A fresh agent without a session id records nothing.
-    const bare = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
-    const out = parseOk<RepoUsageOk>(await bare.runRaw(['usage', '--json']));
-    expect(out.scope).toBe('repo');
-    expect(out.sessions.total).toBe(0);
-    expect(out.sessions.tokens.input_tokens).toBe(0);
-    expect(out.models).toEqual([]);
+  it('includes unassociated project usage and applies recorded touching before choosing sessions', async () => {
+    const f = await fixture();
+    const selected = await f.capture();
+    await f.recordFiles(selected, ['src/usage.ts']);
+    const other = await f.capture();
+    await usageObservation(f.writer, selected, 10);
+    await usageObservation(f.writer, other, 20);
+    await usageObservation(f.writer, null, 40, { session_id: 'unassociated' });
+    const before = await inventory(f.temporary);
+    expect((await usage(f)).usage.accounting.totals).toEqual(tokens(60));
+    expect((await usage(f, ['--origin', 'all'])).usage.accounting.totals).toEqual(tokens(60));
+    expect((await usage(f, ['--touching', 'src/**'])).usage.accounting.totals).toEqual(tokens(20));
+    expect(await inventory(f.temporary)).toEqual(before);
   });
-
-  it('unknown --artifact returns UNKNOWN_ARTIFACT', async () => {
-    const err = await agent.expectError(['usage', '--artifact', 'no-such-id', '--json']);
-    expect(err.error.code).toBe('UNKNOWN_ARTIFACT');
+  it('reports missing registered history without creating a replacement or exact zero', async () => {
+    const f = await fixture();
+    f.writer.close();
+    await rm(projectDatabasePath(f.authority));
+    const before = await inventory(f.temporary);
+    const result = await usage(f);
+    expect(result.completeness).toMatchObject({
+      complete: false,
+      issues: [expect.objectContaining({ code: 'HISTORY_MISSING' })],
+    });
+    expect(result.usage.accounting.totals).toBeNull();
+    expect(await inventory(f.temporary)).toEqual(before);
   });
-
-  it('artifact scope: exact sessions, labelled estimate, models, per-checkpoint spans', async () => {
-    const plan = await agent.capturePlan(
-      { task: 'usage read surface e2e', plan_steps: [{ text: 's1', label: 's1' }] },
-      { noLlm: true }
-    );
-    const artifactId = plan.artifact_id;
-    await agent.runRaw([
-      'capture',
-      'checkpoint',
-      'open',
-      '--no-llm',
-      '--input',
-      inputFile(
-        JSON.stringify({
-          idempotency_key: `open-${randomUUID()}`,
-          artifact_id: artifactId,
-          declared_step_ids: [plan.plan_steps[0].step_id],
-        })
-      ),
-    ]);
-    // Usage lands BETWEEN open and close → the close stamp's
-    // cumulative-since-open delta picks it up.
-    await appendFile(transcriptPath, `${transcriptLine(sid, 3)}\n`, 'utf8');
-    await agent.runRaw([
-      'capture',
-      'checkpoint',
-      'close',
-      '--no-llm',
-      '--input',
-      inputFile(
-        JSON.stringify({
-          idempotency_key: `close-${randomUUID()}`,
-          artifact_id: artifactId,
-          summary: 'work with usage',
-          files_changed: ['src/x.ts'],
-          verification: [{ command: 'test fixture', exit_code: 0 }],
-          completed_step_ids: [plan.plan_steps[0].step_id],
-        })
-      ),
-    ]);
-
-    const out = parseOk<ArtifactUsageOk>(
-      await agent.runRaw(['usage', '--artifact', artifactId, '--json'])
-    );
-    expect(out.scope).toBe('artifact');
-    expect(out.artifact_id).toBe(artifactId);
-    expect(out.session_totals_exact.map((s) => s.session_id)).toContain(sid);
-    expect(out.note).toMatch(/ESTIMATE, never additive across artifacts/);
-    expect(out.models.map((m) => m.model)).toEqual(['claude-opus-4-8']);
-    // 100+200+300 across the three transcript lines.
-    expect(out.models[0].input_tokens).toBe(600);
-
-    const cp1 = out.checkpoints.filter((c) => c.checkpoint_n === 1);
-    expect(cp1).toHaveLength(1);
-    expect(cp1[0].session_id).toBe(sid);
-    // The third transcript line (300 in / 120 out) landed inside the window.
-    expect(cp1[0].deltas.input_tokens).toBe(300);
-    expect(cp1[0].deltas.output_tokens).toBe(120);
-    expect(out.checkpoints_note).toMatch(/never sum rows/);
-
-    // Repo scope sees the same session as the accounting base.
-    const repoOut = parseOk<RepoUsageOk>(await agent.runRaw(['usage', '--json']));
-    expect(repoOut.sessions.total).toBe(1);
-    expect(repoOut.sessions.tokens.input_tokens).toBe(600);
+  it('discloses an unreadable selected session without repairing derived rows', async () => {
+    const f = await fixture();
+    const id = await f.capture();
+    await usageObservation(f.writer, id, 10);
+    const db = new Database(projectDatabasePath(f.authority));
+    db.prepare("UPDATE usage_snapshots SET cumulative_json = '{}' ").run();
+    db.close();
+    const before = await inventory(f.temporary);
+    const result = await usage(f);
+    expect(result.completeness).toMatchObject({
+      complete: false,
+      issues: [expect.objectContaining({ code: 'HISTORY_INTEGRITY_REQUIRED' })],
+    });
+    expect(result.usage.accounting.totals).toBeNull();
+    expect(result.usage.model_totals).toBeNull();
+    expect(await inventory(f.temporary)).toEqual(before);
   });
 });

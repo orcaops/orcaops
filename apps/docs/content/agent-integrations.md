@@ -42,13 +42,13 @@ skills-only: the Copilot CLI and VS Code surface installed skills as
   in any worktree enables every existing and future worktree of the same
   repository; skills materialize into the global skill location used by each
   selected agent (tracked in `~/.orcaops/install.local.json`); and each
-  worktree's `.orcaops/` store is hidden via the common dir's `info/exclude`.
+  worktree's `.orcaops/` working directory is hidden via the common dir's `info/exclude`.
   Personal scope writes no instruction file and no repository settings entries —
   guidance comes from global skills and, with consent, machine-level session
   hooks. `git status` stays clean, diffs stay empty, and teammates see nothing.
   Orcaops never edits a tracked file under personal scope (enforced at runtime:
-  every planned write must land in the common dir's `orcaops/` files or
-  `info/exclude`, git's hooks dir, or this worktree's `.orcaops/` store, never
+  every planned installation write must land in the common dir's `orcaops/` files or
+  `info/exclude`, git's hooks dir, or this worktree's `.orcaops/` working directory, never
   in a sibling worktree or on a tracked path).
 - `project` keeps generated skills and commands in the repo — the
   [team adoption](./team-adoption.md) mode. Switch with
@@ -64,12 +64,11 @@ Notes on `personal`:
 - Every supported agent gets skills. Automatic guidance comes from machine
   session hooks; declining them leaves the agents with global skills and the
   CLI, and `orcaops session-hooks install` adds the reminder later.
-- Artifacts, caches, reviews, and usage data stay per worktree. A sibling that
-  has never captured is a valid empty source: read commands and hooks serve it
-  without creating files, and the first capture creates that worktree's
-  `.orcaops/` store. Repository-wide enablement is not repository-wide hot
-  history — with the archive disabled, prior captures do not follow you into a
-  fresh worktree.
+- Captured artifacts, reviews and usage share the project's canonical database
+  across worktrees. Worktree identity and focus remain separate. A passive read
+  never initializes a missing store; a registered project whose database is
+  missing reports missing history. Worktree caches and authoring files remain
+  local. See [Local data](./local-data.md).
 - A project config checked out in a worktree wins over the shared personal
   config for that worktree; switching branches changes the effective source
   without changing install ownership.
@@ -80,21 +79,12 @@ Notes on `personal`:
 - Slash commands require project scope: no supported agent declares a global
   command root, so `/orcaops:*` commands do not materialize under personal or
   global scope.
-- The repo identity (`git config --local orcaops.projectid`) is minted at
-  init under every scope — repo-local, invisible to `git status`, shared
-  across worktrees. A filesystem copy that includes `.git` shares the same
-  identity, pins, archive namespace, and global refs until explicitly re-keyed;
-  Orcaops never guesses move versus copy or performs that re-key in doctor. To
-  make a copy independent, run this in the copy before capturing new work:
-
-  ```bash
-  git config --local --unset orcaops.projectid
-  orcaops update
-  ```
-
-  `update` mints a fresh identity that applies from then on; history, pins, and
-  refs already recorded under the old identity stay where they are. Do not do
-  this after an ordinary move, where keeping the identity is correct.
+- Repository registration records the project, data root and database instance
+  in the Git common directory. Worktrees share that registration and have their
+  own create-once identities. Copying `.git` copies these identities; it does
+  not establish an independent project. Do not unset `orcaops.projectid` or
+  remove registration files to force a fresh install. `orcaops doctor` reports
+  mismatches; automatic re-keying and reset are not supported.
 
 `install.link` controls global materialization:
 

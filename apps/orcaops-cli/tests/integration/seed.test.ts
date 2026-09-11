@@ -5,8 +5,21 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { loadConfig } from '@orcaops/core';
-import { artifactPathsFor, ArtifactStore, readEventLog, uuidv7 } from '@orcaops/storage';
+import {
+  type ArtifactDraftSemantics,
+  type PlanInput,
+  prepareArtifactDraft,
+  type SummaryInput,
+  uuidv7,
+} from '@orcaops/storage';
+import {
+  appendProjectArtifactEvents,
+  appendProjectImportedArtifact,
+  type ProjectDatabase,
+  queryProjectArtifacts,
+  readProjectArtifact,
+  readProjectCloudSyncStatus,
+} from '@orcaops/storage/history/database';
 import {
   createHistoryRepo,
   gitClient,
@@ -14,6 +27,8 @@ import {
   type HistoryRepo,
 } from '@orcaops/test-harness';
 
+import { resolveDatabaseSeedCommandContext } from '../../src/lib/database-seed-context.js';
+import { readDatabaseSeedState } from '../../src/lib/database-seed-state.js';
 import { makeAgent } from '../support/test-agent.js';
 
 const execFileAsync = promisify(execFile);
@@ -41,8 +56,97 @@ const datedCommit = (
 describe('orcaops seed', () => {
   let repo: HistoryRepo;
   let agent: ReturnType<typeof makeAgent>;
+  let dataRoot: string;
+
+  const seedEnv = () => ({ ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_DATA_DIR: dataRoot });
+
+  async function withDatabase<T>(
+    callback: (database: ProjectDatabase) => T | Promise<T>,
+    write = false,
+    cwd = repo.path
+  ): Promise<T> {
+    const context = await resolveDatabaseSeedCommandContext({
+      cwd,
+      env: seedEnv(),
+      write,
+    });
+    try {
+      return await callback(context.database);
+    } finally {
+      context.close();
+    }
+  }
+
+  async function appendImportedArtifact<T>(
+    artifactId: string,
+    authoredPayload: unknown,
+    callback: (semantics: ArtifactDraftSemantics) => Promise<T>
+  ): Promise<T> {
+    return withDatabase(async (database) => {
+      const prior = readProjectArtifact(database, artifactId);
+      const draft = await prepareArtifactDraft(
+        {
+          artifactId,
+          priorEvents: prior?.thread.events ?? [],
+          authoredPayload,
+          secretAllow: [],
+          idempotencyBlocks: [],
+        },
+        callback
+      );
+      if (draft.evaluation.kind === 'threw') throw draft.evaluation.error;
+      if (draft.idempotencyChanges.length)
+        throw new Error('Imported fixture produced unhandled attempt changes');
+      await appendProjectImportedArtifact(database, {
+        artifactId,
+        operationId: uuidv7(),
+        expectedRevision: prior?.revision ?? null,
+        eventBytes: Buffer.concat(draft.events.map((event) => event.eventBytes)),
+        sidecarPayloads: draft.events.flatMap((event) =>
+          event.sidecar ? [{ eventId: event.record.event_id, bytes: event.sidecar.bytes }] : []
+        ),
+        secretAllow: [],
+      });
+      return draft.evaluation.value;
+    }, true);
+  }
+
+  async function appendCapturedArtifact<T>(
+    artifactId: string,
+    authoredPayload: unknown,
+    callback: (semantics: ArtifactDraftSemantics) => Promise<T>
+  ): Promise<T> {
+    return withDatabase(async (database) => {
+      const prior = readProjectArtifact(database, artifactId);
+      const draft = await prepareArtifactDraft(
+        {
+          artifactId,
+          priorEvents: prior?.thread.events ?? [],
+          authoredPayload,
+          secretAllow: [],
+          idempotencyBlocks: [],
+        },
+        callback
+      );
+      if (draft.evaluation.kind === 'threw') throw draft.evaluation.error;
+      if (draft.idempotencyChanges.length)
+        throw new Error('Captured fixture produced unhandled attempt changes');
+      await appendProjectArtifactEvents(database, {
+        artifactId,
+        operationId: uuidv7(),
+        expectedRevision: prior?.revision ?? null,
+        eventBytes: Buffer.concat(draft.events.map((event) => event.eventBytes)),
+        sidecarPayloads: draft.events.flatMap((event) =>
+          event.sidecar ? [{ eventId: event.record.event_id, bytes: event.sidecar.bytes }] : []
+        ),
+        secretAllow: [],
+      });
+      return draft.evaluation.value;
+    }, true);
+  }
 
   beforeEach(async () => {
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-seed-data-'));
     repo = await createHistoryRepo([
       {
         type: 'commit',
@@ -57,13 +161,14 @@ describe('orcaops seed', () => {
         files: { 'src/health.ts': 'export const healthy = true;\n' },
       },
     ]);
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+    agent = makeAgent({ cwd: repo.path, env: seedEnv() });
     await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
   });
 
   afterEach(async () => {
     vi.restoreAllMocks();
     await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
   });
 
   it('suggests the agent workflow after init with a raw-command fallback', async () => {
@@ -129,12 +234,10 @@ describe('orcaops seed', () => {
   });
 
   it('recovers an interrupted seed run rather than refusing over its own checkpoint', async () => {
-    const config = await loadConfig(repo.path);
-    const store = new ArtifactStore({ repoRoot: repo.path, config });
     const artifactId = uuidv7();
     const stepId = uuidv7();
     const ts = '2025-06-01T00:00:00.000Z';
-    const plan = await store.writePlan({
+    const planInput: PlanInput = {
       schema_version: 4,
       artifact_id: artifactId,
       branch: 'origin/main',
@@ -169,22 +272,26 @@ describe('orcaops seed', () => {
       step_lineage: { added: [], dropped: [], unchanged: [], rewritten: [] },
       criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
       prior_plan_event_id: null,
+    };
+    await appendImportedArtifact(artifactId, { plan: planInput }, async (semantics) => {
+      const plan = await semantics.writePlan(planInput, {
+        idempotencyKey: `${artifactId}:plan`,
+      });
+      await semantics.writeCheckpointOpened(
+        {
+          artifact_id: artifactId,
+          declared_step_ids: [stepId],
+          policy_exceptions: [],
+          plan_revision_id: plan.event_id,
+        },
+        {
+          headSha: repo.shas.root!,
+          openedAt: ts,
+          idempotencyKey: `${artifactId}:open:1`,
+          invokedByAgent: 'other',
+        }
+      );
     });
-    await store.writeCheckpointOpened(
-      {
-        artifact_id: artifactId,
-        declared_step_ids: [stepId],
-        policy_exceptions: [],
-        plan_revision_id: plan.event_id,
-      },
-      {
-        headSha: repo.shas.root!,
-        openedAt: ts,
-        idempotencyKey: `${artifactId}:open:1`,
-        invokedByAgent: 'other',
-      }
-    );
-    store.close();
 
     const preview = JSON.parse((await agent.runRaw(['seed', '--dry-run', '--json'])).stdout);
     expect(preview).toMatchObject({
@@ -203,74 +310,11 @@ describe('orcaops seed', () => {
     expect(result.totals.created).toBeGreaterThan(0);
     expect(result.notes.join('\n')).toMatch(/recovering an interrupted seed run/i);
 
-    const reopened = new ArtifactStore({ repoRoot: repo.path, config });
-    try {
-      expect(await reopened.readCheckpoints(artifactId)).toMatchObject([{ status: 'abandoned' }]);
-    } finally {
-      reopened.close();
-    }
-  });
-
-  it('materializes archive-held imports into a linked worktree', async () => {
-    const dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-seed-worktree-data-'));
-    const env = { ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_DATA_DIR: dataRoot };
-    const enableArchive = async (root: string): Promise<void> => {
-      const configPath = path.join(root, '.orcaops', 'config.json');
-      const config = JSON.parse(await readFile(configPath, 'utf8'));
-      config.archive = { enabled: true, redact_secrets: false };
-      await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
-    };
-
-    const agentA = makeAgent({ cwd: repo.path, env });
-    await agentA.runRaw(['init', '--force', '--yes', '--json', '--no-llm']);
-    await enableArchive(repo.path);
-    const seeded = JSON.parse((await agentA.runRaw(['seed', '--yes', '--json'])).stdout);
-    expect(seeded.totals.created).toBeGreaterThan(0);
-
-    const worktreePath = path.join(
-      await mkdtemp(path.join(tmpdir(), 'orcaops-seed-worktree-')),
-      'linked'
-    );
-    await gitClient(repo.path).raw(['worktree', 'add', '-b', 'linked', worktreePath]);
-    const agentB = makeAgent({ cwd: worktreePath, env });
-    await agentB.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
-    await enableArchive(worktreePath);
-
-    // Before the fix this reported covered-N beside an empty store.
-    expect(JSON.parse((await agentB.runRaw(['seed', 'status', '--json'])).stdout)).toMatchObject({
-      imported_artifacts: 0,
-    });
-
-    const applied = JSON.parse((await agentB.runRaw(['seed', '--yes', '--json'])).stdout);
-    expect(applied.restored_from_archive).toBe(seeded.totals.created);
-    expect(applied.totals.created).toBe(0);
-    expect(applied.notes.join('\n')).toMatch(/Restored \d+ artifacts? from the shared project/i);
-
-    expect(JSON.parse((await agentB.runRaw(['seed', 'status', '--json'])).stdout)).toMatchObject({
-      imported_artifacts: seeded.totals.created,
-    });
-    const listed = await agentB.runRaw(['list', '--imported']);
-    expect(listed.stdout).not.toContain('No artifacts captured.');
-    expect(listed.stdout).toContain('[imported]');
-  });
-
-  it('refuses to call an interrupted store complete or fresh', async () => {
-    expect((await agent.runRaw(['seed', '--yes', '--json'])).exitCode).toBe(0);
-    const journalPath = path.join(repo.path, '.orcaops', 'cache', 'seed', 'journal.json');
-    const journal = JSON.parse(await readFile(journalPath, 'utf8'));
-    const [firstCluster] = Object.keys(journal.clusters);
-    journal.clusters[firstCluster!].status = 'writing';
-    await writeFile(journalPath, JSON.stringify(journal, null, 2));
-
-    const status = JSON.parse((await agent.runRaw(['seed', 'status', '--json'])).stdout);
-    expect(status).toMatchObject({
-      state: 'partial',
-      coverage_interrupted: true,
-      coverage_stale: true,
-    });
-    const human = (await agent.runRaw(['seed', 'status'])).stdout;
-    expect(human).toContain('Coverage (interrupted run — rerun `orcaops seed --yes` to finish):');
-    expect(human).not.toContain('Coverage (complete)');
+    expect(
+      await withDatabase(
+        (database) => readProjectArtifact(database, artifactId)!.thread.checkpoints
+      )
+    ).toMatchObject([{ status: 'abandoned' }]);
   });
 
   it('covers every seed cluster spanned by a live checkpoint commit range', async () => {
@@ -284,7 +328,7 @@ describe('orcaops seed', () => {
         files: { 'src/baseline.ts': 'export const baseline = true;\n' },
       },
     ]);
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+    agent = makeAgent({ cwd: repo.path, env: seedEnv() });
     await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
 
     const plan = await agent.capturePlan(
@@ -351,12 +395,9 @@ describe('orcaops seed', () => {
     expect(JSON.parse(applied.stdout)).toMatchObject({
       totals: { selected: 3, created: 1, covered: 2, failed: 0 },
     });
-    const config = await loadConfig(repo.path);
-    const store = new ArtifactStore({ repoRoot: repo.path, config });
     expect(
-      store.store.listArtifacts().filter((row) => row.origin_kind === 'git-import')
+      await withDatabase((database) => queryProjectArtifacts(database, { origin: 'imported' }).rows)
     ).toHaveLength(1);
-    store.close();
   });
 
   it('imports history untouched by a checkpoint that was rebased between open and close', async () => {
@@ -386,7 +427,7 @@ describe('orcaops seed', () => {
         files: { 'src/session.ts': 'export const session = true;\n' },
       },
     ]);
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+    agent = makeAgent({ cwd: repo.path, env: seedEnv() });
     await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
 
     const plan = await agent.capturePlan(
@@ -471,7 +512,7 @@ describe('orcaops seed', () => {
         files: { 'src/stray.ts': 'export const stray = true;\n' },
       },
     ]);
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+    agent = makeAgent({ cwd: repo.path, env: seedEnv() });
     await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
 
     const plan = await agent.capturePlan(
@@ -501,22 +542,31 @@ describe('orcaops seed', () => {
       '2025-01-04T00:00:00.000Z',
       '2025-01-04T00:00:00.000Z'
     );
-
-    const close = await agent.captureCheckpointClose(
+    const mainHead = await git.revparse(['HEAD']);
+    const close = await appendCapturedArtifact(
+      plan.artifact_id,
       {
-        artifact_id: plan.artifact_id,
-        n: open.n,
         summary: 'Landed the work on main instead',
         files_changed: ['src/work.ts'],
-        verification: [{ command: 'test fixture', exit_code: 0 }],
-        completed_step_ids: [stepId],
-        decisions: [],
-        uncertainty: [],
-        done_criteria: [],
       },
-      { noLlm: true }
+      (semantics) =>
+        semantics.writeCheckpointClosed(
+          {
+            artifact_id: plan.artifact_id,
+            n: open.n,
+            summary: 'Landed the work on main instead',
+            head_sha: mainHead,
+            files_changed: ['src/work.ts'],
+            verification: [{ command: 'test fixture', exit_code: 0 }],
+            completed_step_ids: [stepId],
+            decisions: [],
+            uncertainty: [],
+            done_criteria: [],
+          },
+          { idempotencyKey: uuidv7() }
+        )
     );
-    expect(close.ok).toBe(true);
+    expect(close.outcome).toBe('created');
 
     const straySha = repo.shas.stray!;
     await git.raw(['branch', '-D', 'feature']);
@@ -553,7 +603,7 @@ describe('orcaops seed', () => {
     };
     expect(neverRun.checks.find((check) => check.name === 'seed')).toMatchObject({
       status: 'warn',
-      summary: 'git history exists but Orcaops has never been seeded',
+      summary: 'Git history exists but the project database has no seed state',
     });
 
     // A preview writes no journal state, so doctor keeps reporting
@@ -564,7 +614,7 @@ describe('orcaops seed', () => {
     };
     expect(afterPreview.checks.find((check) => check.name === 'seed')).toMatchObject({
       status: 'warn',
-      summary: 'git history exists but Orcaops has never been seeded',
+      summary: 'Git history exists but the project database has no seed state',
     });
 
     const fixed = JSON.parse((await agent.runRaw(['doctor', '--fix', '--json'])).stdout) as {
@@ -599,10 +649,9 @@ describe('orcaops seed', () => {
       totals: { pending: 1 },
     });
 
-    const config = await loadConfig(repo.path);
-    let store = new ArtifactStore({ repoRoot: repo.path, config });
-    expect(store.store.listArtifacts()).toHaveLength(0);
-    store.close();
+    expect(await withDatabase((database) => queryProjectArtifacts(database, {}).rows)).toHaveLength(
+      0
+    );
 
     const appliedResult = await agent.runRaw([
       'seed',
@@ -623,21 +672,14 @@ describe('orcaops seed', () => {
     });
     const artifactId = applied.seeded[0]!.artifactId;
 
-    store = new ArtifactStore({ repoRoot: repo.path, config });
-    expect(await store.readArtifact(artifactId)).toMatchObject({
+    const before = await withDatabase((database) => readProjectArtifact(database, artifactId)!);
+    expect(before.thread.plan).toMatchObject({
       origin: {
         kind: 'git-import',
         job: { job_id: expect.stringMatching(/^[0-9a-f-]{36}$/u), kind: 'initial' },
       },
     });
-    expect(await store.readSummary(artifactId)).not.toBeNull();
-    expect(store.store.listLifecycles(artifactId)).toEqual([]);
-    const paths = artifactPathsFor(repo.path, config, artifactId);
-    const before = await readEventLog({
-      eventLogPath: paths.eventsNdjson,
-      sidecarsDir: paths.sidecarsDir,
-    });
-    store.close();
+    expect(before.thread.summary).not.toBeNull();
 
     const rerunResult = await agent.runRaw([
       'seed',
@@ -650,11 +692,9 @@ describe('orcaops seed', () => {
     expect(JSON.parse(rerunResult.stdout)).toMatchObject({
       totals: { created: 0, resumed: 0, covered: 1, failed: 0 },
     });
-    const after = await readEventLog({
-      eventLogPath: paths.eventsNdjson,
-      sidecarsDir: paths.sidecarsDir,
-    });
-    expect(after.events).toHaveLength(before.events.length);
+    const after = await withDatabase((database) => readProjectArtifact(database, artifactId)!);
+    expect(after.revision).toEqual(before.revision);
+    expect(after.thread.events).toHaveLength(before.thread.events.length);
 
     await gitClient(repo.path).checkoutLocalBranch('current-work');
     const livePlan = await agent.capturePlan(
@@ -668,23 +708,21 @@ describe('orcaops seed', () => {
     );
 
     const bareList = JSON.parse((await agent.runRaw(['list', '--json'])).stdout) as {
-      artifacts: Array<{ id: string; origin: string | null }>;
-      imported_artifacts: { count: number; hint: string };
+      results: Array<{ id: string; origin: string }>;
+      origin_counts: { returned: { captured: number; imported: number } };
     };
-    expect(bareList.artifacts).toEqual([
-      expect.objectContaining({ id: livePlan.artifact_id, origin: null }),
-    ]);
-    expect(bareList.imported_artifacts).toEqual({
-      count: 1,
-      hint: 'orcaops list --imported',
-    });
-    const importedList = JSON.parse(
-      (await agent.runRaw(['list', '--imported', '--json'])).stdout
-    ) as { artifacts: Array<{ id: string; origin: string | null }> };
-    expect(importedList.artifacts).toEqual([
+    expect(bareList.results).toEqual([
+      expect.objectContaining({ id: livePlan.artifact_id, origin: 'captured' }),
       expect.objectContaining({ id: artifactId, origin: 'git-import' }),
     ]);
-    const importedTable = (await agent.runRaw(['list', '--imported'])).stdout;
+    expect(bareList.origin_counts.returned).toEqual({ captured: 1, imported: 1 });
+    const importedList = JSON.parse(
+      (await agent.runRaw(['list', '--origin', 'imported', '--json'])).stdout
+    ) as { results: Array<{ id: string; origin: string }> };
+    expect(importedList.results).toEqual([
+      expect.objectContaining({ id: artifactId, origin: 'git-import' }),
+    ]);
+    const importedTable = (await agent.runRaw(['list', '--origin', 'imported'])).stdout;
     const importedRows = importedTable
       .split('\n')
       .filter((tableLine) => tableLine.includes('[imported]'));
@@ -697,27 +735,7 @@ describe('orcaops seed', () => {
       imported_artifacts: { count: number };
     };
     expect(status.artifacts).toEqual([expect.objectContaining({ id: livePlan.artifact_id })]);
-    expect(status.imported_artifacts.count).toBe(1);
-
-    store = new ArtifactStore({ repoRoot: repo.path, config });
-    for (const rankedArtifactId of [livePlan.artifact_id, artifactId]) {
-      store.store.replaceSearchEntry({
-        artifact_id: rankedArtifactId,
-        source: 'digest',
-        branch: 'main',
-        ts: '2025-01-01T00:00:00.000Z',
-        content: 'equivalent ranking containmentneedle',
-      });
-    }
-    store.close();
-
-    const rankedSearch = JSON.parse(
-      (await agent.runRaw(['search', 'containmentneedle', '--json'])).stdout
-    ) as { results: Array<{ artifact_id: string; origin: string | null }> };
-    expect(rankedSearch.results.map((result) => [result.artifact_id, result.origin])).toEqual([
-      [livePlan.artifact_id, null],
-      [artifactId, 'git-import'],
-    ]);
+    expect(status.imported_artifacts.count).toBe(0);
 
     await gitClient(repo.path).checkout('main');
 
@@ -725,30 +743,32 @@ describe('orcaops seed', () => {
       results: Array<{ artifact_id: string; origin: string | null }>;
     };
     expect(search.results).toContainEqual(
-      expect.objectContaining({ artifact_id: artifactId, origin: 'git-import' })
+      expect.objectContaining({ artifact_id: artifactId, origin: 'imported' })
     );
     expect(
-      JSON.parse((await agent.runRaw(['search', 'service', '--no-imported', '--json'])).stdout)
+      JSON.parse(
+        (await agent.runRaw(['search', 'service', '--origin', 'captured', '--json'])).stdout
+      )
     ).toMatchObject({ count: 0, results: [] });
     expect((await agent.runRaw(['search', 'service'])).stdout).toContain('[imported]');
 
     const why = JSON.parse((await agent.runRaw(['why', 'src/health.ts:1', '--json'])).stdout) as {
-      best: { artifact_id: string; origin?: { kind: string } } | null;
+      best: { artifact_id: string; origin?: string } | null;
     };
     expect(why.best).toMatchObject({
       artifact_id: artifactId,
-      origin: { kind: 'git-import' },
+      origin: 'imported',
     });
     const whyText = (await agent.runRaw(['why', 'src/health.ts:1'])).stdout;
-    expect(whyText).toContain('origin:     imported from git history (synthesized)');
-    expect(whyText).toMatch(/task: {7}Imported from git history: .+ … \(2 commits\)/u);
+    expect(whyText).toContain('Origin: imported from git history (synthesized)');
+    expect(whyText).toMatch(/Task: Imported from git history: .+ … \(2 commits\)/u);
     expect(whyText).not.toMatch(/^\s*- [0-9a-f]{7} /mu);
 
     const between = JSON.parse(
       (await agent.runRaw(['list', '--between', `${repo.shas.root}..${repo.shas.next}`, '--json']))
         .stdout
-    ) as { matched: Array<{ id: string; origin: string | null }> };
-    expect(between.matched).toContainEqual(
+    ) as { results: Array<{ id: string; origin: string | null }> };
+    expect(between.results).toContainEqual(
       expect.objectContaining({ id: artifactId, origin: 'git-import' })
     );
     expect((await agent.runRaw(['show', artifactId])).stdout).toContain(
@@ -773,11 +793,15 @@ describe('orcaops seed', () => {
     const uncoveredSha = (await git.revparse(['HEAD'])).trim();
     const uncovered = JSON.parse(
       (await agent.runRaw(['why', 'uncovered.ts:1', '--json'])).stdout
-    ) as { best: null; hint: string };
-    expect(uncovered.best).toBeNull();
-    expect(uncovered.hint).toContain(
-      `orcaops seed --commit ${uncoveredSha}\` will import its cluster`
-    );
+    ) as {
+      best: { confidence: string; content_match: string };
+      target: { blame: { sha: string } };
+      seed_guidance: { state: string; command: null; reasons: string[] };
+    };
+    expect(uncovered.target.blame.sha).toBe(uncoveredSha);
+    expect(uncovered.best).toMatchObject({ confidence: 'weak', content_match: 'none' });
+    expect(uncovered.seed_guidance).toMatchObject({ state: 'suppressed', command: null });
+    expect(uncovered.seed_guidance.reasons).toContain('RELATED_HISTORY_PRESENT');
 
     // A declined area swaps the import call-to-action for the decline state.
     await writeFile(path.join(repo.path, 'src', 'later.ts'), 'export const later = true;\n');
@@ -786,12 +810,13 @@ describe('orcaops seed', () => {
     await agent.runRaw(['seed', 'status', '--decline', 'src', '--json']);
     const declinedWhy = JSON.parse(
       (await agent.runRaw(['why', 'src/later.ts:1', '--json'])).stdout
-    ) as { best: null; hint: string };
-    expect(declinedWhy.hint).toContain('imports for src were declined');
-    expect(declinedWhy.hint).toContain('orcaops seed status --offer-again src');
-    expect(declinedWhy.hint).not.toContain('seed --commit');
+    ) as { project_coverage: { declined_area: string }; seed_guidance: { command: null } };
+    expect(declinedWhy.project_coverage.declined_area).toBe('src');
+    expect(declinedWhy.seed_guidance.command).toBeNull();
     const declinedWhyText = (await agent.runRaw(['why', 'src/later.ts:1'])).stdout;
     expect(declinedWhyText).toContain('imports for src were declined');
+    expect(declinedWhyText).toContain("orcaops seed status --offer-again 'src'");
+    expect(declinedWhyText).not.toContain('seed --commit');
   });
 
   it('warns when the selected branch excludes checked-out commits', async () => {
@@ -839,15 +864,8 @@ describe('orcaops seed', () => {
     const applied = JSON.parse(appliedResult.stdout) as {
       seeded: Array<{ artifactId: string }>;
     };
-    const artifactId = applied.seeded[0]!.artifactId;
 
-    const config = await loadConfig(repo.path);
-    const store = new ArtifactStore({ repoRoot: repo.path, config });
-    expect(store.store.findArtifactsForCloudSyncDrain({ force: true }).included).not.toContain(
-      artifactId
-    );
-    expect(store.store.countCloudSyncPendingArtifacts()).toBe(0);
-    store.close();
+    expect(await withDatabase((database) => readProjectCloudSyncStatus(database).rows)).toEqual([]);
 
     const stats = JSON.parse((await agent.runRaw(['stats', '--json'])).stdout) as {
       plan_revisions: { artifacts_with_plan: number; histogram: Record<string, number> };
@@ -876,16 +894,14 @@ describe('orcaops seed', () => {
     );
   });
 
-  it('prefixes the imported trailer with the empty live state on plain list', async () => {
+  it('reports imported rows when no captured artifacts exist', async () => {
     const appliedResult = await agent.runRaw(['seed', '--yes', '--json']);
     expect(appliedResult.exitCode).toBe(0);
 
     const bare = (await agent.runRaw(['list'])).stdout;
-    expect(bare).toContain('No live artifacts captured.');
-    expect(bare).toMatch(/… and \d+ imported artifact/u);
-    expect(bare.indexOf('No live artifacts captured.')).toBeLessThan(
-      bare.indexOf('imported artifact')
-    );
+    expect(bare).toContain('[imported]');
+    expect(bare).toContain('Returned: 0 captured, 1 imported.');
+    expect(bare).toContain('Matching: 0 captured, 1 imported.');
   });
 
   it('swaps the apply CTA for a nothing-to-do line when the preview has no pending clusters', async () => {
@@ -906,6 +922,12 @@ describe('orcaops seed', () => {
       seeded: Array<{ artifactId: string }>;
     };
     const artifactId = applied.seeded[0]!.artifactId;
+    await gitClient(repo.path).raw([
+      'remote',
+      'add',
+      'origin',
+      'https://example.test/orcaops-seed.git',
+    ]);
 
     // No credentials exist in this environment: reaching the cloud client
     // would surface NOT_CONNECTED, so the containment code doubles as proof
@@ -943,7 +965,7 @@ describe('orcaops seed', () => {
         files: { 'frontend/app.ts': 'four\nfive\n' },
       },
     ]);
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+    agent = makeAgent({ cwd: repo.path, env: seedEnv() });
     await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
 
     const pathResult = await agent.runRaw(['seed', '--path', 'backend', '--yes', '--json']);
@@ -1002,12 +1024,9 @@ describe('orcaops seed', () => {
     expect(afterCommitHuman.stdout).toContain(
       'Coverage excludes 1 commit-lane import — rerun a full or --path seed to refresh.'
     );
-    const config = await loadConfig(repo.path);
-    const store = new ArtifactStore({ repoRoot: repo.path, config });
     expect(
-      store.store.listArtifacts().filter((artifact) => artifact.origin_kind === 'git-import')
+      await withDatabase((database) => queryProjectArtifacts(database, { origin: 'imported' }).rows)
     ).toHaveLength(2);
-    store.close();
 
     const secondPath = await agent.runRaw(['seed', '--path', 'frontend', '--yes', '--json']);
     expect(secondPath.exitCode).toBe(0);
@@ -1047,7 +1066,7 @@ describe('orcaops seed', () => {
         files: { 'docs/guide.md': 'three\n' },
       },
     ]);
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+    agent = makeAgent({ cwd: repo.path, env: seedEnv() });
     await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
     await agent.runRaw(['seed', 'status', '--decline', 'docs', '--offered', 'docs', '--json']);
 
@@ -1140,7 +1159,7 @@ describe('orcaops seed', () => {
         files: { 'apps/orcaops-watch/main.ts': 'export const watch = true;\n' },
       },
     ]);
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+    agent = makeAgent({ cwd: repo.path, env: seedEnv() });
     await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
 
     const rejected = JSON.parse(
@@ -1220,7 +1239,7 @@ describe('orcaops seed', () => {
         files: { 'surface/recent.ts': 'four\nfive\n' },
       },
     ]);
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+    agent = makeAgent({ cwd: repo.path, env: seedEnv() });
     await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
 
     const recency = await agent.runRaw(['seed', '--max-commits', '1', '--yes', '--json']);
@@ -1364,18 +1383,16 @@ describe('orcaops seed', () => {
       unmatched: [],
       warnings: [],
     });
-    const config = await loadConfig(repo.path);
-    const store = new ArtifactStore({ repoRoot: repo.path, config });
-    const plan = await store.readPlan(applied.seeded[0]!.artifactId);
+    const artifact = await withDatabase((database) =>
+      readProjectArtifact(database, applied.seeded[0]!.artifactId)
+    );
+    const plan = artifact?.thread.plan;
     expect(plan).toMatchObject({
       label: 'Stable service foundation',
       origin: { kind: 'git-import' },
     });
     expect(plan?.origin?.enriched_at).toMatch(/^\d{4}-/u);
-    expect((await store.readSummary(applied.seeded[0]!.artifactId))?.outcome).toBe(
-      'Shipped a stable service foundation.'
-    );
-    store.close();
+    expect(artifact?.thread.summary?.outcome).toBe('Shipped a stable service foundation.');
 
     // A re-run writes nothing, so the enriched count reports zero actual
     // writes and the retargeted file is reported as already imported —
@@ -1504,26 +1521,25 @@ describe('orcaops seed', () => {
     const artifactId = applied.seeded[0]!.artifactId;
 
     const importedList = JSON.parse(
-      (await agent.runRaw(['list', '--imported', '--json'])).stdout
-    ) as { artifacts: Array<{ id: string; label: string }> };
-    expect(importedList.artifacts).toEqual([
+      (await agent.runRaw(['list', '--origin', 'imported', '--json'])).stdout
+    ) as { results: Array<{ id: string; label: string }> };
+    expect(importedList.results).toEqual([
       expect.objectContaining({ id: artifactId, label: 'Stable service groundwork' }),
     ]);
-    const table = (await agent.runRaw(['list', '--imported'])).stdout;
+    const table = (await agent.runRaw(['list', '--origin', 'imported'])).stdout;
     expect(table).toContain('[imported] Stable service groundwork —');
 
     const hits = JSON.parse((await agent.runRaw(['search', 'groundwork', '--json'])).stdout) as {
       results: Array<{
         artifact_id: string;
-        source: string;
+        source_locator: string;
         snippet: string;
         origin: string | null;
       }>;
     };
     const hit = hits.results.find((r) => r.artifact_id === artifactId);
-    expect(hit).toMatchObject({ source: 'plan:0', origin: 'git-import' });
-    // FTS snippets wrap the matched token in <<>> markers.
-    expect(hit!.snippet).toContain('Stable service <<groundwork>>');
+    expect(hit).toMatchObject({ source_locator: 'plan_captured:0', origin: 'imported' });
+    expect(hit!.snippet).toContain('Stable service groundwork');
   });
 
   it('derives agent-trace contributors for imported commits from the historical authors', async () => {
@@ -1577,10 +1593,9 @@ describe('orcaops seed', () => {
     expect(appliedResult.exitCode).toBe(0);
     const applied = JSON.parse(appliedResult.stdout) as { seeded: Array<{ artifactId: string }> };
     const artifactId = applied.seeded[0]!.artifactId;
-    const config = await loadConfig(repo.path);
-    const store = new ArtifactStore({ repoRoot: repo.path, config });
-    const plan = await store.readPlan(artifactId);
-    store.close();
+    const plan = await withDatabase(
+      (database) => readProjectArtifact(database, artifactId)?.thread.plan
+    );
     const stepId = plan!.plan_steps[0]!.step_id;
 
     const brief = JSON.parse((await agent.runRaw(['step', 'brief', stepId, '--json'])).stdout) as {
@@ -1592,12 +1607,10 @@ describe('orcaops seed', () => {
     expect(human).toContain('origin:       imported from git history (synthesized)');
   });
 
-  it('tags and banners imported rows reached via loose-ends --all-branches', async () => {
-    const config = await loadConfig(repo.path);
-    const store = new ArtifactStore({ repoRoot: repo.path, config });
+  it('tags and banners imported rows on loose-ends', async () => {
     const artifactId = uuidv7();
     const ts = '2025-06-01T00:00:00.000Z';
-    await store.writePlan({
+    const plan: PlanInput = {
       schema_version: 4,
       artifact_id: artifactId,
       branch: 'origin/main',
@@ -1632,8 +1645,8 @@ describe('orcaops seed', () => {
       step_lineage: { added: [], dropped: [], unchanged: [], rewritten: [] },
       criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
       prior_plan_event_id: null,
-    });
-    await store.writeSummary({
+    };
+    const summary: SummaryInput = {
       schema_version: 1,
       artifact_id: artifactId,
       agent: 'other',
@@ -1644,20 +1657,19 @@ describe('orcaops seed', () => {
       deferred_decisions: [],
       head_sha: repo.shas.next!,
       ts,
+    };
+    await appendImportedArtifact(artifactId, { plan, summary }, async (semantics) => {
+      await semantics.writePlan(plan, { idempotencyKey: `${artifactId}:plan` });
+      await semantics.writeSummary(summary, { idempotencyKey: `${artifactId}:summary` });
     });
-    store.close();
 
-    // The seed ref never matches the local branch name, so the default
-    // scope excludes the imported row (the recorded opt-out).
-    expect((await agent.runRaw(['loose-ends'])).stdout).toContain('No loose ends in scope.');
-
-    const human = (await agent.runRaw(['loose-ends', '--all-branches'])).stdout;
+    const human = (await agent.runRaw(['loose-ends'])).stdout;
     expect(human).toContain('[imported] Imported leftover thread');
     expect(human).toContain('origin: imported from git history (synthesized)');
     const json = JSON.parse(
-      (await agent.runRaw(['loose-ends', '--all-branches', '--json'])).stdout
-    ) as { artifacts: Array<{ artifact_id: string; origin: string | null }> };
-    expect(json.artifacts).toEqual([
+      (await agent.runRaw(['loose-ends', '--origin', 'imported', '--json'])).stdout
+    ) as { results: Array<{ artifact_id: string; origin: string | null }> };
+    expect(json.results).toEqual([
       expect.objectContaining({ artifact_id: artifactId, origin: 'git-import' }),
     ]);
   });
@@ -1726,14 +1738,14 @@ describe('orcaops seed', () => {
     await gitClient(repo.path).checkoutLocalBranch('current-work');
 
     const json = JSON.parse((await agent.runRaw(['decisions', '--json'])).stdout) as {
-      artifacts: Array<{
+      results: Array<{
         origin: string | null;
         records: Array<{ source: string; decision: string }>;
       }>;
     };
-    expect(json.artifacts).toHaveLength(1);
-    expect(json.artifacts[0]!.origin).toBe('git-import');
-    expect(json.artifacts[0]!.records).toEqual([
+    expect(json.results).toHaveLength(1);
+    expect(json.results[0]!.origin).toBe('git-import');
+    expect(json.results[0]!.records).toEqual([
       expect.objectContaining({
         source: 'plan',
         decision: 'Stabilize the service before adding features',
@@ -1750,10 +1762,8 @@ describe('orcaops seed', () => {
     // The citation is quoted on its own line, never left inline in the reason.
     expect(text).not.toContain('reason: Stability outranked feature work (evidence:');
 
-    // loose-ends opted OUT of seeded default-scope participation: imported
-    // history owes nothing.
     const looseEnds = (await agent.runRaw(['loose-ends'])).stdout;
-    expect(looseEnds).toContain('No loose ends in scope.');
+    expect(looseEnds).toContain('No loose ends in available history.');
   });
 
   it('validates default dry-run bundles on a later default apply', async () => {
@@ -2034,7 +2044,7 @@ describe('orcaops seed', () => {
           files: { 'src/current.ts': 'export const current = true;\n' },
         },
       ]);
-      agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+      agent = makeAgent({ cwd: repo.path, env: seedEnv() });
       await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
     });
 
@@ -2045,12 +2055,11 @@ describe('orcaops seed', () => {
         totals: { selected: 1, created: 1, failed: 0 },
       });
 
-      const config = await loadConfig(repo.path);
-      const store = new ArtifactStore({ repoRoot: repo.path, config });
       expect(
-        store.store.listArtifacts().filter((row) => row.origin_kind === 'git-import')
+        await withDatabase(
+          (database) => queryProjectArtifacts(database, { origin: 'imported' }).rows
+        )
       ).toHaveLength(1);
-      store.close();
     });
 
     it('imports old history for a targeted path', async () => {
@@ -2155,7 +2164,7 @@ describe('orcaops seed', () => {
         committerDate: '2025-01-04T00:00:00.000Z',
       },
     ]);
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+    agent = makeAgent({ cwd: repo.path, env: seedEnv() });
     await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
 
     const preview = await agent.runRaw([
@@ -2196,159 +2205,14 @@ describe('orcaops seed', () => {
       },
     ];
 
-    let dataRoot: string;
-
-    const preciousStatePath = async (repoRoot: string): Promise<string> => {
-      const projectId = (
-        await gitClient(repoRoot).raw(['config', '--local', '--get', 'orcaops.projectid'])
-      ).trim();
-      expect(projectId).not.toBe('');
-      return path.join(dataRoot, 'projects', projectId, 'seed-state.json');
-    };
-
-    const readPrecious = async (repoRoot: string): Promise<Record<string, unknown>> =>
-      JSON.parse(await readFile(await preciousStatePath(repoRoot), 'utf8')) as Record<
-        string,
-        unknown
-      >;
-
     beforeEach(async () => {
       await repo.cleanup();
       repo = await createHistoryRepo(HISTORY);
-      dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-seed-data-'));
-      agent = makeAgent({
-        cwd: repo.path,
-        env: { ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_DATA_DIR: dataRoot },
-      });
+      agent = makeAgent({ cwd: repo.path, env: seedEnv() });
       await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
     });
 
-    /**
-     * Reproduce a `kill -9` landing between the durable summary_captured
-     * append and the projection + cache writes, for one imported artifact.
-     * Deterministic — the projections are pure functions of the log prefix.
-     */
-    const tearSummaryProjection = async (artifactId: string): Promise<void> => {
-      const config = await loadConfig(repo.path);
-      const paths = artifactPathsFor(repo.path, config, artifactId);
-      await rm(paths.summaryJson);
-      await rm(paths.summaryMd);
-      const artifactJson = JSON.parse(await readFile(paths.artifactJson, 'utf8'));
-      artifactJson.state = 'active';
-      await writeFile(paths.artifactJson, JSON.stringify(artifactJson, null, 2) + '\n');
-      const store = new ArtifactStore({ repoRoot: repo.path, config });
-      try {
-        store.store.db.prepare('DELETE FROM summaries WHERE artifact_id = ?').run(artifactId);
-        store.store.db
-          .prepare("UPDATE artifacts SET status = 'active', completed_at = NULL WHERE id = ?")
-          .run(artifactId);
-      } finally {
-        store.close();
-      }
-    };
-
-    const seedOnce = async (): Promise<string> => {
-      const applied = await agent.runRaw([
-        'seed',
-        '--since',
-        '2020-01-01T00:00:00.000Z',
-        '--yes',
-        '--json',
-      ]);
-      expect(applied.exitCode).toBe(0);
-      const seeded = (JSON.parse(applied.stdout) as { seeded: Array<{ artifactId: string }> })
-        .seeded;
-      expect(seeded.length).toBeGreaterThan(0);
-      return seeded[0]!.artifactId;
-    };
-
-    it('heals a seed whose summary event outlived its projections', async () => {
-      const artifactId = await seedOnce();
-      await tearSummaryProjection(artifactId);
-
-      // A torn projection must not be reported as a failed cluster.
-      const healed = await agent.runRaw([
-        'seed',
-        '--since',
-        '2020-01-01T00:00:00.000Z',
-        '--yes',
-        '--json',
-      ]);
-      expect(healed.exitCode).toBe(0);
-      expect(healed.stdout).not.toContain('canonicalJson');
-      expect(healed.stdout).not.toContain('OPEN_CP_OVERLAP');
-      expect(healed.stdout).not.toContain('Unable to replay');
-
-      const status = await agent.runRaw(['seed', 'status', '--json']);
-      const parsed = JSON.parse(status.stdout) as {
-        state: string;
-        failures: unknown[];
-      };
-      expect(parsed.state).toBe('complete');
-      expect(parsed.failures).toEqual([]);
-
-      // The repair must reach the cache and the files, not merely leave the
-      // run reporting complete — every other read surface goes through these.
-      const config = await loadConfig(repo.path);
-      const store = new ArtifactStore({ repoRoot: repo.path, config });
-      try {
-        expect(store.store.getSummary(artifactId)).not.toBeNull();
-        expect(store.store.getArtifact(artifactId)?.status).toBe('complete');
-      } finally {
-        store.close();
-      }
-      const paths = artifactPathsFor(repo.path, config, artifactId);
-      expect(JSON.parse(await readFile(paths.artifactJson, 'utf8')).state).toBe('summarized');
-      await expect(readFile(paths.summaryJson, 'utf8')).resolves.toContain('"outcome"');
-
-      // A third run is a clean no-op: healed once, not merely non-fatal.
-      const again = await agent.runRaw([
-        'seed',
-        '--since',
-        '2020-01-01T00:00:00.000Z',
-        '--yes',
-        '--json',
-      ]);
-      expect(again.exitCode).toBe(0);
-      expect((JSON.parse(again.stdout) as { totals: { failed: number } }).totals.failed).toBe(0);
-    });
-
-    it('repairs a torn summary projection through `orcaops rebuild`', async () => {
-      // Pins the remedy the seed failure text now names, so that text stays true.
-      const artifactId = await seedOnce();
-      await tearSummaryProjection(artifactId);
-
-      const rebuilt = await agent.runRaw(['rebuild', '--json']);
-      expect(rebuilt.exitCode).toBe(0);
-
-      const config = await loadConfig(repo.path);
-      const store = new ArtifactStore({ repoRoot: repo.path, config });
-      try {
-        expect(store.store.getSummary(artifactId)).not.toBeNull();
-      } finally {
-        store.close();
-      }
-    });
-
-    it('exits non-zero and refuses to call the run complete when a cluster fails', async () => {
-      const artifactId = await seedOnce();
-      await tearSummaryProjection(artifactId);
-      // Hold that artifact's lock so the repairing write cannot acquire it.
-      // This is the field shape: a crashed holder's lock is honored until the
-      // stale threshold elapses, and the cluster fails in the meantime.
-      await mkdir(path.join(repo.path, '.orcaops', 'tmp', 'locks', `${artifactId}.lock`), {
-        recursive: true,
-      });
-
-      const failed = await agent.runRaw(['seed', '--since', '2020-01-01T00:00:00.000Z', '--yes']);
-      expect(failed.exitCode).toBe(1);
-      expect(failed.stdout).toContain('Seed finished with 1 failure');
-      expect(failed.stdout).not.toContain('Seed complete —');
-      expect(failed.stdout).toContain('failed 1');
-      expect(failed.stdout).toContain('orcaops rebuild');
-    }, 60_000);
-
-    it('keeps ids, consent, and declines across a cache wipe', async () => {
+    it('keeps ids, consent, and declines across a no-op rerun', async () => {
       const applied = await agent.runRaw([
         'seed',
         '--since',
@@ -2366,16 +2230,11 @@ describe('orcaops seed', () => {
       expect(importedIds.length).toBeGreaterThan(0);
       await agent.runRaw(['seed', 'status', '--decline', './src/', '--json']);
 
-      const before = await readPrecious(repo.path);
-      expect(before).toMatchObject({ pr_context: true });
-      // Stand in for a large-history run that already printed the hint.
-      await writeFile(
-        await preciousStatePath(repo.path),
-        JSON.stringify({ ...before, commit_graph_hint_shown: true }),
-        'utf8'
-      );
-
-      await rm(path.join(repo.path, '.orcaops', 'cache'), { recursive: true, force: true });
+      const before = await withDatabase((database) => readDatabaseSeedState(database)!);
+      expect(before.precious).toMatchObject({
+        pr_context: true,
+        discovery_areas: { src: { declined_at: expect.any(String) } },
+      });
 
       const rerun = await agent.runRaw([
         'seed',
@@ -2389,40 +2248,24 @@ describe('orcaops seed', () => {
         totals: { created: 0, failed: 0, covered: importedIds.length },
       });
 
-      const config = await loadConfig(repo.path);
-      const store = new ArtifactStore({ repoRoot: repo.path, config });
       expect(
-        store.store
-          .listArtifacts()
-          .filter((artifact) => artifact.origin_kind === 'git-import')
-          .map((artifact) => artifact.id)
-          .sort()
+        await withDatabase((database) =>
+          queryProjectArtifacts(database, { origin: 'imported' })
+            .rows.map((artifact) => artifact.artifactId)
+            .sort()
+        )
       ).toEqual(importedIds);
-      store.close();
-
-      // The rebuilt journal names the ids this run re-derived: identical ids
-      // prove the nonce came back from the precious half, not a fresh mint.
-      const journal = JSON.parse(
-        await readFile(path.join(repo.path, '.orcaops', 'cache', 'seed', 'journal.json'), 'utf8')
-      ) as {
-        schema_version: number;
-        install_nonce: string;
-        clusters: Record<string, { artifact_id: string; status: string }>;
-      };
-      expect(journal.schema_version).toBe(2);
+      const after = await withDatabase((database) => readDatabaseSeedState(database)!);
+      expect(after.precious).toMatchObject({
+        install_nonce: before.precious!.install_nonce,
+        pr_context: true,
+        discovery_areas: { src: { declined_at: expect.any(String) } },
+      });
       expect(
-        Object.values(journal.clusters)
+        Object.values(after.journal!.clusters)
           .map((cluster) => cluster.artifact_id)
           .sort()
       ).toEqual(importedIds);
-
-      const after = await readPrecious(repo.path);
-      expect(after).toMatchObject({
-        install_nonce: before.install_nonce,
-        pr_context: true,
-        commit_graph_hint_shown: true,
-      });
-      expect(journal.install_nonce).toBe(before.install_nonce);
 
       const status = await agent.runRaw(['seed', 'status', '--json']);
       expect(JSON.parse(status.stdout)).toMatchObject({
@@ -2431,37 +2274,7 @@ describe('orcaops seed', () => {
       });
     });
 
-    it('reports complete from the store when the journal cache is gone', async () => {
-      const applied = await agent.runRaw([
-        'seed',
-        '--since',
-        '2020-01-01T00:00:00.000Z',
-        '--yes',
-        '--json',
-      ]);
-      expect(applied.exitCode).toBe(0);
-      const created = (JSON.parse(applied.stdout) as { totals: { created: number } }).totals
-        .created;
-      expect(created).toBeGreaterThan(0);
-
-      await rm(path.join(repo.path, '.orcaops', 'cache'), { recursive: true, force: true });
-
-      const text = await agent.runRaw(['seed', 'status']);
-      expect(text.exitCode).toBe(0);
-      expect(text.stdout).toContain(
-        'Seed state: complete (inferred from imported artifacts; the run journal cache was cleared)'
-      );
-      expect(text.stdout).toContain(`Imported artifacts: ${created}`);
-
-      const status = await agent.runRaw(['seed', 'status', '--json']);
-      expect(JSON.parse(status.stdout)).toMatchObject({
-        state: 'complete',
-        state_inferred_from_store: true,
-        imported_artifacts: created,
-      });
-    });
-
-    it('notes archive-carried coverage in a fresh linked worktree', async () => {
+    it('shares imported coverage with a linked worktree', async () => {
       const applied = await agent.runRaw([
         'seed',
         '--since',
@@ -2479,10 +2292,7 @@ describe('orcaops seed', () => {
         'linked'
       );
       await gitClient(repo.path).raw(['worktree', 'add', '-b', 'linked-coverage', linkedRoot]);
-      const linkedAgent = makeAgent({
-        cwd: linkedRoot,
-        env: { ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_DATA_DIR: dataRoot },
-      });
+      const linkedAgent = makeAgent({ cwd: linkedRoot, env: seedEnv() });
       await linkedAgent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
 
       const preview = await linkedAgent.runRaw([
@@ -2494,83 +2304,15 @@ describe('orcaops seed', () => {
       ]);
       expect(preview.exitCode).toBe(0);
       expect(JSON.parse(preview.stdout)).toMatchObject({
-        totals: { pending: 0, covered: created, covered_via_archive: created },
+        totals: { pending: 0, covered: created, covered_via_archive: 0 },
       });
-
-      const previewText = await linkedAgent.runRaw([
-        'seed',
-        '--since',
-        '2020-01-01T00:00:00.000Z',
-        '--dry-run',
-      ]);
-      expect(previewText.stdout).toContain(`${created} covered via the shared project archive.`);
-    });
-
-    it('keeps head-sha coverage from a lossy archived thread instead of re-importing it', async () => {
-      const applied = await agent.runRaw([
-        'seed',
-        '--since',
-        '2020-01-01T00:00:00.000Z',
-        '--yes',
-        '--json',
-      ]);
-      expect(applied.exitCode).toBe(0);
-      const seededIds = (
-        JSON.parse(applied.stdout) as { seeded: Array<{ artifactId: string }> }
-      ).seeded.map((entry) => entry.artifactId);
-      expect(seededIds.length).toBeGreaterThan(0);
-
-      const projectId = (
-        await gitClient(repo.path).raw(['config', '--local', '--get', 'orcaops.projectid'])
-      ).trim();
-      // Rot every archived thread's final complete line (the summary event):
-      // the log becomes lossy while the checkpoint prefix stays readable.
-      for (const artifactId of seededIds) {
-        const eventsPath = path.join(
-          dataRoot,
-          'projects',
-          projectId,
-          'artifacts',
-          artifactId,
-          'events.ndjson'
-        );
-        const lines = (await readFile(eventsPath, 'utf8')).split('\n');
-        const last = lines.length - (lines.at(-1) === '' ? 2 : 1);
-        lines[last] = lines[last]!.replace(
-          /"checksum":"[0-9a-f]{64}"/u,
-          `"checksum":"${'0'.repeat(64)}"`
-        );
-        await writeFile(eventsPath, lines.join('\n'), 'utf8');
-      }
-
-      const linkedRoot = path.join(
-        await mkdtemp(path.join(tmpdir(), 'orcaops-seed-lossy-wt-')),
-        'linked'
-      );
-      await gitClient(repo.path).raw(['worktree', 'add', '-b', 'lossy-coverage', linkedRoot]);
-      const linkedAgent = makeAgent({
-        cwd: linkedRoot,
-        env: { ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_DATA_DIR: dataRoot },
-      });
-      await linkedAgent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
-
-      const preview = await linkedAgent.runRaw([
-        'seed',
-        '--since',
-        '2020-01-01T00:00:00.000Z',
-        '--dry-run',
-        '--json',
-      ]);
-      expect(preview.exitCode).toBe(0);
-      const payload = JSON.parse(preview.stdout) as {
-        totals: { pending: number; covered: number };
-        notes: string[];
-      };
-      expect(payload.totals.pending).toBe(0);
-      expect(payload.totals.covered).toBe(seededIds.length);
-      expect(payload.notes.join('\n')).toMatch(
-        /archived threads? with corrupt event lines contributed head-sha coverage/u
-      );
+      expect(
+        await withDatabase(
+          (database) => queryProjectArtifacts(database, { origin: 'imported' }).rows,
+          false,
+          linkedRoot
+        )
+      ).toHaveLength(created);
     });
 
     it('groups imported artifacts by the job that produced them', async () => {
@@ -2716,10 +2458,7 @@ describe('orcaops seed', () => {
         'linked'
       );
       await gitClient(repo.path).raw(['worktree', 'add', '-b', 'linked', linkedRoot]);
-      const linkedAgent = makeAgent({
-        cwd: linkedRoot,
-        env: { ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_DATA_DIR: dataRoot },
-      });
+      const linkedAgent = makeAgent({ cwd: linkedRoot, env: seedEnv() });
       await linkedAgent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
 
       const linkedStatus = await linkedAgent.runRaw(['seed', 'status', '--json']);
@@ -2742,9 +2481,17 @@ describe('orcaops seed', () => {
       // Deterministic ids are nonce-salted, so matching previews across two
       // worktrees is the nonce being shared rather than re-minted per worktree.
       expect(previewIds(linkedPreview.stdout)).toEqual(previewIds(primaryPreview.stdout));
-      expect(await readPrecious(linkedRoot)).toMatchObject({
-        install_nonce: (await readPrecious(repo.path)).install_nonce,
-      });
+      const primaryState = await withDatabase(
+        (database) => readDatabaseSeedState(database)!,
+        false,
+        repo.path
+      );
+      const linkedState = await withDatabase(
+        (database) => readDatabaseSeedState(database)!,
+        false,
+        linkedRoot
+      );
+      expect(linkedState.precious?.install_nonce).toBe(primaryState.precious?.install_nonce);
     });
   });
 
@@ -2768,37 +2515,5 @@ describe('orcaops seed', () => {
         });
       }
     );
-
-    it('reports a held run lock as SEED_RUN_ACTIVE naming the owner and lock path', async () => {
-      const dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-seed-lock-data-'));
-      const scopedAgent = makeAgent({
-        cwd: repo.path,
-        env: { ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_DATA_DIR: dataRoot },
-      });
-      // Mints the project identity the lock path is keyed on.
-      await scopedAgent.runRaw(['seed', '--dry-run', '--json']);
-      const projectId = (
-        await gitClient(repo.path).raw(['config', '--local', '--get', 'orcaops.projectid'])
-      ).trim();
-      const lockPath = path.join(dataRoot, 'projects', projectId, 'seed-run.lock');
-      // A live owner: this test process's own pid.
-      await writeFile(
-        lockPath,
-        `${JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() })}\n`
-      );
-
-      const blocked = await scopedAgent.runRaw(['seed', '--dry-run', '--json']);
-      expect(blocked.exitCode).toBe(1);
-      expect(JSON.parse(blocked.stdout)).toMatchObject({
-        ok: false,
-        error: {
-          code: 'SEED_RUN_ACTIVE',
-          message: expect.stringMatching(
-            new RegExp(`pid ${process.pid}.*seed-run\\.lock.*remove the lock file and retry`, 'su')
-          ),
-        },
-      });
-      await rm(dataRoot, { recursive: true, force: true });
-    });
   });
 });

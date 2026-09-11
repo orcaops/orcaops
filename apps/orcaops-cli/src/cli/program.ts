@@ -1,16 +1,8 @@
 import { Command, InvalidArgumentError, Option } from 'commander';
 
 import { assertSafeCloudUrl, hasCloudCredentials, setDefaultCliVersion } from '@orcaops/core';
-import { SEARCH_TYPES } from '@orcaops/evaluator-protocol/search-types';
+import { SEARCH_SOURCE_KINDS } from '@orcaops/core/history/search';
 
-import {
-  archiveDisableAction,
-  archiveEnableAction,
-  archivePruneAction,
-  archiveRepairAction,
-  archiveResolveAction,
-  archiveStatusAction,
-} from '../commands/archive.js';
 import { authStateAction } from '../commands/auth-state.js';
 import { blockAcknowledgeAction } from '../commands/block/acknowledge.js';
 import { blockDismissAction } from '../commands/block/dismiss.js';
@@ -45,6 +37,7 @@ import { exportAgentTraceAction } from '../commands/export.js';
 import { fingerprintDeriveAction, fingerprintShowAction } from '../commands/fingerprint.js';
 import { finishAction } from '../commands/finish.js';
 import { gcAction } from '../commands/gc.js';
+import { createHistoryConvertAction } from '../commands/history-convert.js';
 import { type HookAgent, hookSessionStartAction } from '../commands/hook-session-start.js';
 import { initAction } from '../commands/init.js';
 import { lineageAction } from '../commands/lineage.js';
@@ -111,6 +104,7 @@ import { detectInstallIncompleteness, formatIncompletenessNudge } from '../lib/i
 import {
   getInvocationCwd,
   getInvocationEnv,
+  getInvocationRootOverride,
   isCi,
   setInvocationInvokedByAgent,
   setInvocationRootOverride,
@@ -126,14 +120,6 @@ function parsePositiveInt(value: string): number {
   const n = parseDigitInt(value);
   if (n === null || n < 1) {
     throw new InvalidArgumentError('expected a positive integer');
-  }
-  return n;
-}
-
-function parseNonNegativeInt(value: string): number {
-  const n = parseDigitInt(value);
-  if (n === null) {
-    throw new InvalidArgumentError('expected a non-negative integer');
   }
   return n;
 }
@@ -256,13 +242,11 @@ export function buildProgram(options: BuildProgramOptions): Command {
   // ── init ────────────────────────────────────────────────────────────────
   program
     .command('init')
-    .description(
-      'Bootstrap orcaops in the current repo (archive content conflicts warn; applied init remains successful)'
-    )
+    .description('Bootstrap orcaops in the current repo')
     .option('--force', 'Reconcile and overwrite Orcaops-managed files; preserve current config')
     .option(
       '--reset-config',
-      'With --force, replace config with current defaults; artifacts and cache data are preserved'
+      'With --force, replace config with current defaults; canonical history is preserved'
     )
     .option('--no-llm', 'Configure without an LLM; LLM evaluators are skipped')
     .option(
@@ -451,13 +435,12 @@ export function buildProgram(options: BuildProgramOptions): Command {
 
   // ── configure ───────────────────────────────────────────────────────────
   // Interactive settings menu — a front-end over the SAME reconcile update
-  // runs (apply persists config, then updateAction reconciles), with archive
-  // and git hooks routed through their own machinery. TTY-only by design;
+  // runs (apply persists config, then updateAction reconciles). TTY-only by design;
   // scripts use the update flags.
   program
     .command('configure')
     .description(
-      'Interactively review and change orcaops settings (agents, session hooks, block, prefix, scope, hints, archive, git hooks)'
+      'Interactively review and change orcaops settings (agents, session hooks, block, prefix, scope, hints, git hooks)'
     )
     .action(() => configureAction({}));
 
@@ -501,7 +484,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
   // ── rebuild ─────────────────────────────────────────────────────────────
   program
     .command('rebuild')
-    .description('Rebuild the SQLite cache from authoritative artifact event logs')
+    .description('Rebuild query and search indexes from retained database history')
     .option('--json', 'Emit JSON')
     .action(rebuildAction);
 
@@ -605,20 +588,21 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .action((opts: { json?: boolean }) => sessionHooksStatusAction(opts));
 
   // ── checkout ────────────────────────────────────────────────────────────
-  // Pin focus to a specific artifact for the current shell, or clear
-  // the pin. Pin lives outside
-  // the repo at $XDG_STATE_HOME/orcaops/pins/<repo-id>/<shell-key-id>.json.
   program
     .command('checkout [artifactId]')
-    .description('Pin focus to <artifact-id> for this shell (persists), or --clear to remove')
-    .option('--clear', 'Clear the pin for the current shell instead of writing one')
+    .description('Focus an explicit task in this session, with deliberate binding changes')
+    .option('--project <projectId>', 'Select the original project UUID')
+    .option('--clear', 'Clear only the current session focus')
+    .option('--handoff', 'Explicitly transfer execution ownership to this worktree')
+    .option(
+      '--recover-orphaned',
+      'Recover an owner absent from the complete registered worktree inventory'
+    )
+    .option('--reason <reason>', 'Original reason for the explicit handoff or recovery')
+    .option('--operation-id <operationId>', 'Retry the exact original checkout or focus operation')
     .option('--json', 'Emit JSON')
-    .action(async (artifactId: string | undefined, opts: { clear?: boolean; json?: boolean }) =>
-      checkoutAction({
-        artifactId,
-        clear: opts.clear,
-        json: opts.json,
-      })
+    .action(async (artifactId: string | undefined, opts: Parameters<typeof checkoutAction>[0]) =>
+      checkoutAction({ ...opts, artifactId })
     );
 
   // ── doctor ──────────────────────────────────────────────────────────────
@@ -632,24 +616,15 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .action(doctorAction);
 
   // ── gc ──────────────────────────────────────────────────────────────────
-  // Garbage collection for stale pins, abandoned summarized artifacts,
-  // and stale review dirs. Unreachable nonterminal artifacts are reported.
-  // Dry-run by default.
   program
     .command('gc')
-    .description(
-      'Garbage-collect stale pins / abandoned summarized / stale review dirs; report nonterminal orphans'
-    )
-    .option(
-      '--retention-days <n>',
-      'Retention window for abandoned summarized artifacts and stale review dirs (overrides config.gc.retention_days)',
-      parseNonNegativeInt
-    )
-    .option('--apply', 'Actually delete candidates (default is dry-run)')
+    .description('Inspect retained Git publications and reclaim positively retired refs')
+    .option('--project <id>', 'Qualify cleanup to the current repository project UUID')
+    .option('--apply', 'Reclaim eligible refs (default is dry-run)')
     .option('--json', 'Emit JSON')
-    .action((opts: { retentionDays?: number; apply?: boolean; json?: boolean }) =>
+    .action((opts: { project?: string; apply?: boolean; json?: boolean }) =>
       gcAction({
-        retentionDays: opts.retentionDays,
+        projectId: opts.project,
         apply: opts.apply,
         json: opts.json,
       })
@@ -715,6 +690,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
       '--artifact <id>',
       'Scope manifest sourcing to one artifact, and supply the diff base when --base is absent'
     )
+    .option('--project <id>', 'Qualify the read to one registered project')
     .option('--json', 'Emit JSON')
     .action(
       (opts: {
@@ -724,6 +700,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
         base?: string;
         target?: string;
         artifact?: string;
+        project?: string;
         json?: boolean;
       }) => diffAction(opts)
     );
@@ -741,9 +718,16 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .option('--commit <sha>', 'Commit to attribute (default: HEAD)')
     .option('--out <path>', 'Append the record to a JSONL file instead of stdout')
     .option('--notes', 'Also attach the record as a git note (refs/notes/orcaops/agent-trace)')
+    .option('--project <id>', 'Qualify the read to one registered project')
     .option('--json', 'Emit a JSON envelope')
-    .action((opts: { commit?: string; out?: string; notes?: boolean; json?: boolean }) =>
-      exportAgentTraceAction(opts)
+    .action(
+      (opts: {
+        commit?: string;
+        out?: string;
+        notes?: boolean;
+        project?: string;
+        json?: boolean;
+      }) => exportAgentTraceAction(opts)
     );
 
   // ── snapshots ───────────────────────────────────────────────────────────
@@ -808,14 +792,10 @@ export function buildProgram(options: BuildProgramOptions): Command {
   snapshotsCmd
     .command('prune')
     .description('Prune local snapshot refs (dry-run by default; --apply to delete)')
-    .option('--artifact <id>', 'Total-wipe every ref of one artifact')
-    .option('--orphans', 'Prune refs whose artifact is absent + malformed refs')
-    .option('--all', 'Prune every refs/orcaops/snap/* ref (requires --apply)')
+    .option('--artifact <id>', 'Prune eligible retired snapshot publications for one artifact')
+    .option('--orphans', 'Prune eligible retired snapshot publications')
+    .option('--all', 'Prune all eligible retired snapshot publications (requires --apply)')
     .option('--apply', 'Actually delete candidates (default is dry-run)')
-    .option(
-      '--allow-underived',
-      'Apply even when candidates lack stored/cached manifests (archive-enabled repos only)'
-    )
     .option('--json', 'Emit JSON')
     .action(
       (opts: {
@@ -823,7 +803,6 @@ export function buildProgram(options: BuildProgramOptions): Command {
         orphans?: boolean;
         all?: boolean;
         apply?: boolean;
-        allowUnderived?: boolean;
         json?: boolean;
       }) =>
         snapshotsPruneAction({
@@ -831,69 +810,8 @@ export function buildProgram(options: BuildProgramOptions): Command {
           orphans: opts.orphans,
           all: opts.all,
           apply: opts.apply,
-          allowUnderived: opts.allowUnderived,
           json: opts.json,
         })
-    );
-
-  // ── archive ─────────────────────────────────────────────────────────────
-  // Home-dir archive. Parent is a thin router; `--json` lives on
-  // the leaves only (commander parent-`--json` swallow gotcha, above).
-  const archiveCmd = program
-    .command('archive')
-    .description('Manage the home-dir archive (mirror of captured history)');
-  archiveCmd
-    .command('enable')
-    .description(
-      'Strictly enable the home-dir archive and backfill (content conflicts keep it enabled but exit nonzero)'
-    )
-    .option('--json', 'Emit JSON')
-    .action((opts: { json?: boolean }) => archiveEnableAction({ json: opts.json }));
-  archiveCmd
-    .command('disable')
-    .description('Turn off archive mirroring (archived data is retained; prune deletes)')
-    .option('--json', 'Emit JSON')
-    .action((opts: { json?: boolean }) => archiveDisableAction({ json: opts.json }));
-  archiveCmd
-    .command('status')
-    .description('Show archive identity, mirror lag, and perms posture')
-    .option('--json', 'Emit JSON')
-    .action((opts: { json?: boolean }) => archiveStatusAction({ json: opts.json }));
-  archiveCmd
-    .command('repair')
-    .description(
-      'Backfill safe gaps and report content-blocked artifacts without failing the whole repair'
-    )
-    .option('--json', 'Emit JSON')
-    .action((opts: { json?: boolean }) => archiveRepairAction({ json: opts.json }));
-  archiveCmd
-    .command('resolve')
-    .description(
-      'Explicitly choose hot or archive authority (dry-run by default; backups retained)'
-    )
-    .requiredOption('--artifact <id>', 'Artifact whose divergent copy should be replaced')
-    .addOption(
-      new Option('--source <source>', 'Authoritative source')
-        .choices(['archive', 'hot'])
-        .makeOptionMandatory()
-    )
-    .option('--apply', 'Perform the replacement (default is dry-run)')
-    .option('--json', 'Emit JSON')
-    .action(
-      (opts: { artifact: string; source: 'archive' | 'hot'; apply?: boolean; json?: boolean }) =>
-        archiveResolveAction(opts)
-    );
-  archiveCmd
-    .command('prune')
-    .description(
-      'Delete archived history (dry-run by default; --apply to delete — the ONLY deletion path)'
-    )
-    .option('--project <id>', "Delete one project's entire archive dir")
-    .option('--artifact <id>', "Delete one artifact's archive dir")
-    .option('--apply', 'Actually delete candidates (default is dry-run)')
-    .option('--json', 'Emit JSON')
-    .action((opts: { project?: string; artifact?: string; apply?: boolean; json?: boolean }) =>
-      archivePruneAction(opts)
     );
 
   // ── seed ────────────────────────────────────────────────────────────────
@@ -941,61 +859,69 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .option('--json', 'Emit JSON')
     .action(seedStatusAction);
 
+  // ── history ─────────────────────────────────────────────────────────────
+  program
+    .command('history')
+    .description('Work with retained legacy project history')
+    .command('convert')
+    .description(
+      'Convert a frozen 0.2.0-rc.2 legacy repository into its project database. ' +
+        'Without --apply this previews identities, counts, hashes, disclosed omissions and ' +
+        'target presence without decoding omitted payloads or writing anything.'
+    )
+    .option(
+      '--apply',
+      'Perform the conversion: import every retained family, compare the result against its ' +
+        'original sources and register the database once'
+    )
+    .option('--offline', 'Confirm the explicit offline window --apply requires')
+    .option(
+      '--operation-id <uuid>',
+      'Retry the original conversion by its operation ID instead of starting a new one'
+    )
+    .option('--json', 'Emit JSON')
+    .action(createHistoryConvertAction());
+
   // ── status / list / show ────────────────────────────────────────────────
   program
     .command('status')
-    .description('Show artifact thread status for a branch')
-    .option('--branch <name>', 'Branch name (defaults to current)')
+    .description('Inspect passive task context and artifact thread status')
+    .option('--scope <scope>', 'History scope: worktree, project, or all-projects')
+    .option('--project <id>', 'Select one project by its UUID')
+    .option(
+      '--branch <name>',
+      'Literal branch (current branch for bare status; all for explicit project)'
+    )
     .option('--json', 'Emit JSON for skill consumption')
     .action(statusAction);
 
   program
     .command('list')
-    .description('List captured artifacts')
-    .option(
-      '--branch <name>',
-      'Override the branch-membership filter (defaults to current git branch)'
-    )
-    .option('--all-branches', 'List artifacts across every branch (ignores --branch)')
-    .option('--state <state>', 'Filter by lifecycle state (planned, active, blocked, summarized)')
+    .description('List artifacts in canonical project history')
+    .option('--scope <scope>', 'History scope: worktree, project (default), or all-projects')
+    .option('--project <id>', 'Select one project by its UUID')
+    .option('--branch <name>', 'Filter by literal branch membership (all branches by default)')
+    .option('--origin <origin>', 'Origin: all (default), captured, or imported')
+    .option('--state <state>', 'Lifecycle state: planned, active, blocked, or summarized')
     .option('--limit <n>', 'Max artifacts to display (bare listing defaults to 50)', strictIntOrNaN)
-    .option('--imported', 'List only artifacts synthesized from git history')
-    .option(
-      '--since <ts>',
-      'Only artifacts STARTED at/after this ISO date or datetime (UTC; date-only = start of the UTC day)'
-    )
-    .option(
-      '--until <ts>',
-      'Only artifacts STARTED at/before this ISO date or datetime (UTC; date-only = end of the UTC day)'
-    )
+    .option('--offset <n>', 'Skip this many matching artifacts', strictIntOrNaN)
+    .option('--since <ts>', 'Only artifacts started at/after this ISO date or datetime (UTC)')
+    .option('--until <ts>', 'Only artifacts started at/before this ISO date or datetime (UTC)')
     .option(
       '--active-since <ts>',
-      'Only artifacts ACTIVE at/after this time (UTC): a checkpoint whose open/close interval ' +
-        'overlaps the window (a still-open checkpoint counts), a summary, or plan capture inside it'
+      'Lower checkpoint-interval, summary or plan activity bound (UTC)'
     )
     .option(
       '--active-until <ts>',
-      'Upper bound of the activity window (UTC; date-only = end of the UTC day)'
+      'Upper checkpoint-interval, summary or plan activity bound (UTC)'
     )
-    // ── file-provenance selector ──
     .option(
-      '--touching <path>',
-      'Select artifacts whose CLOSED checkpoints list <path> in files_changed ' +
-        '(open checkpoints have no files_changed until close; window flags are rejected)'
+      '--touching <glob>',
+      'Filter recorded closed-checkpoint files by project-relative glob before paging'
     )
-    // ── ref-range selector (the changelog feed) ──
     .option(
       '--between <ref1>..<ref2>',
-      'Select artifacts whose recorded head shas (checkpoint close / summary / pre-pr) fall in ' +
-        '`git rev-list ref1..ref2`; artifacts on the ref2 branch lineage with no sha in range are ' +
-        'disclosed as unmatched_candidates. Rejects --branch/--all-branches, window flags, --touching'
-    )
-    // ── cross-project mode ──
-    .option(
-      '--all-projects',
-      'List across every archived project. Current-project hot and retained archive rows are ' +
-        'deduplicated freshest-first (ties use hot). Implies all branches; rejects ' +
-        '--branch/--touching/--between'
+      'Select recorded HEAD anchors in this Git range and disclose unmatched lineage candidates'
     )
     .option('--json', 'Emit JSON')
     .action(listAction);
@@ -1012,8 +938,12 @@ export function buildProgram(options: BuildProgramOptions): Command {
       'Every recorded decision in scope (plan revisions, checkpoint closes, deferred in ' +
         'summaries); window flags filter decision RECORDS by their timestamp (UTC)'
     )
-    .option('--branch <name>', 'Branch-membership filter (defaults to current git branch)')
-    .option('--all-branches', 'Search every branch (ignores --branch)')
+    .option('--scope <kind>', 'worktree, project (default), or all-projects')
+    .option('--project <id>', 'Select a project UUID')
+    .option('--branch <name>', 'Literal recorded branch filter (default: all branches)')
+    .option('--origin <kind>', 'all (default), captured, or imported')
+    .option('--touching <glob>', 'Filter recorded project-relative changed files')
+    .option('--offset <n>', 'Artifacts to skip before inspection', strictIntOrNaN)
     .option('--limit <n>', 'Max artifacts to inspect (default: all)', strictIntOrNaN)
     .option(
       '--artifact <id>',
@@ -1022,16 +952,10 @@ export function buildProgram(options: BuildProgramOptions): Command {
       collectArtifactIds,
       []
     )
-    .option('--since <ts>', 'Artifacts started + records at/after this time (UTC)')
-    .option('--until <ts>', 'Artifacts started + records at/before this time (UTC)')
-    .option('--active-since <ts>', 'Activity window lower bound; also filters records (UTC)')
-    .option('--active-until <ts>', 'Activity window upper bound; also filters records (UTC)')
-    // ── cross-project mode ──
-    .option(
-      '--all-projects',
-      'Collect decisions across every archived project; current-project hot and retained archive ' +
-        'rows are deduplicated freshest-first (ties use hot; implies all branches; rejects --branch/--artifact)'
-    )
+    .option('--since <ts>', 'Decision records at/after this time (UTC)')
+    .option('--until <ts>', 'Decision records at/before this time (UTC)')
+    .option('--active-since <ts>', 'Decision record window lower bound (UTC)')
+    .option('--active-until <ts>', 'Decision record window upper bound (UTC)')
     .option('--json', 'Emit JSON')
     .action(decisionsAction);
 
@@ -1043,8 +967,12 @@ export function buildProgram(options: BuildProgramOptions): Command {
         'select ARTIFACTS only — findings are always current state (never time-filtered), so ' +
         'combining them with --artifact is rejected'
     )
-    .option('--branch <name>', 'Branch-membership filter (defaults to current git branch)')
-    .option('--all-branches', 'Search every branch (ignores --branch)')
+    .option('--scope <kind>', 'worktree, project (default), or all-projects')
+    .option('--project <id>', 'Select a project UUID')
+    .option('--branch <name>', 'Literal recorded branch filter (default: all branches)')
+    .option('--origin <kind>', 'all (default), captured, or imported')
+    .option('--touching <glob>', 'Filter recorded project-relative changed files')
+    .option('--offset <n>', 'Artifacts to skip before inspection', strictIntOrNaN)
     .option('--limit <n>', 'Max artifacts to inspect (default: all)', strictIntOrNaN)
     .option(
       '--artifact <id>',
@@ -1056,19 +984,13 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .option('--until <ts>', 'Select artifacts started at/before this time (UTC)')
     .option('--active-since <ts>', 'Select artifacts active at/after this time (UTC)')
     .option('--active-until <ts>', 'Select artifacts active at/before this time (UTC)')
-    // ── cross-project mode ──
-    .option(
-      '--all-projects',
-      'Collect loose ends across every archived project; current-project hot and retained archive ' +
-        'rows are deduplicated freshest-first (ties use hot; implies all branches; rejects --branch/--artifact)'
-    )
     .option('--json', 'Emit JSON')
     .action(looseEndsAction);
 
   // ── step ─────────────────────────────────────────────────────────────────
   // Parent is a thin router (same shape as `fingerprint`); the `brief` leaf
-  // carries the options. Step ids are globally-unique UUIDv7s, so --artifact
-  // is only a disambiguator for pathological multi-hit stores.
+  // carries the options. Historical step identifiers may recur across
+  // artifacts, so --artifact selects among the artifacts containing the step.
   const stepCmd = program
     .command('step')
     .description('Per-plan-step queries over the captured record');
@@ -1078,20 +1000,33 @@ export function buildProgram(options: BuildProgramOptions): Command {
       'The parallel-dispatch task brief for one plan step: text + acceptance criteria + claim ' +
         'state + related checkpoint evidence + plan guardrails + sibling claim states'
     )
-    .option('--artifact <id>', 'Disambiguate when the step_id appears in multiple artifacts')
+    .option(
+      '--artifact <id>',
+      'Select the artifact (UUID or unique prefix) when the step_id appears in several'
+    )
+    .option('--project <id>', 'Select one project by its UUID')
     .option('--json', 'Emit JSON')
-    .action((stepId: string, opts: { artifact?: string; json?: boolean }) =>
+    .action((stepId: string, opts: { artifact?: string; project?: string; json?: boolean }) =>
       stepBriefAction(stepId, opts)
     );
 
   program
     .command('stats')
-    .description('Repo-wide store aggregates: artifact/checkpoint/summary counts + session tokens')
-    // ── cross-project mode ──
+    .description(
+      'Scoped aggregates from canonical project history: artifact/checkpoint/summary counts, ' +
+        'evaluator rates, revision churn, checkpoint durations, hygiene and session usage. ' +
+        'The diff-attribution hygiene hint captures the live worktree tree through a temporary ' +
+        'index (untracked files included), which writes unreferenced loose Git tree objects and ' +
+        'leaves the real index and every ref untouched'
+    )
+    .option('--scope <scope>', 'History scope: worktree, project (default), or all-projects')
+    .option('--project <id>', 'Select one project by its UUID')
+    .option('--branch <name>', 'Literal recorded branch filter (default: all branches)')
+    .option('--origin <kind>', 'all (default), captured, or imported')
+    .option('--state <state>', 'planned, active, blocked, or summarized')
     .option(
-      '--all-projects',
-      'Per-project rollups + totals across every archived project; current-project hot and ' +
-        'retained archive rows are deduplicated freshest-first (ties use hot)'
+      '--touching <glob>',
+      'Filter recorded closed-checkpoint files by project-relative glob before aggregating'
     )
     .option('--json', 'Emit JSON')
     .action(statsAction);
@@ -1121,117 +1056,93 @@ export function buildProgram(options: BuildProgramOptions): Command {
 
   program
     .command('show <artifactId>')
-    .description('Render a single artifact thread')
+    .description('Render a single retained artifact thread')
+    .option('--project <id>', 'Select the project containing the artifact')
     .option('--json', 'Emit JSON')
     .action(showAction);
 
-  // ── usage-ledger read surface ──
   program
     .command('usage')
-    .description(
-      'Coding-agent usage: exact session/model totals repo-wide, or per-artifact attribution ' +
-        '(labelled estimate) + per-checkpoint spans with --artifact'
-    )
-    .option(
-      '--artifact <id>',
-      'Artifact scope (single-valued — per-artifact estimates must never be summed)'
-    )
+    .description('Selected session usage totals and non-additive artifact estimates')
+    .option('--artifact <id>', 'Select one exact artifact or unambiguous prefix')
+    .option('--scope <scope>', 'worktree | project | all-projects')
+    .option('--project <id>', 'Select one project by identity')
+    .option('--branch <name>', 'Restrict to one literal branch')
+    .option('--origin <origin>', 'captured | imported | all')
+    .option('--state <state>', 'Restrict to one artifact state')
+    .option('--touching <glob>', 'Restrict to artifacts whose recorded paths match')
     .option('--json', 'Emit JSON')
-    .action((opts: { artifact?: string; json?: boolean }) => usageAction(opts));
+    .action(usageAction);
 
-  // ── search ─────────────────────────────────────────────────────────────
   program
     .command('search <query>')
-    .description('FTS5 search over captured content')
-    .option('--branch <name>', 'Restrict to one branch')
-    // Derived, not restated: this help text listed four of the seven types
-    // for as long as the command accepted seven.
-    .option('--type <kind>', SEARCH_TYPES.join(' | '))
+    .description('Search retained project history')
+    .option('--scope <scope>', 'worktree | project | all-projects')
+    .option('--project <id>', 'Select one project by identity')
+    .option('--branch <name>', 'Restrict to one literal branch')
+    .option('--origin <origin>', 'captured | imported | all')
+    .option('--touching <glob>', 'Restrict to artifacts whose touched paths match')
+    .option('--type <kind>', SEARCH_SOURCE_KINDS.join(' | '))
     .option('--limit <n>', 'Max results (default 25)', strictIntOrNaN)
-    .option('--no-imported', 'Exclude artifacts synthesized from git history')
-    // ── touched-surface glob filter ──
-    .option(
-      '--scope <glob>',
-      'Only results whose artifact touched a matching path (closed-cp files_changed + declared ' +
-        'touched_scope as literal paths); --limit applies after the filter'
-    )
-    // ── cross-project mode ──
-    .option(
-      '--all-projects',
-      'Search across every archived project. Current-project hot and retained archive hits are ' +
-        'deduplicated freshest-first (ties use hot). Implies all branches; rejects --branch'
-    )
+    .option('--offset <n>', 'Skip this many matching results', strictIntOrNaN)
     .option('--json', 'Emit JSON')
-    .action(
-      (
-        query: string,
-        opts: {
-          branch?: string;
-          type?: string;
-          limit?: number;
-          scope?: string;
-          allProjects?: boolean;
-          imported?: boolean;
-          json?: boolean;
-        }
-      ) => searchAction(query, opts)
-    );
+    .action(searchAction);
 
-  // ── resume ─────────────────────────────────────────────────────────────
+  // ── resume ────────────────────────────────────────────────────────────────
   program
     .command('resume')
-    .description('Show progress + a paste-ready prompt for the latest artifact on a branch')
-    .option('--artifact <id>', 'Resume <id> without setting a pin (resume-once)')
-    .option('--branch <name>', 'Branch (defaults to current)')
+    .description('Read an explicit artifact or the eligible task in this context without writing')
+    .option('--artifact <id>', 'Read an exact artifact UUID or prefix without changing focus')
+    .option('--project <id>', 'Select one project by its UUID')
+    .option('--branch <name>', 'Restrict implicit task candidates by literal branch membership')
     .option('--copy', 'Copy the suggested prompt block to the system clipboard')
-    .option(
-      '--accept-default',
-      'When the picker is ambiguous, pin + resume the default candidate (most-recently-active)'
-    )
-    .option(
-      '--no-pin',
-      'Skip the auto-pin write that --accept-default otherwise performs (CI / headless)'
-    )
     .option('--format <fmt>', 'Output format: md (default) or json', 'md')
     .option('--json', 'Shorthand for --format json')
-    .action(
-      (opts: {
-        artifact?: string;
-        branch?: string;
-        copy?: boolean;
-        acceptDefault?: boolean;
-        pin?: boolean;
-        format?: string;
-        json?: boolean;
-      }) =>
-        resumeAction({
-          artifact: opts.artifact,
-          branch: opts.branch,
-          copy: opts.copy,
-          acceptDefault: opts.acceptDefault,
-          // commander negates --no-pin into opts.pin === false
-          noPin: opts.pin === false,
-          format: opts.format === 'json' ? 'json' : 'md',
-          json: opts.json,
-        })
-    );
+    .action(resumeAction);
 
   // ── why ────────────────────────────────────────────────────────────────
   program
     .command('why <target>')
-    .description('Show complete newest-first history for <file>, or attribute <file>:<line>')
-    .option('--all', 'Expand whole-file details or list every line candidate')
-    .option('--branch <name>', 'Restrict search to checkpoints on this branch')
+    .description('Find ranked provenance for <file> or attribute <file>:<line>')
+    .option('--all', 'Default to 1,000 results; processing budgets still apply')
+    .option(
+      '--details',
+      'Include full JSON candidate evidence (may be large; no effect without --json)'
+    )
+    .option('--scope <scope>', 'worktree | project')
+    .option('--project <id>', 'Select one registered project by identity')
+    .option('--branch <name>', 'Restrict to one literal branch')
+    .option('--origin <origin>', 'captured | imported | all')
+    .option('--touching <glob>', 'Restrict to artifacts whose touched paths match')
+    .option('--at <revision>', 'Resolve the code target at an exact Git revision')
+    .option('--limit <n>', 'Max results (default 25)', strictIntOrNaN)
+    .option('--offset <n>', 'Skip this many matching results', strictIntOrNaN)
     .option('--json', 'Emit JSON')
-    .action((target: string, opts: { all?: boolean; branch?: string; json?: boolean }) =>
-      whyAction(target, opts)
+    .action(
+      (
+        target: string,
+        opts: {
+          all?: boolean;
+          details?: boolean;
+          scope?: 'worktree' | 'project';
+          project?: string;
+          branch?: string;
+          origin?: 'captured' | 'imported' | 'all';
+          touching?: string;
+          at?: string;
+          limit?: number;
+          offset?: number;
+          json?: boolean;
+        }
+      ) => whyAction(target, opts)
     );
 
   // ── digest ─────────────────────────────────────────────────────────────
   program
     .command('digest [artifact_id]')
     .description('Render a reviewer-facing PR summary for an artifact or branch')
-    .option('--artifact <id>', 'Artifact id (defaults to latest on branch)')
+    .option('--artifact <id>', 'Artifact id (defaults to the current task on this branch)')
+    .option('--project <id>', 'Qualify the read to one registered project')
     .option('--branch <name>', 'Branch (defaults to current)')
     .option('--branch-wide', 'Combine every captured artifact in the branch PR range')
     .option('--base <ref>', 'Base ref for --branch-wide (defaults to the repository default)')
@@ -1244,6 +1155,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
         artifactId: string | undefined,
         opts: {
           artifact?: string;
+          project?: string;
           branch?: string;
           out?: string;
           format?: string;
@@ -1256,6 +1168,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
         digestAction({
           artifact: opts.artifact,
           artifactArg: artifactId,
+          project: opts.project,
           branch: opts.branch,
           out: opts.out,
           format: opts.format === 'json' ? 'json' : 'md',
@@ -1752,9 +1665,8 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .argument('[args...]', 'flags forwarded verbatim to the orcaops-watch app')
     .allowUnknownOption()
     .passThroughOptions()
-    .action((args: string[], _opts: unknown, command: Command) => {
-      const root = (command.optsWithGlobals() as { root?: string }).root;
-      return watchAction(args, root);
+    .action((args: string[]) => {
+      return watchAction(args, getInvocationRootOverride());
     });
 
   // ── review ────────────────────────────────────────────────────────────────
@@ -1779,15 +1691,14 @@ export function buildProgram(options: BuildProgramOptions): Command {
     // No commander help: a leading `--help`/`-h` flows through to the engine's
     // own verb usage (commander's stub knows nothing about the engine verbs).
     .helpOption(false)
-    .action((args: string[], _opts: unknown, command: Command) => {
-      const root = (command.optsWithGlobals() as { root?: string }).root;
-      return reviewAction(args, root);
+    .action((args: string[]) => {
+      return reviewAction(args, getInvocationRootOverride());
     });
 
   // ── plan (cloud source-plan review track) ────────────────────────────────
   // Distinct from `capture plan` (the artifact's own plan): this group manages
   // the cloud SourcePlan review surface — upload a plan for review, pull the
-  // approved version into the local pull-cache for `--source-plan cloud:…`.
+  // approved version into project history for `--source-plan cloud:…`.
   const planGroup = program
     .command('plan', hideCloud)
     .description('Cloud source-plan review track: upload a plan for review, pull the approved one');
@@ -1823,7 +1734,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
     );
   planGroup
     .command('pull <idOrSlug>')
-    .description('Pull the approved version of a cloud plan into the local pull-cache')
+    .description('Pull the approved version of a cloud plan into project history')
     .option('--out <path>', 'Also write the plan body to this file (records lineage for born-pins)')
     .option('--json', 'Emit JSON')
     .action((idOrSlug: string, opts: { out?: string; json?: boolean }) =>
@@ -1840,12 +1751,12 @@ export function buildProgram(options: BuildProgramOptions): Command {
     );
   reviewGroup
     .command('pull <ref>')
-    .description('Pull the under-review candidate (or --proposal <id>) into the local review cache')
+    .description('Pull the under-review candidate (or --proposal <id>) into project history')
     .option('--proposal <id>', 'Pull this proposal instead of the candidate')
     .addOption(
       new Option(
         '--version <n>',
-        'Pull a sealed historical version (read-only — never cached, NOT a push base)'
+        'Pull a sealed historical version (read-only — not retained, NOT a push base)'
       ).conflicts('proposal')
     )
     .option('--out <path>', 'Also write the body to this file (file-first; NOT a pinnable anchor)')
@@ -1874,7 +1785,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .option('--input <file>', "Body file, or '-' for stdin (defaults to piped stdin)")
     .option(
       '--base-version-id <id>',
-      'Base candidate version id (headless/CI; skips the local cache)'
+      'Base candidate version id (headless/CI; bypasses the retained candidate)'
     )
     .option('--supersedes <proposalId>', 'Supersede your own OPEN proposal (rebase chain)')
     .option('--summary <text>', 'Proposal summary')
@@ -1908,7 +1819,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .option('--input <file>', "Body file, or '-' for stdin (defaults to piped stdin)")
     .option(
       '--base-version-id <id>',
-      'Expected candidate version id (headless/CI; skips the local cache)'
+      'Expected candidate version id (headless/CI; bypasses the retained candidate)'
     )
     .addOption(
       new Option(
@@ -2163,15 +2074,26 @@ export function buildProgram(options: BuildProgramOptions): Command {
       '--pass-token <cursor>',
       'Activity cursor echoed from `review pull` (coalesces notifications)'
     )
+    .option(
+      '--idempotency-key <key>',
+      'Identify one exact operation; a new key authors a new operation after inspection'
+    )
     .option('--json', 'Emit JSON')
-    .action((commentId: string, opts: { message: string; passToken?: string; json?: boolean }) =>
-      reviewFeedbackReplyAction(commentId, { ...opts, baseUrl: cloudBaseUrl })
+    .action(
+      (
+        commentId: string,
+        opts: { message: string; passToken?: string; idempotencyKey?: string; json?: boolean }
+      ) => reviewFeedbackReplyAction(commentId, { ...opts, baseUrl: cloudBaseUrl })
     );
   reviewFeedbackGroup
     .command('resolve <commentId>', hideCloud)
     .description("Resolve a thread (the reviewer's verb — agents reply, humans resolve)")
+    .option(
+      '--idempotency-key <key>',
+      'Identify one exact operation; a new key authors a new operation after inspection'
+    )
     .option('--json', 'Emit JSON')
-    .action((commentId: string, opts: { json?: boolean }) =>
+    .action((commentId: string, opts: { idempotencyKey?: string; json?: boolean }) =>
       reviewFeedbackResolveAction(commentId, { ...opts, baseUrl: cloudBaseUrl })
     );
   reviewFeedbackGroup
@@ -2204,6 +2126,9 @@ export function buildProgram(options: BuildProgramOptions): Command {
   program.hook('preAction', (_thisCommand, actionCommand) => {
     const opts = actionCommand.optsWithGlobals() as { root?: string; invokedByAgent?: string };
     setInvocationRootOverride(opts.root);
+    // Root belongs to invocation routing; strict command validators must only
+    // receive their own domain options after the override has been captured.
+    delete (actionCommand.opts() as { root?: string }).root;
     // Same ALS pattern as --root: the invoking-agent resolver (and the
     // usage stamp running outside the action body) reads it from the
     // invocation frame instead of threading every action signature.

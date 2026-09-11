@@ -1,5 +1,5 @@
 ---
-description: 'Configure archives, LLM tools, secret scrubbing, review limits, usage capture, and environment overrides.'
+description: 'Configure local history, LLM tools, secret scrubbing, review limits, usage capture, and environment overrides.'
 ---
 
 # Capture and data configuration
@@ -8,28 +8,18 @@ These settings control local history, model-backed workflows, secret protection,
 review evidence, usage attribution, and process-level overrides. See
 [Local data](./local-data.md) for the plain-language storage and Cloud boundary.
 
-## Durable archive
+## Project history location
 
-`archive.enabled` defaults to `true`. Captured history is mirrored into the
-user's Orcaops data directory so it survives deletion of the current worktree.
-Interactive, non-interactive, and `--yes` initialization all use this durable
-default.
+Canonical history uses one SQLite database per project, shared across worktrees.
+There is no archive mirror or archive enable/disable setting. The local operator
+selects the data root through `ORCAOPS_DATA_DIR`, then `XDG_DATA_HOME`, with
+`~/.orcaops` as the fallback. See [Local data](./local-data.md) for the layout and
+retention boundary.
 
-Set `archive.enabled` to `false` or run `orcaops archive disable` to stop
-mirroring for a worktree. Disabling retains data already archived;
-`orcaops archive prune` is the explicit deletion path. Set
-`archive.redact_secrets` to `true` when the archive copy should redact
-secret-shaped strings instead of preserving byte-identical payloads. It
-defaults to `false`, so the mirror holds event text as written — outside the
-repository, outside `.gitignore`, and surviving deletion of the worktree. That
-default is deliberate: the mirror is what a cold-start `orcaops resume` restores
-from in a fresh checkout, and a redacted mirror restores redacted text.
-`orcaops doctor` reports which of the two postures a repository is in.
-
-Use `orcaops archive enable` to enable mirroring and backfill existing local
-history. A retained archive directory after disabling is informational rather
-than configuration drift; `orcaops doctor` reports its path and the choices to
-re-enable mirroring or reclaim the space.
+A repository registration records the expected root and database instance.
+Changing an environment variable does not migrate an existing registered project;
+a mismatch is reported rather than silently creating replacement history.
+`orcaops status` and `orcaops doctor` inspect that state.
 
 ## LLM settings
 
@@ -151,9 +141,10 @@ manifest and hashed into its `manifest_hash`. Treat it as durable: it is not a
 performance knob, and there is no reason to reach for it.
 
 `review.max_diff_bytes` (default 10 MB) caps the **live `base → pinned` review
-diff** that `orcaops review` collects, attributes, and writes to
-`.orcaops/reviews/<slug>/diff.patch`. It touches no durable identity, so this is
-the collection cap to adjust when a very large branch outgrows the default.
+diff** that `orcaops review` collects and attributes. The resulting diff is
+retained with the floor evidence and bound to that publication. Adjust this
+collection cap when a very large branch outgrows the default; it affects newly
+prepared evidence, not previously retained publications.
 
 The Task Review forensic lane also has a fixed 2 MB transport ceiling for the
 eligible diff it serves to the reviewer. Raising `review.max_diff_bytes` cannot
@@ -172,7 +163,7 @@ review stub remains visible in the changed-file inventory and disclosure.
 
 Review trees include tracked modifications and deletions by default. Non-ignored
 untracked files are excluded and disclosed so a local transcript, export, or
-archive cannot silently become review evidence or consume the cap. Add an exact
+saved copy cannot silently become review evidence or consume the cap. Add an exact
 repo-relative file path to `review.include_untracked` only when it is intentional
 source evidence. Ignored/generated paths are never admitted through this opt-in;
 rejected entries are disclosed separately.
@@ -237,7 +228,7 @@ transport test controls are not user configuration.
 | `ORCAOPS_TOKEN`            | Provides a cloud credential from the environment (read-only store; no refresh). See [authentication](./authentication.md).                      |
 | `ORCAOPS_CREDENTIAL_STORE` | Selects the OS keychain credential store when set to `keyring`.                                                                                 |
 | `ORCAOPS_CONFIG_HOME`      | Overrides the config/credentials directory (default: XDG config dir, e.g. `~/.config/orcaops`).                                                 |
-| `ORCAOPS_DATA_DIR`         | Overrides the archive data root (default: XDG data dir, else `~/.orcaops`).                                                                     |
+| `ORCAOPS_DATA_DIR`         | Selects the canonical history data root (default: XDG data dir, else `~/.orcaops`).                                                             |
 | `ORCAOPS_GLOBAL_ROOT`      | Overrides the global state root (default `~/.orcaops`).                                                                                         |
 | `ORCAOPS_INVOKED_BY_AGENT` | Provides the capture-attribution fallback when `--invoked-by-agent` is not passed.                                                              |
 | `ORCAOPS_DISABLE_DRAIN`    | Disables the automatic cloud push drain when set to `1`.                                                                                        |

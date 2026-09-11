@@ -6,7 +6,6 @@ import { PathContainmentError, type SupportedAgentId } from '@orcaops/storage';
 
 import { CliExit } from '../../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../../io/output.js';
-import { buildContext } from '../../lib/context.js';
 import {
   type GlobalInstallManifest,
   readGlobalManifest,
@@ -14,6 +13,7 @@ import {
 } from '../../lib/global-install.js';
 import { readGeneratedByStamp } from '../../lib/install-drift.js';
 import { resolveRepoKey } from '../../lib/repo-key.js';
+import { resolveInstallCommandContext } from '../../lib/repository-context.js';
 import {
   currentSkillCapabilities,
   resolveSkillSet,
@@ -89,105 +89,101 @@ async function perUserSkillInstalled(
 
 export async function skillsListAction(opts: SkillsListOptions = {}): Promise<void> {
   try {
-    const ctx = await buildContext({ mintArchiveIdentity: false });
-    try {
-      const config = ctx.config;
-      const resolved = resolveSkillSet(config, ctx.gates);
-      const enabledIds = new Set(resolved.enabled.map((t) => t.id));
-      const capabilityMissing = new Map(
-        resolved.disabled
-          .filter((d) => d.reason === 'capability_unsatisfied')
-          .map((d) => [d.template.id, d.missing_capabilities ?? []])
-      );
-      // Global AND personal scope materialize skills into per-user dirs
-      // (planGlobalInstall); only project scope keeps them in the repo trees.
-      const perUserScope = config.install.scope === 'global' || config.install.scope === 'personal';
-      let manifest: GlobalInstallManifest | null = null;
-      let repoId: string | null = null;
-      if (perUserScope) {
-        manifest = await readGlobalManifest();
-        try {
-          repoId = await resolveRepoKey(ctx.repo);
-        } catch {
-          repoId = null;
-        }
+    const ctx = await resolveInstallCommandContext();
+    const config = ctx.config;
+    const resolved = resolveSkillSet(config, ctx.gates);
+    const enabledIds = new Set(resolved.enabled.map((t) => t.id));
+    const capabilityMissing = new Map(
+      resolved.disabled
+        .filter((d) => d.reason === 'capability_unsatisfied')
+        .map((d) => [d.template.id, d.missing_capabilities ?? []])
+    );
+    // Global AND personal scope materialize skills into per-user dirs
+    // (planGlobalInstall); only project scope keeps them in the repo trees.
+    const perUserScope = config.install.scope === 'global' || config.install.scope === 'personal';
+    let manifest: GlobalInstallManifest | null = null;
+    let repoId: string | null = null;
+    if (perUserScope) {
+      manifest = await readGlobalManifest();
+      try {
+        repoId = await resolveRepoKey(ctx.repo);
+      } catch {
+        repoId = null;
       }
+    }
 
-      const rows: SkillRow[] = [];
-      for (const t of visibleSkillTemplates(ctx.gates)) {
-        let installed: Record<string, boolean> | null = null;
-        if (perUserScope) {
-          if (repoId !== null) {
-            installed = {};
-            for (const agentId of config.install.agents) {
-              const filePath = perUserSkillPath(agentId, t.id, config.naming.prefix);
-              if (filePath === null) continue;
-              installed[agentId] = await perUserSkillInstalled(
-                manifest,
-                repoId,
-                agentId,
-                filePath,
-                config.naming.prefix
-              );
-            }
-          }
-        } else {
+    const rows: SkillRow[] = [];
+    for (const t of visibleSkillTemplates(ctx.gates)) {
+      let installed: Record<string, boolean> | null = null;
+      if (perUserScope) {
+        if (repoId !== null) {
           installed = {};
           for (const agentId of config.install.agents) {
-            const adapter = getToolAdapter(agentId);
-            if (!adapter?.skills) continue;
-            const rel = adapter.skills.filePath(t.id, config.naming.prefix);
-            let stamp: string | null;
-            try {
-              stamp = await readGeneratedByStamp(path.join(ctx.repoRoot, rel), ctx.repoRoot);
-            } catch (err) {
-              if (!(err instanceof PathContainmentError)) throw err;
-              stamp = null;
-            }
-            installed[agentId] = stamp !== null;
+            const filePath = perUserSkillPath(agentId, t.id, config.naming.prefix);
+            if (filePath === null) continue;
+            installed[agentId] = await perUserSkillInstalled(
+              manifest,
+              repoId,
+              agentId,
+              filePath,
+              config.naming.prefix
+            );
           }
         }
-        rows.push({
-          id: t.id,
-          name: t.name,
-          group: t.group ?? null,
-          default_enabled: t.defaultEnabled ?? true,
-          override: config.skills.enabled[t.id] ?? null,
-          effective: enabledIds.has(t.id),
-          requires: t.requires ?? [],
-          capability_satisfied: !capabilityMissing.has(t.id),
-          installed,
-        });
+      } else {
+        installed = {};
+        for (const agentId of config.install.agents) {
+          const adapter = getToolAdapter(agentId);
+          if (!adapter?.skills) continue;
+          const rel = adapter.skills.filePath(t.id, config.naming.prefix);
+          let stamp: string | null;
+          try {
+            stamp = await readGeneratedByStamp(path.join(ctx.repoRoot, rel), ctx.repoRoot);
+          } catch (err) {
+            if (!(err instanceof PathContainmentError)) throw err;
+            stamp = null;
+          }
+          installed[agentId] = stamp !== null;
+        }
       }
-
-      if (opts.json) {
-        emitOk({
-          skills: rows,
-          capabilities: currentSkillCapabilities(config, ctx.gates),
-        });
-        return;
-      }
-
-      const lines: string[] = [];
-      lines.push('ID              GROUP          EFFECTIVE  DEFAULT  OVERRIDE  INSTALLED');
-      for (const r of rows) {
-        const installedCol =
-          r.installed === null
-            ? '(no repo identity)'
-            : Object.entries(r.installed)
-                .map(([a, ok]) => `${a}:${ok ? 'yes' : 'no'}`)
-                .join(' ') || '(no agents)';
-        lines.push(
-          `${r.id.padEnd(15)} ${(r.group ?? '-').padEnd(14)} ${String(r.effective).padEnd(10)} ` +
-            `${String(r.default_enabled).padEnd(8)} ${String(r.override ?? '-').padEnd(9)} ${installedCol}` +
-            (r.capability_satisfied ? '' : `  [requires ${r.requires.join(', ')}]`)
-        );
-      }
-      lines.push('');
-      writeTerminalSafeStdout(lines.join('\n'));
-    } finally {
-      ctx.store.close();
+      rows.push({
+        id: t.id,
+        name: t.name,
+        group: t.group ?? null,
+        default_enabled: t.defaultEnabled ?? true,
+        override: config.skills.enabled[t.id] ?? null,
+        effective: enabledIds.has(t.id),
+        requires: t.requires ?? [],
+        capability_satisfied: !capabilityMissing.has(t.id),
+        installed,
+      });
     }
+
+    if (opts.json) {
+      emitOk({
+        skills: rows,
+        capabilities: currentSkillCapabilities(config, ctx.gates),
+      });
+      return;
+    }
+
+    const lines: string[] = [];
+    lines.push('ID              GROUP          EFFECTIVE  DEFAULT  OVERRIDE  INSTALLED');
+    for (const r of rows) {
+      const installedCol =
+        r.installed === null
+          ? '(no repo identity)'
+          : Object.entries(r.installed)
+              .map(([a, ok]) => `${a}:${ok ? 'yes' : 'no'}`)
+              .join(' ') || '(no agents)';
+      lines.push(
+        `${r.id.padEnd(15)} ${(r.group ?? '-').padEnd(14)} ${String(r.effective).padEnd(10)} ` +
+          `${String(r.default_enabled).padEnd(8)} ${String(r.override ?? '-').padEnd(9)} ${installedCol}` +
+          (r.capability_satisfied ? '' : `  [requires ${r.requires.join(', ')}]`)
+      );
+    }
+    lines.push('');
+    writeTerminalSafeStdout(lines.join('\n'));
   } catch (err) {
     if (opts.json) emitError(err);
     writeErrorLine(err);

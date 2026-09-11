@@ -10,82 +10,29 @@ import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStderr } from '../io/output.js';
 import { CLI_VERSION } from '../lib/cli-version.js';
-import { buildContext, type CliContext } from '../lib/context.js';
-import { classifyOverlapMatch, loadManifestSources } from '../lib/manifest-sources.js';
+import {
+  createContextRevalidator,
+  historyRepository,
+  requireRepositoryScope,
+} from '../lib/database-branch-history.js';
+import { loadDiffManifests, readProjectDiffArtifacts } from '../lib/database-diff.js';
+import {
+  type DatabaseExportOptions,
+  dominantExportModel,
+  exportArtifactOrigins,
+  readExportUsageSnapshots,
+  validateDatabaseExport,
+} from '../lib/database-export.js';
+import { resolveDatabaseHistoryCommandContext } from '../lib/database-history-context.js';
+import { classifyOverlapMatch } from '../lib/database-manifest-sources.js';
+import { closeFailedHistoryRead } from '../lib/history-reader-close.js';
+import { historyScopeCommandError } from '../lib/history-scope-error.js';
+import { parseAddedLines, toRanges } from '../lib/history-trace-views.js';
 
 /** Our own documented notes namespace. NEVER git-ai's refs/notes/ai. */
 export const AGENT_TRACE_NOTES_REF = 'refs/notes/orcaops/agent-trace';
 
-export interface ExportAgentTraceOptions {
-  commit?: string;
-  out?: string;
-  notes?: boolean;
-  json?: boolean;
-}
-
-export interface AddedLine {
-  file: string;
-  line: number;
-  text: string;
-}
-
-/**
- * Walk a unified diff and yield every ADDED line with its NEW-side line
- * number — positions valid at the commit the diff targets, which is
- * exactly what agent-trace `ranges` must reference. Line-level (not
- * hunk-level) is deliberate: commit diffs merge adjacent
- * checkpoint-window edits (squashes especially), so exact hunk-hash
- * matching would be systematically sparse; per-line membership survives
- * the merge.
- */
-export function parseAddedLines(diffText: string): AddedLine[] {
-  const out: AddedLine[] = [];
-  let file: string | null = null;
-  let newLn = 0;
-  let inHunk = false;
-  for (const raw of diffText.split('\n')) {
-    if (raw.startsWith('diff --git ')) {
-      file = null;
-      inHunk = false;
-      continue;
-    }
-    if (raw.startsWith('+++ ')) {
-      const p = raw.slice(4).trim();
-      file = p === '/dev/null' ? null : p.replace(/^b\//, '');
-      continue;
-    }
-    if (raw.startsWith('@@')) {
-      const m = /\+(\d+)(?:,(\d+))?/.exec(raw);
-      newLn = m ? Number.parseInt(m[1], 10) : 0;
-      inHunk = m !== null;
-      continue;
-    }
-    if (!inHunk || file === null) continue;
-    if (raw.startsWith('+')) {
-      out.push({ file, line: newLn, text: raw.slice(1) });
-      newLn += 1;
-    } else if (raw.startsWith(' ')) {
-      newLn += 1;
-    } else if (raw.startsWith('-') || raw.startsWith('\\')) {
-      // old-side / no-newline marker — no new-side movement
-    } else {
-      inHunk = false; // section ended (mode lines, binary notice, …)
-    }
-  }
-  return out;
-}
-
-/** Merge sorted line numbers into contiguous [start, end] ranges. */
-export function toRanges(lines: number[]): Array<{ start_line: number; end_line: number }> {
-  const sorted = [...new Set(lines)].sort((a, b) => a - b);
-  const ranges: Array<{ start_line: number; end_line: number }> = [];
-  for (const n of sorted) {
-    const last = ranges[ranges.length - 1];
-    if (last !== undefined && n === last.end_line + 1) last.end_line = n;
-    else ranges.push({ start_line: n, end_line: n });
-  }
-  return ranges;
-}
+export type ExportAgentTraceOptions = DatabaseExportOptions;
 
 /**
  * models.dev-style slug from a raw model name (best-effort; agent-trace's
@@ -96,48 +43,6 @@ function toModelSlug(model: string): string {
   if (model.startsWith('gpt') || /^o\d/.test(model)) return `openai/${model}`;
   if (model.startsWith('gemini')) return `google/${model}`;
   return model;
-}
-
-/**
- * Dominant model for one (artifact, checkpoint): usage-snapshot rows for
- * the artifact, preferring rows stamped with this checkpoint_n, decided
- * by output tokens. Null when nothing was recorded (the adapter may not
- * have written lifecycle snapshots) — the contributor then carries
- * `type: 'ai'` with no model_id.
- */
-function dominantModel(ctx: CliContext, artifactId: string, checkpointN: number): string | null {
-  try {
-    const rows = ctx.store.store.readUsageSnapshots(artifactId);
-    const scoped = rows.filter((r) => r.checkpoint_n === checkpointN);
-    const pool = scoped.length > 0 ? scoped : rows;
-    const totals = new Map<string, number>();
-    for (const row of pool) {
-      let breakdown: unknown;
-      try {
-        breakdown = JSON.parse(row.model_breakdown);
-      } catch {
-        continue;
-      }
-      if (!Array.isArray(breakdown)) continue;
-      for (const entry of breakdown) {
-        const model = (entry as { model?: unknown }).model;
-        const tokens = (entry as { output_tokens?: unknown }).output_tokens;
-        if (typeof model !== 'string' || model.length === 0) continue;
-        totals.set(model, (totals.get(model) ?? 0) + (typeof tokens === 'number' ? tokens : 0));
-      }
-    }
-    let best: string | null = null;
-    let bestTokens = -1;
-    for (const [model, tokens] of totals) {
-      if (tokens > bestTokens) {
-        best = model;
-        bestTokens = tokens;
-      }
-    }
-    return best;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -161,10 +66,18 @@ function dominantModel(ctx: CliContext, artifactId: string, checkpointN: number)
  */
 export async function exportAgentTraceAction(opts: ExportAgentTraceOptions): Promise<void> {
   try {
-    const ctx = await buildContext({ mintArchiveIdentity: false });
+    const prepared = validateDatabaseExport(opts);
+    const context = await resolveDatabaseHistoryCommandContext({
+      profile: 'git-history',
+      selector: prepared.selector,
+    });
     try {
+      const { git } = requireRepositoryScope(context.scope);
+      const revalidate = createContextRevalidator(context.scope);
+      const repo = historyRepository(git.worktreeRoot);
+      await revalidate();
       const commitRef = opts.commit !== undefined && opts.commit.length > 0 ? opts.commit : 'HEAD';
-      const commitSha = await ctx.repo.resolveCommit(commitRef);
+      const commitSha = await repo.resolveCommit(commitRef);
       if (commitSha === null) {
         throw new OrcaopsError(
           ErrorCodes.INVALID_INPUT,
@@ -172,11 +85,11 @@ export async function exportAgentTraceAction(opts: ExportAgentTraceOptions): Pro
           'commit'
         );
       }
-      const parentSha = (await ctx.repo.resolveCommit(`${commitSha}^`)) ?? EMPTY_TREE_SHA;
+      const parentSha = (await repo.resolveCommit(`${commitSha}^`)) ?? EMPTY_TREE_SHA;
 
-      const cap = ctx.config.diff_fingerprint.max_diff_bytes;
+      const cap = context.config.diff_fingerprint.max_diff_bytes;
       const diff = await diffSnapshotTrees({
-        repo: ctx.repo,
+        repo,
         openTreeSha: parentSha,
         closeTreeSha: commitSha,
         maxDiffBytes: cap,
@@ -192,14 +105,16 @@ export async function exportAgentTraceAction(opts: ExportAgentTraceOptions): Pro
       // Manifest sourcing over EVERY artifact in the store — a commit may
       // carry work from any branch's artifacts; sourcing is cheap and the
       // coverage block discloses what was available.
-      const candidates = ctx.store.store.listArtifacts({});
+      await revalidate();
+      const pool = readProjectDiffArtifacts(context);
+      const candidates = pool.artifacts;
       const {
         sources,
         manifestless,
         incompatibleCount,
         overlapAdjudications,
         skippedUnreadableArtifacts,
-      } = await loadManifestSources(ctx, candidates);
+      } = await loadDiffManifests(context, candidates, pool.skipped);
       // FAIL CLOSED: agent-trace attribution pools every artifact; a
       // skipped one shrinks the ambiguity pool and could promote a
       // shared line to a confident single-artifact attribution.
@@ -290,26 +205,20 @@ export async function exportAgentTraceAction(opts: ExportAgentTraceOptions): Pro
       // replays a commit orcaops never watched being written, so its
       // contributor is the recorded commit-author set from the artifact
       // origin — asserting `ai` would fabricate authorship testimony.
-      const originByArtifact = new Map(candidates.map((a) => [a.id, a.origin_kind ?? null]));
-      const importedAuthorsByArtifact = new Map<string, string[]>();
-      for (const perCp of byFile.values()) {
-        for (const key of perCp.keys()) {
-          const artifactId = key.split(':')[0];
-          if (originByArtifact.get(artifactId) !== 'git-import') continue;
-          if (importedAuthorsByArtifact.has(artifactId)) continue;
-          const plan = await ctx.store.readPlan(artifactId);
-          importedAuthorsByArtifact.set(artifactId, plan?.origin?.authors ?? []);
-        }
-      }
+      const originByArtifact = exportArtifactOrigins(candidates);
+      const usageSnapshots = readExportUsageSnapshots(context);
 
       const files = [...byFile.entries()].map(([filePath, perCp]) => ({
         path: filePath,
         conversations: [...perCp.entries()].map(([key, lineNumbers]) => {
           const [artifactId, nStr, kind] = key.split(':');
           const checkpointN = Number.parseInt(nStr, 10);
-          const imported = originByArtifact.get(artifactId) === 'git-import';
-          const model = imported ? null : dominantModel(ctx, artifactId, checkpointN);
-          const authors = importedAuthorsByArtifact.get(artifactId) ?? [];
+          const recorded = originByArtifact.get(artifactId);
+          const imported = recorded?.origin === 'git-import';
+          const model = imported
+            ? null
+            : dominantExportModel(usageSnapshots, artifactId, checkpointN);
+          const authors = recorded?.authors ?? [];
           return {
             contributor: imported
               ? {
@@ -371,12 +280,12 @@ export async function exportAgentTraceAction(opts: ExportAgentTraceOptions): Pro
           },
         },
       };
-      const emitted = ctx.config.digest.redact_secrets ? redactSecretsInObject(record) : record;
+      const emitted = context.config.digest.redact_secrets ? redactSecretsInObject(record) : record;
       const serialized = stringifyTerminalSafeJson(emitted, 2);
 
       let notesWritten = false;
       if (opts.notes === true) {
-        await ctx.repo.addNote(AGENT_TRACE_NOTES_REF, commitSha, JSON.stringify(emitted));
+        await repo.addNote(AGENT_TRACE_NOTES_REF, commitSha, JSON.stringify(emitted));
         notesWritten = true;
       }
 
@@ -386,7 +295,7 @@ export async function exportAgentTraceAction(opts: ExportAgentTraceOptions): Pro
         await writeFile(outPath, `${JSON.stringify(emitted)}\n`, { flag: 'a' });
         // Realpath both sides — macOS tempdirs are symlinked (/var →
         // /private/var) and a naive prefix check would miss the repo.
-        const repoRootReal = await realpath(ctx.repoRoot).catch(() => ctx.repoRoot);
+        const repoRootReal = await realpath(git.worktreeRoot).catch(() => git.worktreeRoot);
         const outReal = await realpath(outPath).catch(() => outPath);
         const inRepo = outReal.startsWith(`${repoRootReal}${path.sep}`);
         const inScrubbedDir = outReal.startsWith(
@@ -422,12 +331,18 @@ export async function exportAgentTraceAction(opts: ExportAgentTraceOptions): Pro
             `\`git push origin ${AGENT_TRACE_NOTES_REF}\`).\n`
         );
       }
+    } catch (cause) {
+      closeFailedHistoryRead(context.scope);
+      throw cause;
     } finally {
-      ctx.store.close();
+      context.scope.close();
     }
-  } catch (err) {
+  } catch (cause) {
+    const err = historyScopeCommandError(cause);
     if (opts.json) emitError(err);
     writeErrorLine(err);
     throw new CliExit(1);
   }
 }
+
+export { parseAddedLines, toRanges, type AddedLine } from '../lib/history-trace-views.js';

@@ -26,14 +26,23 @@ describe('current config gate', () => {
   // therefore personal, so post-reset reads resolve the effective path.
   const configPath = (): string => path.join(repo.path, '.orcaops', 'config.json');
 
-  it('init --force preserves current settings and artifact/cache bytes', async () => {
-    const artifactSentinel = path.join(repo.path, '.orcaops', 'artifacts', 'preserve-me.txt');
-    const cacheSentinel = path.join(repo.path, '.orcaops', 'cache', 'preserve-me.txt');
-    // Init no longer creates the data directories eagerly; the first write does.
-    await mkdir(path.dirname(artifactSentinel), { recursive: true });
-    await mkdir(path.dirname(cacheSentinel), { recursive: true });
-    await writeFile(artifactSentinel, 'artifact bytes', 'utf8');
-    await writeFile(cacheSentinel, 'cache bytes', 'utf8');
+  const captureArtifact = async (task: string): Promise<string> => {
+    const result = await agent.capturePlan(
+      {
+        task,
+        plan_steps: [{ text: 'retain history', label: 'retain history' }],
+        touched_scope: [],
+      },
+      { noLlm: true }
+    );
+    return result.artifact_id;
+  };
+
+  it('init --force preserves current settings and unrelated project bytes', async () => {
+    const artifactId = await captureArtifact('history before forced reconciliation');
+    const sentinel = path.join(repo.path, '.orcaops', 'local', 'preserve-me.txt');
+    await mkdir(path.dirname(sentinel), { recursive: true });
+    await writeFile(sentinel, 'project bytes', 'utf8');
     await writeFile(
       configPath(),
       JSON.stringify({
@@ -41,7 +50,6 @@ describe('current config gate', () => {
         install: { agents: ['codex'] },
         naming: { prefix: 'oo' },
         generated_files: 'ignore',
-        archive: { enabled: false, redact_secrets: false },
       }),
       'utf8'
     );
@@ -52,18 +60,17 @@ describe('current config gate', () => {
       naming?: { prefix?: string };
       install?: { agents?: string[] };
       generated_files?: string;
-      archive?: { enabled?: boolean };
     };
     expect(after.schema_version).toBe(CONFIG_SCHEMA_VERSION);
     expect(after.naming?.prefix).toBe('oo');
     expect(after.install?.agents).toEqual(['codex']);
     expect(after.generated_files).toBe('ignore');
-    expect(after.archive?.enabled).toBe(false);
-    expect(await readFile(artifactSentinel, 'utf8')).toBe('artifact bytes');
-    expect(await readFile(cacheSentinel, 'utf8')).toBe('cache bytes');
+    expect(await readFile(sentinel, 'utf8')).toBe('project bytes');
     expect((JSON.parse(res.stdout) as { config_reset: boolean }).config_reset).toBe(false);
-    const status = await agent.runRaw(['status', '--json']);
-    expect(status.exitCode).toBe(0);
+    const list = JSON.parse((await agent.runRaw(['list', '--json'])).stdout) as {
+      results: Array<{ id: string }>;
+    };
+    expect(list.results.map((row) => row.id)).toContain(artifactId);
   });
 
   it('explicit config flags override only their setting during forced reconciliation', async () => {
@@ -73,7 +80,6 @@ describe('current config gate', () => {
         schema_version: CONFIG_SCHEMA_VERSION,
         install: { agents: ['codex'] },
         naming: { prefix: 'oo' },
-        archive: { enabled: false, redact_secrets: false },
       }),
       'utf8'
     );
@@ -82,21 +88,16 @@ describe('current config gate', () => {
     const after = JSON.parse(await readFile(configPath(), 'utf8')) as {
       naming: { prefix: string };
       install: { agents: string[] };
-      archive: { enabled: boolean };
     };
     expect(after.naming.prefix).toBe('revised');
     expect(after.install.agents).toEqual(['codex']);
-    expect(after.archive.enabled).toBe(false);
   });
 
-  it('init --force --reset-config restores defaults while preserving artifact/cache bytes', async () => {
-    const artifactSentinel = path.join(repo.path, '.orcaops', 'artifacts', 'preserve-me.txt');
-    const cacheSentinel = path.join(repo.path, '.orcaops', 'cache', 'preserve-me.txt');
-    // Init no longer creates the data directories eagerly; the first write does.
-    await mkdir(path.dirname(artifactSentinel), { recursive: true });
-    await mkdir(path.dirname(cacheSentinel), { recursive: true });
-    await writeFile(artifactSentinel, 'artifact bytes', 'utf8');
-    await writeFile(cacheSentinel, 'cache bytes', 'utf8');
+  it('init --force --reset-config restores defaults while preserving unrelated project bytes', async () => {
+    const artifactId = await captureArtifact('history before config reset');
+    const sentinel = path.join(repo.path, '.orcaops', 'local', 'preserve-me.txt');
+    await mkdir(path.dirname(sentinel), { recursive: true });
+    await writeFile(sentinel, 'project bytes', 'utf8');
     await writeFile(
       configPath(),
       JSON.stringify({
@@ -104,7 +105,6 @@ describe('current config gate', () => {
         install: { agents: ['codex'] },
         naming: { prefix: 'oo' },
         generated_files: 'ignore',
-        archive: { enabled: false, redact_secrets: false },
       }),
       'utf8'
     );
@@ -121,9 +121,12 @@ describe('current config gate', () => {
     expect(after.naming?.prefix ?? 'orcaops').toBe('orcaops');
     expect(after.install.agents).toEqual(['claude-code']);
     expect(after.generated_files ?? 'commit').toBe('commit');
-    expect(await readFile(artifactSentinel, 'utf8')).toBe('artifact bytes');
-    expect(await readFile(cacheSentinel, 'utf8')).toBe('cache bytes');
+    expect(await readFile(sentinel, 'utf8')).toBe('project bytes');
     expect((JSON.parse(res.stdout) as { config_reset: boolean }).config_reset).toBe(true);
+    const list = JSON.parse((await agent.runRaw(['list', '--json'])).stdout) as {
+      results: Array<{ id: string }>;
+    };
+    expect(list.results.map((row) => row.id)).toContain(artifactId);
   });
 
   it('a current config with an unknown root key fails with INVALID_CONFIG and names the key', async () => {
@@ -209,6 +212,6 @@ describe('current config gate', () => {
     expect(res.exitCode).toBe(0);
     expect(res.stdout).toContain('preserve current config');
     expect(res.stdout).toContain('--reset-config');
-    expect(res.stdout.replace(/\s+/g, ' ')).toContain('artifacts and cache data are preserved');
+    expect(res.stdout.replace(/\s+/g, ' ')).toContain('canonical history is preserved');
   });
 });

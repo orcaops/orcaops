@@ -1,21 +1,17 @@
-import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { Store } from '@orcaops/storage';
-import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
+import { uuidv7 } from '@orcaops/storage';
+import {
+  type ProjectDatabase,
+  recordProjectCloudSyncFailure,
+} from '@orcaops/storage/history/database';
 
+import { fixture } from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
 import { clearCloudLogin, seedCloudLogin } from '../support/test-helpers.js';
 
-/**
- * Inject a recorded failure via Store.recordCloudSyncFailure (which is
- * what eagerPush calls internally). Calling it `failures` times reaches
- * the desired consecutive_failures count via the same atomic UPDATE
- * path the runtime uses, so the test exercises the public Store API
- * rather than poking columns directly.
- */
-function seedFailure(
-  cwd: string,
+async function seedFailure(
+  database: ProjectDatabase,
   artifactId: string,
   failures: number,
   attemptedAt: string,
@@ -30,44 +26,52 @@ function seedFailure(
     | 'server-behind'
     | 'unknown',
   errorMessage: string | null
-): void {
-  const dbPath = path.join(cwd, '.orcaops', 'cache', 'orcaops.db');
-  const store = new Store(dbPath);
-  try {
-    for (let i = 0; i < failures; i++) {
-      store.recordCloudSyncFailure(artifactId, {
+): Promise<void> {
+  for (let i = 0; i < failures; i++) {
+    await recordProjectCloudSyncFailure(
+      database,
+      {
+        operationId: uuidv7(),
+        revisionId: uuidv7(),
+        artifactId,
+        target: {
+          server_url: 'https://cloud.example',
+          org_id: 'test-org',
+          account_id: 'test-account',
+        },
         kind: errorKind,
         message: errorMessage,
         attemptedAt,
         attemptStartedAt: attemptedAt,
-      });
-    }
-  } finally {
-    store.close();
+      },
+      { secretAllow: [] }
+    );
   }
 }
 
 describe('orcaops push-status + cloud_sync surfaces', () => {
-  let repo: TempRepo;
+  let history: Awaited<ReturnType<typeof fixture>>;
   let agent: ReturnType<typeof makeAgent>;
 
   beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
+    history = await fixture();
     // The cloud-sync surfaces under test are gated on credential presence, so
     // seed a real credential file rather than forcing the gate: that exercises
     // the same detection a user's machine performs. Paired with the drain
     // kill-switch so seeded creds never reach the network.
     seedCloudLogin();
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+    agent = makeAgent({
+      cwd: history.main,
+      env: { ORCAOPS_DATA_DIR: history.root, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
   });
 
   afterEach(async () => {
     clearCloudLogin();
-    await repo.cleanup();
+    await history.cleanup();
   });
 
   it('reports an empty pending list on a fresh repo with no artifacts', async () => {
-    await agent.init({ noLlm: true });
     const res = await agent.runRaw(['push-status', '--json']);
     expect(res.exitCode).toBe(0);
     const r = JSON.parse(res.stdout) as { ok: boolean; pending: unknown[] };
@@ -76,21 +80,11 @@ describe('orcaops push-status + cloud_sync surfaces', () => {
   });
 
   it('surfaces pending artifact + error state in JSON after a recorded failure', async () => {
-    await agent.init({ noLlm: true });
-    const planRes = await agent.runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(
-        JSON.stringify({ task: 'rate limit endpoint', plan_steps: [{ text: 's1', label: 's1' }] })
-      ),
-    ]);
-    const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
+    const artifactId = await history.capture();
 
-    seedFailure(
-      repo.path,
-      plan.artifact_id,
+    await seedFailure(
+      history.writer,
+      artifactId,
       3,
       new Date().toISOString(),
       'http-5xx',
@@ -109,7 +103,7 @@ describe('orcaops push-status + cloud_sync surfaces', () => {
         next_attempt_seconds_from_now: number | null;
       }>;
     };
-    const row = r.pending.find((p) => p.artifact_id === plan.artifact_id);
+    const row = r.pending.find((p) => p.artifact_id === artifactId);
     expect(row).toBeDefined();
     expect(row?.consecutive_failures).toBe(3);
     expect(row?.last_push_error_kind).toBe('http-5xx');
@@ -121,16 +115,8 @@ describe('orcaops push-status + cloud_sync surfaces', () => {
   });
 
   it('orcaops status --json exposes a cloud_sync block with stuck count + last_failure', async () => {
-    await agent.init({ noLlm: true });
-    const planRes = await agent.runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(JSON.stringify({ task: 'thing', plan_steps: [{ text: 's1', label: 's1' }] })),
-    ]);
-    const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
-    seedFailure(repo.path, plan.artifact_id, 2, new Date().toISOString(), 'timeout', null);
+    const artifactId = await history.capture();
+    await seedFailure(history.writer, artifactId, 2, new Date().toISOString(), 'timeout', null);
 
     const res = await agent.runRaw(['status', '--json']);
     expect(res.exitCode).toBe(0);
@@ -144,24 +130,16 @@ describe('orcaops push-status + cloud_sync surfaces', () => {
     };
     expect(body.cloud_sync.pending_count).toBeGreaterThanOrEqual(1);
     expect(body.cloud_sync.stuck_count).toBe(1);
-    expect(body.cloud_sync.last_failure?.artifact_id).toBe(plan.artifact_id);
+    expect(body.cloud_sync.last_failure?.artifact_id).toBe(artifactId);
     expect(body.cloud_sync.last_failure?.kind).toBe('timeout');
     expect(body.cloud_sync.last_failure?.consecutive_failures).toBe(2);
   });
 
   it('push-status does not recommend a bare force retry when only upgrade-required is stuck', async () => {
-    await agent.init({ noLlm: true });
-    const planRes = await agent.runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(JSON.stringify({ task: 'thing', plan_steps: [{ text: 's1', label: 's1' }] })),
-    ]);
-    const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
-    seedFailure(
-      repo.path,
-      plan.artifact_id,
+    const artifactId = await history.capture();
+    await seedFailure(
+      history.writer,
+      artifactId,
       2,
       new Date().toISOString(),
       'upgrade-required',
@@ -175,18 +153,10 @@ describe('orcaops push-status + cloud_sync surfaces', () => {
   });
 
   it('doctor suppresses the force-retry footer when only deterministic kinds are stuck', async () => {
-    await agent.init({ noLlm: true });
-    const planRes = await agent.runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(JSON.stringify({ task: 'thing', plan_steps: [{ text: 's1', label: 's1' }] })),
-    ]);
-    const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
-    seedFailure(
-      repo.path,
-      plan.artifact_id,
+    const artifactId = await history.capture();
+    await seedFailure(
+      history.writer,
+      artifactId,
       3,
       new Date().toISOString(),
       'upgrade-required',
@@ -205,17 +175,39 @@ describe('orcaops push-status + cloud_sync surfaces', () => {
     expect(details).not.toContain('resync --force');
   });
 
+  it('doctor preserves content-invalid history instead of recommending a forced resend', async () => {
+    const artifactId = await history.capture();
+    await seedFailure(
+      history.writer,
+      artifactId,
+      1,
+      new Date().toISOString(),
+      'content-invalid',
+      'retained content was rejected'
+    );
+
+    const res = await agent.runRaw(['doctor', '--json']);
+    expect(res.exitCode).toBeLessThanOrEqual(1);
+    const report = JSON.parse(res.stdout) as {
+      checks: Array<{ name: string; details?: string[] }>;
+    };
+    const details = (
+      report.checks.find((check) => check.name === 'cloud-sync-pending')?.details ?? []
+    ).join('\n');
+    expect(details).toContain('preserve the retained artifact and report this diagnostic');
+    expect(details).not.toContain('resync --force');
+  });
+
   it('orcaops doctor surfaces a cloud-sync-pending warn when a stuck artifact exists', async () => {
-    await agent.init({ noLlm: true });
-    const planRes = await agent.runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(JSON.stringify({ task: 'thing', plan_steps: [{ text: 's1', label: 's1' }] })),
-    ]);
-    const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
-    seedFailure(repo.path, plan.artifact_id, 4, new Date().toISOString(), 'http-4xx', 'rejected');
+    const artifactId = await history.capture();
+    await seedFailure(
+      history.writer,
+      artifactId,
+      4,
+      new Date().toISOString(),
+      'http-4xx',
+      'rejected'
+    );
 
     const res = await agent.runRaw(['doctor', '--json']);
     expect(res.exitCode).toBeLessThanOrEqual(1); // warn does not fail-exit
@@ -225,6 +217,9 @@ describe('orcaops push-status + cloud_sync surfaces', () => {
     const probe = r.checks.find((c) => c.name === 'cloud-sync-pending');
     expect(probe).toBeDefined();
     expect(probe?.status).toBe('warn');
-    expect(probe?.summary).toMatch(/stuck on cloud sync/);
+    expect(probe?.summary).toMatch(/retained artifact target.*pending cloud sync/);
+    expect((probe?.details ?? []).join('\n')).toContain(
+      'inspect the original operation, then run `orcaops resync --force` only when retry is safe'
+    );
   });
 });

@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -77,7 +77,10 @@ describe('orcaops eval test', () => {
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
-    agent = makeAgent({ cwd: repo.path });
+    agent = makeAgent({
+      cwd: repo.path,
+      env: { ORCAOPS_DATA_DIR: path.join(repo.path, 'history-data') },
+    });
     await agent.init({ noLlm: true });
     const addPack = await agent.runRaw([
       'eval',
@@ -115,14 +118,16 @@ describe('orcaops eval test', () => {
 
   it('runs pass and violation fixtures without changing the real store', async () => {
     const passingFixture = await writeFixture({ plan: fixturePlan(), fires_at: 'post-plan' });
-    const storeRoot = path.join(repo.path, '.orcaops');
+    const storeRoot = path.join(repo.path, 'history-data');
     const before = await snapshotFiles(storeRoot);
 
     const first = await runFixture(passingFixture);
     expect(first.exitCode).toBe(0);
     const firstEnvelope = JSON.parse(first.stdout) as EvalTestOk;
     expect(firstEnvelope.run.verdict).toBe('pass');
-    expect(firstEnvelope.artifact_id).toMatch(/^fixture-.+/);
+    expect(firstEnvelope.artifact_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    );
     expect(await snapshotFiles(storeRoot)).toEqual(before);
 
     const second = await runFixture(passingFixture);
@@ -157,9 +162,38 @@ describe('orcaops eval test', () => {
     expect(await snapshotFiles(storeRoot)).toEqual(before);
   });
 
+  it('evaluates a fixture without recreating missing project history', async () => {
+    const fixture = await writeFixture({ plan: fixturePlan(), fires_at: 'post-plan' });
+    const historyRoot = path.join(repo.path, 'history-data');
+    await rm(historyRoot, { recursive: true });
+
+    const result = await runFixture(fixture);
+
+    expect(result.exitCode, result.stdout).toBe(0);
+    expect((JSON.parse(result.stdout) as EvalTestOk).run.verdict).toBe('pass');
+    await expect(readdir(historyRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses secret fixture content before evaluator lookup without changing history', async () => {
+    const secret = 'ghp_' + 'A'.repeat(36);
+    const fixture = await writeFixture({
+      plan: { ...fixturePlan(), task: secret },
+      fires_at: 'post-plan',
+    });
+    const historyRoot = path.join(repo.path, 'history-data');
+    const before = await snapshotFiles(historyRoot);
+
+    const result = await runFixture(fixture, 'core/not-real');
+
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout).error.code).toBe('SECRET_IN_PAYLOAD');
+    expect(result.stdout + result.stderr).not.toContain(secret);
+    expect(await snapshotFiles(historyRoot)).toEqual(before);
+  });
+
   it('leaves the real store unchanged when evaluator discovery or fixture setup fails', async () => {
     const validFixture = await writeFixture({ plan: fixturePlan(), fires_at: 'post-plan' });
-    const storeRoot = path.join(repo.path, '.orcaops');
+    const storeRoot = path.join(repo.path, 'history-data');
     const before = await snapshotFiles(storeRoot);
 
     const missingEvaluator = await runFixture(validFixture, 'core/not-real');
@@ -592,7 +626,7 @@ describe('orcaops eval test', () => {
     const malformedFixture = await writeFixture({
       plan: { schema_version: 4, artifact_id: 'malformed' },
     });
-    const storeRoot = path.join(repo.path, '.orcaops');
+    const storeRoot = path.join(repo.path, 'history-data');
     const before = await snapshotFiles(storeRoot);
 
     const result = await runFixture(malformedFixture, 'core/not-real');

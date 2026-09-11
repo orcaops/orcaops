@@ -30,8 +30,8 @@ Skip when:
 # How to invoke
 
 \`\`\`bash
-orcaops loose-ends --json                     # current branch
-orcaops loose-ends --all-branches --json      # repo-wide sweep
+orcaops loose-ends --json                     # current project
+orcaops loose-ends --scope project --json      # repo-wide sweep
 orcaops loose-ends --artifact <id> --json     # exact scope (repeatable)
 \`\`\`
 

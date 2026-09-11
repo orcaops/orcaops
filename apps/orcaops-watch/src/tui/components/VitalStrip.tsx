@@ -1,7 +1,7 @@
 import { DEFAULT_SPARKLINE } from '@orcaops/watch-data/ui';
 import type { WatchThread } from '@orcaops/watch-data/ui';
 
-import { ago, fmtTokens } from '../../core/format';
+import { ago, fmtSessionTokenValue, summarizeSessionTokens } from '../../core/format';
 import { useCockpitTheme } from '../ThemeProvider';
 import { Rule } from '../kit';
 import { truncate } from '../layout';
@@ -40,18 +40,17 @@ export interface CompactVitalStripLayout {
 /** One-row vitals retain token and step truth, then add activity if it fits. */
 export function selectCompactVitalStripLayout({
   width,
-  tokens,
+  tokenValue,
   done,
   total,
   activity,
 }: {
   width: number;
-  tokens: number;
+  tokenValue: string;
   done: number;
   total: number;
   activity: string;
 }): CompactVitalStripLayout {
-  const tokenValue = fmtTokens(tokens);
   const stepValue = total > 0 ? `${done}/${total}` : '—';
   const row = fitActionRow(
     [
@@ -125,10 +124,9 @@ export function VitalStrip({
 }) {
   const { BRIGHT, DIM, DIMMER } = useCockpitTheme();
   const inner = Math.max(16, width - 2);
-  const tokens = thread.sessions.reduce((total, session) => total + session.tokens, 0);
-  const sessions = new Set(
-    thread.sessions.map((session) => `${session.agent}:${session.session_id}`)
-  ).size;
+  const tokenSummary = summarizeSessionTokens(thread.sessions);
+  const tokenValue = fmtSessionTokenValue(tokenSummary);
+  const sessions = tokenSummary.sessions;
   const done = thread.planSteps.filter((s) => s.done).length;
   const wip = thread.planSteps.filter((s) => s.current).length;
   const total = thread.planSteps.length;
@@ -137,7 +135,7 @@ export function VitalStrip({
   if (inner < 54) {
     const layout = selectCompactVitalStripLayout({
       width: inner,
-      tokens,
+      tokenValue,
       done,
       total,
       activity: ago(thread.lastWriteMs, nowMs),
@@ -175,7 +173,7 @@ export function VitalStrip({
           <box flexDirection="row" height={1}>
             <text fg={DIMMER}>SESSION TOKENS</text>
             <box flexGrow={1} />
-            <text fg={BRIGHT}>{fmtTokens(tokens)}</text>
+            <text fg={BRIGHT}>{tokenValue}</text>
           </box>
           <box height={1}>
             <text
@@ -183,7 +181,16 @@ export function VitalStrip({
             >{`${sessions} session${sessions === 1 ? '' : 's'} · ${thread.agent}`}</text>
           </box>
           <box height={1}>
-            <text fg={DIMMER}>{truncate(sessionScope, cellW)}</text>
+            <text fg={DIMMER}>
+              {truncate(
+                tokenSummary.status === 'exact'
+                  ? sessionScope
+                  : tokenSummary.status === 'incomplete' && tokenSummary.tokens !== 0
+                    ? 'partial · observed lower bound'
+                    : 'usage unavailable',
+                cellW
+              )}
+            </text>
           </box>
         </box>
 

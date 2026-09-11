@@ -639,6 +639,9 @@ describe('routine Story reader', () => {
   it('joins required global item dispositions by exact id', async () => {
     const before = await storyReader();
     expect(before.reader.finish.blockers).toContainEqual({ kind: 'story_items', open: 2 });
+    expect(
+      before.reader.routeIndex.attentionItems.find((item) => item.kind === 'finding')?.source
+    ).toContain('agent-reported');
 
     events.push(
       {

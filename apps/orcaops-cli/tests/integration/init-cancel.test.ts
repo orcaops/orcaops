@@ -87,7 +87,6 @@ describe('interactive init cancellation', () => {
     ['session-hook choice', 'Session-start hooks', false, []],
     ['machine-hook consent', 'Continue with', false, []],
     ['instruction-file choice', 'Let orcaops keep a section', false, ['--scope', 'project']],
-    ['archive choice', 'Keep a backup', false, []],
     ['customization choice', 'Customize more', false, []],
     ['command prefix', 'Name prefix', true, []],
     ['install scope', 'Where should', true, []],

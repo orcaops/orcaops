@@ -2,13 +2,13 @@
 // watch sidecar's internal `review …` argv) depends on. The verbs have their
 // own suites; this pins the parser and the dispatcher.
 
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ensureReviewStateVersion, REVIEW_STATE_VERSION } from './reviewState.js';
 import { parseReviewArgs, resolveReviewRoot, runReview } from './run.js';
+import { capturedReviewFixture } from '../tests/capturedReviewFixture.js';
 
 let root: string;
 let out: string[];
@@ -16,7 +16,6 @@ let err: string[];
 
 beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'orcaops-run-test-'));
-  await ensureReviewStateVersion(path.join(root, '.orcaops', 'reviews', 'demo'), root);
   out = [];
   err = [];
   vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
@@ -30,6 +29,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
@@ -140,77 +140,104 @@ describe('parseReviewArgs', () => {
 describe('runReview dispatch', () => {
   const env = () => ({ ORCAOPS_ROOT: root }) as NodeJS.ProcessEnv;
 
-  it('routes the public durable-state health surface', async () => {
+  it('refuses to adopt legacy file health as canonical project history', async () => {
     expect(
-      await runReview(['review', 'state', 'health', '--branch', 'demo', '--json'], env())
-    ).toBe(0);
+      await runReview(
+        [
+          'review',
+          'state',
+          'health',
+          '--project',
+          '01a07bd8-655f-7a07-8edf-337973600ef6',
+          '--branch',
+          'demo',
+          '--json',
+        ],
+        { ...env(), ORCAOPS_DATA_DIR: path.join(root, 'missing-data') }
+      )
+    ).toBe(1);
     expect(JSON.parse(out.at(-1)!)).toMatchObject({
-      schema_version: 2,
-      branch: 'demo',
-      status: 'HEALTHY',
+      schema_version: 3,
+      ok: false,
+      code: 'HISTORY_MISSING',
     });
   });
 
   it('routes journal, comments, and anchor to their verbs (root via env)', async () => {
-    // journal: empty log ⇒ empty ledger, exit 0.
-    expect(await runReview(['review', 'journal', '--branch', 'demo'], env())).toBe(0);
-    expect(JSON.parse(out[out.length - 1]!)).toEqual({
+    const f = await capturedReviewFixture();
+    await f.publishFloor();
+    // The verbs resolve their data root from the ambient environment, so the
+    // stub has to reach process.env, not only the argv-side env.
+    vi.stubEnv('ORCAOPS_DATA_DIR', f.dataRoot);
+    const reviewEnv = { ORCAOPS_ROOT: f.gitRoot } as NodeJS.ProcessEnv;
+    // journal: no appended events ⇒ empty ledger, exit 0.
+    expect(await runReview(['review', 'journal', '--branch', f.branch], reviewEnv)).toBe(0);
+    expect(JSON.parse(out[out.length - 1]!)).toMatchObject({
       sections: [],
       findings: [],
       uncertainties: [],
       coverage: [],
       prompts: [],
-      unassigned: { gapRows: [], gapRowsDigest: null, ambiguousHunkKeys: [] },
-      lifecycle: { state: 'OPEN', stale: false, current: null, history: [] },
+      lifecycle: { state: 'OPEN' },
       ledger_generation: expect.any(String),
     });
-    // comments: empty log ⇒ empty payload, exit 0.
-    expect(await runReview(['review', 'comments', '--branch', 'demo', '--json'], env())).toBe(0);
+    // comments: no retained comments ⇒ empty payload, exit 0.
+    expect(await runReview(['review', 'comments', '--branch', f.branch, '--json'], reviewEnv)).toBe(
+      0
+    );
     expect(JSON.parse(out[out.length - 1]!)).toMatchObject({ open_count: 0, comments: [] });
-    // anchor: no cached diff ⇒ the verb's precondition error.
+    // anchor: a file the retained diff does not carry ⇒ the verb's precondition error.
     expect(
       await runReview(
-        ['review', 'anchor', '--branch', 'demo', '--file', 'a', '--side', 'add', '--start', '1'],
-        env()
+        ['review', 'anchor', '--branch', f.branch, '--file', 'a', '--side', 'add', '--start', '1'],
+        reviewEnv
       )
     ).toBe(1);
-    expect(err.join('')).toContain('no cached diff');
-  });
+    expect(err.join('')).toContain("no changed 'add' lines");
+  }, 180_000);
 
-  it('leaves JSON journal health failures to the typed append boundary', async () => {
-    await writeFile(
-      path.join(root, '.orcaops', 'reviews', 'demo', 'review-state.json'),
-      `${JSON.stringify({ review_state_version: REVIEW_STATE_VERSION - 1 })}\n`
-    );
+  it('emits a journal append rejection as a typed envelope on stderr', async () => {
+    // The append boundary owns its own refusal shape: a branch the project
+    // retains no review for cannot take an event, and the caller gets a
+    // parseable code on stderr rather than a ledger on stdout.
+    const f = await capturedReviewFixture();
+    vi.stubEnv('ORCAOPS_DATA_DIR', f.dataRoot);
     const event = JSON.stringify({
       type: 'section',
       ts: '2026-07-09T00:00:00.000Z',
       threadKey: 'S1',
       action: 'VISIT',
     });
-
     expect(
-      await runReview(['review', 'journal', '--branch', 'demo', '--add', event, '--json'], env())
+      await runReview(
+        ['review', 'journal', '--branch', 'never-reviewed', '--add', event, '--json'],
+        { ORCAOPS_ROOT: f.gitRoot } as NodeJS.ProcessEnv
+      )
     ).toBe(1);
-
     expect(out).toEqual([]);
     expect(JSON.parse(err.join(''))).toMatchObject({
       ok: false,
-      code: 'DURABLE_STATE_UNHEALTHY',
-      message: expect.stringContaining('repair deletes the complete review directory'),
+      code: 'FLOOR_UNAVAILABLE',
+      message: expect.any(String),
     });
-  });
+  }, 180_000);
 
   it('an unknown subcommand exits 2 with the routing error', async () => {
     expect(await runReview(['review', 'nope'], env())).toBe(2);
     expect(err.join('')).toContain("unknown subcommand 'nope'");
   });
 
-  it('rejects cache rebuild authorization outside review data', async () => {
+  it('rejects a retired cache rebuild authorization on any verb', async () => {
+    // The flag named a disposable file cache that no longer exists; the retained
+    // floor publication is the cache, so the verb says so rather than accepting
+    // a no-op the caller would read as a forced rebuild.
     expect(
       await runReview(['review', 'journal', '--branch', 'demo', '--rebuild-cache'], env())
     ).toBe(2);
-    expect(err.join('')).toContain('--rebuild-cache is only valid with `review data`');
+    expect(await runReview(['review', 'data', '--branch', 'demo', '--rebuild-cache'], env())).toBe(
+      2
+    );
+    expect(err.join('')).toContain('--rebuild-cache is retired');
   });
 
   it.each([

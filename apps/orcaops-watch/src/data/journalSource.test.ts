@@ -53,7 +53,7 @@ describe('Watch v2 journal boundary', () => {
     ).toBeNull();
   });
 
-  it('parses successful archive warnings without adding them to the ledger', () => {
+  it('carries the replayed ledger alone, with no second channel beside it', () => {
     const response = parseJournalResponse(
       JSON.stringify({
         sections: [],
@@ -64,62 +64,24 @@ describe('Watch v2 journal boundary', () => {
         unassigned: { gapRows: [], gapRowsDigest: null, ambiguousHunkKeys: [] },
         lifecycle: { state: 'OPEN', stale: false, current: null, history: [] },
         ledger_generation: 'generation-a',
-        warnings: [
-          {
-            code: 'REVIEW_ARCHIVE_WRITE_FAILED',
-            message: 'hot append succeeded; mirror unavailable',
-          },
-        ],
       })
     );
 
-    expect(response.warnings).toEqual([
-      {
-        code: 'REVIEW_ARCHIVE_WRITE_FAILED',
-        message: 'hot append succeeded; mirror unavailable',
-      },
-    ]);
+    expect(Object.keys(response)).toEqual(['ledger']);
+    expect(response.ledger.ledgerGeneration).toBe('generation-a');
     expect(response.ledger).not.toHaveProperty('warnings');
   });
 
-  it('retains typed rejections with archive warnings as one document', () => {
+  it('keeps a typed rejection to its code and message when the verb sends more', () => {
     expect(
       parseAppendRejection(
         JSON.stringify({
           ok: false,
           code: 'STALE_LEDGER',
           message: 'refresh and retry',
-          warnings: [
-            {
-              code: 'REVIEW_ARCHIVE_SETUP_FAILED',
-              message: 'archive unavailable',
-            },
-          ],
+          warnings: [{ code: 'REVIEW_ARCHIVE_WRITE_FAILED', message: 'mirror unavailable' }],
         })
       )
-    ).toEqual({
-      ok: false,
-      code: 'STALE_LEDGER',
-      message: 'refresh and retry',
-      warnings: [
-        {
-          code: 'REVIEW_ARCHIVE_SETUP_FAILED',
-          message: 'archive unavailable',
-        },
-      ],
-    });
-  });
-
-  it('rejects malformed warning fields at the sidecar boundary', () => {
-    expect(
-      parseAppendRejection(
-        JSON.stringify({
-          ok: false,
-          code: 'STALE_LEDGER',
-          message: 'refresh and retry',
-          warnings: [{ code: 'INVENTED_WARNING', message: 'nope' }],
-        })
-      )
-    ).toBeNull();
+    ).toEqual({ ok: false, code: 'STALE_LEDGER', message: 'refresh and retry' });
   });
 });

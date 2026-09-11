@@ -235,9 +235,12 @@ async function readConfigDocument(
   }
   try {
     return JSON.parse(rawText);
-  } catch (err) {
+  } catch {
     if (tolerateUnreadable) return UNREADABLE;
-    throw new Error(`${location.configPath} is not valid JSON: ${(err as Error).message}`);
+    throw new ConfigValidationError(
+      `${location.configPath} is not valid JSON. Correct the configuration file before retrying.`,
+      'config'
+    );
   }
 }
 

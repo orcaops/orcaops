@@ -10,6 +10,11 @@ vi.mock('./shared.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./shared.js')>();
   return {
     ...actual,
+    createReviewMutation: () => ({
+      client: holder.client,
+      persistence: undefined,
+      didDispatch: () => true,
+    }),
     withReviewCloud: async (
       _opts: unknown,
       fn: (ctx: {
@@ -18,6 +23,7 @@ vi.mock('./shared.js', async (importOriginal) => {
         baseUrl: string;
         orgId: string;
         credentialStore: unknown;
+        stampUsage: () => Promise<void>;
       }) => Promise<unknown>
     ) =>
       fn({
@@ -26,6 +32,7 @@ vi.mock('./shared.js', async (importOriginal) => {
         baseUrl: 'https://cloud.example',
         orgId: 'org_1',
         credentialStore: {},
+        stampUsage: async () => undefined,
       }),
   };
 });

@@ -11,6 +11,20 @@ export interface GitResult {
   stderr: string;
 }
 
+export function isolatedReviewGitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...source };
+  for (const key of [
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_COMMON_DIR',
+    'GIT_INDEX_FILE',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  ])
+    delete env[key];
+  return env;
+}
+
 export function runGit(
   cwd: string,
   args: readonly string[],
@@ -67,31 +81,12 @@ export async function revParseTree(cwd: string, ref: string): Promise<string | n
   return sha.length > 0 ? sha : null;
 }
 
-/**
- * The blob sha of `file` as it exists in `commit`'s tree, or null if the path is
- * absent there. The blame cache keys on this side-specific blob: the tip blob for
- * an added path (it exists at the tip), the base blob for a deleted/renamed old
- * path (it exists only at the base). A path missing on the queried side → null,
- * and the caller falls back to an uncached blame.
- */
-export async function revParseBlob(
-  cwd: string,
-  commit: string,
-  file: string
-): Promise<string | null> {
-  const r = await runGit(cwd, ['rev-parse', '--verify', '--quiet', `${commit}:${file}`]);
-  if (r.code !== 0) return null;
-  const sha = r.stdout.toString('utf8').trim();
-  return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
-}
-
 const BLAME_HEADER = /^([0-9a-f]{40}) \d+ (\d+)(?: \d+)?$/;
 
 /**
  * A blame result. `ok` distinguishes a genuine "no lines" answer from a git
- * failure: both leave `map` empty, but the blame cache MUST NOT persist a
- * failure as an empty result (a transient glitch would otherwise poison the
- * entry). Callers that don't care about caching can ignore `ok` and read `map`.
+ * failure: both leave `map` empty, while callers must surface the latter as
+ * degraded attribution.
  */
 export interface BlameResult {
   ok: boolean;
@@ -146,101 +141,4 @@ export async function blameFileReverse(
     if (m) map.set(Number(m[2]), m[1]);
   }
   return { ok: true, map };
-}
-
-/** One `--name-status` row. `status` is the letter (A/M/D/R/C/T/…); `score` is
- * the rename/copy similarity (e.g. 100 for `R100`) or null; `oldPath` is the
- * source path for a rename/copy, else null; `path` is the new/primary path. */
-export interface NameStatusEntry {
-  status: string;
-  score: number | null;
-  path: string;
-  oldPath: string | null;
-}
-
-export interface NameStatusResult {
-  ok: boolean;
-  entries: NameStatusEntry[];
-}
-
-// Git can exit 0 while WARNING (to stderr) that inexact rename detection was
-// skipped because too many files blew `diff.renameLimit` — an incomplete
-// rename/copy classification we must not trust (it could misclassify a
-// rename-involved path as stable and cache a wrong owner). Treat as ok:false.
-const RENAME_SKIPPED_RE = /rename detection was skipped|diff\.renameLimit/i;
-
-/**
- * Hermetic per-segment `--name-status` between two trees. Forces explicit
- * rename+copy detection (`-c diff.renames=true --find-renames --find-copies`)
- * so results never inherit the user's `diff.*` config, and reads NUL-delimited
- * raw paths (`-z`) so a path containing a tab/newline/quote is parsed verbatim,
- * never as a Git-quoted display string. Any failure — non-zero exit, the
- * rename-limit warning, or a truncated stream — returns `ok:false` with no
- * entries, so a caller degrades to full blame rather than trusting a partial
- * "this segment touched nothing" answer.
- */
-/**
- * Parse a `git diff --name-status -z` raw string into entries. Pure (no git), so
- * it is directly unit-testable. `-z` frames each field with a trailing NUL:
- * `<status>\0<path>\0` for A/M/D/T, `R<score>\0<old>\0<new>\0` (and C) for
- * rename/copy — so non-empty output ALWAYS ends in a NUL. Output that doesn't (a
- * truncated stream) or that ends mid-record returns `ok:false`, so a caller never
- * trusts a possibly-cut final path (which could misclassify a rename-involved
- * path as stable). The split drops the trailing empty token after the final NUL.
- */
-export function parseNameStatusZ(raw: string): NameStatusResult {
-  if (raw.length > 0 && !raw.endsWith('\0')) return { ok: false, entries: [] };
-  const tokens = raw.split('\0');
-  const entries: NameStatusEntry[] = [];
-  let i = 0;
-  while (i < tokens.length) {
-    const field = tokens[i];
-    if (field === undefined || field.length === 0) {
-      i += 1;
-      continue; // the trailing empty token
-    }
-    const letter = field[0];
-    const score = field.length > 1 ? Number.parseInt(field.slice(1), 10) : NaN;
-    if (letter === 'R' || letter === 'C') {
-      const oldPath = tokens[i + 1];
-      const newPath = tokens[i + 2];
-      // Empty path tokens mean the record was truncated after a field's NUL (a
-      // path is never empty) — reject rather than emit a bogus rename.
-      if (!oldPath || !newPath) return { ok: false, entries: [] };
-      entries.push({
-        status: letter,
-        score: Number.isFinite(score) ? score : null,
-        path: newPath,
-        oldPath,
-      });
-      i += 3;
-    } else {
-      const p = tokens[i + 1];
-      if (!p) return { ok: false, entries: [] };
-      entries.push({ status: letter, score: null, path: p, oldPath: null });
-      i += 2;
-    }
-  }
-  return { ok: true, entries };
-}
-
-export async function nameStatus(
-  cwd: string,
-  openTree: string,
-  closeTree: string
-): Promise<NameStatusResult> {
-  const r = await runGit(cwd, [
-    '-c',
-    'diff.renames=true',
-    'diff',
-    '--name-status',
-    '-z',
-    '--find-renames',
-    '--find-copies',
-    '--no-color',
-    openTree,
-    closeTree,
-  ]);
-  if (r.code !== 0 || RENAME_SKIPPED_RE.test(r.stderr)) return { ok: false, entries: [] };
-  return parseNameStatusZ(r.stdout.toString('utf8'));
 }

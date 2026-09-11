@@ -1,11 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
-import { loadConfig, Repo } from '@orcaops/core';
-import { ArtifactStore, type Config, type SourcePlanPin } from '@orcaops/storage';
-import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
+import { Repo } from '@orcaops/core';
+import { getDefaultConfig, type SourcePlanPin } from '@orcaops/storage';
+import { readProjectArtifact } from '@orcaops/storage/history/database';
 
-import type { CliContext } from './context.js';
-import { buildEvaluatorContext } from './evaluator-bridge.js';
+import { databaseEvaluatorStore } from './database-evaluators.js';
+import { buildEvaluatorContext, type LifecycleEvaluatorContext } from './evaluator-bridge.js';
+import { fixture } from '../../tests/helpers/database-history.js';
 
 /**
  * The bridge populates `EvaluatorContext.prior_plan` for
@@ -17,110 +18,71 @@ import { buildEvaluatorContext } from './evaluator-bridge.js';
  * priorPlan as "nothing to compare against".
  */
 describe('buildEvaluatorContext — prior_plan population', () => {
-  let repo: TempRepo;
-  let config: Config;
-  let store: ArtifactStore;
-  let ctx: CliContext;
+  let f: Awaited<ReturnType<typeof fixture>>;
+  let ctx: LifecycleEvaluatorContext;
 
-  const branch = 'feat/prior-plan-test';
   const artifactId = '01999999-9999-7000-8000-000000000001';
   const STEP_A = '01HX0K8N6ZQF8M5R2V8DZ7T3KA';
   const STEP_B = '01HX0K8N6ZQF8M5R2V8DZ7T3KB';
 
   beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    // loadConfig needs `.orcaops/` to exist; createTempRepo doesn't set
-    // it up. Build a minimal config in-memory instead.
-    config = (await loadConfig(repo.path).catch(() => null)) as unknown as Config;
-    if (!config) {
-      // loadConfig refused — synthesize a default via storage's helper.
-      const { getDefaultConfig } = await import('@orcaops/storage');
-      config = getDefaultConfig();
-    }
-    store = new ArtifactStore({ repoRoot: repo.path, config });
+    f = await fixture();
     ctx = {
-      repoRoot: repo.path,
-      config,
-      gates: { cloud: false },
-      repo: new Repo(repo.path),
-      store,
-      archive: null,
-      healedProjection: false,
-      healResult: null,
-      invokingAgent: { agent: 'claude-code', source: 'ambient' },
+      repoRoot: f.main,
+      repo: new Repo(f.main),
+      config: getDefaultConfig(),
+      get store() {
+        return databaseEvaluatorStore(readProjectArtifact(f.writer, artifactId)!.thread);
+      },
     };
   });
 
-  afterEach(async () => {
-    store.close();
-    await repo.cleanup();
-  });
-
   async function writeInitialPlan(sourcePlan?: SourcePlanPin): Promise<void> {
-    await store.writePlan(
-      {
-        schema_version: 4,
-        artifact_id: artifactId,
-        branch,
-        base_sha: 'sha-base',
-        agent: 'claude-code',
-        agent_session_id: null,
-        task: 'do the thing',
-        label: 'initial-label',
-        plan_steps: [
-          { step_id: STEP_A, text: 'step a text', label: 'step-a', acceptance_criteria: [] },
-          { step_id: STEP_B, text: 'step b text', label: 'step-b', acceptance_criteria: [] },
-        ],
-        touched_scope: ['initial-scope'],
-        non_goals: [
-          {
-            text: 'no-initial-pivots',
-            rationale: 'out of scope for the initial slice',
-            source_refs: [],
-          },
-        ],
-        decisions: [],
-        started_at: '2026-04-26T12:00:00.000Z',
-        revision_n: 0,
-        revised_at: null,
-        rationale: null,
-        step_lineage: { added: [], dropped: [], unchanged: [], rewritten: [] },
-        criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
-        prior_plan_event_id: null,
-      },
-      sourcePlan
-        ? { idempotencyKey: 'init-plan-key', sourcePlan }
-        : { idempotencyKey: 'init-plan-key' }
-    );
+    await f.capture(artifactId, {
+      ts: '2026-04-26T12:00:00.000Z',
+      ...(sourcePlan ? { sourcePlan } : {}),
+      touchedScope: ['initial-scope'],
+      nonGoals: [{ text: 'no-initial-pivots', rationale: 'out of scope', source_refs: [] }],
+      steps: [
+        { step_id: STEP_A, text: 'step a text', label: 'step-a', acceptance_criteria: [] },
+        { step_id: STEP_B, text: 'step b text', label: 'step-b', acceptance_criteria: [] },
+      ],
+    });
   }
 
   async function revisePlanAddStepC(): Promise<void> {
-    await store.revisePlan(
-      {
-        idempotency_key: 'revise-add-c',
-        artifact_id: artifactId,
-        label: 'revised-label',
-        plan_steps: [
-          { step_id: STEP_A, text: 'step a text', label: 'step-a', acceptance_criteria: [] },
-          { step_id: STEP_B, text: 'step b text', label: 'step-b', acceptance_criteria: [] },
-          { text: 'step c text', label: 'step-c', acceptance_criteria: [] },
-        ],
-        touched_scope: ['initial-scope', 'new-scope'],
-        non_goals: [
-          {
-            text: 'no-initial-pivots',
-            rationale: 'out of scope for the initial slice',
-            source_refs: [],
-          },
-          { text: 'no-second-pivots', rationale: 'deferred to a later artifact', source_refs: [] },
-        ],
-        rationale: 'discovered a missing step c',
-        prior_plan_event_id: null,
-        acknowledge_drops_completed_steps: [],
-        acknowledge_criteria_changes: [],
-        decisions: [],
-      },
-      { idempotencyKey: 'revise-add-c' }
+    await f.mutate(artifactId, {}, (semantics) =>
+      semantics.revisePlan(
+        {
+          idempotency_key: 'revise-add-c',
+          artifact_id: artifactId,
+          label: 'revised-label',
+          plan_steps: [
+            { step_id: STEP_A, text: 'step a text', label: 'step-a', acceptance_criteria: [] },
+            { step_id: STEP_B, text: 'step b text', label: 'step-b', acceptance_criteria: [] },
+            { text: 'step c text', label: 'step-c', acceptance_criteria: [] },
+          ],
+          touched_scope: ['initial-scope', 'new-scope'],
+          non_goals: [
+            {
+              text: 'no-initial-pivots',
+              rationale: 'out of scope',
+              source_refs: [],
+            },
+            {
+              text: 'no-second-pivots',
+              rationale: 'deferred to a later artifact',
+              source_refs: [],
+            },
+          ],
+          rationale: 'discovered a missing step c',
+          prior_plan_event_id: null,
+          acknowledge_drops_completed_steps: [],
+          acknowledge_criteria_changes: [],
+          decisions: [],
+        },
+        { idempotencyKey: 'revise-add-c' }
+      )
     );
   }
 
@@ -187,7 +149,7 @@ describe('buildEvaluatorContext — prior_plan population', () => {
     });
     expect(evalCtx.prior_plan).not.toBeNull();
     expect(evalCtx.prior_plan!.revision_n).toBe(0);
-    expect(evalCtx.prior_plan!.label).toBe('initial-label');
+    expect(evalCtx.prior_plan!.label).toBe(`History ${artifactId}`);
     expect(evalCtx.prior_plan!.plan_steps).toHaveLength(2);
     expect(evalCtx.prior_plan!.plan_steps.map((s) => s.step_id)).toEqual([STEP_A, STEP_B]);
     // Prior touched_scope / non_goals are the initial values — the
@@ -197,7 +159,7 @@ describe('buildEvaluatorContext — prior_plan population', () => {
     expect(evalCtx.prior_plan!.non_goals).toEqual([
       {
         text: 'no-initial-pivots',
-        rationale: 'out of scope for the initial slice',
+        rationale: 'out of scope',
         source_refs: [],
       },
     ]);
@@ -210,30 +172,32 @@ describe('buildEvaluatorContext — prior_plan population', () => {
   it('keeps a revision pass pinned when a newer plan is already live', async () => {
     await writeInitialPlan();
     await revisePlanAddStepC();
-    const revisionOne = await store.readPlan(artifactId);
-    const initialPlan = await store.readPlanRevision(artifactId, 0);
+    const revisionOne = await ctx.store.readPlan(artifactId);
+    const initialPlan = await ctx.store.readPlanRevision(artifactId, 0);
     if (revisionOne === null || initialPlan === null) throw new Error('missing plan fixture');
 
-    await store.revisePlan(
-      {
-        idempotency_key: 'revise-after-pinned-pass',
-        artifact_id: artifactId,
-        label: 'newer-label',
-        plan_steps: revisionOne.plan_steps.map((step) => ({
-          step_id: step.step_id,
-          text: step.text,
-          label: step.label,
-          acceptance_criteria: step.acceptance_criteria,
-        })),
-        touched_scope: ['newer-scope'],
-        non_goals: revisionOne.non_goals,
-        rationale: 'advance while the earlier pass is pending',
-        prior_plan_event_id: null,
-        acknowledge_drops_completed_steps: [],
-        acknowledge_criteria_changes: [],
-        decisions: [],
-      },
-      { idempotencyKey: 'revise-after-pinned-pass' }
+    await f.mutate(artifactId, {}, (semantics) =>
+      semantics.revisePlan(
+        {
+          idempotency_key: 'revise-after-pinned-pass',
+          artifact_id: artifactId,
+          label: 'newer-label',
+          plan_steps: revisionOne.plan_steps.map((step) => ({
+            step_id: step.step_id,
+            text: step.text,
+            label: step.label,
+            acceptance_criteria: step.acceptance_criteria,
+          })),
+          touched_scope: ['newer-scope'],
+          non_goals: revisionOne.non_goals,
+          rationale: 'advance while the earlier pass is pending',
+          prior_plan_event_id: null,
+          acknowledge_drops_completed_steps: [],
+          acknowledge_criteria_changes: [],
+          decisions: [],
+        },
+        { idempotencyKey: 'revise-after-pinned-pass' }
+      )
     );
 
     const evalCtx = await buildEvaluatorContext({
@@ -246,7 +210,7 @@ describe('buildEvaluatorContext — prior_plan population', () => {
     expect(evalCtx.plan.revision_n).toBe(1);
     expect(evalCtx.plan.label).toBe('revised-label');
     expect(evalCtx.prior_plan?.revision_n).toBe(0);
-    expect((await store.readPlan(artifactId))?.revision_n).toBe(2);
+    expect((await ctx.store.readPlan(artifactId))?.revision_n).toBe(2);
   });
 
   it('returns null prior_plan on non-revision phases even with revisions present', async () => {
@@ -272,65 +236,29 @@ describe('buildEvaluatorContext — prior_plan population', () => {
  * defaults would give checks a false account of the captured summary.
  */
 describe('buildEvaluatorContext — summary fields', () => {
-  let repo: TempRepo;
-  let config: Config;
-  let store: ArtifactStore;
-  let ctx: CliContext;
+  let f: Awaited<ReturnType<typeof fixture>>;
+  let ctx: LifecycleEvaluatorContext;
 
-  const branch = 'feat/summary-fields-test';
   const artifactId = '01999999-9999-7000-8000-000000000002';
   const STEP_A = '01HX0K8N6ZQF8M5R2V8DZ7T3KD';
 
   beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    const { getDefaultConfig } = await import('@orcaops/storage');
-    config = getDefaultConfig();
-    store = new ArtifactStore({ repoRoot: repo.path, config });
+    f = await fixture();
     ctx = {
-      repoRoot: repo.path,
-      config,
-      gates: { cloud: false },
-      repo: new Repo(repo.path),
-      store,
-      archive: null,
-      healedProjection: false,
-      healResult: null,
-      invokingAgent: { agent: 'claude-code', source: 'ambient' },
+      repoRoot: f.main,
+      repo: new Repo(f.main),
+      config: getDefaultConfig(),
+      get store() {
+        return databaseEvaluatorStore(readProjectArtifact(f.writer, artifactId)!.thread);
+      },
     };
   });
 
-  afterEach(async () => {
-    store.close();
-    await repo.cleanup();
-  });
-
   async function writeMinimalPlan(): Promise<void> {
-    await store.writePlan(
-      {
-        schema_version: 4,
-        artifact_id: artifactId,
-        branch,
-        base_sha: 'sha-base',
-        agent: 'claude-code',
-        agent_session_id: null,
-        task: 'summary fields test',
-        label: 'summary-fields',
-        plan_steps: [
-          { step_id: STEP_A, text: 'do the thing', label: 'do-it', acceptance_criteria: [] },
-        ],
-        touched_scope: [],
-        non_goals: [],
-        decisions: [],
-        started_at: '2026-04-26T12:00:00.000Z',
-        revision_n: 0,
-        revised_at: null,
-        rationale: null,
-        step_lineage: { added: [], dropped: [], unchanged: [], rewritten: [] },
-        criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
-        prior_plan_event_id: null,
-      },
-      { idempotencyKey: 'plan-key' }
-    );
+    await f.capture(artifactId, {
+      ts: '2026-04-26T12:00:00.000Z',
+      steps: [{ step_id: STEP_A, text: 'do the thing', label: 'do-it', acceptance_criteria: [] }],
+    });
   }
 
   it('returns summary: null when no summary has been captured', async () => {
@@ -345,22 +273,24 @@ describe('buildEvaluatorContext — summary fields', () => {
 
   it('populates deferred_decisions and written_at from the real summary event', async () => {
     await writeMinimalPlan();
-    await store.writeSummary(
-      {
-        schema_version: 1,
-        artifact_id: artifactId,
-        outcome: 'shipped with caveats',
-        tests_written: ['wrote a unit test'],
-        tests_run: ['ran the suite'],
-        open_items: ['follow up on edge case X'],
-        deferred_decisions: [
-          'punted on caching strategy — revisit when load profile is known',
-          'left auth integration to follow-up artifact',
-        ],
-        head_sha: 'sha-head',
-        ts: '2026-04-26T13:30:00.000Z',
-      },
-      { idempotencyKey: 'summary-key' }
+    await f.mutate(artifactId, {}, (semantics) =>
+      semantics.writeSummary(
+        {
+          schema_version: 1,
+          artifact_id: artifactId,
+          outcome: 'shipped with caveats',
+          tests_written: ['wrote a unit test'],
+          tests_run: ['ran the suite'],
+          open_items: ['follow up on edge case X'],
+          deferred_decisions: [
+            'punted on caching strategy — revisit when load profile is known',
+            'left auth integration to follow-up artifact',
+          ],
+          head_sha: 'sha-head',
+          ts: '2026-04-26T13:30:00.000Z',
+        },
+        { idempotencyKey: 'summary-key' }
+      )
     );
 
     const evalCtx = await buildEvaluatorContext({
@@ -381,19 +311,21 @@ describe('buildEvaluatorContext — summary fields', () => {
 
   it('preserves an empty deferred_decisions array (default) when none were captured', async () => {
     await writeMinimalPlan();
-    await store.writeSummary(
-      {
-        schema_version: 1,
-        artifact_id: artifactId,
-        outcome: 'clean',
-        tests_written: [],
-        tests_run: [],
-        open_items: [],
-        deferred_decisions: [],
-        head_sha: 'sha-head',
-        ts: '2026-04-26T14:00:00.000Z',
-      },
-      { idempotencyKey: 'summary-empty-key' }
+    await f.mutate(artifactId, {}, (semantics) =>
+      semantics.writeSummary(
+        {
+          schema_version: 1,
+          artifact_id: artifactId,
+          outcome: 'clean',
+          tests_written: [],
+          tests_run: [],
+          open_items: [],
+          deferred_decisions: [],
+          head_sha: 'sha-head',
+          ts: '2026-04-26T14:00:00.000Z',
+        },
+        { idempotencyKey: 'summary-empty-key' }
+      )
     );
 
     const evalCtx = await buildEvaluatorContext({
@@ -407,83 +339,51 @@ describe('buildEvaluatorContext — summary fields', () => {
 });
 
 describe('buildEvaluatorContext — verified-close verification mapping', () => {
-  let repo: TempRepo;
-  let config: Config;
-  let store: ArtifactStore;
-  let ctx: CliContext;
+  let f: Awaited<ReturnType<typeof fixture>>;
+  let ctx: LifecycleEvaluatorContext;
 
   const artifactId = '01999999-9999-7000-8000-00000000000b';
   const STEP_A = '01HX0K8N6ZQF8M5R2V8DZ7T3KA';
 
   beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    config = (await loadConfig(repo.path).catch(() => null)) as unknown as Config;
-    if (!config) {
-      const { getDefaultConfig } = await import('@orcaops/storage');
-      config = getDefaultConfig();
-    }
-    store = new ArtifactStore({ repoRoot: repo.path, config });
+    f = await fixture();
     ctx = {
-      repoRoot: repo.path,
-      config,
-      gates: { cloud: false },
-      repo: new Repo(repo.path),
-      store,
-      archive: null,
-      healedProjection: false,
-      healResult: null,
-      invokingAgent: { agent: 'claude-code', source: 'ambient' },
-    };
-    await store.writePlan(
-      {
-        schema_version: 4,
-        artifact_id: artifactId,
-        branch: 'feat/verify',
-        base_sha: 'sha-base',
-        agent: 'claude-code',
-        agent_session_id: null,
-        task: 'verification mapping',
-        label: 'verification-mapping',
-        plan_steps: [{ step_id: STEP_A, text: 'step a', label: 'step-a', acceptance_criteria: [] }],
-        touched_scope: [],
-        non_goals: [],
-        decisions: [],
-        started_at: '2026-04-26T12:00:00.000Z',
-        revision_n: 0,
-        revised_at: null,
-        rationale: null,
-        step_lineage: { added: [], dropped: [], unchanged: [], rewritten: [] },
-        criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
-        prior_plan_event_id: null,
+      repoRoot: f.main,
+      repo: new Repo(f.main),
+      config: getDefaultConfig(),
+      get store() {
+        return databaseEvaluatorStore(readProjectArtifact(f.writer, artifactId)!.thread);
       },
-      { idempotencyKey: 'plan-key' }
+    };
+    await f.capture(artifactId, {
+      ts: '2026-04-26T12:00:00.000Z',
+      steps: [{ step_id: STEP_A, text: 'step a', label: 'step-a', acceptance_criteria: [] }],
+    });
+    await f.mutate(artifactId, {}, (semantics) =>
+      semantics.writeCheckpointOpened(
+        { artifact_id: artifactId, declared_step_ids: [STEP_A] },
+        { idempotencyKey: 'open-key', headSha: 'cafef00d' }
+      )
     );
-    await store.writeCheckpointOpened(
-      { artifact_id: artifactId, declared_step_ids: [STEP_A] },
-      { idempotencyKey: 'open-key', headSha: 'cafef00d' }
-    );
-  });
-
-  afterEach(async () => {
-    store.close();
-    await repo.cleanup();
   });
 
   async function closeWith(verification?: Array<Record<string, unknown>>): Promise<void> {
-    await store.writeCheckpointClosed(
-      {
-        artifact_id: artifactId,
-        n: 1,
-        summary: 'done',
-        files_changed: [],
-        decisions: [],
-        uncertainty: [],
-        done_criteria: [],
-        ...(verification !== undefined ? { verification: verification as never } : {}),
-        completed_step_ids: verification === undefined ? [] : [STEP_A],
-        head_sha: 'cafef00d',
-      },
-      { idempotencyKey: 'close-key' }
+    await f.mutate(artifactId, {}, (semantics) =>
+      semantics.writeCheckpointClosed(
+        {
+          artifact_id: artifactId,
+          n: 1,
+          summary: 'done',
+          files_changed: [],
+          decisions: [],
+          uncertainty: [],
+          done_criteria: [],
+          ...(verification !== undefined ? { verification: verification as never } : {}),
+          completed_step_ids: verification === undefined ? [] : [STEP_A],
+          head_sha: 'cafef00d',
+        },
+        { idempotencyKey: 'close-key' }
+      )
     );
   }
 

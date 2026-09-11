@@ -200,7 +200,7 @@ drive_app_journey() {
   mouse_node_point "$PROBE_OUT" shell-menu-view click
   mouse_node_point "$PROBE_OUT" shell-menu-item-watch.cycle-grouping click
   wait_for_log_count "$PROBE_OUT" '^WATCH_GROUP value=task$' 1 app-group-task
-  wait_for_node "$PROBE_OUT" 'watch-task-row-task:journey-project:probe'
+  wait_for_node "$PROBE_OUT" 'watch-task-row-task:journey-project-id:probe'
   wait_for_log_count "$PROBE_OUT" '^WATCH_DETAIL level=task$' 1 app-task-detail
   expected=$(( $(log_count "$PROBE_OUT" '^WATCH_DETAIL level=thread$') + 1 ))
   mouse_node_point "$PROBE_OUT" 'watch-task-member:thread:journey-artifact' click

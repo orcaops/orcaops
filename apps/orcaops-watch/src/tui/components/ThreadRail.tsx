@@ -69,8 +69,14 @@ function ThreadRow({
   const branchW = Math.max(3, idBudget - projW - 1);
 
   const summary = thread.currentLine ?? thread.title;
-  // Open review comments surface loud on the row (`✎ n`), stealing summary width.
-  const commentBadge = thread.openComments > 0 ? `✎ ${thread.openComments} ` : '';
+  // Open review comments surface loud on the row (`✎ n`), stealing summary
+  // width; an unreadable count shows `✎ ?` rather than hiding the review.
+  const commentBadge =
+    thread.openComments === null
+      ? '✎ ? '
+      : thread.openComments > 0
+        ? `✎ ${thread.openComments} `
+        : '';
 
   return (
     <Row

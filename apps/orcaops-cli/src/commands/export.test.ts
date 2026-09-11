@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseAddedLines, toRanges } from './export.js';
+import { parseAddedLines, toRanges } from '../lib/history-trace-views.js';
 
 describe('parseAddedLines', () => {
   it('yields added lines with NEW-side positions across hunks and files', () => {

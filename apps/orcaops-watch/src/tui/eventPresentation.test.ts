@@ -1,18 +1,15 @@
 // One typed mapping owns the label and color-family presentation of every
 // event type, and all three surfaces (Live Events, the detail model, and the
 // Detail pane) consume it. EventTypeSchema has no ready/wrap members and
-// appendEvent accepts only EventType, while the permissive ticker reader can
-// pass through arbitrary string types from torn or foreign lines. The
-// mapping's neutral fallback is therefore a required presentation guard.
+// Retained records accept only EventType, while the ticker carries whatever
+// type string it receives, so a foreign or older value reaches
+// presentation intact. The neutral fallback is therefore a required guard.
 
 import { readFileSync } from 'node:fs';
-import { mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { EventTypeSchema } from '@orcaops/storage';
-import { EventTailReader } from '@orcaops/watch-data';
 import type { TickerEvent, WatchThread } from '@orcaops/watch-data/ui';
 
 import { buildDetail } from './detail';
@@ -81,11 +78,10 @@ function threadWithEvents(recentEvents: TickerEvent[]): WatchThread {
   return {
     artifactId: 'a1',
     artifactStatus: 'active',
-    source: 'hot',
     branch: 'feature/demo',
     title: 'Thread a1',
     agent: 'codex',
-    sessions: [{ agent: 'codex', session_id: 'session-a1', tokens: 12_345 }],
+    sessions: [{ agent: 'codex', session_id: 'session-a1', status: 'exact', tokens: 12_345 }],
     openCheckpoints: 0,
     openComments: 0,
     isCurrentCheckout: false,
@@ -101,6 +97,9 @@ function threadWithEvents(recentEvents: TickerEvent[]): WatchThread {
     planDecisions: [],
     nonGoals: [],
     recentEvents,
+    version: '1:retained',
+    omittedEvents: 0,
+    activityWindowComplete: true,
   };
 }
 
@@ -134,25 +133,13 @@ describe('the detail model consumes the mapping', () => {
   });
 });
 
-describe('the ticker feed is permissive — the mapping fallback is the guard', () => {
-  it('the tail reader passes through a schema-invalid type, and presentation degrades it', async () => {
-    // The write path is compile-typed (appendEvent takes EventType) and the
-    // validated read path (readEventLog) enforces the strict record schema,
-    // but THIS reader deliberately accepts any parsed string so corruption
-    // stays observable in the ticker instead of vanishing. The presentation
-    // layer must therefore neutralize unknown types, never color them.
-    const dir = await mkdtemp(path.join(tmpdir(), 'orcaops-tail-'));
-    const eventsPath = path.join(dir, 'events.jsonl');
-    await writeFile(
-      eventsPath,
-      `${JSON.stringify({ ts: '2026-07-30T12:00:00.000Z', type: 'ready_for_review' })}
-`,
-      'utf8'
-    );
-    const events = await new EventTailReader().read(eventsPath);
-    expect(events.map((e) => e.type)).toEqual(['ready_for_review']);
-    expect(eventFamily(events[0]!.type)).toBe('other');
-    expect(eventLabel(events[0]!.type)).toBe('ready for review');
+describe('an out-of-schema ticker type reaches the detail model', () => {
+  it('degrades it to the neutral tone and a spelled-out label, never a colored lane', () => {
+    const thread = threadWithEvents([tickerEvent('ready_for_review', 1_722_000_005_000)]);
+    const { lines } = buildDetail(thread, new Set(), 120);
+    const row = lines.find((line) => line.text.includes('ready for review'));
+    expect(row).toBeDefined();
+    expect(row!.tone).toBe('ev-other');
   });
 });
 

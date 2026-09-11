@@ -6,7 +6,7 @@ import {
   reconcileCommitsAgainstCoverage,
   type ReconciledCommit,
 } from '@orcaops/core';
-import { type ArtifactRow, RecoveryRefusedError, resolveCaptureExcludes } from '@orcaops/storage';
+import { resolveCaptureExcludes } from '@orcaops/storage';
 
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
@@ -17,21 +17,27 @@ import {
   writeTerminalSafeStderr,
   writeTerminalSafeStdout,
 } from '../io/output.js';
-import { loadInFlightOnBranch } from '../lib/active-artifact.js';
-import { resolveBranchReadScope } from '../lib/artifact-scope.js';
-import { buildContext, type CliContext } from '../lib/context.js';
-import { classifyOverlapMatch, loadManifestSources } from '../lib/manifest-sources.js';
+import {
+  createContextRevalidator,
+  historyRepository,
+  requireRepositoryScope,
+} from '../lib/database-branch-history.js';
+import {
+  type DatabaseDiffOptions,
+  type DiffArtifact,
+  type DiffContext,
+  loadDiffManifests,
+  readBranchDiffArtifacts,
+  readDefaultDiffArtifact,
+  readDiffArtifact,
+  validateDatabaseDiff,
+} from '../lib/database-diff.js';
+import { resolveDatabaseHistoryCommandContext } from '../lib/database-history-context.js';
+import { classifyOverlapMatch } from '../lib/database-manifest-sources.js';
+import { closeFailedHistoryRead } from '../lib/history-reader-close.js';
+import { historyScopeCommandError } from '../lib/history-scope-error.js';
 
-export interface DiffAttributionOptions {
-  attribution?: boolean;
-  /** Audit in-window commits. Mutually exclusive with --attribution. */
-  reconcile?: boolean;
-  base?: string;
-  target?: string;
-  artifact?: string;
-  unattributed?: boolean;
-  json?: boolean;
-}
+export type DiffAttributionOptions = DatabaseDiffOptions;
 
 /**
  * How the diff base was chosen. `flag` is `--base <ref>`; `artifact_flag` is an
@@ -68,7 +74,7 @@ type ManifestScope = { kind: 'artifact'; artifact_id: string } | { kind: 'branch
  * Base semantics: `--base <ref>` wins, then an explicit `--artifact <id>`,
  * then the current branch's in-flight artifact's plan `base_sha`
  * (branch-scoped resolution — the shell pin is NEVER consulted: it can
- * point cross-branch, `lib/active-artifact.ts` documents the hazard),
+ * point cross-branch),
  * falling back to the branch's most recent artifact (read-only command,
  * disclosed via `base.source`), and hard-requiring `--base` or
  * `--artifact` when the branch has no artifacts. `--target <ref>` switches
@@ -114,16 +120,24 @@ export async function diffAction(opts: DiffAttributionOptions): Promise<void> {
       );
     }
 
-    const ctx = await buildContext({ mintArchiveIdentity: false });
+    const prepared = validateDatabaseDiff(opts);
+    const context = await resolveDatabaseHistoryCommandContext({
+      profile: 'git-history',
+      selector: prepared.selector,
+    });
     try {
-      const branch = await ctx.repo.getCurrentBranch();
+      const { git } = requireRepositoryScope(context.scope);
+      const revalidate = createContextRevalidator(context.scope);
+      const repo = historyRepository(git.worktreeRoot);
+      await revalidate();
+      const branch = await repo.getCurrentBranch();
 
       // ── Base resolution ────────────────────────────────────────────
       let baseSha: string;
       let baseRef: string;
       let baseSource: BaseSource;
       if (opts.base !== undefined && opts.base.length > 0) {
-        const resolved = await ctx.repo.resolveCommit(opts.base);
+        const resolved = await repo.resolveCommit(opts.base);
         if (resolved === null) {
           throw new OrcaopsError(
             ErrorCodes.INVALID_INPUT,
@@ -137,7 +151,7 @@ export async function diffAction(opts: DiffAttributionOptions): Promise<void> {
       } else {
         // --base wins over --artifact: it is the more specific instruction. When
         // absent, an explicit --artifact supplies the base.
-        const row = await resolveDefaultBaseArtifact(ctx, branch, opts.artifact);
+        const row = resolveDefaultBaseArtifact(context, branch, opts.artifact);
         if (row === null) {
           throw new OrcaopsError(
             ErrorCodes.INVALID_INPUT,
@@ -166,7 +180,7 @@ export async function diffAction(opts: DiffAttributionOptions): Promise<void> {
       let liveUnmergedPaths: readonly string[] = [];
       let liveUnmergedProbeFailed = false;
       if (opts.target !== undefined && opts.target.length > 0) {
-        const resolved = await ctx.repo.resolveCommit(opts.target);
+        const resolved = await repo.resolveCommit(opts.target);
         if (resolved === null) {
           throw new OrcaopsError(
             ErrorCodes.INVALID_INPUT,
@@ -177,8 +191,8 @@ export async function diffAction(opts: DiffAttributionOptions): Promise<void> {
         targetSha = resolved;
         target = { kind: 'ref', ref: opts.target, sha: resolved };
       } else {
-        const live = await captureWorktreeTreeSha(ctx.repo, {
-          excludePatterns: resolveCaptureExcludes(ctx.config.capture).patterns,
+        const live = await captureWorktreeTreeSha(repo, {
+          excludePatterns: resolveCaptureExcludes(context.config.capture).patterns,
         });
         if (!live.ok) {
           throw new OrcaopsError(
@@ -206,9 +220,9 @@ export async function diffAction(opts: DiffAttributionOptions): Promise<void> {
       }
 
       // ── Live diff (byte-capped, same pipeline as capture) ──────────
-      const cap = ctx.config.diff_fingerprint.max_diff_bytes;
+      const cap = context.config.diff_fingerprint.max_diff_bytes;
       const diff = await diffSnapshotTrees({
-        repo: ctx.repo,
+        repo,
         openTreeSha: baseSha,
         closeTreeSha: targetSha,
         maxDiffBytes: cap,
@@ -223,26 +237,23 @@ export async function diffAction(opts: DiffAttributionOptions): Promise<void> {
       }
 
       // ── Manifest sourcing per closed checkpoint ────────────────────
-      let candidates: ArtifactRow[];
+      let candidates: DiffArtifact[];
+      let skippedCandidates: Parameters<typeof loadDiffManifests>[2] = [];
       let manifestScope: ManifestScope;
       if (opts.artifact !== undefined && opts.artifact.length > 0) {
-        const row = ctx.store.store.getArtifact(opts.artifact);
-        if (row === null) {
-          throw new OrcaopsError(
-            ErrorCodes.UNKNOWN_ARTIFACT,
-            `No artifact with id "${opts.artifact}".`
-          );
-        }
-        candidates = [row];
-        manifestScope = { kind: 'artifact', artifact_id: row.id };
+        const artifact = readDiffArtifact(context, opts.artifact);
+        candidates = [artifact];
+        manifestScope = { kind: 'artifact', artifact_id: artifact.id };
       } else {
         // Seeded participation (storage-class rule, decided explicitly):
         // attribution is a provenance surface — without imported manifests a
-        // seeded store answers `granularity: none` for history it holds.
-        const scope = await resolveBranchReadScope(ctx, {}, { imported: 'include' });
-        candidates = scope.rows;
+        // seeded project answers `granularity: none` for history it holds.
+        const branchArtifacts = readBranchDiffArtifacts(context, branch);
+        candidates = branchArtifacts.artifacts;
+        skippedCandidates = branchArtifacts.skipped;
         manifestScope = { kind: 'branch', branch };
       }
+      await revalidate();
 
       const {
         sources,
@@ -251,7 +262,7 @@ export async function diffAction(opts: DiffAttributionOptions): Promise<void> {
         incompatibleCount,
         overlapAdjudications,
         skippedUnreadableArtifacts,
-      } = await loadManifestSources(ctx, candidates);
+      } = await loadDiffManifests(context, candidates, skippedCandidates);
       // FAIL CLOSED: attribution is decided by pool membership — a
       // skipped artifact shrinks the ambiguity pool, so a hunk two
       // artifacts both claimed would attribute confidently to the one
@@ -349,7 +360,7 @@ export async function diffAction(opts: DiffAttributionOptions): Promise<void> {
       }
 
       // ── File-level attributions for degraded checkpoints ───────────
-      const changedFiles = await ctx.repo.getChangedFiles(baseSha, targetSha);
+      const changedFiles = await repo.getChangedFiles(baseSha, targetSha);
       const changedSet = new Set(changedFiles);
       const fileAttributions = manifestless
         .map((m) => ({
@@ -414,9 +425,10 @@ export async function diffAction(opts: DiffAttributionOptions): Promise<void> {
       }
       writeTerminalSafeStdout(formatHuman(envelope));
     } finally {
-      ctx.store.close();
+      closeFailedHistoryRead(context.scope);
     }
-  } catch (err) {
+  } catch (cause) {
+    const err = historyScopeCommandError(cause);
     if (opts.json) emitError(err);
     writeErrorLine(err);
     throw new CliExit(1);
@@ -427,8 +439,7 @@ export async function diffAction(opts: DiffAttributionOptions): Promise<void> {
  * Base-artifact resolution: an explicit `--artifact <id>` wins, else the
  * in-flight artifact on the branch (newest first — same invariant as capture
  * autodetect), else the branch's most recent artifact. The shell pin is
- * deliberately NOT consulted (it can point cross-branch; see
- * `resolveActiveArtifactId`'s rationale).
+ * deliberately NOT consulted because it can point across branches.
  *
  * `explicitId` exists because the fallback tiers are status- and recency-ranked,
  * never identity-ranked: with two summarized artifacts on one branch,
@@ -437,30 +448,14 @@ export async function diffAction(opts: DiffAttributionOptions): Promise<void> {
  * attribution base for the implementation work it reviewed is the failure this
  * closes.
  */
-async function resolveDefaultBaseArtifact(
-  ctx: CliContext,
+function resolveDefaultBaseArtifact(
+  context: DiffContext,
   branch: string,
   explicitId?: string
-): Promise<{ artifact: ArtifactRow; source: BaseSource } | null> {
-  if (explicitId !== undefined && explicitId.length > 0) {
-    const row = ctx.store.store.getArtifact(explicitId);
-    if (row === null) {
-      throw new OrcaopsError(ErrorCodes.UNKNOWN_ARTIFACT, `No artifact with id "${explicitId}".`);
-    }
-    return { artifact: row, source: 'artifact_flag' };
-  }
-  const inFlight = await loadInFlightOnBranch(ctx, branch);
-  if (inFlight.length > 0) {
-    return { artifact: inFlight[0].row, source: 'active_artifact' };
-  }
-  // Seeded participation (storage-class rule, decided explicitly): a base is
-  // live-work state — an imported artifact is always summarized and
-  // backdated, so it can never be the implicit diff base.
-  const scope = await resolveBranchReadScope(ctx, { branch }, { imported: 'live-only' });
-  if (scope.rows.length > 0) {
-    return { artifact: scope.rows[0], source: 'recent_artifact' };
-  }
-  return null;
+): { artifact: DiffArtifact; source: BaseSource } | null {
+  if (explicitId !== undefined && explicitId.length > 0)
+    return { artifact: readDiffArtifact(context, explicitId), source: 'artifact_flag' };
+  return readDefaultDiffArtifact(context, branch);
 }
 
 // ── `orcaops diff --reconcile` ────────────────────────────────────────────
@@ -549,25 +544,26 @@ async function diffReconcile(opts: DiffAttributionOptions): Promise<void> {
     );
   }
 
-  const ctx = await buildContext({ mintArchiveIdentity: false });
+  const prepared = validateDatabaseDiff(opts);
+  const context = await resolveDatabaseHistoryCommandContext({
+    profile: 'git-history',
+    selector: prepared.selector,
+  });
   try {
-    const branch = await ctx.repo.getCurrentBranch();
+    const { git } = requireRepositoryScope(context.scope);
+    const revalidate = createContextRevalidator(context.scope);
+    const repo = historyRepository(git.worktreeRoot);
+    await revalidate();
+    const branch = await repo.getCurrentBranch();
 
     // ── Artifact resolution (window owner) ─────────────────────────────
-    let artifactRow: ArtifactRow;
+    let artifactRow: DiffArtifact;
     let artifactSource: BaseSource;
     if (opts.artifact !== undefined && opts.artifact.length > 0) {
-      const row = ctx.store.store.getArtifact(opts.artifact);
-      if (row === null) {
-        throw new OrcaopsError(
-          ErrorCodes.UNKNOWN_ARTIFACT,
-          `No artifact with id "${opts.artifact}".`
-        );
-      }
-      artifactRow = row;
+      artifactRow = readDiffArtifact(context, opts.artifact);
       artifactSource = 'flag';
     } else {
-      const resolved = await resolveDefaultBaseArtifact(ctx, branch);
+      const resolved = resolveDefaultBaseArtifact(context, branch);
       if (resolved === null) {
         throw new OrcaopsError(
           ErrorCodes.INVALID_INPUT,
@@ -587,7 +583,7 @@ async function diffReconcile(opts: DiffAttributionOptions): Promise<void> {
     }
 
     // ── Strict ref validation (error-not-clean, always) ────────────────
-    const baseSha = await ctx.repo.resolveCommit(artifactRow.base_sha);
+    const baseSha = await repo.resolveCommit(artifactRow.base_sha);
     if (baseSha === null) {
       throw new OrcaopsError(
         ErrorCodes.INVALID_INPUT,
@@ -597,7 +593,7 @@ async function diffReconcile(opts: DiffAttributionOptions): Promise<void> {
         'reconcile'
       );
     }
-    const branchHeadSha = await ctx.repo.resolveCommit('HEAD');
+    const branchHeadSha = await repo.resolveCommit('HEAD');
     if (branchHeadSha === null) {
       throw new OrcaopsError(
         ErrorCodes.INVALID_INPUT,
@@ -606,7 +602,7 @@ async function diffReconcile(opts: DiffAttributionOptions): Promise<void> {
       );
     }
 
-    const cps = await ctx.store.readCheckpointsRecovered(artifactRow.id);
+    const cps = artifactRow.thread.checkpoints;
     let latestClosed: { n: number; head_sha: string; closed_at: string } | null = null;
     for (const cp of cps) {
       if (cp.status !== 'closed') continue;
@@ -622,7 +618,7 @@ async function diffReconcile(opts: DiffAttributionOptions): Promise<void> {
     let windowHeadSha: string;
     let headSource: ReconcileHeadSource;
     if (latestClosed !== null) {
-      const resolved = await ctx.repo.resolveCommit(latestClosed.head_sha);
+      const resolved = await repo.resolveCommit(latestClosed.head_sha);
       if (resolved === null) {
         throw new OrcaopsError(
           ErrorCodes.INVALID_INPUT,
@@ -647,15 +643,15 @@ async function diffReconcile(opts: DiffAttributionOptions): Promise<void> {
     // BOTH boundaries — a rebase can leave summary.head_sha resolvable yet NOT on
     // the linear windowHead..HEAD path, which would mis-partition; then we fall
     // back to the single soft span (current behavior).
-    const summary = await ctx.store.readSummary(artifactRow.id);
+    const summary = artifactRow.thread.summary;
     let preSummaryHeadSha: string | null = null;
     if (summary !== null && windowHeadSha !== branchHeadSha) {
-      const summaryHead = await ctx.repo.resolveCommit(summary.head_sha);
+      const summaryHead = await repo.resolveCommit(summary.head_sha);
       if (
         summaryHead !== null &&
         summaryHead !== windowHeadSha &&
-        (await ctx.repo.isAncestor(windowHeadSha, summaryHead)) &&
-        (await ctx.repo.isAncestor(summaryHead, branchHeadSha))
+        (await repo.isAncestor(windowHeadSha, summaryHead)) &&
+        (await repo.isAncestor(summaryHead, branchHeadSha))
       ) {
         preSummaryHeadSha = summaryHead;
       }
@@ -667,7 +663,7 @@ async function diffReconcile(opts: DiffAttributionOptions): Promise<void> {
     // ── Strict enumeration ─────────────────────────────────────────────
     let windowCommits: Array<{ sha: string; subject: string; files: string[] }>;
     try {
-      windowCommits = await ctx.repo.getCommitsBetweenStrict(baseSha, windowHeadSha);
+      windowCommits = await repo.getCommitsBetweenStrict(baseSha, windowHeadSha);
     } catch (err) {
       throw new OrcaopsError(
         ErrorCodes.INVALID_INPUT,
@@ -681,10 +677,7 @@ async function diffReconcile(opts: DiffAttributionOptions): Promise<void> {
     let preSummaryCommits: Array<{ sha: string; subject: string; files: string[] }> = [];
     if (preSummaryHeadSha !== null) {
       try {
-        preSummaryCommits = await ctx.repo.getCommitsBetweenStrict(
-          windowHeadSha,
-          preSummaryHeadSha
-        );
+        preSummaryCommits = await repo.getCommitsBetweenStrict(windowHeadSha, preSummaryHeadSha);
       } catch (err) {
         throw new OrcaopsError(
           ErrorCodes.INVALID_INPUT,
@@ -698,10 +691,7 @@ async function diffReconcile(opts: DiffAttributionOptions): Promise<void> {
     let postWindowCommits: Array<{ sha: string; subject: string; files: string[] }> = [];
     if (postWindowBaseSha !== branchHeadSha) {
       try {
-        postWindowCommits = await ctx.repo.getCommitsBetweenStrict(
-          postWindowBaseSha,
-          branchHeadSha
-        );
+        postWindowCommits = await repo.getCommitsBetweenStrict(postWindowBaseSha, branchHeadSha);
       } catch (err) {
         throw new OrcaopsError(
           ErrorCodes.INVALID_INPUT,
@@ -723,22 +713,31 @@ async function diffReconcile(opts: DiffAttributionOptions): Promise<void> {
     // silently clean).
     // Seeded participation matches --attribution: imported manifests count
     // as coverage evidence for the history they imported.
-    const candidates =
+    await revalidate();
+    const pool =
       opts.artifact !== undefined && opts.artifact.length > 0
-        ? [artifactRow]
-        : (await resolveBranchReadScope(ctx, {}, { imported: 'include' })).rows;
+        ? { artifacts: [artifactRow], skipped: [] }
+        : readBranchDiffArtifacts(context, branch);
+    const candidates = pool.artifacts;
     const {
       sources,
       manifestless,
       incompatibleCount,
       overlapAdjudications,
       skippedUnreadableArtifacts,
-    } = await loadManifestSources(ctx, candidates);
+    } = await loadDiffManifests(context, candidates, pool.skipped);
     // Reconcile-side skips are conservative (a skipped artifact only
     // WEAKENS coverage, surfacing commits as uncovered), so enumeration
     // continues — but the omission must ride the structured disclosure,
     // not stderr alone.
     const skippedUnreadable = new Set<string>(skippedUnreadableArtifacts);
+    // Sibling rot stays sibling-local, but it must be visible in human mode too: the
+    // JSON disclosure below is invisible to someone reading the rendered reconcile.
+    for (const artifactId of skippedUnreadable)
+      writeTerminalSafeStderr(
+        `warning: skipping unreadable artifact ${artifactId} in diff coverage — ` +
+          `its claims are absent, so coverage is understated\n`
+      );
 
     const weakCoverage = new Set<string>();
     const weakByCp = new Map<string, Set<string>>();
@@ -756,19 +755,7 @@ async function diffReconcile(opts: DiffAttributionOptions): Promise<void> {
     for (const row of candidates) {
       // Sibling rot stays sibling-local: skip the unreadable row with a
       // warning rather than aborting the diff for the whole branch.
-      const rowCps =
-        row.id === artifactRow.id
-          ? cps
-          : await ctx.store.readCheckpointsRecovered(row.id).catch((err: unknown) => {
-              if (!(err instanceof RecoveryRefusedError)) throw err;
-              skippedUnreadable.add(row.id);
-              process.stderr.write(
-                `warning: skipping unreadable artifact ${row.id} in diff coverage — ` +
-                  `${err.message}\n`
-              );
-              return [];
-            });
-      for (const cp of rowCps) {
+      for (const cp of row.thread.checkpoints) {
         if (cp.status !== 'closed') continue;
         const cpWeak = weakByCp.get(`${row.id}:${cp.n}`);
         const rejected = new Set(cp.window_overlap?.rejected_claims ?? []);
@@ -864,7 +851,7 @@ async function diffReconcile(opts: DiffAttributionOptions): Promise<void> {
     }
     writeTerminalSafeStdout(formatReconcileHuman(envelope));
   } finally {
-    ctx.store.close();
+    closeFailedHistoryRead(context.scope);
   }
 }
 

@@ -83,7 +83,7 @@ describe('the contextual review rail', () => {
     const rows = app.rows();
 
     expect(frame).toContain('REVIEW CONTEXT · CHECKPOINT');
-    expect(frame).toContain('OUTCOME');
+    expect(frame).toContain('AGENT-REPORTED OUTCOME');
     expect(frame).toContain('Checkpoint 1 reworked the');
     expect(frame).toContain('configuration loader path.');
     expect(frame).toContain('CAPTURED QUESTIONS · 1 OPEN');
@@ -184,16 +184,22 @@ describe('compact file navigation', () => {
       width: 160,
       height: 40,
     });
-    const beforeState = app.state();
     // Row 1 is the viewport-oriented file and already owns the stronger violet
     // background. Hover the cursor-only row so this assertion isolates hover.
     const row = app.surfaceRect('review-file-navigator-row-0');
+    await app.mockMouse.moveTo(row.x + row.width + 2, row.y);
+    await app.settle();
+    const beforeState = app.state();
     const beforeBackground = app.surfaceBackground('review-file-navigator-row-0');
 
     await app.mockMouse.moveTo(row.x + 2, row.y);
-    await app.settle();
+    const hoverVisible = await app.settleUntil(() =>
+      app
+        .surfaceBackground('review-file-navigator-row-0')
+        .some((channel, index) => channel !== beforeBackground[index])
+    );
 
-    expect(app.surfaceBackground('review-file-navigator-row-0')).not.toEqual(beforeBackground);
+    expect(hoverVisible).toBe(true);
     expect(app.state()).toEqual(beforeState);
     app.unmount();
   });

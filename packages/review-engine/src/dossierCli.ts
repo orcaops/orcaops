@@ -1,16 +1,20 @@
 // `review dossier` — tier 1 of the two-lane surface: the instant
 // deterministic dossier plus both budgeted lane inputs, zero model
 // calls.
-
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
+//
+// The dossier is derived on read from the retained floor publication and never
+// bound to a run: `prepareDatabaseReviewRunInputs` binds a run's dossier,
+// projection, forensic input, coverage and diff to that run, so a dossier built
+// before any run exists has no canonical home. Like the claim ledger, it
+// restates what the selected floor already covers and mints nothing.
 
 import { loadConfig } from '@orcaops/core';
-import { DISCLOSURE_CODE, slugifyBranch } from '@orcaops/review-core';
-import { atomicWriteFile, resolveCaptureExcludes } from '@orcaops/storage';
+import { DISCLOSURE_CODE } from '@orcaops/review-core';
+import { resolveCaptureExcludes } from '@orcaops/storage';
 
 import { buildClaimLedger, type ClaimLedgerEntry } from './claimLedger.js';
-import { loadCheckpointClaims } from './claimLedgerCli.js';
+import { checkpointClaims } from './claimLedgerCli.js';
+import { readCanonicalReviewSource } from './database/review-source.js';
 import {
   AccountCorpusCeilingError,
   buildDossier,
@@ -23,27 +27,23 @@ import {
   ROUTINE_BUDGET_V1,
   StubPolicyError,
 } from './dossier.js';
-import { loadHealthyFloorSource } from './floorSource.js';
-import { reviewLock } from './reviewLock.js';
-import { reviewDirPath } from './reviewPaths.js';
-import { requireReviewStateVersion, reviewStateLockKey } from './reviewState.js';
+import { writeReviewError, writeReviewOutput } from './reviewFiles.js';
 import type { ReviewArgs } from './run.js';
 
 const USAGE = `usage: review dossier --branch <b> [--profile routine|full] [--json]
-Builds the tier-1 deterministic dossier: the complete
+Derives the tier-1 deterministic dossier from the selected floor: the complete
 account-vs-code record, the budgeted account-lane projection, and the
-capture-blind forensic lane input. Zero model calls. Writes
-dossier-v1.json, dossier.md, account-projection-v1.json, and
-forensic-input-v1.json under .orcaops/reviews/<branch>/.
+capture-blind forensic lane input. Zero model calls, and nothing is written —
+the run's pinned inputs are minted by \`review start\` / \`routine-start\`.
 --profile routine uses the ~8k-token-per-lane routine budgets; default full.
 `;
 
-async function rebuildLedger(
-  root: string,
+function rebuildLedger(
+  artifacts: Parameters<typeof checkpointClaims>[0],
   branch: string,
   floor: Parameters<typeof buildClaimLedger>[0]['floor']
-): Promise<ClaimLedgerEntry[]> {
-  const checkpoints = await loadCheckpointClaims(root, branch, floor.scope.artifact_ids);
+): ClaimLedgerEntry[] {
+  const checkpoints = checkpointClaims(artifacts, floor.scope.artifact_ids);
   return buildClaimLedger({
     floor,
     checkpoints,
@@ -61,29 +61,27 @@ export function parseDossierProfile(value: string | undefined): DossierProfile |
 }
 
 /**
- * Build the dossier from the healthy floor and write the four lane files.
- * Shared by `review dossier` and the composite `review routine-start`.
+ * Derive the dossier from the selected floor. Shared by `review dossier` and
+ * any caller that needs the same deterministic projection without a run.
  */
-export async function buildAndWriteDossier(
+export async function buildBranchDossier(
   root: string,
   branch: string,
   profile: DossierProfile
 ): Promise<ReturnType<typeof buildDossier>> {
-  const branchSlug = slugifyBranch(branch);
-  const reviewDir = reviewDirPath(root, branchSlug);
-  // Repo diff-stub policy (review.stub_paths). Validate at routine-start, before
-  // any read/build work, so a malformed policy fails loudly with no payload
-  // minted — never a silent skip.
+  // Repo diff-stub policy (review.stub_paths). Validate before any read/build
+  // work, so a malformed policy fails loudly with no payload derived — never a
+  // silent skip.
   const config = await loadConfig(root);
   const stubPaths = config.review.stub_paths;
   const invalidStubs = invalidStubPatterns(stubPaths);
   if (invalidStubs.length > 0) throw new StubPolicyError(invalidStubs);
   // Same posture for the exclude policy: a malformed entry is a hole in a
-  // security control, so fail before any payload is minted rather than
+  // security control, so fail before any payload is derived rather than
   // silently reviewing the path it was meant to withhold.
   const excludes = resolveCaptureExcludes(config.capture);
   if (excludes.invalid.length > 0) throw new ExcludePolicyError(excludes.invalid);
-  const source = await loadHealthyFloorSource(root, branchSlug);
+  const source = await readCanonicalReviewSource(branch, { cwd: root });
   // Refuse over a truncated floor: a truncated review diff is
   // partial coverage; the routine surface must never mint a payload over it.
   const truncated = source.floor.disclosure.find(
@@ -98,12 +96,10 @@ export async function buildAndWriteDossier(
       capMatch !== null ? Number.parseInt(capMatch[1]!, 10) : null
     );
   }
-  const retainedDiff = await readFile(path.join(reviewDir, 'diff.patch'), 'utf8');
-  const ledgerEntries = await rebuildLedger(root, branch, source.floor);
-  const result = buildDossier({
+  return buildDossier({
     floor: source.floor,
-    retainedDiff,
-    ledgerEntries,
+    retainedDiff: source.diffText,
+    ledgerEntries: rebuildLedger(source.artifacts, branch, source.floor),
     branch,
     baseSha: source.floor.scope.base_sha,
     generatedAt: new Date().toISOString(),
@@ -111,96 +107,47 @@ export async function buildAndWriteDossier(
     stubPaths,
     excludePaths: excludes.patterns,
   });
-  const lock = reviewLock(root);
-  await lock.withLock(reviewStateLockKey(branchSlug), async (lease) => {
-    await requireReviewStateVersion(reviewDir);
-    const currentSource = await loadHealthyFloorSource(root, branchSlug);
-    if (currentSource.floorFingerprint !== source.floorFingerprint) {
-      throw new Error('review floor changed while the dossier was being built; retry');
-    }
-    await lease.verify();
-    await atomicWriteFile(
-      path.join(reviewDir, 'dossier-v1.json'),
-      `${JSON.stringify(result.dossier, null, 2)}\n`,
-      root
-    );
-    await atomicWriteFile(path.join(reviewDir, 'dossier.md'), result.markdown, root);
-    await atomicWriteFile(
-      path.join(reviewDir, 'account-projection-v1.json'),
-      `${JSON.stringify(result.accountProjection, null, 2)}\n`,
-      root
-    );
-    await atomicWriteFile(
-      path.join(reviewDir, 'forensic-input-v1.json'),
-      `${JSON.stringify(result.forensicInput, null, 2)}\n`,
-      root
-    );
-    // Coverage snapshot: the floor's persisted per-hunk attribution over
-    // the SAME diff bytes the dossier read. composeStory folds it into Part
-    // ownership at finalization; the run pins its sha under `input_shas`.
-    await atomicWriteFile(
-      path.join(reviewDir, 'coverage-v1.json'),
-      `${JSON.stringify(
-        {
-          schema_version: 1,
-          attribution_rung: source.floor.attribution.active_rung,
-          items: source.floor.coverage.items,
-          summary: source.floor.coverage.summary,
-        },
-        null,
-        2
-      )}\n`,
-      root
-    );
-  });
-  return result;
 }
 
 export async function runDossier(args: ReviewArgs, root: string): Promise<number> {
   if (args.help === true) {
-    process.stdout.write(USAGE);
+    writeReviewOutput(USAGE);
     return 0;
   }
   if (!args.branch) {
-    process.stderr.write(`review dossier: --branch is required\n${USAGE}`);
+    writeReviewError(`review dossier: --branch is required\n${USAGE}`);
     return 2;
   }
   const profile = parseDossierProfile(args.profile);
   if (profile === null) {
-    process.stderr.write(
+    writeReviewError(
       `review dossier: unknown --profile '${args.profile ?? ''}' — valid values: routine, full\n`
     );
     return 2;
   }
   try {
-    const result = await buildAndWriteDossier(root, args.branch, profile);
+    const result = await buildBranchDossier(root, args.branch, profile);
 
     if (args.json) {
-      process.stdout.write(
+      writeReviewOutput(
         `${JSON.stringify({
           ok: true,
           profile,
           hunks: result.dossier.code_index.length,
           ledgerEntries: result.dossier.account_core.ledger.length,
           truncationRecords: result.dossier.truncation_manifest.length,
-          files: [
-            'dossier-v1.json',
-            'dossier.md',
-            'account-projection-v1.json',
-            'forensic-input-v1.json',
-            'coverage-v1.json',
-          ],
+          floor_input_hash: result.dossier.floor_input_hash,
         })}\n`
       );
     } else {
-      process.stdout.write(result.markdown);
+      writeReviewOutput(result.markdown);
     }
     return 0;
   } catch (error) {
     if (error instanceof StubPolicyError || error instanceof ExcludePolicyError) {
       // Malformed repo stub or exclude policy: parseable envelope, no payload minted.
       if (args.json) {
-        process.stdout.write(
+        writeReviewOutput(
           `${JSON.stringify({
             ok: false,
             error: {
@@ -212,7 +159,7 @@ export async function runDossier(args: ReviewArgs, root: string): Promise<number
           })}\n`
         );
       } else {
-        process.stderr.write(`review dossier: ${error.message}\n`);
+        writeReviewError(`review dossier: ${error.message}\n`);
       }
       return 1;
     }
@@ -224,7 +171,7 @@ export async function runDossier(args: ReviewArgs, root: string): Promise<number
       // Size-degradation refusal: parseable envelope naming the
       // ceiling and the actual size; no payload was minted.
       if (args.json) {
-        process.stdout.write(
+        writeReviewOutput(
           `${JSON.stringify({
             ok: false,
             error: {
@@ -237,18 +184,18 @@ export async function runDossier(args: ReviewArgs, root: string): Promise<number
           })}\n`
         );
       } else {
-        process.stderr.write(`review dossier: ${error.message}\n`);
+        writeReviewError(`review dossier: ${error.message}\n`);
       }
       return 1;
     }
     if (error instanceof DossierBudgetError) {
-      process.stderr.write(`review dossier: ${error.message}\n`);
+      writeReviewError(`review dossier: ${error.message}\n`);
       for (const item of error.inventory.slice(0, 10)) {
-        process.stderr.write(`  oversize: ${item.id} (${item.section}) ~${item.size} tokens\n`);
+        writeReviewError(`  oversize: ${item.id} (${item.section}) ~${item.size} tokens\n`);
       }
       return 1;
     }
-    process.stderr.write(`review dossier: ${(error as Error).message}\n`);
+    writeReviewError(`review dossier: ${(error as Error).message}\n`);
     return 1;
   }
 }

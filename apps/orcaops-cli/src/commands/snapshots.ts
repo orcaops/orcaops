@@ -2,13 +2,21 @@ import path from 'node:path';
 
 import {
   diffSnapshotTrees,
-  listRawSnapshotRefNames,
   listSensitiveTreePaths,
-  listSnapshotRefs,
   materializeSnapshotTree,
-  pruneSnapshotRefs,
+  Repo,
+  SNAPSHOT_REF_PREFIX,
 } from '@orcaops/core';
+import {
+  applyDatabaseGitReclamation,
+  type DatabaseMaintenanceInspection,
+  type DatabaseMaintenanceResource,
+  inspectDatabaseMaintenance,
+  readRegisteredDatabaseContext,
+  resumeDatabaseGitReclamation,
+} from '@orcaops/core/history/database-retention';
 import { cutTruncatedSecretTail } from '@orcaops/evaluator-protocol/secrets';
+import { resolveDatabaseHistoryArtifact } from '@orcaops/project-scope/history/database';
 import {
   checkoutsRoot,
   type Checkpoint,
@@ -17,6 +25,13 @@ import {
   uuidv7,
   writeCachedirTag,
 } from '@orcaops/storage';
+import { normalizeHistoryRoot } from '@orcaops/storage/history/authority';
+import {
+  openProjectDatabase,
+  ProjectDatabaseError,
+  readProjectGitReclamationAdmission,
+  resolveProjectArtifactDetails,
+} from '@orcaops/storage/history/database';
 
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
@@ -28,58 +43,180 @@ import {
   writeTerminalSafeStderr,
   writeTerminalSafeStdout,
 } from '../io/output.js';
-import { buildContext } from '../lib/context.js';
-import { readDerivedCache } from '../lib/fingerprint-cache.js';
-import { getInvocationEnv } from '../lib/invocation-context.js';
+import { historyGitEnvironment, historyRepository } from '../lib/database-branch-history.js';
+import { resolveDatabaseHistoryCommandContext } from '../lib/database-history-context.js';
+import { retainedCheckpointManifest } from '../lib/database-manifest-sources.js';
+import { closeFailedHistoryRead } from '../lib/history-reader-close.js';
+import { historyScopeCommandError } from '../lib/history-scope-error.js';
+import {
+  getInvocationCwd,
+  getInvocationEnv,
+  getInvocationRootOverride,
+} from '../lib/invocation-context.js';
 import { parseDigitInt } from '../lib/strict-int.js';
 
 const PRUNE_WARNING =
-  'WARNING: pruning snapshot refs makes fingerprint manifests non-re-derivable ' +
-  '(unless stored at capture, or already derived into the archive cache).';
+  'WARNING: pruning retired snapshot refs can make their boundary trees unavailable ' +
+  'when no other Git ref retains the objects.';
 
 export interface SnapshotsPruneOptions {
-  /** Total-wipe every ref of one artifact (all phases/statuses). */
   artifact?: string;
-  /** Refs whose artifact is absent + malformed-but-valid-git refs. */
   orphans?: boolean;
-  /** Every refs/orcaops/snap/* ref. Requires --apply. */
   all?: boolean;
-  /** Actually delete. Default is dry-run. */
   apply?: boolean;
-  /**
-   * With the archive enabled, `--apply` refuses when a
-   * candidate ref belongs to a closed checkpoint that has NEITHER a
-   * stored manifest NOR a cached derived manifest (pruning would strand
-   * it forever). Pass this to prune anyway, or run `fingerprint derive`
-   * first. No-op when the archive is disabled.
-   */
-  allowUnderived?: boolean;
   json?: boolean;
 }
 
 type PruneMode = 'artifact' | 'orphans' | 'all';
 
-/**
- * `orcaops snapshots prune --artifact <id> | --orphans | --all [--apply] [--json]`
- *
- * Manual cleanup of local `refs/orcaops/snap/*` refs. Dry-run by
- * default (matches `gc` UX); `--apply` to delete. Every output — both
- * modes, human and JSON — carries the non-re-derivability warning.
- *
- * All selectors operate over the RAW namespace set
- * (`listRawSnapshotRefNames`), NOT `listSnapshotRefs` — the latter
- * silently drops malformed refs, so a parsed-`artifact_id` definition
- * of `--orphans` could never remove the malformed refs that doctor's
- * `stale-snapshot-refs` recommends `prune --orphans` for.
- * `pruneSnapshotRefs` accepts any ref that is
- * namespace-prefixed + passes `git check-ref-format`, so
- * malformed-but-valid refs delete cleanly.
- *
- * This is the intentional TOTAL-wipe path (per `--artifact`/`--all`),
- * distinct from the sync layer's SELECTIVE auto-prune which preserves
- * re-derivability for skipped/abandon/in-flight refs.
- */
-export async function snapshotsPruneAction(opts: SnapshotsPruneOptions = {}): Promise<void> {
+interface PruneCounts {
+  publications: number;
+  operations: number;
+  removed: number;
+  absent: number;
+  replayed: number;
+}
+
+const emptyPruneCounts = (): PruneCounts => ({
+  publications: 0,
+  operations: 0,
+  removed: 0,
+  absent: 0,
+  replayed: 0,
+});
+
+function selectedSnapshotResources(
+  inspection: DatabaseMaintenanceInspection,
+  mode: PruneMode,
+  artifactId: string | null
+): DatabaseMaintenanceResource[] {
+  return inspection.resources.filter((resource) => {
+    if (resource.role === 'checkpoint') {
+      return mode !== 'artifact' || resource.ownerId === artifactId;
+    }
+    if (resource.role !== null || !resource.fullRef.startsWith(`${SNAPSHOT_REF_PREFIX}/`)) {
+      return false;
+    }
+    return (
+      mode !== 'artifact' || resource.fullRef.startsWith(`${SNAPSHOT_REF_PREFIX}/${artifactId}/`)
+    );
+  });
+}
+
+function resolveArtifactId(
+  handle: Awaited<ReturnType<typeof openProjectDatabase>>,
+  requested: string,
+  projectId: string
+): string {
+  const resolved = resolveProjectArtifactDetails(handle, requested);
+  if (resolved.kind === 'missing') {
+    throw new OrcaopsError(ErrorCodes.UNKNOWN_ARTIFACT, `No artifact with id "${requested}".`);
+  }
+  if (resolved.kind === 'ambiguous') {
+    throw new OrcaopsError(
+      ErrorCodes.AMBIGUOUS_ARTIFACT,
+      'Use a longer prefix or an exact artifact UUID.',
+      'artifact',
+      {
+        history_candidates: resolved.candidates.map((artifactId) => ({
+          id: artifactId,
+          project_id: projectId,
+          command: `orcaops snapshots prune --artifact ${artifactId}`,
+        })),
+      }
+    );
+  }
+  return resolved.artifactId;
+}
+
+function recordPruneOutcome(
+  counts: PruneCounts,
+  completed: Set<string>,
+  publicationId: string,
+  result: { value: { outcome: 'removed' | 'absent' }; replayed: boolean }
+): void {
+  completed.add(publicationId);
+  counts.publications = completed.size;
+  counts.operations += 1;
+  counts[result.value.outcome] += 1;
+  if (result.replayed) counts.replayed += 1;
+}
+
+function pruneRecoverability(
+  handle: Awaited<ReturnType<typeof openProjectDatabase>>,
+  admissionOperationId: string
+): 'pending' | 'settled' | 'unknown' {
+  try {
+    const record = readProjectGitReclamationAdmission(handle, admissionOperationId).value;
+    return record && !record.terminal ? 'pending' : record ? 'settled' : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function pruneFailure(
+  cause: unknown,
+  counts: PruneCounts,
+  kind: 'pending_reclamation' | 'git_publication' | 'inspection',
+  id: string,
+  recoverability?: 'pending' | 'settled' | 'unknown'
+): never {
+  throw new OrcaopsError(
+    cause instanceof ProjectDatabaseError ? cause.code : 'SNAPSHOT_PRUNE_FAILED',
+    `Snapshot pruning stopped at ${kind} ${id}: ${cause instanceof Error ? cause.message : String(cause)}`,
+    undefined,
+    {
+      ...(cause instanceof ProjectDatabaseError && cause.reason ? { reason: cause.reason } : {}),
+      snapshot_prune_progress: {
+        state:
+          recoverability === 'pending'
+            ? 'recoverable_in_progress'
+            : counts.publications > 0
+              ? 'partial_completion'
+              : 'refused',
+        completed: { ...counts },
+        failed_candidate: { kind, id },
+      },
+    }
+  );
+}
+
+function pruneOutput(
+  inspection: DatabaseMaintenanceInspection | null,
+  mode: PruneMode,
+  artifactId: string | null,
+  counts: PruneCounts
+) {
+  const resources = inspection ? selectedSnapshotResources(inspection, mode, artifactId) : [];
+  return {
+    project_id: inspection?.authority.projectId ?? null,
+    artifact: artifactId,
+    completeness: inspection?.completeness ?? { complete: true, issues: [] },
+    candidates: resources
+      .filter((resource) => resource.state === 'eligible')
+      .map((resource) => resource.fullRef),
+    protected: resources
+      .filter((resource) => resource.state === 'protected')
+      .map((resource) => ({
+        publication_id: resource.publicationId,
+        full_ref: resource.fullRef,
+        reason: resource.reason,
+      })),
+    unknown: resources
+      .filter((resource) => resource.publicationId === null)
+      .map((resource) => resource.fullRef),
+    outcomes: counts,
+    deleted: counts.removed,
+  };
+}
+
+export async function snapshotsPruneAction(received: SnapshotsPruneOptions = {}): Promise<void> {
+  const opts = { ...received };
+  const controller = new AbortController();
+  const interrupt = () => controller.abort();
+  process.on('SIGINT', interrupt);
+  let reader: Awaited<ReturnType<typeof openProjectDatabase>> | null = null;
+  let writer: Awaited<ReturnType<typeof openProjectDatabase>> | null = null;
   try {
     const selected: PruneMode[] = [];
     if (opts.artifact !== undefined) selected.push('artifact');
@@ -97,124 +234,165 @@ export async function snapshotsPruneAction(opts: SnapshotsPruneOptions = {}): Pr
       throw new OrcaopsError(ErrorCodes.INVALID_INPUT, '--artifact requires an id.', 'artifact');
     }
     if (mode === 'all' && opts.apply !== true) {
-      throw new OrcaopsError(
-        ErrorCodes.INVALID_INPUT,
-        '--all requires --apply (a full namespace wipe is never an implicit dry-run default).',
-        'all'
+      throw new OrcaopsError(ErrorCodes.INVALID_INPUT, '--all requires --apply.', 'all');
+    }
+
+    const invocationCwd = getInvocationCwd();
+    const env = { ...getInvocationEnv() };
+    const override = getInvocationRootOverride() ?? env.ORCAOPS_ROOT;
+    const cwd = override?.trim() ? path.resolve(invocationCwd, override) : invocationCwd;
+    const root = await normalizeHistoryRoot({ cwd: invocationCwd, env });
+    const context = await readRegisteredDatabaseContext(
+      { cwd, root: root.resolvedRoot },
+      { signal: controller.signal }
+    );
+    if (!context) {
+      if (mode === 'artifact') {
+        throw new ProjectDatabaseError(
+          'HISTORY_MISSING',
+          'Registered project history is unavailable. Preserve the registration, SQLite companion files and retained evidence, then run `orcaops doctor`. Restore only the verified original database; setup cannot replace missing history.'
+        );
+      }
+      const output = pruneOutput(null, mode, null, emptyPruneCounts());
+      if (opts.json) emitOk({ schema_version: 1, applied: opts.apply === true, mode, ...output });
+      else writeTerminalSafeStdout(formatPruneHuman(opts.apply === true, mode, output));
+      return;
+    }
+
+    reader = await openProjectDatabase({
+      authority: context.authority,
+      mode: 'reader',
+      signal: controller.signal,
+    });
+    const artifactId =
+      mode === 'artifact'
+        ? resolveArtifactId(reader, opts.artifact!, context.authority.projectId)
+        : null;
+    let inspection = await inspectDatabaseMaintenance(reader, context);
+    reader.close();
+    reader = null;
+    if (opts.apply && !inspection.completeness.complete) {
+      throw new ProjectDatabaseError(
+        'HISTORY_INACCESSIBLE',
+        'Managed Git namespace inspection is incomplete; preserve every ref and repair access before pruning.'
       );
     }
 
-    const ctx = await buildContext();
-    try {
-      let candidates: string[];
-      if (mode === 'artifact') {
-        candidates = await listRawSnapshotRefNames(ctx.repo, { artifactId: opts.artifact });
-      } else if (mode === 'all') {
-        candidates = await listRawSnapshotRefNames(ctx.repo);
-      } else {
-        // orphans = malformed (raw − parsed)
-        //         ∪ parsed refs whose artifact_id is absent from the store
-        //         ∪ "unmodeled" parsed refs: artifact exists + has a
-        //           summary, but the ref's checkpoint n is absent from
-        //           readCheckpointsRecovered (a pin-before-append crash
-        //           orphan). The unmodeled predicate is IDENTICAL to
-        //           doctor's `stale-snapshot-refs` 'unmodeled' class
-        //           (artifact present, summary !== null, n ∉ recovered)
-        //           so `prune --orphans --apply` reclaims exactly what
-        //           doctor flags — no drift.
-        const raw = await listRawSnapshotRefNames(ctx.repo);
-        const parsed = await listSnapshotRefs(ctx.repo);
-        const parsedRefs = new Set(parsed.map((e) => e.ref));
-        const malformed = raw.filter((r) => !parsedRefs.has(r));
-        const byArtifact = new Map<string, typeof parsed>();
-        for (const e of parsed) {
-          const list = byArtifact.get(e.artifact_id) ?? [];
-          list.push(e);
-          byArtifact.set(e.artifact_id, list);
-        }
-        const absent: string[] = [];
-        const unmodeled: string[] = [];
-        for (const [aid, entries] of byArtifact) {
-          if (ctx.store.store.getArtifact(aid) === null) {
-            for (const e of entries) absent.push(e.ref);
-            continue;
-          }
-          // DELIBERATELY fail-closed (not enumeration containment): this
-          // scan nominates snapshot refs for GC — treating an unreadable
-          // artifact's refs as unmodeled would delete evidence for
-          // checkpoints that may exist.
-          const summary = await ctx.store.readSummary(aid);
-          if (summary === null) continue; // in-flight — mirror doctor's gate
-          const recovered = await ctx.store.readCheckpointsRecovered(aid);
-          const modeledN = new Set(recovered.map((c) => c.n));
-          for (const e of entries) {
-            if (!modeledN.has(e.n)) unmodeled.push(e.ref);
-          }
-        }
-        candidates = [...new Set([...malformed, ...absent, ...unmodeled])].sort();
+    const initial = pruneOutput(inspection, mode, artifactId, emptyPruneCounts());
+    const counts = emptyPruneCounts();
+    const completed = new Set<string>();
+    const initialCandidates = selectedSnapshotResources(inspection, mode, artifactId).filter(
+      (resource) => resource.state === 'eligible'
+    );
+    if (opts.apply && initialCandidates.length > 0) {
+      if (controller.signal.aborted) {
+        throw new ProjectDatabaseError('CANCELLED', 'Snapshot pruning cancelled before writing.');
       }
-
-      // Pre-prune enforcement: with the archive enabled, flag
-      // candidate refs whose closed checkpoint has no stored manifest and
-      // no cached derived manifest — pruning those trees loses the last
-      // derivation source. Dry-run discloses; --apply requires
-      // --allow-underived (or a prior `fingerprint derive`).
-      let underived: string[] = [];
-      if (ctx.config.archive.enabled && candidates.length > 0) {
-        underived = await findUnderivedRefs(
-          {
-            listParsedRefs: () => listSnapshotRefs(ctx.repo),
-            readCheckpoint: (aid, n) => ctx.store.readCheckpoint(aid, n),
-            cachedManifestExists: async (aid, n) =>
-              ctx.archive !== null &&
-              (await readDerivedCache(ctx.archive.projectDir, aid, n)) !== null,
-          },
-          candidates
+      let waiting = false;
+      const operation = {
+        signal: controller.signal,
+        onWait: () => {
+          if (waiting) return;
+          waiting = true;
+          writeTerminalSafeStderr(
+            'Waiting to prune retired snapshot publications; Ctrl-C cancels the wait.\n'
+          );
+        },
+      };
+      writer = await openProjectDatabase({
+        authority: context.authority,
+        mode: 'writer',
+        signal: controller.signal,
+      });
+      for (const admission of inspection.pendingAdmissions) {
+        const selected = initialCandidates.some(
+          (resource) => resource.publicationId === admission.target.publicationId
         );
-        if (opts.apply === true && underived.length > 0 && opts.allowUnderived !== true) {
-          throw new OrcaopsError(
-            ErrorCodes.INVALID_INPUT,
-            underivedPruneRefusal(underived.length, mode === 'all' ? 'all' : 'default'),
-            'allow-underived'
+        if (!selected) continue;
+        try {
+          const result = await resumeDatabaseGitReclamation(
+            writer,
+            context,
+            admission.admissionOperationId,
+            operation
+          );
+          recordPruneOutcome(counts, completed, admission.target.publicationId, result);
+        } catch (cause) {
+          pruneFailure(
+            cause,
+            counts,
+            'pending_reclamation',
+            admission.admissionOperationId,
+            pruneRecoverability(writer, admission.admissionOperationId)
           );
         }
       }
 
-      let deleted = 0;
-      if (opts.apply === true && candidates.length > 0) {
-        deleted = (await pruneSnapshotRefs(ctx.repo, candidates)).deleted;
+      try {
+        inspection = await inspectDatabaseMaintenance(writer, context);
+        if (!inspection.completeness.complete) {
+          throw new ProjectDatabaseError(
+            'HISTORY_INACCESSIBLE',
+            'Managed Git namespace changed to an incomplete state; preserve every remaining ref and repair access before retrying.'
+          );
+        }
+      } catch (cause) {
+        pruneFailure(cause, counts, 'inspection', 'managed_git_namespace');
       }
+      for (const resource of selectedSnapshotResources(inspection, mode, artifactId)) {
+        if (resource.state !== 'eligible' || !resource.target) continue;
+        const admission = {
+          admissionOperationId: uuidv7(),
+          terminalOperationId: uuidv7(),
+          target: resource.target,
+        };
+        try {
+          const result = await applyDatabaseGitReclamation(writer, context, admission, operation);
+          recordPruneOutcome(counts, completed, resource.publicationId!, result);
+        } catch (cause) {
+          pruneFailure(
+            cause,
+            counts,
+            'git_publication',
+            resource.publicationId!,
+            pruneRecoverability(writer, admission.admissionOperationId)
+          );
+        }
+      }
+    }
+    writer?.close();
+    writer = null;
 
-      if (opts.json) {
-        emitOk({
-          applied: opts.apply === true,
-          mode,
-          warning: PRUNE_WARNING,
-          candidates,
-          ...(ctx.config.archive.enabled ? { underived } : {}),
-          deleted,
-        });
-        return;
-      }
+    if (opts.json) {
+      emitOk({
+        schema_version: 1,
+        applied: opts.apply === true,
+        mode,
+        warning: PRUNE_WARNING,
+        ...initial,
+        outcomes: counts,
+        deleted: counts.removed,
+      });
+    } else {
       writeTerminalSafeStdout(
-        formatHuman(opts.apply === true, mode, candidates, deleted, underived)
+        formatPruneHuman(opts.apply === true, mode, { ...initial, outcomes: counts })
       );
-    } finally {
-      ctx.store.close();
     }
   } catch (err) {
+    if (reader) closeFailedHistoryRead(reader);
+    if (writer) closeFailedHistoryRead(writer);
     if (opts.json) emitError(err);
-    writeErrorLine(err);
+    else writeErrorLine(err);
     throw new CliExit(1);
+  } finally {
+    process.off('SIGINT', interrupt);
   }
 }
 
-function formatHuman(
+function formatPruneHuman(
   applied: boolean,
   mode: PruneMode,
-  candidates: string[],
-  deleted: number,
-  underived: string[] = []
+  output: ReturnType<typeof pruneOutput>
 ): string {
   const lines: string[] = [];
   lines.push(
@@ -224,18 +402,18 @@ function formatHuman(
   );
   lines.push(PRUNE_WARNING);
   lines.push('');
-  lines.push(`  refs: ${candidates.length}` + (applied ? ` → deleted ${deleted}` : ''));
-  for (const r of candidates) {
-    lines.push(`    - ${r}${underived.includes(r) ? '  [underived]' : ''}`);
-  }
-  if (underived.length > 0 && !applied) {
-    lines.push('');
+  lines.push(`  project:       ${output.project_id ?? '(unregistered)'}`);
+  lines.push(`  completeness:  ${output.completeness.complete ? 'complete' : 'incomplete'}`);
+  lines.push(`  candidates:    ${output.candidates.length}`);
+  lines.push(`  protected:     ${output.protected.length}`);
+  if (applied)
     lines.push(
-      `  ${underived.length} ref(s) are underived (no stored or cached manifest); ` +
-        '`--apply` will refuse without `--allow-underived` — run ' +
-        '`orcaops fingerprint derive --artifact <id> --checkpoint <n>` for each first.'
+      `  outcomes:      ${output.outcomes.removed} removed, ${output.outcomes.absent} absent, ` +
+        `${output.outcomes.replayed} replayed`
     );
-  }
+  for (const ref of output.candidates) lines.push(`    eligible  ${ref}`);
+  for (const resource of output.protected)
+    lines.push(`    protected ${resource.full_ref} (${resource.reason})`);
   lines.push('');
   return lines.join('\n');
 }
@@ -245,6 +423,20 @@ function formatHuman(
 type BoundaryPhase = 'open' | 'close' | 'abandon';
 
 const BOUNDARY_PHASES: readonly BoundaryPhase[] = ['open', 'close', 'abandon'];
+
+function snapshotRepository(
+  context: Awaited<ReturnType<typeof resolveDatabaseHistoryCommandContext>>,
+  repositoryInstanceId: string
+): Repo {
+  const git = context.scope.gitContext;
+  if (!git || git.repositoryInstanceId !== repositoryInstanceId) {
+    throw new ProjectDatabaseError(
+      'AUTHORITY_MISMATCH',
+      'Use the repository instance that owns this retained snapshot evidence.'
+    );
+  }
+  return historyRepository(git.worktreeRoot);
+}
 
 /**
  * The phase a bare `snapshots checkout` / a range endpoint defaults to,
@@ -312,19 +504,13 @@ export function requireBoundary(
   return boundary;
 }
 
-/**
- * The pruned-boundary message, shared by checkout and diff. Aligned with
- * derive's pruned-ref wording, PLUS the auto-prune context: pruning
- * synced cps' open/close refs is NORMAL operation,
- * not an edge case.
- */
+/** The pruned-boundary message shared by checkout and diff. */
 function prunedBoundaryMessage(shaShort: string, n: number, phase: BoundaryPhase): string {
   return (
     `Snapshot commit ${shaShort} for checkpoint #${n} phase "${phase}" is unreachable. The ` +
-    `refs pinning it were likely pruned (\`orcaops snapshots prune\` / \`orcaops gc\`, or the ` +
-    `cloud-sync auto-prune — a synced checkpoint's open/close refs are pruned once its ` +
-    `manifest lands). A pruned boundary can no longer be materialized; time-travel is ` +
-    `strongest on unsynced/local work.`
+    `retired publication may have been pruned with \`orcaops snapshots prune\` or ` +
+    `\`orcaops gc\`, or its Git objects may be unavailable. This boundary can no longer be ` +
+    `materialized until the missing Git evidence is restored.`
   );
 }
 
@@ -365,6 +551,7 @@ export interface SnapshotsCheckoutOptions {
  * `capture.exclude` are listed before the write.
  */
 export async function snapshotsCheckoutAction(opts: SnapshotsCheckoutOptions): Promise<void> {
+  opts = { ...opts };
   try {
     if (typeof opts.artifact !== 'string' || opts.artifact.length === 0) {
       throw new OrcaopsError(ErrorCodes.INVALID_INPUT, '--artifact <id> is required.', 'artifact');
@@ -384,15 +571,15 @@ export async function snapshotsCheckoutAction(opts: SnapshotsCheckoutOptions): P
       );
     }
 
-    const ctx = await buildContext();
+    const ctx = await resolveDatabaseHistoryCommandContext({ profile: 'exact' });
     try {
-      if (ctx.store.store.getArtifact(opts.artifact) === null) {
-        throw new OrcaopsError(
-          ErrorCodes.UNKNOWN_ARTIFACT,
-          `No artifact with id "${opts.artifact}".`
-        );
-      }
-      const cp = await ctx.store.readCheckpoint(opts.artifact, opts.checkpoint);
+      const target = resolveDatabaseHistoryArtifact(ctx.scope, opts.artifact);
+      opts.artifact = target.artifactId;
+      const repo = snapshotRepository(ctx, target.authority.repositoryInstanceId);
+      const gitEnv = historyGitEnvironment();
+      const cp =
+        target.artifact.thread.checkpoints.find((checkpoint) => checkpoint.n === opts.checkpoint) ??
+        null;
       if (cp === null) {
         throw new OrcaopsError(
           ErrorCodes.INVALID_INPUT,
@@ -411,24 +598,17 @@ export async function snapshotsCheckoutAction(opts: SnapshotsCheckoutOptions): P
       // checkout proceeds regardless.
       let note: string | undefined;
       if (cp.status === 'closed') {
-        try {
-          const manifest = await ctx.store.readCheckpointDiffFingerprint(
-            opts.artifact,
-            opts.checkpoint
-          );
-          if (
-            manifest !== null &&
-            (manifest.open_tree_sha !== cp.open_snapshot.tree_sha ||
-              manifest.close_tree_sha !== cp.close_snapshot.tree_sha)
-          ) {
-            note =
-              `stored manifest's fingerprint window (${manifest.open_tree_sha.slice(0, 12)}..` +
-              `${manifest.close_tree_sha.slice(0, 12)}) differs from the physical snapshot ` +
-              `boundaries (empty-fence recovery). This checkout materializes the PHYSICAL ` +
-              `"${phase}" boundary tree.`;
-          }
-        } catch {
-          // unreadable manifest — no note; integrity surfacing belongs to show/derive
+        const manifest = await retainedCheckpointManifest(target.artifact.thread, cp);
+        if (
+          manifest !== null &&
+          (manifest.open_tree_sha !== cp.open_snapshot.tree_sha ||
+            manifest.close_tree_sha !== cp.close_snapshot.tree_sha)
+        ) {
+          note =
+            `stored manifest's fingerprint window (${manifest.open_tree_sha.slice(0, 12)}..` +
+            `${manifest.close_tree_sha.slice(0, 12)}) differs from the physical snapshot ` +
+            `boundaries (empty-fence recovery). This checkout materializes the PHYSICAL ` +
+            `"${phase}" boundary tree.`;
         }
       }
 
@@ -457,12 +637,13 @@ export async function snapshotsCheckoutAction(opts: SnapshotsCheckoutOptions): P
         boundary.tree_sha === null
           ? []
           : await listSensitiveTreePaths(
-              ctx.repo,
+              repo,
               boundary.tree_sha,
-              resolveCaptureExcludes(ctx.config.capture).patterns
+              resolveCaptureExcludes(ctx.config.capture).patterns,
+              gitEnv
             );
 
-      const result = await materializeSnapshotTree(ctx.repo, commitSha, dir);
+      const result = await materializeSnapshotTree(repo, commitSha, dir, { env: gitEnv });
       if (!result.ok) {
         if (result.error_reason === 'commit_unreachable') {
           throw new OrcaopsError(
@@ -532,9 +713,10 @@ export async function snapshotsCheckoutAction(opts: SnapshotsCheckoutOptions): P
       ];
       writeTerminalSafeStdout(lines.join('\n'));
     } finally {
-      ctx.store.close();
+      ctx.scope.close();
     }
-  } catch (err) {
+  } catch (cause) {
+    const err = historyScopeCommandError(cause);
     if (opts.json) emitError(err);
     writeErrorLine(err);
     throw new CliExit(1);
@@ -695,6 +877,7 @@ interface ResolvedEndpoint {
  * is trimmed to a valid UTF-8 boundary.
  */
 export async function snapshotsDiffAction(opts: SnapshotsDiffOptions): Promise<void> {
+  opts = { ...opts };
   try {
     if (typeof opts.artifact !== 'string' || opts.artifact.length === 0) {
       throw new OrcaopsError(ErrorCodes.INVALID_INPUT, '--artifact <id> is required.', 'artifact');
@@ -713,17 +896,16 @@ export async function snapshotsDiffAction(opts: SnapshotsDiffOptions): Promise<v
     }
     const parsed = parseDiffRange(opts.range);
 
-    const ctx = await buildContext({ mintArchiveIdentity: false });
+    const ctx = await resolveDatabaseHistoryCommandContext({ profile: 'exact' });
     try {
-      if (ctx.store.store.getArtifact(opts.artifact) === null) {
-        throw new OrcaopsError(
-          ErrorCodes.UNKNOWN_ARTIFACT,
-          `No artifact with id "${opts.artifact}".`
-        );
-      }
+      const target = resolveDatabaseHistoryArtifact(ctx.scope, opts.artifact);
+      opts.artifact = target.artifactId;
+      const thread = target.artifact.thread;
+      const repo = snapshotRepository(ctx, target.authority.repositoryInstanceId);
+      const gitEnv = historyGitEnvironment();
 
-      const readCp = async (n: number): Promise<Checkpoint> => {
-        const cp = await ctx.store.readCheckpoint(opts.artifact, n);
+      const readCp = (n: number): Checkpoint => {
+        const cp = thread.checkpoints.find((checkpoint) => checkpoint.n === n) ?? null;
         if (cp === null) {
           throw new OrcaopsError(
             ErrorCodes.INVALID_INPUT,
@@ -762,13 +944,13 @@ export async function snapshotsDiffAction(opts: SnapshotsDiffOptions): Promise<v
             `${side}-phase`
           );
         }
-        const ref = `refs/orcaops/baseline/${opts.artifact}`;
-        const sha = await ctx.repo.resolveCommit(ref);
+        const ref = null;
+        const sha = thread.artifactJson?.baseline_seed_tree_sha ?? null;
         if (sha === null) {
           throw new OrcaopsError(
             ErrorCodes.SNAPSHOT_UNAVAILABLE,
-            `No plan-time baseline for "${opts.artifact}" — it was never pinned, or its ref ` +
-              `was auto-pruned once the first checkpoint was accounted. Salvage fallback: try ` +
+            `No plan-time baseline for "${opts.artifact}" — it was never retained, or its ` +
+              `Git objects are unavailable. Salvage fallback: try ` +
               `the prior checkpoint's close boundary, or \`snapshots checkout\` the abandon ` +
               `tree without a diff.`,
             'range'
@@ -816,22 +998,25 @@ export async function snapshotsDiffAction(opts: SnapshotsDiffOptions): Promise<v
         // manifest's trees are authoritative (empty-fence recovery may
         // have pinned a baseline open tree ≠ the physical boundary).
         if (cp.status === 'closed' && fromPhase === 'open' && toPhase === 'close') {
-          try {
-            const manifest = await ctx.store.readCheckpointDiffFingerprint(opts.artifact, parsed.n);
-            if (manifest !== null) {
-              treeSource = 'stored_manifest_trees';
-              if (manifest.open_tree_sha !== from.sha || manifest.close_tree_sha !== to.sha) {
-                note =
-                  `manifest fingerprint window differs from the physical snapshot boundaries ` +
-                  `(empty-fence recovery) — diffing the manifest window ` +
-                  `${manifest.open_tree_sha.slice(0, 12)}..${manifest.close_tree_sha.slice(0, 12)}.`;
-              }
-              from.sha = manifest.open_tree_sha;
-              to.sha = manifest.close_tree_sha;
+          const manifest = await retainedCheckpointManifest(thread, cp);
+          if (cp.diff_fingerprint_summary.manifest_hash !== null && manifest === null) {
+            throw new OrcaopsError(
+              ErrorCodes.EVENT_LOG_CORRUPT,
+              `Checkpoint #${parsed.n} declares retained fingerprint evidence that cannot be loaded. ` +
+                'Run `orcaops doctor` and preserve the database for explicit repair.',
+              'range'
+            );
+          }
+          if (manifest !== null) {
+            treeSource = 'stored_manifest_trees';
+            if (manifest.open_tree_sha !== from.sha || manifest.close_tree_sha !== to.sha) {
+              note =
+                `manifest fingerprint window differs from the physical snapshot boundaries ` +
+                `(empty-fence recovery) — diffing the manifest window ` +
+                `${manifest.open_tree_sha.slice(0, 12)}..${manifest.close_tree_sha.slice(0, 12)}.`;
             }
-          } catch {
-            // unreadable manifest → physical boundaries; integrity
-            // surfacing belongs to show/derive
+            from.sha = manifest.open_tree_sha;
+            to.sha = manifest.close_tree_sha;
           }
         }
       } else {
@@ -847,7 +1032,7 @@ export async function snapshotsDiffAction(opts: SnapshotsDiffOptions): Promise<v
 
       const cap = ctx.config.diff_fingerprint.max_diff_bytes;
       const diff = await diffSnapshotTrees({
-        repo: ctx.repo,
+        repo,
         openTreeSha: from.sha,
         closeTreeSha: to.sha,
         // Read a bounded overlap PAST the cap so redaction sees whole
@@ -856,15 +1041,15 @@ export async function snapshotsDiffAction(opts: SnapshotsDiffOptions): Promise<v
         // length and emitted as an unmatched prefix. The overlap is a fixed
         // small constant, so the memory bound moves by a known amount.
         maxDiffBytes: cap + SECRET_STRADDLE_OVERLAP_BYTES,
+        env: gitEnv,
       });
       if (!diff.ok) {
         throw new OrcaopsError(
           ErrorCodes.SNAPSHOT_UNAVAILABLE,
           `git diff ${from.sha.slice(0, 12)}..${to.sha.slice(0, 12)} failed — one or both ` +
-            `endpoint trees are unreachable. The snapshot refs pinning them were likely ` +
-            `pruned (\`orcaops snapshots prune\` / \`orcaops gc\`, or the cloud-sync ` +
-            `auto-prune once a synced checkpoint's manifest landed); a pruned boundary can ` +
-            `no longer be diffed. Time-travel is strongest on unsynced/local work.`,
+            `endpoint trees are unreachable or unavailable. A retired publication may have ` +
+            `been pruned with \`orcaops snapshots prune\` or \`orcaops gc\`; this boundary can ` +
+            `no longer be diffed.`,
           'range'
         );
       }
@@ -924,84 +1109,12 @@ export async function snapshotsDiffAction(opts: SnapshotsDiffOptions): Promise<v
         writeTerminalSafeStderr(`[snapshots diff] note: ${note}\n`);
       }
     } finally {
-      ctx.store.close();
+      ctx.scope.close();
     }
-  } catch (err) {
+  } catch (cause) {
+    const err = historyScopeCommandError(cause);
     if (opts.json) emitError(err);
     writeErrorLine(err);
     throw new CliExit(1);
   }
-}
-
-/** Injected readers so the underived predicate is directly unit-testable. */
-export interface UnderivedProbe {
-  listParsedRefs: () => Promise<Array<{ ref: string; artifact_id: string; n: number }>>;
-  readCheckpoint: (
-    artifactId: string,
-    n: number
-  ) => Promise<{
-    status: string;
-    diff_fingerprint_summary?: { manifest_hash: string | null };
-  } | null>;
-  cachedManifestExists: (artifactId: string, n: number) => Promise<boolean>;
-}
-
-/**
- * Candidate refs whose closed checkpoint has NEITHER a stored manifest
- * (capture-time, mirrored to the archive with the event log) NOR a cached
- * derived manifest (the `fingerprint derive` cache). Malformed refs,
- * absent artifacts, and non-closed checkpoints have nothing to derive —
- * never flagged. Exported for direct unit testing.
- */
-export async function findUnderivedRefs(
-  probe: UnderivedProbe,
-  candidates: string[]
-): Promise<string[]> {
-  const parsedByRef = new Map((await probe.listParsedRefs()).map((e) => [e.ref, e]));
-  const derivableByCp = new Map<string, boolean>();
-  const underived: string[] = [];
-  for (const ref of candidates) {
-    const entry = parsedByRef.get(ref);
-    if (!entry) continue;
-    const key = `${entry.artifact_id}:${entry.n}`;
-    let derivable = derivableByCp.get(key);
-    if (derivable === undefined) {
-      // NO catch: this probe gates DELETION. A recovery refusal (or any
-      // other failure) must abort the prune — treating an unreadable
-      // checkpoint as "nothing to protect" would delete the last
-      // derivation source for state that cannot be verified.
-      derivable = true; // default: nothing to protect
-      const cp = await probe.readCheckpoint(entry.artifact_id, entry.n);
-      if (cp !== null && cp.status === 'closed') {
-        derivable = (cp.diff_fingerprint_summary?.manifest_hash ?? null) !== null;
-        if (!derivable) {
-          derivable = await probe.cachedManifestExists(entry.artifact_id, entry.n);
-        }
-      }
-      derivableByCp.set(key, derivable);
-    }
-    if (!derivable) underived.push(ref);
-  }
-  return underived;
-}
-
-/**
- * Refusal for `--apply` over underived refs. Flows verbatim into the
- * public JSON error envelope; exported so the remedy text stays pinned.
- * The listing pointer is mode-aware: `--all` has no dry-run (it requires
- * `--apply`), so its remedy routes through doctor instead of a re-run
- * that would itself refuse.
- */
-export function underivedPruneRefusal(count: number, mode: 'default' | 'all' = 'default'): string {
-  const listing =
-    mode === 'all'
-      ? 'Run `orcaops doctor` to list them'
-      : 'Re-run without `--apply` to list them (marked [underived])';
-  return (
-    `${count} candidate ref(s) belong to checkpoints with no stored or ` +
-    `cached manifest — pruning them makes those fingerprints permanently ` +
-    `non-derivable. ${listing}, ` +
-    `run \`orcaops fingerprint derive --artifact <id> --checkpoint <n>\` for each ` +
-    `first, or pass \`--allow-underived\` to prune anyway.`
-  );
 }

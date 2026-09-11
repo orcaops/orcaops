@@ -54,6 +54,7 @@ describe('buildBranchDigestData', () => {
           n: 1,
           ts: '2026-01-01T01:00:00.000Z',
           summary: 'Built the feature.',
+          close_snapshot: { tree_sha: 'first-tree', snapshot_commit_sha: 'first-close' },
           files_changed: ['feature.ts'],
           verification: [{ command: 'pnpm test', exit_code: 0, output_digest: '10 passed' }],
         },
@@ -100,6 +101,7 @@ describe('buildBranchDigestData', () => {
           n: 1,
           ts: '2026-01-02T01:00:00.000Z',
           summary: 'Added the cache.',
+          close_snapshot: { tree_sha: 'later-tree', snapshot_commit_sha: 'later-close' },
           files_changed: ['cache.ts'],
           verification: [
             { command: ' pnpm   test ', exit_code: 0, output_digest: '12 passed' },
@@ -172,18 +174,63 @@ describe('buildBranchDigestData', () => {
       data.tests.filter((test) => test.kind === 'verification' && test.exit_code === 0)
     ).toEqual([
       expect.objectContaining({
+        output_digest: '10 passed',
+        sources: [{ artifact_id: 'primary', checkpoint: 1 }],
+      }),
+      expect.objectContaining({
         output_digest: '12 passed',
-        exit_code: 0,
-        sources: expect.arrayContaining([
-          { artifact_id: 'primary', checkpoint: 1 },
-          { artifact_id: 'follow-up', checkpoint: 1 },
-        ]),
+        sources: [{ artifact_id: 'follow-up', checkpoint: 1 }],
       }),
     ]);
     expect(data.tests).toContainEqual(expect.objectContaining({ text: 'pnpm lint', exit_code: 1 }));
+    const markdown = renderBranchDigestMarkdown(data);
+    expect(markdown).toContain(
+      'Agent reports command exited 0. Checkpoint subsequently closed at snapshot `first-close`.'
+    );
+    expect(markdown).toContain(
+      'Agent reports command exited 0. Checkpoint subsequently closed at snapshot `later-close`.'
+    );
+    expect(markdown).not.toContain('ran against snapshot');
     expect(data.usage.sessions).toEqual([
       expect.objectContaining({ session_id: 'shared', input_tokens: 20, record_count: 2 }),
     ]);
+  });
+
+  it('keeps another artifact summary command when the same command has a checkpoint result', () => {
+    const first = digest('primary', 'First', 'First done.', {
+      checkpoints: [
+        {
+          n: 1,
+          ts: '2026-01-01T00:00:00.000Z',
+          summary: 'First finding',
+          files_changed: [],
+          verification: [{ command: 'pnpm test', exit_code: 0 }],
+        },
+      ],
+    });
+    const second = digest('follow-up', 'Second', 'Second done.', { tests_run: ['pnpm test'] });
+    const data = buildBranchDigestData({
+      range,
+      artifacts: [first, second].map((data, order) => ({
+        data,
+        state: 'summarized',
+        order,
+        anchors: [],
+        matched_anchors: [],
+      })),
+    });
+    expect(data.tests).toContainEqual(
+      expect.objectContaining({
+        kind: 'verification',
+        sources: [{ artifact_id: 'primary', checkpoint: 1 }],
+      })
+    );
+    expect(data.tests).toContainEqual(
+      expect.objectContaining({ kind: 'test_run', sources: [{ artifact_id: 'follow-up' }] })
+    );
+    expect(renderBranchDigestMarkdown(data)).toContain(
+      'Agent reports running this command; result and target not recorded here. _(artifact follow-up)_'
+    );
   });
 
   it('merges sources only for fully equivalent decisions and passing release checks', () => {
@@ -283,9 +330,11 @@ describe('buildBranchDigestData', () => {
     });
 
     const markdown = renderBranchDigestMarkdown(data);
-    expect(markdown).toContain('**Verification:** `pnpm test`');
-    expect(markdown).toContain('**Test run:** `pnpm lint`');
-    expect(markdown).toContain('**Test file:** `feature.test.ts`');
+    expect(markdown).toContain('`pnpm test` — Agent reports command exited 0.');
+    expect(markdown).toContain(
+      '`pnpm lint` — Agent reports running this command; result and target not recorded here.'
+    );
+    expect(markdown).toContain('`feature.test.ts` — Agent reports writing this test file.');
     expect(markdown).toContain('Imported from Git history (synthesized, not captured reasoning)');
     expect(markdown).toContain('## artifacts not included');
     expect(markdown).toContain('`branch-candidate`');

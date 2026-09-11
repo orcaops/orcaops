@@ -92,7 +92,8 @@ export function packStaged(stagingDir, releaseDir) {
   });
   const [info] = JSON.parse(out);
   const tarball = path.join(releaseDir, info.filename);
-  if (!existsSync(tarball)) fail(`npm pack reported ${info.filename} but it is not in ${releaseDir}`);
+  if (!existsSync(tarball))
+    fail(`npm pack reported ${info.filename} but it is not in ${releaseDir}`);
   return tarball;
 }
 
@@ -143,7 +144,10 @@ export function assertTarball(tarball, { required = [], forbid = null, executabl
  * The publishable-staging verifier plus what it cannot see: the executable's
  * mode on disk and, on macOS, that its signature verifies.
  */
-export function verifyStaging(stagingDir, { rootDir, bundle, executable = null, codesign = false }) {
+export function verifyStaging(
+  stagingDir,
+  { rootDir, bundle, executable = null, codesign = false }
+) {
   run(
     'node',
     // --no-docs: a platform package ships one compiled binary and its notices;
@@ -158,7 +162,8 @@ export function verifyStaging(stagingDir, { rootDir, bundle, executable = null, 
   );
   if (executable !== null) {
     const exe = path.join(stagingDir, executable);
-    if ((statSync(exe).mode & 0o111) === 0) fail(`${executable} is not executable in ${stagingDir}`);
+    if ((statSync(exe).mode & 0o111) === 0)
+      fail(`${executable} is not executable in ${stagingDir}`);
     // Only a mac can verify a Mach-O signature, and only darwin executables carry one.
     if (codesign && process.platform === 'darwin') {
       run('codesign', ['--verify', '--strict', '--verbose=2', exe]);

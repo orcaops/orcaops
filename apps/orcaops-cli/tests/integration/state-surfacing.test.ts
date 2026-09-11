@@ -1,24 +1,30 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
-import { sourcePlanCacheDir, writePullCacheRecord } from '@orcaops/storage';
-import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
+import { uuidv7 } from '@orcaops/storage';
+import { openProjectDatabase } from '@orcaops/storage/history/database';
+import { inputFile } from '@orcaops/test-harness';
 
+import { createDatabasePlanPullPersistence } from '../../src/lib/database-source-plan-pull.js';
+import { fixture } from '../helpers/database-history.js';
 import { cloudRecord } from '../support/source-plan-test-helpers.js';
 import { makeAgent } from '../support/test-agent.js';
-import { plantBlockViolation } from '../support/test-helpers.js';
 
-describe('state surfacing in list / status / show', () => {
-  let repo: TempRepo;
+describe('state surfacing in list / status / show', { timeout: 60_000 }, () => {
+  let f: Awaited<ReturnType<typeof fixture>>;
   let agent: ReturnType<typeof makeAgent>;
 
   beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    agent = makeAgent({ cwd: repo.path });
-    await agent.init({ noLlm: true });
-  });
-
-  afterEach(async () => {
-    await repo.cleanup();
+    f = await fixture();
+    agent = makeAgent({
+      cwd: f.main,
+      env: {
+        ORCAOPS_DATA_DIR: f.root,
+        ORCAOPS_DISABLE_DRAIN: '1',
+        CODEX_SESSION_ID: 'state-session',
+        CLAUDE_SESSION_ID: '',
+        CLAUDE_CODE_SESSION_ID: '',
+      },
+    });
   });
 
   it('list --json: a freshly-planned artifact reports state=planned', async () => {
@@ -29,12 +35,14 @@ describe('state surfacing in list / status / show', () => {
       '--input',
       inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
     ]);
+    expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
     const listRes = await agent.runRaw(['list', '--json']);
+    expect(listRes.exitCode, listRes.stdout + listRes.stderr).toBe(0);
     const r = JSON.parse(listRes.stdout) as {
-      artifacts: Array<{ id: string; state: string }>;
+      results: Array<{ id: string; state: string }>;
     };
-    const found = r.artifacts.find((a) => a.id === plan.artifact_id);
+    const found = r.results.find((a) => a.id === plan.artifact_id);
     expect(found?.state).toBe('planned');
   });
 
@@ -46,17 +54,34 @@ describe('state surfacing in list / status / show', () => {
       '--input',
       inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
     ]);
+    expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
-    await plantBlockViolation({
-      cwd: repo.path,
-      artifactId: plan.artifact_id,
-      evaluatorRef: 'test-pack/api-stub',
-    });
+    await f.mutate(plan.artifact_id, { blocked: true }, (semantics) =>
+      semantics.writeEvaluatorRunPayload(
+        plan.artifact_id,
+        {
+          schema: 'orcaops.evaluator_run/v1',
+          run_id: uuidv7(),
+          artifact_id: plan.artifact_id,
+          evaluator_ref: 'test-pack/api-stub',
+          package_id: 'test-pack',
+          evaluator_id: 'api-stub',
+          phase: 'pre-pr',
+          severity: 'block',
+          run_status: 'completed',
+          verdict: 'violation',
+          body: 'Retained blocking evidence',
+          ts: '2026-09-05T00:00:01.000Z',
+        },
+        { idempotencyKey: uuidv7() }
+      )
+    );
     const listRes = await agent.runRaw(['list', '--json']);
+    expect(listRes.exitCode, listRes.stdout + listRes.stderr).toBe(0);
     const r = JSON.parse(listRes.stdout) as {
-      artifacts: Array<{ id: string; state: string }>;
+      results: Array<{ id: string; state: string }>;
     };
-    expect(r.artifacts.find((a) => a.id === plan.artifact_id)?.state).toBe('blocked');
+    expect(r.results.find((a) => a.id === plan.artifact_id)?.state).toBe('blocked');
   });
 
   it('status --json: reports state per artifact', async () => {
@@ -67,6 +92,7 @@ describe('state surfacing in list / status / show', () => {
       '--input',
       inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
     ]);
+    expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
     const res = await agent.runRaw(['status', '--json']);
     const r = JSON.parse(res.stdout) as {
@@ -83,13 +109,13 @@ describe('state surfacing in list / status / show', () => {
       '--input',
       inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
     ]);
+    expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
     const res = await agent.runRaw(['show', plan.artifact_id, '--json']);
     const r = JSON.parse(res.stdout) as {
       artifact: { id: string; state: string; status?: string };
     };
     expect(r.artifact.state).toBe('planned');
-    // One public vocabulary: the coarse status column never leaves show.
     expect(r.artifact.status).toBeUndefined();
   });
 
@@ -101,13 +127,15 @@ describe('state surfacing in list / status / show', () => {
       '--input',
       inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
     ]);
+    expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
-    await agent.runRaw([
+    const summary = await agent.runRaw([
       'capture',
       'summary',
       '--input',
       inputFile(JSON.stringify({ artifact_id: plan.artifact_id, outcome: 'shipped' })),
     ]);
+    expect(summary.exitCode, summary.stdout + summary.stderr).toBe(0);
     const res = await agent.runRaw(['show', plan.artifact_id, '--json']);
     const r = JSON.parse(res.stdout) as { artifact: { state: string } };
     expect(r.artifact.state).toBe('summarized');
@@ -126,8 +154,13 @@ describe('state surfacing in list / status / show', () => {
     expect(res.stdout).toMatch(/planned/);
   });
 
-  it('status --json: surfaces a per-artifact source_plan, distinct from top-level current_pin', async () => {
-    await writePullCacheRecord(sourcePlanCacheDir(repo.path), cloudRecord());
+  it('status --json: surfaces a per-artifact source_plan, distinct from execution focus', async () => {
+    await createDatabasePlanPullPersistence({
+      reader: f.writer,
+      target: { server_url: 'https://cloud.example', org_id: 'org_1', account_id: 'account_1' },
+      secretAllow: [],
+      openWriter: () => openProjectDatabase({ authority: f.authority, mode: 'writer' }),
+    }).writeRecord(cloudRecord());
     const planRes = await agent.runRaw([
       'capture',
       'plan',
@@ -143,10 +176,11 @@ describe('state surfacing in list / status / show', () => {
         })
       ),
     ]);
+    expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
     const res = await agent.runRaw(['status', '--json']);
     const r = JSON.parse(res.stdout) as {
-      current_pin: unknown;
+      focus: Array<{ pin: { artifact_id: string } | null }>;
       artifacts: Array<{
         id: string;
         source_plan: {
@@ -164,9 +198,7 @@ describe('state surfacing in list / status / show', () => {
       version: '3',
     });
     expect('content' in (found!.source_plan as object)).toBe(false);
-    // Regression guard for the naming collision: the per-artifact source_plan
-    // is orthogonal to the shell's top-level current_pin — both keys coexist.
-    expect('current_pin' in r).toBe(true);
+    expect(r.focus.some((selection) => selection.pin?.artifact_id === plan.artifact_id)).toBe(true);
   });
 
   it('status --json: source_plan is null for an unpinned artifact', async () => {
@@ -177,6 +209,7 @@ describe('state surfacing in list / status / show', () => {
       '--input',
       inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
     ]);
+    expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
     const res = await agent.runRaw(['status', '--json']);
     const r = JSON.parse(res.stdout) as {

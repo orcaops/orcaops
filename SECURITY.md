@@ -86,18 +86,15 @@ those product-managed roots — `project`, `global`, or `personal` — but it
 selects from a fixed set rather than supplying a path; the only path inputs a
 repository can supply are the two named above.
 
-**Status**: enforced. Every artifact-id-to-path construction passes through a
-single sink that rejects unsafe id segments and resolves configured paths
-through existing ancestors. Repository-managed hot artifact, cache-database,
-usage, archive-sidecar, source-plan, plan-review, review-feedback, and watch-cursor
-paths refuse symlink components, including dangling symlinks, rather than following
-an in-repository link onto unrelated source or artifact data. `ArtifactStore` hot
-reads and writes, usage-ledger IO, storage and review engine lock directories,
-durable directory creation/chmod, projection renames, cache-database open, cloud
-cache reads and writes, archive mirror/repair/restore hot-side operations, Watch
-event reads, and recursive artifact deletion repeat the resolved check at their
-filesystem boundary. Archive prune validates its `--project` / `--artifact`
-arguments before building any path and re-checks containment at the removal itself.
+**Status**: enforced at the canonical database and retained-evidence boundaries.
+Project, store and repository identities are validated against create-once
+registration. Canonical history roots come from local operator configuration,
+not checked-in artifact/cache path settings. Database and evidence access checks
+ownership and containment; a missing expected database is never initialized as
+an empty replacement. Passive readers use existing validated read-only database
+connections, with SQLite-managed runtime coordination permitted, and perform no
+application repair, migration or index rebuild. Generated worktree files retain
+their repository containment checks.
 Repository install mutations apply the same policy to generated skills and
 commands, instruction files, install manifests, `.gitignore`, project
 session-hook entries, Git hooks (including a `core.hooksPath`-designated
@@ -120,7 +117,7 @@ legitimate); dangling links are refused. The consent record
 orcaops global root — never the authority for what gets removed.
 
 Containment is an explicit filesystem-operation policy: generic storage
-primitives and product-managed home/archive locations do not infer a
+primitives and product-managed history locations do not infer a
 repository boundary, so any new repository-local caller must supply one.
 These are userspace path checks rather than an `openat(2)`-style kernel
 sandbox; a process that can concurrently replace path components can still
@@ -133,7 +130,7 @@ with write access to the worktree are not trusted.
 A secret an agent reads out of the repository is the repository's problem —
 orcaops did not create it, and refusing a capture cannot remove it. What
 orcaops owes you is that capturing does not move it somewhere the repository
-never went: into a cloud thread, into a home-directory archive that outlives
+never went: into a cloud thread, into project history that outlives
 the worktree, or into a payload a reviewing agent's model provider reads.
 
 Recognizable **vendor-issued credentials** are refused at the write boundary,
@@ -206,14 +203,12 @@ later fails a test rather than silently escaping the gate. Stated limits:
 - This is an **accident guard, not an adversarial control**. It catches a
   credential an agent quoted from debug output, an env file, or its own logs.
   An agent that deliberately encodes one is out of scope, as it is today.
-- The **durable archive mirrors event text verbatim by default**
-  (`archive.enabled: true`, `archive.redact_secrets: false`), into the user's
-  Orcaops data directory — outside the repository, outside `.gitignore`, and
-  surviving deletion of the worktree. Warn-tier content capture admitted is
-  therefore copied there as written. The default is deliberate: the mirror is
-  what a cold-start `orcaops resume` restores from in a fresh checkout, and a
-  redacted mirror is a lossy restore. `orcaops doctor` reports which of the two
-  postures a repository is in.
+- Canonical project history retains admitted captured content in the user's
+  data root, normally outside the repository and surviving worktree deletion.
+  Warn-tier content admitted at capture remains retained as written; there is
+  no optional redacted archive copy. Database history and immutable evidence
+  are not encrypted by Orcaops. Protect the data root and retained Git objects
+  with the same care as other private engineering material.
 - Detection is prefix- and keyword-shaped. An unlabelled high-entropy
   credential is not recognized by any pattern.
 - The value test applies three conditions, in this order. A run of six or more
@@ -242,7 +237,7 @@ later fails a test rather than silently escaping the gate. Stated limits:
   known false positive rather than leaving it unexplained.
 - That value test is safe only because it runs on the value half of a
   recognized `key=value` shape. The same predicate applied to arbitrary text
-  matches a few percent of the strings in a real capture archive — measured at
+  matches a few percent of the strings in a captured-history corpus — measured at
   4.7% over 874,000 string values — and what it matches is ids, content hashes
   and refs, so widening the recognized key names to generic ones like `key`,
   `id`, `hash` or `digest` would break it.

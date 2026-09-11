@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FileStore } from '@orcaops/core';
-import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
+import { requireDatabaseExecutionContext } from '@orcaops/core/history/database-capture';
+import { openProjectDatabase, readProjectArtifact } from '@orcaops/storage/history/database';
+import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
 import { clearCloudLogin, commitFile } from '../support/test-helpers.js';
@@ -99,12 +102,24 @@ describe('checkpoint snapshot — drain×gate composition (command path)', () =>
   let repo: TempRepo;
   let agent: ReturnType<typeof makeAgent>;
   let cloud: MockCloud;
+  let dataRoot: string;
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-snapshot-drain-history-'));
+    await gitClient(repo.path).raw([
+      'remote',
+      'add',
+      'origin',
+      'https://git.example.test/orcaops/repo.git',
+    ]);
     cloud = await startMockCloud();
     // Drain ENABLED (no ORCAOPS_DISABLE_DRAIN) — exercising it is the whole point.
-    agent = makeAgent({ cwd: repo.path, cloudBaseUrl: cloud.baseUrl });
+    agent = makeAgent({
+      cwd: repo.path,
+      env: { ORCAOPS_DATA_DIR: dataRoot },
+      cloudBaseUrl: cloud.baseUrl,
+    });
     clearCloudLogin();
   });
 
@@ -112,11 +127,21 @@ describe('checkpoint snapshot — drain×gate composition (command path)', () =>
     clearCloudLogin();
     await cloud.close();
     await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
   });
 
-  async function readProj<T>(artifactId: string, n: number): Promise<T> {
-    const p = path.join(repo.path, '.orcaops', 'artifacts', artifactId, `checkpoint-${n}.json`);
-    return JSON.parse(await readFile(p, 'utf8')) as T;
+  async function readCheckpoint<T>(artifactId: string, n: number): Promise<T> {
+    const context = await requireDatabaseExecutionContext({ cwd: repo.path, root: dataRoot });
+    const database = await openProjectDatabase({ authority: context.authority, mode: 'reader' });
+    try {
+      const checkpoint = readProjectArtifact(database, artifactId)?.thread.checkpoints.find(
+        (entry) => entry.n === n
+      );
+      if (!checkpoint) throw new Error(`checkpoint ${n} is missing`);
+      return checkpoint as T;
+    } finally {
+      database.close();
+    }
   }
 
   // init + capture plan with NO seeded login. The plan command also runs the pre-body
@@ -216,12 +241,12 @@ describe('checkpoint snapshot — drain×gate composition (command path)', () =>
     // and capture proceeded on the now-fresh credential.
     expect(cloud.tokenPosts).toBeGreaterThanOrEqual(1);
     expect(new FileStore().read(cloud.baseUrl)?.accessToken).toBe('fresh_at');
-    const openProj = await readProj<OpenProj>(artifactId, 1);
+    const openProj = await readCheckpoint<OpenProj>(artifactId, 1);
     expect(openProj.open_snapshot.tree_sha).not.toBeNull();
 
     await commitFile(repo.path, 'src/foo.ts', 'export const x = 1;\n', 'add foo');
     await closeCp(artifactId, stepId);
-    const proj = await readProj<ClosedProj>(artifactId, 1);
+    const proj = await readCheckpoint<ClosedProj>(artifactId, 1);
     expect(proj.close_snapshot.tree_sha).not.toBeNull();
     expect(proj.diff_fingerprint_summary.status).toBe('captured');
   });
@@ -237,12 +262,12 @@ describe('checkpoint snapshot — drain×gate composition (command path)', () =>
     // proceeded anyway (the snapshot path is auth-independent).
     expect(cloud.tokenPosts).toBeGreaterThanOrEqual(1);
     expect(new FileStore().read(cloud.baseUrl)?.accessToken).toBe('stale_at'); // unchanged
-    const openProj = await readProj<OpenProj>(artifactId, 1);
+    const openProj = await readCheckpoint<OpenProj>(artifactId, 1);
     expect(openProj.open_snapshot.tree_sha).not.toBeNull();
 
     await commitFile(repo.path, 'src/foo.ts', 'export const x = 1;\n', 'add foo');
     await closeCp(artifactId, stepId);
-    const proj = await readProj<ClosedProj>(artifactId, 1);
+    const proj = await readCheckpoint<ClosedProj>(artifactId, 1);
     expect(proj.close_snapshot.tree_sha).not.toBeNull();
     expect(proj.diff_fingerprint_summary.status).toBe('captured');
   });

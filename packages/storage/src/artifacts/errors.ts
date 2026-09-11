@@ -6,7 +6,7 @@
  */
 
 /**
- * Thrown by `ArtifactStore.writeSummary` when the artifact's
+ * Thrown during summary capture when the artifact's
  * lifecycle state is `blocked` — a block-severity evaluator has either
  * produced an unresolved violation or failed to run. Violations can be
  * dispositioned; errors can only be cleared by a successful re-run.
@@ -31,7 +31,7 @@ export class BlockedError extends Error {
 }
 
 /**
- * Thrown by `ArtifactStore.writeCheckpointOpened` when the proposed
+ * Thrown during checkpoint opening when the proposed
  * `declared_step_ids` overlap with another open cp's declared scope
  * or with a closed cp's `completed_step_ids`. Distinct code because
  * parent agents handle it programmatically (retry with different
@@ -56,7 +56,7 @@ export class OpenCheckpointOverlapError extends Error {
 }
 
 /**
- * Thrown by `ArtifactStore.writeSummary` when the artifact still has
+ * Thrown during summary capture when the artifact still has
  * one or more open checkpoints. Atomic with the summary write (the
  * gate check happens inside the artifact lock), so two-phase
  * lifecycle state can't drift between check and write.
@@ -277,7 +277,7 @@ export class PolicyExceptionInvalidError extends CheckpointValidationError {
 }
 
 /**
- * Thrown by `ArtifactStore.revisePlan` when a `summary_captured` event
+ * Thrown during plan revision when a `summary_captured` event
  * already exists for the artifact — revision is frozen post-summary
  * (the plan as-of finalization is the audit record reviewers read;
  * revising past it would invalidate the summary's coverage claim).
@@ -303,7 +303,7 @@ export class ArtifactFinalizedError extends Error {
 }
 
 /**
- * Thrown by `ArtifactStore.writeSummary` when a `summary_captured`
+ * Thrown during summary capture when a `summary_captured`
  * event already exists and the caller did NOT provide a `prior_summary_event_id`
  * supersede token. A bare re-capture is refused so a second agent (multi-agent
  * repos share one artifact thread) can't silently clobber the reviewer-facing
@@ -325,7 +325,7 @@ export class SummaryAlreadyCapturedError extends Error {
 }
 
 /**
- * Thrown by `ArtifactStore.writeSummary` when a `prior_summary_event_id`
+ * Thrown during summary capture when a `prior_summary_event_id`
  * supersede token was provided but is not the latest summary event — another
  * amend landed since it was read. Optimistic-concurrency, mirroring
  * `StalePlanRevisionError`. Re-read resume/status and retry with the fresh token.
@@ -407,7 +407,7 @@ export class GitImportEnrichmentProjectionError extends Error {
 }
 
 /**
- * Thrown by `ArtifactStore.revisePlan` when the new plan would drop
+ * Thrown during plan revision when the new plan would drop
  * a `step_id` that any **open** cp currently declares. Hard
  * conflict — the agent must abandon the cp first, or revise without
  * dropping that step_id.
@@ -435,7 +435,7 @@ export class PlanRevisionOpenCpConflictError extends Error {
 }
 
 /**
- * Thrown by `ArtifactStore.revisePlan` when `prior_plan_event_id`
+ * Thrown during plan revision when `prior_plan_event_id`
  * does not match the artifact's latest plan event — a newer
  * `plan_revised` (or the only `plan_captured`) has been committed
  * since the agent last observed the plan. Optimistic-concurrency
@@ -462,7 +462,7 @@ export class StalePlanRevisionError extends Error {
 }
 
 /**
- * Thrown by `ArtifactStore.revisePlan` when the new plan would drop
+ * Thrown during plan revision when the new plan would drop
  * one or more `step_id`s that closed cps have already claimed via
  * `completed_step_ids`, AND the input's
  * `acknowledge_drops_completed_steps` does not cover each. Mirrors
@@ -488,7 +488,7 @@ export class UnacknowledgedDroppedCompletionsError extends Error {
 }
 
 /**
- * Thrown by `ArtifactStore.revisePlan` when a revision removes an acceptance
+ * Thrown during plan revision when a revision removes an acceptance
  * criterion from an open or completed step without listing that criterion_id
  * in `acknowledge_criteria_changes`. Removal narrows the current rubric while
  * the opening-revision evidence remains historical, so an explicit audited
@@ -513,7 +513,7 @@ export class UnacknowledgedCriteriaChangesError extends Error {
 }
 
 /**
- * Thrown by `ArtifactStore.revisePlan` when the input plan_steps
+ * Thrown during plan revision when the input plan_steps
  * carry duplicate step_ids or reference step_ids that would yield
  * an inconsistent step_lineage block. Distinct from
  * `DeclaredStepsInvalidError` so the path attribution stays

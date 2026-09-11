@@ -19,6 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { PROPRIETARY_PACKAGES } from './check-no-proprietary.mjs';
+import { embeddedAddonFindings } from './lib/bundle-scan.mjs';
 import { resolvePackageDir } from './third-party-notices.mjs';
 import {
   assertTarball,
@@ -82,6 +83,11 @@ try {
   if (declaration.bun !== pinnedBun) {
     fail(`the executables embed Bun ${declaration.bun}, but .bun-version pins ${pinnedBun}`);
   }
+  // Older declarations carry no checkout. Refuse rather than scan for nothing:
+  // a silently path-blind scan is exactly the failure this records.
+  if (typeof declaration.checkout !== 'string' || declaration.checkout.length === 0) {
+    fail(`${declarationFile} records no build checkout — recompile with the current compile step`);
+  }
   const executables = platforms.map((platform) => ({
     platform,
     exe: path.join(compiledDir, platform.package, platform.exe),
@@ -104,13 +110,24 @@ try {
     { cwd: ROOT, stdio: 'inherit' }
   );
   for (const { platform, exe } of executables) {
-    if (!readFileSync(exe, 'latin1').includes(POSITIVE_CONTROL)) {
+    const bytes = readFileSync(exe, 'latin1');
+    if (!bytes.includes(POSITIVE_CONTROL)) {
       fail(
         `${platform.package}: the byte scan cannot see the bundled JavaScript (no "${POSITIVE_CONTROL}")`
       );
     }
+    // A bundled native addon closes over the BUILD machine's `__dirname`, so the
+    // installed executable resolves its `.node` to a path that exists only on
+    // the machine that compiled it. Scan for the checkout the COMPILE recorded,
+    // not this one: with SKIP_COMPILE=1 the executables were built elsewhere, and
+    // scanning for the assembling machine's root would match nothing and pass for
+    // the wrong reason. The path-independent signatures cover that case too.
+    const findings = embeddedAddonFindings(bytes, { checkout: declaration.checkout ?? null });
+    if (findings.length > 0) {
+      fail(`${platform.package}: the executable ${findings.join('; ')}`);
+    }
   }
-  log('Executables keep the proprietary packages external, and the scan saw their code ✓');
+  log('Executables keep the proprietary packages external, embed no checkout path ✓');
 
   // -------------------------------------------------------------------------
   // 3. Stage, attribute, pack and verify one package per platform
@@ -130,7 +147,11 @@ try {
       (watchPkg.devDependencies[name] ?? '').startsWith('workspace:')
   );
   const runtimeSeeds = Object.keys(watchPkg.dependencies ?? {});
-  const externals = [...PROPRIETARY_PACKAGES, 'better-sqlite3', '@napi-rs/keyring'];
+  // Read what the compile actually externalized rather than restating it: a
+  // hardcoded list here once claimed better-sqlite3 was external while the
+  // compile inlined it, and the attribution walk then skipped a package the
+  // executable really carried.
+  const externals = declaration.external;
 
   const tarballs = [];
   for (const { platform, exe } of executables) {

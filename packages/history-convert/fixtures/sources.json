@@ -1,0 +1,12 @@
+{
+  "source_revision": "9cb6e606cebed31a3e22bb928119c04cb041bfc3",
+  "entries": [
+    {
+      "fixture": "artifact-plan.json",
+      "source_path": "packages/storage/src/events/rebuilders.test.ts",
+      "source_sha256": "320f72e148d64ce2f58e3a696b533747697e88afe7375c15507c1112f55189e3",
+      "declaration": "first planPayload initializer",
+      "basis": "Literal fixture extracted from the pinned published source test"
+    }
+  ]
+}

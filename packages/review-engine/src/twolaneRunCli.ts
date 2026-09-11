@@ -12,44 +12,56 @@
 // one fresh reviewer. The engine enforces the order — account context is
 // refused until the forensic lane is terminal — so capture blindness is a
 // deterministic guarantee, not an instruction.
+//
+// Every run state transition settles through the canonical run APIs in
+// `database/run-command.ts`: the run revision, its pinned inputs, one
+// publication per attempt and the sealed terminal receipt are retained rows.
+// The only file these verbs write is the served lane payload, which is
+// rebuildable render data derived from the run's own pinned inputs.
 
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z, ZodError } from 'zod';
 
+export {
+  latencyProfileFor,
+  ownershipSummaryFromComposed,
+  type RoutineLatencyProfile,
+  type RoutineLatencyTier,
+  type TwolaneOwnershipSummary,
+} from './twolaneRunMetadata.js';
+
 import { type ExecutableIdentity, parseCitationId, slugifyBranch } from '@orcaops/review-core';
-import { ArtifactLock, ArtifactLockLeaseLostError, atomicWriteFile } from '@orcaops/storage';
+import { uuidv7 } from '@orcaops/storage';
 
 import { CLAIM_LEDGER_SHARED_EXPLANATIONS } from './claimLedger.js';
+import { deriveReviewOperationId } from './database/review-operation.js';
 import {
-  CURRENT_STORY_INSTALL_FAILED,
-  publishCurrentStoryForRun,
-  type PublishCurrentStoryResult,
-} from './currentStory.js';
+  finalizeCanonicalRun,
+  readCanonicalRun,
+  readCanonicalRunFinalization,
+  readCanonicalRunStatus,
+  recordCanonicalLaneServed,
+  forensicTerminal as runForensicTerminal,
+  startCanonicalRun,
+  submitCanonicalLane,
+} from './database/run-command.js';
+import { type TerminalRecord } from './database/terminal-record.js';
 import {
+  AccountCorpusCeilingError,
   type AccountProjection,
-  type DossierV1,
+  ExcludePolicyError,
   type ForensicInput,
-  parseAccountProjectionJson,
-  parseDossierV1Json,
-  parseForensicInputJson,
+  ForensicTransportCeilingError,
+  ReviewDiffTruncatedError,
+  StubPolicyError,
 } from './dossier.js';
-import { reviewLock } from './reviewLock.js';
-import { reviewDirPath, reviewEntryPath } from './reviewPaths.js';
-import { requireReviewStateVersion, reviewStateLockKey } from './reviewState.js';
+import { writeReviewError, writeReviewOutput } from './reviewFiles.js';
 import type { ReviewArgs } from './run.js';
+import { SEMANTIC_ANCHOR_INPUT_FILE } from './semanticAnchors.js';
+import { PartOwnershipInvariantError } from './storyOwnership.js';
 import {
-  prepareSemanticAnchorInput,
-  SEMANTIC_ANCHOR_INPUT_FILE,
-  SEMANTIC_ANCHOR_RECEIPT_FILE,
-  type SemanticAnchorPreparation,
-  unavailableSemanticAnchorPreparation,
-} from './semanticAnchors.js';
-import { type CoverageInput, PartOwnershipInvariantError } from './storyOwnership.js';
-import {
-  projectStoryReviewModel,
-  serializeStoryReviewModelForInstall,
   STORY_REVIEW_MODEL_FILE,
   StoryReviewModelCatalogError,
   StoryReviewModelInvariantError,
@@ -57,87 +69,44 @@ import {
   StoryReviewModelRangeError,
 } from './storyReviewModel.js';
 import {
-  canonicalJsonSha256,
-  normalizeSubmission,
-  type SubmissionNormalizationCode,
-} from './submissionNormalization.js';
-import {
   type DeclaredIsolation,
   executionProfileFieldSchema,
   ISOLATION_VALUES,
-  readTwolaneRunFile,
-  type RoutineNormalizationCode,
-  type RoutineNormalizationSummaryCode,
-  TWOLANE_RUN_FILE,
-  TWOLANE_RUN_RECORD_SCHEMA_VERSION,
   TWOLANE_RUN_SCHEMA_VERSION,
-  type TwolaneAttemptRecord,
   type TwolaneExecutionProfile,
   type TwolaneRunFile,
 } from './twolaneRunFile.js';
+import { latencyProfileFor } from './twolaneRunMetadata.js';
 import {
-  type AccountPayload,
-  type AuthoredAccountPayload,
   buildAccountPromptAliases,
-  type ComposedStory,
-  composeStory,
-  type ForensicPayload,
-  freshSliceRunState,
   type Lane,
   partitionAccountEvaluatorRuns,
-  renderSlice,
   ROUTINE_STORY_AUTHORING_SCHEMA_VERSION,
   SLICE_SCHEMA_VERSION,
-  sliceContext,
   type SliceRunState,
-  submitLane,
 } from './twolaneSlice.js';
 
-// Run-file contract re-exports: the schema and reader live in the
-// dependency-neutral twolaneRunFile.ts; existing importers keep this path.
+// Run-file contract re-exports: the schema lives in the dependency-neutral
+// twolaneRunFile.ts; existing importers keep this path.
 export {
   type AccountSubmissionLineage,
   type DeclaredIsolation,
   type ExecutionProfileField,
-  readTwolaneRunFile,
   type RoutineNormalizationCode,
   type RoutineNormalizationSummaryCode,
   TWOLANE_RUN_SCHEMA_VERSION,
   type TwolaneAttemptRecord,
   type TwolaneExecutionProfile,
   type TwolaneRunFile,
-  TwolaneRunFileError,
 } from './twolaneRunFile.js';
 
 export const ROUTINE_ORDER_MESSAGE =
   'account context is served only after the forensic lane is terminal (accepted, or its submission attempts can no longer be repaired)';
 
-const RUN_RECORD_FILE = 'run-record-v1.json';
-const COMPOSED_STORY_FILE = 'composed-story-v2.json';
-const INPUT_FILES = {
-  dossier: 'dossier-v1.json',
-  projection: 'account-projection-v1.json',
-  forensic_input: 'forensic-input-v1.json',
-} as const;
-/**
- * Optional snapshot pinned alongside the required INPUT_FILES: the floor's
- * persisted attribution coverage. Absent when the dossier predates the
- * coverage snapshot — the composition then finalizes as a labeled degraded
- * ownership state rather than fabricating a topology.
- */
-const COVERAGE_FILE = 'coverage-v1.json';
-/**
- * The unified diff the floor was derived from, pinned alongside coverage so the
- * run is self-contained: the Story review model's Part ranges round-trip against
- * THIS file at install, and the TUI renders the per-Part diff from it.
- */
-const DIFF_FILE = 'diff.patch';
 const LANE_MD_FILE: Record<Lane, string> = {
   account: 'lane-account.md',
   forensic: 'lane-forensic.md',
 };
-
-type IsolationStatus = 'SUBAGENT_FRESH' | 'SEQUENTIAL' | 'UNKNOWN';
 
 const executionProfileSchema = z
   .object({
@@ -236,72 +205,29 @@ export const LANE_CONTRACTS: Record<Lane, Record<string, unknown>> = {
   },
 };
 
-// ---------------------------------------------------------------------------
-// Run state on disk: .orcaops/reviews/<slug>/twolane/<run-id>/
-// ---------------------------------------------------------------------------
-
-export interface AcceptedAccountEnvelope {
-  schema_version: 1;
-  normalization_code: RoutineNormalizationSummaryCode;
-  normalization_codes: RoutineNormalizationCode[];
-  normalized_authored: AuthoredAccountPayload;
-  compiled_payload: AccountPayload;
-  inner: {
-    raw_submission_sha256: string;
-    normalized_authored_sha256: string;
-    compiled_payload_sha256: string;
-    diagnostic_codes: string[];
-  };
-}
-
 const sha16 = (bytes: Buffer | string): string =>
   createHash('sha256').update(bytes).digest('hex').slice(0, 16);
 
-const reviewDirFor = (root: string, branch: string): string =>
-  reviewDirPath(root, slugifyBranch(branch));
-
-const runDirFor = (root: string, branch: string, runId: string): string =>
-  reviewEntryPath(
+/**
+ * Where a served lane payload is written for the reviewer to read.
+ *
+ * Deliberately outside `.orcaops/reviews/`: the payload is rebuildable render
+ * data derived from the run's own pinned inputs, never a publication. It is
+ * rewritten on every serve and nothing reads it back as authority.
+ */
+const payloadPathFor = (root: string, branch: string, runId: string, lane: Lane): string =>
+  path.join(
     root,
-    path.join(reviewDirFor(root, branch), 'twolane', runId),
-    'routine review run directory'
+    '.orcaops',
+    'tmp',
+    'review-payloads',
+    slugifyBranch(branch),
+    runId,
+    LANE_MD_FILE[lane]
   );
-
-const lockFor = (root: string): ArtifactLock => reviewLock(root);
-
-type VerifyReviewLease = () => Promise<void>;
-
-const withReviewStateLock = <T>(
-  root: string,
-  branch: string,
-  fn: (verifyLease: VerifyReviewLease) => Promise<T>
-): Promise<T> =>
-  lockFor(root).withLock(reviewStateLockKey(slugifyBranch(branch)), (lease) =>
-    fn(() => lease.verify())
-  );
-
-const withTwolaneRunLock = <T>(
-  root: string,
-  branch: string,
-  runId: string,
-  fn: (verifyLeases: VerifyReviewLease) => Promise<T>
-): Promise<T> => {
-  const lock = lockFor(root);
-  return lock.withLock(reviewStateLockKey(slugifyBranch(branch)), (stateLease) =>
-    lock.withLock(`twolane-${runId}`, (runLease) =>
-      fn(async () => {
-        await stateLease.verify();
-        await runLease.verify();
-      })
-    )
-  );
-};
-
-const writeRunFile = (root: string, runDir: string, run: TwolaneRunFile): Promise<void> =>
-  atomicWriteFile(path.join(runDir, TWOLANE_RUN_FILE), `${JSON.stringify(run, null, 2)}\n`, root);
 
 const emit = (value: unknown): void => {
-  process.stdout.write(`${JSON.stringify(value)}\n`);
+  writeReviewOutput(`${JSON.stringify(value)}\n`);
 };
 
 /**
@@ -317,7 +243,7 @@ export const reviewVerbFailure = (
   code: number
 ): number => {
   if (args.json === true) emit({ ok: false, error: { verb: `review ${verb}`, message } });
-  else process.stderr.write(`review ${verb}: ${message}\n`);
+  else writeReviewError(`review ${verb}: ${message}\n`);
   return code;
 };
 
@@ -340,7 +266,6 @@ const stateEnvelope = (state: SliceRunState) => ({
     forensic: state.lanes.forensic.repairCredit,
   },
 });
-
 // ---------------------------------------------------------------------------
 // Readable lane payloads: line-oriented text derived from the
 // immutable snapshots — data and identifiers only, ids verbatim.
@@ -467,40 +392,6 @@ export interface AccountRunFacts {
   policyStubFiles: number;
   policyStubRows: number;
   latencyTier: string;
-}
-
-export type RoutineLatencyTier = 'LT_250KB' | 'FROM_250KB_TO_LT_1MB' | 'FROM_1MB_TO_2MB';
-export interface RoutineLatencyProfile {
-  latency_input_bytes: number;
-  latency_tier: RoutineLatencyTier;
-  latency_budget_ms: number;
-}
-
-/** Decimal-byte tiers over the exact policy-eligible forensic diff. */
-export function latencyProfileFor(eligibleDiffBytes: number): RoutineLatencyProfile {
-  if (!Number.isInteger(eligibleDiffBytes) || eligibleDiffBytes < 0)
-    throw new Error(`latency input bytes must be a non-negative integer, got ${eligibleDiffBytes}`);
-  if (eligibleDiffBytes < 250_000)
-    return {
-      latency_input_bytes: eligibleDiffBytes,
-      latency_tier: 'LT_250KB',
-      latency_budget_ms: 180_000,
-    };
-  if (eligibleDiffBytes < 1_000_000)
-    return {
-      latency_input_bytes: eligibleDiffBytes,
-      latency_tier: 'FROM_250KB_TO_LT_1MB',
-      latency_budget_ms: 300_000,
-    };
-  if (eligibleDiffBytes <= 2_000_000)
-    return {
-      latency_input_bytes: eligibleDiffBytes,
-      latency_tier: 'FROM_1MB_TO_2MB',
-      latency_budget_ms: 480_000,
-    };
-  throw new Error(
-    `latency input ${eligibleDiffBytes} exceeds the 2,000,000-byte forensic transport ceiling`
-  );
 }
 
 /** Frozen latency tiers. Bounds wall-clock against work served. */
@@ -910,277 +801,6 @@ export function renderAccountRoutineMd(p: AccountProjection, facts?: AccountRunF
 // Verbs
 // ---------------------------------------------------------------------------
 
-type MintResult =
-  | {
-      ok: true;
-      runId: string;
-      runDir: string;
-      input_shas: Record<string, string>;
-    }
-  | { ok: false; message: string };
-
-async function mintRunUnderReviewStateLock(
-  root: string,
-  branch: string,
-  args: ReviewArgs,
-  verifyLease: VerifyReviewLease
-): Promise<MintResult> {
-  const executionProfile = parseExecutionProfile(args.executionProfileJson);
-  if (!executionProfile.ok) return { ok: false, message: executionProfile.message };
-  const reviewDir = reviewDirFor(root, branch);
-  await requireReviewStateVersion(reviewDir);
-  const snapshots: Partial<Record<keyof typeof INPUT_FILES, Buffer>> = {};
-  for (const [key, file] of Object.entries(INPUT_FILES) as [keyof typeof INPUT_FILES, string][]) {
-    try {
-      snapshots[key] = await readFile(path.join(reviewDir, file));
-    } catch {
-      return {
-        ok: false,
-        message: `${file} is not built for this branch; run \`review dossier --branch ${branch}\` first`,
-      };
-    }
-  }
-  const forensicInput = parseForensicInputJson(
-    snapshots.forensic_input!.toString('utf8'),
-    `${reviewDir}/${INPUT_FILES.forensic_input}`
-  );
-  const projection = parseAccountProjectionJson(
-    snapshots.projection!.toString('utf8'),
-    `${reviewDir}/${INPUT_FILES.projection}`
-  );
-  const latencyInputBytes = Buffer.byteLength(forensicInput.diff, 'utf8');
-  if (forensicInput.metrics.eligibleDiffBytes !== latencyInputBytes)
-    return {
-      ok: false,
-      message:
-        `forensic input byte accounting is inconsistent: metrics.eligibleDiffBytes=${forensicInput.metrics.eligibleDiffBytes}, ` +
-        `actual UTF-8 diff bytes=${latencyInputBytes}`,
-    };
-  latencyProfileFor(latencyInputBytes);
-  const runId = randomUUID();
-  const runDir = runDirFor(root, branch, runId);
-  await verifyLease();
-  await mkdir(runDir, { recursive: true });
-  const input_shas: Record<string, string> = {};
-  for (const [key, file] of Object.entries(INPUT_FILES) as [keyof typeof INPUT_FILES, string][]) {
-    const bytes = snapshots[key]!;
-    input_shas[key] = sha16(bytes);
-    await atomicWriteFile(path.join(runDir, file), bytes.toString('utf8'), root);
-  }
-  // Pin the coverage snapshot under the SAME immutability pattern when present.
-  const covBytes = await readFile(path.join(reviewDir, COVERAGE_FILE)).catch(() => null);
-  if (covBytes !== null) {
-    input_shas.coverage = sha16(covBytes);
-    await atomicWriteFile(path.join(runDir, COVERAGE_FILE), covBytes.toString('utf8'), root);
-  }
-  // Pin the unified diff under the same immutability pattern when present. Absent
-  // on a degenerate scope or an older dossier — the model then installs without a
-  // round-trip check (there are no segments to resolve in the degraded states).
-  const diffBytes = await readFile(path.join(reviewDir, DIFF_FILE)).catch(() => null);
-  if (diffBytes !== null) {
-    input_shas.diff = sha16(diffBytes);
-    await atomicWriteFile(path.join(runDir, DIFF_FILE), diffBytes.toString('utf8'), root);
-  }
-  await atomicWriteFile(
-    path.join(runDir, LANE_MD_FILE.forensic),
-    renderForensicRoutineMd(forensicInput),
-    root
-  );
-  // The production mint ALWAYS serves the complete facts block. The parameter is
-  // optional only so the existing unit call sites stay valid; "optional" must
-  // never mean "absent in the path that matters", which is asserted by test.
-  const fm = forensicInput.metrics;
-  await atomicWriteFile(
-    path.join(runDir, LANE_MD_FILE.account),
-    renderAccountRoutineMd(projection, {
-      runId,
-      baseSha: forensicInput.baseSha ?? null,
-      floorInputHash: projection.floor_input_hash,
-      eligibleFiles: fm.eligibleFiles,
-      eligibleDiffBytes: fm.eligibleDiffBytes,
-      excludedFiles: fm.excludedFiles,
-      unreviewableFiles: fm.unreviewableFiles,
-      policyStubFiles: fm.policyStubFiles ?? (forensicInput.policyStubs ?? []).length,
-      policyStubRows:
-        fm.policyStubRows ??
-        (forensicInput.policyStubs ?? []).reduce((n, x) => n + x.adds + x.dels, 0),
-      latencyTier: latencyTierFor(fm.eligibleDiffBytes),
-    }),
-    root
-  );
-  const run: TwolaneRunFile = {
-    schema_version: TWOLANE_RUN_SCHEMA_VERSION,
-    run_id: runId,
-    branch,
-    mode: 'routine',
-    created_at: new Date().toISOString(),
-    input_shas,
-    slice_state: freshSliceRunState(),
-    lane_inputs_served: {},
-    attempts: [],
-    account_lineage: null,
-    latency_input_bytes: latencyInputBytes,
-    runtime_identity: args.runtimeIdentity ?? null,
-    execution_profile: executionProfile.profile,
-    finalized: null,
-  };
-  await verifyLease();
-  await writeRunFile(root, runDir, run);
-  return { ok: true, runId, runDir, input_shas };
-}
-
-async function mintRun(root: string, branch: string, args: ReviewArgs): Promise<MintResult> {
-  return withReviewStateLock(root, branch, (verifyLease) =>
-    mintRunUnderReviewStateLock(root, branch, args, verifyLease)
-  );
-}
-
-async function runStart(args: ReviewArgs, root: string, branch: string): Promise<number> {
-  const minted = await mintRun(root, branch, args);
-  if (!minted.ok) return fail(args, 'start', minted.message, 2);
-  if (args.json) {
-    emit({
-      ok: true,
-      run_id: minted.runId,
-      branch,
-      mode: 'routine',
-      schema_version: TWOLANE_RUN_SCHEMA_VERSION,
-      lanes: ['forensic', 'account'],
-      input_shas: minted.input_shas,
-      run_dir: path.relative(root, minted.runDir),
-    });
-  } else {
-    process.stdout.write(
-      `run ${minted.runId} minted under ${path.relative(root, minted.runDir)}\n`
-    );
-  }
-  return 0;
-}
-
-function parseLane(value: string | undefined): Lane | null {
-  return value === 'account' || value === 'forensic' ? value : null;
-}
-
-/** Read + mark-served + describe one lane's input (no ordering check here). */
-async function serveLaneEnvelope(
-  root: string,
-  branch: string,
-  runId: string,
-  runDir: string,
-  lane: Lane
-): Promise<{
-  contract: Record<string, unknown>;
-  payload_path: string;
-  payload_sha: string;
-  payload_bytes: number;
-}> {
-  const payloadPath = path.join(runDir, LANE_MD_FILE[lane]);
-  const bytes = await readFile(payloadPath);
-  await withTwolaneRunLock(root, branch, runId, async (verifyLeases) => {
-    const fresh = await readTwolaneRunFile(runDir);
-    if (fresh.lane_inputs_served[lane] === undefined) {
-      fresh.lane_inputs_served[lane] = new Date().toISOString();
-      await verifyLeases();
-      await writeRunFile(root, runDir, fresh);
-    }
-  });
-  return {
-    contract: LANE_CONTRACTS[lane],
-    payload_path: path.relative(root, payloadPath),
-    payload_sha: sha16(bytes),
-    payload_bytes: bytes.length,
-  };
-}
-
-async function runLaneInput(args: ReviewArgs, root: string, branch: string): Promise<number> {
-  const lane = parseLane(args.lane);
-  if (lane === null) return fail(args, 'lane-input', '--lane must be `account` or `forensic`', 2);
-  if (!args.runId) return fail(args, 'lane-input', '--run <run-id> is required', 2);
-  const runDir = runDirFor(root, branch, args.runId);
-  let run: TwolaneRunFile;
-  try {
-    run = await readTwolaneRunFile(runDir);
-  } catch (error) {
-    return fail(
-      args,
-      'lane-input',
-      `run ${args.runId} is not readable: ${(error as Error).message}`,
-      1
-    );
-  }
-  if (lane === 'account' && !forensicTerminal(run.slice_state))
-    return fail(args, 'lane-input', `TWOLANE_ROUTINE_ORDER: ${ROUTINE_ORDER_MESSAGE}`, 1);
-  const served = await serveLaneEnvelope(root, branch, args.runId, runDir, lane);
-  const envelope = { ok: true, run_id: run.run_id, lane, ...served };
-  if (args.json) emit(envelope);
-  else
-    process.stdout.write(
-      `lane ${lane} input: ${envelope.payload_path} (${envelope.payload_bytes} bytes, sha ${envelope.payload_sha})\n`
-    );
-  return 0;
-}
-
-async function loadSliceInputs(
-  runDir: string
-): Promise<{ dossier: DossierV1; projection: AccountProjection; forensicInput: ForensicInput }> {
-  const dossier = parseDossierV1Json(
-    await readFile(path.join(runDir, INPUT_FILES.dossier), 'utf8'),
-    `${runDir}/${INPUT_FILES.dossier}`
-  );
-  const projection = parseAccountProjectionJson(
-    await readFile(path.join(runDir, INPUT_FILES.projection), 'utf8'),
-    `${runDir}/${INPUT_FILES.projection}`
-  );
-  const forensicInput = parseForensicInputJson(
-    await readFile(path.join(runDir, INPUT_FILES.forensic_input), 'utf8'),
-    `${runDir}/${INPUT_FILES.forensic_input}`
-  );
-  return { dossier, projection, forensicInput };
-}
-
-/**
- * Load the pinned coverage snapshot for the composition. Absent (or unparseable)
- * → null, and composeStory finalizes as a labeled degraded ownership state
- * rather than fabricating a topology.
- */
-async function loadCoverageSnapshot(runDir: string): Promise<CoverageInput | null> {
-  try {
-    const raw = JSON.parse(await readFile(path.join(runDir, COVERAGE_FILE), 'utf8')) as {
-      items?: CoverageInput['items'];
-      summary?: CoverageInput['summary'];
-    };
-    if (raw.items === undefined || raw.summary === undefined) return null;
-    return { items: raw.items, summary: raw.summary };
-  } catch {
-    return null;
-  }
-}
-
-class PinnedDiffUnreadableError extends Error {}
-
-/**
- * The run's pinned unified diff, or null when the run legitimately pinned none.
- *
- * Swallowing EVERY error to null would conflate two different cases: a
- * diff.patch that exists but cannot be read would skip Part-range validation
- * silently, indistinguishable from a run that pinned no diff at all.
- *
- * `input_shas.diff` is written at start only when a diff was actually pinned, so
- * it is an exact discriminator: pinned-but-unreadable is a hard failure;
- * never-pinned is a real state (degenerate scope, older dossier) that finalize
- * RECORDS rather than hides.
- */
-async function loadPinnedDiff(runDir: string, pinned: boolean): Promise<string | null> {
-  try {
-    return await readFile(path.join(runDir, DIFF_FILE), 'utf8');
-  } catch (error) {
-    if (!pinned) return null;
-    throw new PinnedDiffUnreadableError(
-      `pinned diff (${DIFF_FILE}) is recorded in input_shas but unreadable, so Part ranges cannot be validated: ${(error as Error).message}`
-    );
-  }
-}
-
 /**
  * Every code `classifyFinalizeError` can emit. The public agreement test
  * iterates this list, so a code added to the classifier ships documented or
@@ -1188,7 +808,6 @@ async function loadPinnedDiff(runDir: string, pinned: boolean): Promise<string |
  */
 export const TWOLANE_FINALIZE_ERROR_CODES = [
   'TWOLANE_EXECUTABLE_IDENTITY_DRIFT',
-  'PINNED_DIFF_UNREADABLE',
   'STORY_MODEL_CATALOG_INVALID',
   'STORY_MODEL_PROJECTION_INVALID',
   'STORY_MODEL_RANGES_UNRESOLVED',
@@ -1210,10 +829,10 @@ function classifyFinalizeError(error: unknown): {
   message: string;
 } {
   const message = error instanceof Error ? error.message : String(error);
-  if (error instanceof ExecutableIdentityDriftError)
-    return { code: 'TWOLANE_EXECUTABLE_IDENTITY_DRIFT', message };
-  if (error instanceof PinnedDiffUnreadableError)
-    return { code: 'PINNED_DIFF_UNREADABLE', message };
+  const identityDrift =
+    (error as { code?: string }).code === 'INVALID_INPUT' &&
+    /executable identity pinned by this run/.test(message);
+  if (identityDrift) return { code: 'TWOLANE_EXECUTABLE_IDENTITY_DRIFT', message };
   if (error instanceof StoryReviewModelCatalogError)
     return { code: 'STORY_MODEL_CATALOG_INVALID', message };
   if (error instanceof StoryReviewModelProjectionError)
@@ -1228,17 +847,227 @@ function classifyFinalizeError(error: unknown): {
   return { code: 'STORY_COMPOSE_FAILED', message };
 }
 
-class ExecutableIdentityDriftError extends Error {
-  override readonly name = 'ExecutableIdentityDriftError';
+/**
+ * A malformed repo policy or a size-degradation ceiling is a refusal with its
+ * own parseable envelope: an automated caller must be able to tell "the review
+ * cannot be minted over this scope" from "the engine broke".
+ */
+function policyRefusal(args: ReviewArgs, verb: string, error: unknown): number | null {
+  if (error instanceof StubPolicyError || error instanceof ExcludePolicyError) {
+    if (args.json)
+      emit({
+        ok: false,
+        error: {
+          verb: `review ${verb}`,
+          code: error.code,
+          message: error.message,
+          invalid_patterns: error.invalidPatterns,
+        },
+      });
+    else writeReviewError(`review ${verb}: ${error.message}\n`);
+    return 1;
+  }
+  if (
+    error instanceof AccountCorpusCeilingError ||
+    error instanceof ForensicTransportCeilingError ||
+    error instanceof ReviewDiffTruncatedError
+  ) {
+    if (args.json)
+      emit({
+        ok: false,
+        error: {
+          verb: `review ${verb}`,
+          code: error.code,
+          message: error.message,
+          ceiling_bytes: error.ceilingBytes,
+          actual_bytes: error.actualBytes,
+        },
+      });
+    else writeReviewError(`review ${verb}: ${error.message}\n`);
+    return 1;
+  }
+  return null;
+}
+
+interface MintedRun {
+  runId: string;
+  reviewId: string;
+  inputShas: Record<string, string>;
+}
+
+async function mintRun(
+  args: ReviewArgs,
+  root: string,
+  branch: string,
+  operationId: string
+): Promise<{ ok: true; minted: MintedRun } | { ok: false; message: string }> {
+  const executionProfile = parseExecutionProfile(args.executionProfileJson);
+  if (!executionProfile.ok) return { ok: false, message: executionProfile.message };
+  const started = await startCanonicalRun({
+    branch,
+    root,
+    ...(args.projectId === undefined ? {} : { projectId: args.projectId }),
+    profile: 'routine',
+    createdAt: new Date().toISOString(),
+    runtimeIdentity: args.runtimeIdentity ?? null,
+    executionProfile: executionProfile.profile,
+    operationId,
+    secretAllow: [],
+  });
+  return {
+    ok: true,
+    minted: {
+      runId: started.runId,
+      reviewId: started.reviewId,
+      inputShas: started.inputShas,
+    },
+  };
+}
+
+async function runStart(
+  args: ReviewArgs,
+  root: string,
+  branch: string,
+  operationId: string
+): Promise<number> {
+  const minted = await mintRun(args, root, branch, operationId);
+  if (!minted.ok) return fail(args, 'start', minted.message, 2);
+  if (args.json) {
+    emit({
+      ok: true,
+      run_id: minted.minted.runId,
+      review_id: minted.minted.reviewId,
+      branch,
+      mode: 'routine',
+      schema_version: TWOLANE_RUN_SCHEMA_VERSION,
+      lanes: ['forensic', 'account'],
+      input_shas: minted.minted.inputShas,
+    });
+  } else {
+    writeReviewOutput(`run ${minted.minted.runId} minted for review ${minted.minted.reviewId}\n`);
+  }
+  return 0;
+}
+
+function parseLane(value: string | undefined): Lane | null {
+  return value === 'account' || value === 'forensic' ? value : null;
+}
+
+/**
+ * Derive one lane's payload from the run's pinned inputs, write it where the
+ * reviewer reads it, and record the lane's first-served timestamp.
+ *
+ * The account payload's facts block is the run's own scope, so it is derived
+ * from the pinned forensic metrics rather than recomputed from the worktree.
+ */
+async function serveLaneEnvelope(
+  root: string,
+  branch: string,
+  args: ReviewArgs,
+  runId: string,
+  lane: Lane,
+  run: TwolaneRunFile,
+  inputs: { projection: AccountProjection; forensicInput: ForensicInput },
+  operationId: string
+): Promise<{
+  contract: Record<string, unknown>;
+  payload_path: string;
+  payload_sha: string;
+  payload_bytes: number;
+  served_at: string;
+}> {
+  const metrics = inputs.forensicInput.metrics;
+  const markdown =
+    lane === 'forensic'
+      ? renderForensicRoutineMd(inputs.forensicInput)
+      : renderAccountRoutineMd(inputs.projection, {
+          runId,
+          baseSha: inputs.forensicInput.baseSha ?? null,
+          floorInputHash: inputs.projection.floor_input_hash,
+          eligibleFiles: metrics.eligibleFiles,
+          eligibleDiffBytes: metrics.eligibleDiffBytes,
+          excludedFiles: metrics.excludedFiles,
+          unreviewableFiles: metrics.unreviewableFiles,
+          policyStubFiles:
+            metrics.policyStubFiles ?? (inputs.forensicInput.policyStubs ?? []).length,
+          policyStubRows:
+            metrics.policyStubRows ??
+            (inputs.forensicInput.policyStubs ?? []).reduce((n, x) => n + x.adds + x.dels, 0),
+          latencyTier: latencyTierFor(metrics.eligibleDiffBytes),
+        });
+  const payloadPath = payloadPathFor(root, branch, runId, lane);
+  // Written with plain fs on purpose: the payload is not review publication
+  // state, so it must not go through the review write surface that constrains
+  // writes to a prepared review directory.
+  await mkdir(path.dirname(payloadPath), { recursive: true });
+  await writeFile(payloadPath, markdown, 'utf8');
+  const served = await recordCanonicalLaneServed({
+    branch,
+    root,
+    ...(args.projectId === undefined ? {} : { projectId: args.projectId }),
+    runId,
+    lane,
+    servedAt: new Date().toISOString(),
+    operationId,
+    secretAllow: [],
+  });
+  run.lane_inputs_served = served.run.lane_inputs_served;
+  const bytes = Buffer.from(markdown, 'utf8');
+  return {
+    contract: LANE_CONTRACTS[lane],
+    payload_path: path.relative(root, payloadPath),
+    payload_sha: sha16(bytes),
+    payload_bytes: bytes.length,
+    served_at: served.servedAt,
+  };
+}
+
+async function loadRun(args: ReviewArgs, root: string, branch: string, runId: string) {
+  return readCanonicalRun({
+    branch,
+    root,
+    ...(args.projectId === undefined ? {} : { projectId: args.projectId }),
+    runId,
+  });
+}
+
+async function runLaneInput(
+  args: ReviewArgs,
+  root: string,
+  branch: string,
+  operationId: string
+): Promise<number> {
+  const lane = parseLane(args.lane);
+  if (lane === null) return fail(args, 'lane-input', '--lane must be `account` or `forensic`', 2);
+  if (!args.runId) return fail(args, 'lane-input', '--run <run-id> is required', 2);
+  const read = await loadRun(args, root, branch, args.runId);
+  if (read === null) return fail(args, 'lane-input', `run ${args.runId} is not retained`, 1);
+  if (lane === 'account' && !runForensicTerminal(read.run))
+    return fail(args, 'lane-input', `TWOLANE_ROUTINE_ORDER: ${ROUTINE_ORDER_MESSAGE}`, 1);
+  const served = await serveLaneEnvelope(
+    root,
+    branch,
+    args,
+    args.runId,
+    lane,
+    read.run,
+    read.dossierInputs,
+    operationId
+  );
+  const envelope = { ok: true, run_id: read.runId, lane, ...served };
+  if (args.json) emit(envelope);
+  else
+    writeReviewOutput(
+      `lane ${lane} input: ${envelope.payload_path} (${envelope.payload_bytes} bytes, sha ${envelope.payload_sha})\n`
+    );
+  return 0;
 }
 
 interface SubmitFlags {
   lane: Lane;
   runId: string;
   isolation: DeclaredIsolation;
-  raw: unknown;
-  outerNormalizationCode: SubmissionNormalizationCode;
-  rawSubmissionSha256: string;
+  raw: string;
   usageTokens: number | null;
   usageSource: string | null;
   runtimeIdentity: ExecutableIdentity | null;
@@ -1280,18 +1109,13 @@ async function parseSubmitFlags(
       : await readFile(args.input, 'utf8').catch(() => null);
   if (rawText === null)
     return { ok: false, exit: fail(args, verb, `--input ${args.input} is not readable`, 1) };
-  // Invalid JSON still consumes an attempt and earns shape diagnostics. A
-  // single JSON-string wrapper is normalized deterministically for every lane.
-  const normalized = normalizeSubmission(rawText);
   return {
     ok: true,
     flags: {
       lane,
       runId: args.runId,
       isolation,
-      raw: normalized.value,
-      outerNormalizationCode: normalized.code,
-      rawSubmissionSha256: normalized.raw_sha256,
+      raw: rawText,
       usageTokens,
       usageSource: args.usageSource ?? null,
       runtimeIdentity: args.runtimeIdentity ?? null,
@@ -1299,226 +1123,145 @@ async function parseSubmitFlags(
   };
 }
 
-const runtimeIdentityDrift = (
-  expected: ExecutableIdentity | null,
-  observed: ExecutableIdentity | null
-): string | null => {
-  if (expected === null) return null;
-  if (observed === null)
-    return 'the run pinned an executable identity, but this invocation supplied none';
-  const expectedFingerprint = expected.runtimeFingerprintSha256;
-  const observedFingerprint = observed.runtimeFingerprintSha256;
-  return expectedFingerprint === observedFingerprint
-    ? null
-    : `run executable fingerprint ${expectedFingerprint} does not match current fingerprint ${observedFingerprint}`;
-};
-
 type SubmitOutcome =
   | { status: 'notfound'; message: string }
   | { status: 'sealed' }
   | { status: 'identity-drift'; message: string }
+  | { status: 'refused'; message: string }
   | {
       status: 'done';
       accepted: boolean;
       diagnostics: { code: string; message: string }[];
-      state: SliceRunState;
+      run: TwolaneRunFile;
     };
 
+/**
+ * The submission is validated and published as one attempt. The routine
+ * ordering refusal happens before the attempt is prepared, so an out-of-order
+ * account submission consumes nothing.
+ */
 async function performSubmit(
   root: string,
   branch: string,
-  flags: SubmitFlags
+  args: ReviewArgs,
+  flags: SubmitFlags,
+  operationId: string
 ): Promise<SubmitOutcome> {
-  const runDir = runDirFor(root, branch, flags.runId);
-  let outcome: SubmitOutcome = { status: 'sealed' };
-  await withTwolaneRunLock(root, branch, flags.runId, async (verifyLeases) => {
-    let run: TwolaneRunFile;
-    try {
-      run = await readTwolaneRunFile(runDir);
-    } catch (error) {
-      outcome = { status: 'notfound', message: (error as Error).message };
-      return;
-    }
-    if (run.finalized !== null) {
-      outcome = { status: 'sealed' };
-      return;
-    }
-    const identityDrift = runtimeIdentityDrift(run.runtime_identity, flags.runtimeIdentity);
-    if (identityDrift !== null) {
-      outcome = { status: 'identity-drift', message: identityDrift };
-      return;
-    }
-    if (flags.lane === 'account' && !forensicTerminal(run.slice_state)) {
-      // Engine-enforced routine ordering: refused BEFORE the state machine,
-      // so no attempt is consumed and no state changes.
-      outcome = {
-        status: 'done',
-        accepted: false,
-        diagnostics: [{ code: 'TWOLANE_ROUTINE_ORDER', message: ROUTINE_ORDER_MESSAGE }],
-        state: run.slice_state,
-      };
-      return;
-    }
-    const { dossier, projection } = await loadSliceInputs(runDir);
-    const ctx = sliceContext(dossier, projection, flags.lane);
-    const normalizationCodes: RoutineNormalizationCode[] = [
-      ...(flags.outerNormalizationCode === 'CLEAN_JSON' ? [] : [flags.outerNormalizationCode]),
-    ];
-    if (normalizationCodes.length === 0) normalizationCodes.push('CLEAN_JSON');
-    const normalizationCode: RoutineNormalizationSummaryCode =
-      normalizationCodes.length === 1 ? normalizationCodes[0]! : 'MULTIPLE_NORMALIZATIONS';
-    const normalizedSubmissionSha256 = canonicalJsonSha256(flags.raw);
-    const isRepair = run.slice_state.lanes[flags.lane].attempts >= 1;
-    const submit = submitLane(run.slice_state, flags.lane, flags.raw, ctx, {
-      routine: true,
-      normalized: normalizationCodes.some((code) => code !== 'CLEAN_JSON'),
-    });
-    run.slice_state = submit.state;
-    let compiledPayloadSha256: string | null = null;
-    let acceptedEnvelopeSha256: string | null = null;
-    if (submit.accepted && submit.payload !== null) {
-      await verifyLeases();
-      if (flags.lane === 'account') {
-        const compiled = submit.payload as AccountPayload;
-        compiledPayloadSha256 = canonicalJsonSha256(compiled);
-        const diagnosticCodes = submit.state.lanes.account.diagnostics.map(
-          (diagnostic) => diagnostic.code
-        );
-        const accepted: AcceptedAccountEnvelope = {
-          schema_version: 1,
-          normalization_code: normalizationCode,
-          normalization_codes: normalizationCodes,
-          normalized_authored: flags.raw as AuthoredAccountPayload,
-          compiled_payload: compiled,
-          inner: {
-            raw_submission_sha256: flags.rawSubmissionSha256,
-            normalized_authored_sha256: normalizedSubmissionSha256,
-            compiled_payload_sha256: compiledPayloadSha256,
-            diagnostic_codes: diagnosticCodes,
-          },
-        };
-        acceptedEnvelopeSha256 = canonicalJsonSha256(accepted);
-        run.account_lineage = {
-          ...accepted.inner,
-          accepted_envelope_sha256: acceptedEnvelopeSha256,
-          normalization_code: accepted.normalization_code,
-          normalization_codes: accepted.normalization_codes,
-        };
-        await atomicWriteFile(
-          path.join(runDir, 'accepted-account.json'),
-          `${JSON.stringify(accepted, null, 2)}\n`,
-          root
-        );
-      } else {
-        await atomicWriteFile(
-          path.join(runDir, 'accepted-forensic.json'),
-          `${JSON.stringify(submit.payload, null, 2)}\n`,
-          root
-        );
-      }
-    }
-    run.attempts.push({
+  const read = await loadRun(args, root, branch, flags.runId);
+  if (read === null) return { status: 'notfound', message: `run ${flags.runId} is not retained` };
+  if (read.run.finalized !== null) return { status: 'sealed' };
+  const pinned = read.run.runtime_identity;
+  if (
+    pinned !== null &&
+    pinned.runtimeFingerprintSha256 !== flags.runtimeIdentity?.runtimeFingerprintSha256
+  )
+    return {
+      status: 'identity-drift',
+      message:
+        flags.runtimeIdentity === null
+          ? 'the run pinned an executable identity, but this invocation supplied none'
+          : `run executable fingerprint ${pinned.runtimeFingerprintSha256} does not match current fingerprint ${flags.runtimeIdentity.runtimeFingerprintSha256}`,
+    };
+  if (flags.lane === 'account' && !runForensicTerminal(read.run))
+    return {
+      status: 'done',
+      accepted: false,
+      diagnostics: [{ code: 'TWOLANE_ROUTINE_ORDER', message: ROUTINE_ORDER_MESSAGE }],
+      run: read.run,
+    };
+  try {
+    const submitted = await submitCanonicalLane({
+      branch,
+      root,
+      ...(args.projectId === undefined ? {} : { projectId: args.projectId }),
+      runId: flags.runId,
       lane: flags.lane,
       at: new Date().toISOString(),
-      accepted: submit.accepted,
-      is_repair: isRepair,
-      declared_isolation: flags.isolation,
-      diagnostic_codes: submit.diagnostics.map((d) => d.code),
-      normalization_code: normalizationCode,
-      normalization_codes: normalizationCodes,
-      raw_submission_sha256: flags.rawSubmissionSha256,
-      normalized_submission_sha256: normalizedSubmissionSha256,
-      compiled_payload_sha256: compiledPayloadSha256,
-      accepted_envelope_sha256: acceptedEnvelopeSha256,
-      usage_tokens: flags.usageTokens,
-      usage_source: flags.usageSource,
+      isolation: flags.isolation,
+      usageTokens: flags.usageTokens,
+      usageSource: flags.usageSource,
+      runtimeIdentity: flags.runtimeIdentity,
+      rawSubmission: flags.raw,
+      operationId,
+      secretAllow: [],
     });
-    await verifyLeases();
-    await writeRunFile(root, runDir, run);
-    outcome = {
+    return {
       status: 'done',
-      accepted: submit.accepted,
-      diagnostics: submit.diagnostics,
-      state: submit.state,
+      accepted: submitted.accepted,
+      diagnostics: submitted.diagnostics,
+      run: submitted.run,
     };
-  });
-  return outcome;
+  } catch (error) {
+    return { status: 'refused', message: (error as Error).message };
+  }
 }
 
-async function runLaneSubmit(args: ReviewArgs, root: string, branch: string): Promise<number> {
+function submitFailure(args: ReviewArgs, verb: string, outcome: SubmitOutcome): number | null {
+  if (outcome.status === 'notfound') return fail(args, verb, outcome.message, 1);
+  if (outcome.status === 'sealed')
+    return fail(args, verb, `run ${args.runId!} is finalized; submissions are sealed`, 1);
+  if (outcome.status === 'identity-drift')
+    return fail(args, verb, `TWOLANE_EXECUTABLE_IDENTITY_DRIFT: ${outcome.message}`, 1);
+  if (outcome.status === 'refused') return fail(args, verb, outcome.message, 1);
+  return null;
+}
+
+async function runLaneSubmit(
+  args: ReviewArgs,
+  root: string,
+  branch: string,
+  operationId: string
+): Promise<number> {
   const parsed = await parseSubmitFlags(args, 'lane-submit');
   if (!parsed.ok) return parsed.exit;
-  const outcome = await performSubmit(root, branch, parsed.flags);
-  if (outcome.status === 'notfound')
-    return fail(
-      args,
-      'lane-submit',
-      `run ${parsed.flags.runId} is not readable: ${outcome.message}`,
-      1
-    );
-  if (outcome.status === 'sealed')
-    return fail(
-      args,
-      'lane-submit',
-      `run ${parsed.flags.runId} is finalized; submissions are sealed`,
-      1
-    );
-  if (outcome.status === 'identity-drift')
-    return fail(args, 'lane-submit', `TWOLANE_EXECUTABLE_IDENTITY_DRIFT: ${outcome.message}`, 1);
+  const outcome = await performSubmit(root, branch, args, parsed.flags, operationId);
+  const failed = submitFailure(args, 'lane-submit', outcome);
+  if (failed !== null) return failed;
+  const done = outcome as Extract<SubmitOutcome, { status: 'done' }>;
   const envelope = {
     ok: true,
     run_id: parsed.flags.runId,
     lane: parsed.flags.lane,
-    accepted: outcome.accepted,
-    diagnostics: outcome.diagnostics,
-    state: {
-      ...stateEnvelope(outcome.state),
-    },
+    accepted: done.accepted,
+    diagnostics: done.diagnostics,
+    state: stateEnvelope(done.run.slice_state),
   };
   if (args.json) emit(envelope);
   else
-    process.stdout.write(
-      `lane ${parsed.flags.lane}: ${outcome.accepted ? 'accepted' : `rejected (${outcome.diagnostics.map((d) => d.code).join(', ') || 'no diagnostics'})`}\n`
+    writeReviewOutput(
+      `lane ${parsed.flags.lane}: ${done.accepted ? 'accepted' : `rejected (${done.diagnostics.map((d) => d.code).join(', ') || 'no diagnostics'})`}\n`
     );
   return 0;
 }
 
-const laneIsolation = (
-  attempts: readonly TwolaneAttemptRecord[],
-  lane: Lane
-): IsolationStatus | null => {
-  const mine = attempts.filter((a) => a.lane === lane);
-  if (mine.length === 0) return null;
-  if (mine.some((a) => a.declared_isolation === 'sequential')) return 'SEQUENTIAL';
-  if (mine.some((a) => a.declared_isolation === 'unknown')) return 'UNKNOWN';
-  return 'SUBAGENT_FRESH';
-};
-
-const aggregateIsolation = (perLane: Record<Lane, IsolationStatus | null>): IsolationStatus => {
-  const present = Object.values(perLane).filter((v): v is IsolationStatus => v !== null);
-  if (present.length === 0) return 'UNKNOWN';
-  if (present.includes('SEQUENTIAL')) return 'SEQUENTIAL';
-  if (present.includes('UNKNOWN')) return 'UNKNOWN';
-  return 'SUBAGENT_FRESH';
-};
-
 async function runRunShow(args: ReviewArgs, root: string, branch: string): Promise<number> {
   if (!args.runId) return fail(args, 'run-show', '--run <run-id> is required', 2);
-  const runDir = runDirFor(root, branch, args.runId);
-  let run: TwolaneRunFile;
-  try {
-    run = await readTwolaneRunFile(runDir);
-  } catch (error) {
-    return fail(
-      args,
-      'run-show',
-      `run ${args.runId} is not readable: ${(error as Error).message}`,
-      1
-    );
-  }
+  if (args.semanticInput && !args.json)
+    return fail(args, 'run-show', '--semantic-input requires --json', 2);
+  const read = await readCanonicalRunStatus({
+    branch,
+    root,
+    ...(args.projectId === undefined ? {} : { projectId: args.projectId }),
+    runId: args.runId,
+  });
+  if (read === null) return fail(args, 'run-show', `run ${args.runId} is not retained`, 1);
+  const run = read.run;
+  const finalization =
+    args.semanticInput && run.finalized !== null
+      ? await readCanonicalRunFinalization({
+          branch,
+          root,
+          ...(args.projectId === undefined ? {} : { projectId: args.projectId }),
+          reviewId: read.reviewId,
+          runId: read.runId,
+          revisionId: read.revisionId,
+          version: read.version,
+        })
+      : null;
   const envelope = {
     ok: true,
     run_id: run.run_id,
+    review_id: read.reviewId,
     branch: run.branch,
     mode: run.mode,
     created_at: run.created_at,
@@ -1527,464 +1270,48 @@ async function runRunShow(args: ReviewArgs, root: string, branch: string): Promi
     lane_inputs_served: run.lane_inputs_served,
     attempts: run.attempts,
     finalized: run.finalized,
+    ...(args.semanticInput
+      ? {
+          semantic_anchor:
+            finalization === null ? null : retainedSemanticAnchorResponse(finalization),
+        }
+      : {}),
   };
   if (args.json) emit(envelope);
   else
-    process.stdout.write(
+    writeReviewOutput(
       `run ${run.run_id}: account ${run.slice_state.lanes.account.outcome}, forensic ${run.slice_state.lanes.forensic.outcome}, repair credit account=${run.slice_state.lanes.account.repairCredit} forensic=${run.slice_state.lanes.forensic.repairCredit}, ${run.finalized === null ? 'open' : `finalized ${run.finalized.outcome}`}\n`
     );
   return 0;
 }
 
-type FinalizeOutcome =
-  | { status: 'notfound'; message: string }
-  | {
-      status: 'already';
-      outcome: string;
-      at: string;
-      record: Record<string, unknown> | null;
-      runDir: string;
-      currentStory: PublishCurrentStoryResult | null;
-    }
-  | {
-      status: 'current-install-failed';
-      outcome: string;
-      at: string;
-      message: string;
-      runDir: string;
-    }
-  | {
-      status: 'done';
-      record: Record<string, unknown>;
-      markdown: string | null;
-      runDir: string;
-      currentStory: PublishCurrentStoryResult | null;
-    };
+const STORY_MEMBER_FILES = [
+  'review.md',
+  'brief.json',
+  'composed-story-v2.json',
+  STORY_REVIEW_MODEL_FILE,
+] as const;
 
-export interface TwolaneOwnershipSummary {
-  label: ComposedStory['ownership']['label'];
-  reviewable_rows: number;
-  attributed_rows: number;
-  /** Stored at the composed model's full numeric precision; round only for display. */
-  attributed_pct: number;
-  ambiguous_rows: number;
-  contested_rows: number;
-  unattributed_rows: number;
-  missing_boundary_checkpoints: number;
-}
-
-/** Project only the composed output's authoritative ownership accounting. */
-export const ownershipSummaryFromComposed = (composed: ComposedStory): TwolaneOwnershipSummary => {
-  const metrics = composed.ownership.metrics;
-  const classifiedRows =
-    metrics.attributedRows +
-    metrics.ambiguousRows +
-    metrics.contestedRows +
-    metrics.unattributedRows;
-  if (classifiedRows !== metrics.reviewableRows) {
-    throw new Error(
-      `ownership summary partition mismatch: reviewable=${metrics.reviewableRows}, ` +
-        `attributed=${metrics.attributedRows}, ambiguous=${metrics.ambiguousRows}, ` +
-        `contested=${metrics.contestedRows}, unattributed=${metrics.unattributedRows}`
-    );
-  }
-  return {
-    label: composed.ownership.label,
-    reviewable_rows: metrics.reviewableRows,
-    attributed_rows: metrics.attributedRows,
-    attributed_pct: metrics.attributedPct,
-    ambiguous_rows: metrics.ambiguousRows,
-    contested_rows: metrics.contestedRows,
-    unattributed_rows: metrics.unattributedRows,
-    missing_boundary_checkpoints: composed.ownership.missingBoundaryCheckpoints,
-  };
+const finalizeFiles = (terminal: TerminalRecord): string[] => {
+  const semantic = [
+    terminal.semantic_anchor_input.receipt_file,
+    terminal.semantic_anchor_input.payload_file,
+  ].filter((file): file is NonNullable<typeof file> => file !== null);
+  return [...(terminal.outputs === null ? [] : STORY_MEMBER_FILES), ...semantic];
 };
 
-async function performFinalize(
-  root: string,
-  branch: string,
-  runId: string,
-  runtimeIdentity: ExecutableIdentity | null
-): Promise<FinalizeOutcome> {
-  const runDir = runDirFor(root, branch, runId);
-  let final: FinalizeOutcome = { status: 'notfound', message: 'finalize did not run' };
-  await withTwolaneRunLock(root, branch, runId, async (verifyLeases) => {
-    let run: TwolaneRunFile;
-    let markdown: string | null = null;
-    try {
-      run = await readTwolaneRunFile(runDir);
-    } catch (error) {
-      final = { status: 'notfound', message: (error as Error).message };
-      return;
-    }
-    if (run.finalized !== null) {
-      let record: Record<string, unknown> | null = null;
-      try {
-        record = JSON.parse(await readFile(path.join(runDir, RUN_RECORD_FILE), 'utf8')) as Record<
-          string,
-          unknown
-        >;
-      } catch {
-        // Publication revalidation below will report the terminal inconsistency
-        // with a named current-Story install failure.
-      }
-      final = {
-        status: 'already',
-        outcome: run.finalized.outcome,
-        at: run.finalized.at,
-        record,
-        runDir,
-        currentStory: null,
-      };
-      return;
-    }
-    const identityDrift = runtimeIdentityDrift(run.runtime_identity, runtimeIdentity);
-    if (identityDrift !== null) throw new ExecutableIdentityDriftError(identityDrift);
-    const readAccepted = async <T>(lane: Lane): Promise<T | null> => {
-      if (!run.slice_state.lanes[lane].accepted) return null;
-      const accepted = JSON.parse(
-        await readFile(path.join(runDir, `accepted-${lane}.json`), 'utf8')
-      ) as T | AcceptedAccountEnvelope;
-      return (
-        lane === 'account' ? (accepted as AcceptedAccountEnvelope).compiled_payload : accepted
-      ) as T;
-    };
-    const account = await readAccepted<AccountPayload>('account');
-    const forensic = await readAccepted<ForensicPayload>('forensic');
-    const outcome: 'FULL' | 'DEGRADED' | 'FAILED' =
-      account !== null && forensic !== null
-        ? 'FULL'
-        : account !== null || forensic !== null
-          ? 'DEGRADED'
-          : 'FAILED';
-    let rangeValidation: 'PERFORMED' | 'SKIPPED_NO_PINNED_DIFF' | 'NOT_APPLICABLE' =
-      'NOT_APPLICABLE';
-    let semanticAnchorPreparation = prepareSemanticAnchorInput({
-      runId: run.run_id,
-      storyModel: null,
-      storyModelBytes: null,
-      accountProjection: null,
-      accountProjectionBytes: null,
-      coverage: null,
-      coverageBytes: null,
-      pinnedDiffText: null,
-      forensicInput: null,
-      forensicInputBytes: null,
-      accountLineage: null,
-    });
-    let semanticAnchorReceiptPersisted = false;
-    let ownershipSummary: TwolaneOwnershipSummary | null = null;
-    let outputs: {
-      review_md: string;
-      brief_json: string;
-      composed_story: string;
-      story_review_model: string;
-      story_review_model_sha256: string;
-      ownership_label: string;
-    } | null = null;
-    if (outcome !== 'FAILED') {
-      const { dossier, projection, forensicInput } = await loadSliceInputs(runDir);
-      const coverage = await loadCoverageSnapshot(runDir);
-      const composed = composeStory({ account, forensic, projection, dossier, coverage });
-      ownershipSummary = ownershipSummaryFromComposed(composed);
-      const rendered = renderSlice({
-        dossier,
-        projection,
-        merge: composed.merge,
-        composed,
-        accountPresent: account !== null,
-        forensicPresent: forensic !== null,
-        policyStubs: forensicInput.policyStubs,
-      });
-      // VALIDATE EVERY OUTPUT BEFORE THE FIRST WRITE.
-      //
-      // Deliberately not called "atomic finalization": a failure in one of the
-      // writes below can still leave a partial set on disk, and real multi-file
-      // atomicity needs a transaction or a terminal marker that consumers
-      // honour. What this DOES guarantee is validate-before-write: validating
-      // the story model inside its own write call, which runs LAST, would let an
-      // unresolved Part range throw with review.md and brief.json already
-      // written and the run reporting "not finalized" beside them.
-      const diffText = await loadPinnedDiff(runDir, run.input_shas.diff !== undefined);
-      const model = projectStoryReviewModel(composed, projection);
-      const modelBytes = serializeStoryReviewModelForInstall({
-        model,
-        ...(diffText !== null ? { diffText } : {}),
-      });
-      // Whether the round-trip actually ran is RECORDED, not inferred. A skip is
-      // a legitimate state; an unrecorded skip would claim a validation that was
-      // silently not performed.
-      rangeValidation = diffText !== null ? 'PERFORMED' : 'SKIPPED_NO_PINNED_DIFF';
-
-      // Preparation is a deterministic, derived convenience for a later,
-      // explicitly requested semantic-anchor pass. It is deliberately outside
-      // the core validity boundary: missing coverage, an oversized complete
-      // payload, or an implementation/write failure is recorded in its own
-      // receipt and NEVER invalidates the accepted Story review.
-      let projectionBytes: string | null = null;
-      let coverageBytes: string | null = null;
-      let forensicInputBytes: string | null = null;
-      try {
-        projectionBytes = await readFile(path.join(runDir, INPUT_FILES.projection), 'utf8');
-        coverageBytes = await readFile(path.join(runDir, COVERAGE_FILE), 'utf8').catch(() => null);
-        forensicInputBytes = await readFile(path.join(runDir, INPUT_FILES.forensic_input), 'utf8');
-        semanticAnchorPreparation = prepareSemanticAnchorInput({
-          runId: run.run_id,
-          storyModel: model,
-          storyModelBytes: modelBytes,
-          accountProjection: projection,
-          accountProjectionBytes: projectionBytes,
-          coverage,
-          coverageBytes,
-          pinnedDiffText: diffText,
-          forensicInput,
-          forensicInputBytes,
-          accountLineage:
-            run.account_lineage === null
-              ? null
-              : {
-                  acceptedEnvelopeSha256: run.account_lineage.accepted_envelope_sha256,
-                  compiledPayloadSha256: run.account_lineage.compiled_payload_sha256,
-                },
-        });
-      } catch (error) {
-        if (error instanceof ArtifactLockLeaseLostError) throw error;
-        semanticAnchorPreparation = unavailableSemanticAnchorPreparation(
-          run.run_id,
-          'PREPARATION_FAILED',
-          error instanceof Error ? error.message : String(error),
-          {
-            storyModel: model,
-            storyModelBytes: modelBytes,
-            accountProjection: projection,
-            accountProjectionBytes: projectionBytes,
-            coverage,
-            coverageBytes,
-            pinnedDiffText: diffText,
-            forensicInput,
-            forensicInputBytes,
-            accountLineage:
-              run.account_lineage === null
-                ? null
-                : {
-                    acceptedEnvelopeSha256: run.account_lineage.accepted_envelope_sha256,
-                    compiledPayloadSha256: run.account_lineage.compiled_payload_sha256,
-                  },
-          }
-        );
-      }
-
-      await verifyLeases();
-      await atomicWriteFile(path.join(runDir, 'review.md'), rendered.markdown, root);
-      await atomicWriteFile(
-        path.join(runDir, 'brief.json'),
-        `${JSON.stringify(rendered.brief, null, 2)}\n`,
-        root
-      );
-      await atomicWriteFile(
-        path.join(runDir, COMPOSED_STORY_FILE),
-        `${JSON.stringify(composed, null, 2)}\n`,
-        root
-      );
-      await atomicWriteFile(path.join(runDir, STORY_REVIEW_MODEL_FILE), modelBytes, root);
-      outputs = {
-        review_md: 'review.md',
-        brief_json: 'brief.json',
-        composed_story: COMPOSED_STORY_FILE,
-        story_review_model: STORY_REVIEW_MODEL_FILE,
-        story_review_model_sha256: createHash('sha256').update(modelBytes).digest('hex'),
-        ownership_label: composed.ownership.label,
-      };
-      markdown = rendered.markdown;
-    }
-    // Persist the derived input after every core output has succeeded. An I/O
-    // failure here is demoted into an UNAVAILABLE receipt; the review remains
-    // finalizable and the run record remains the authoritative disclosure.
-    const persistSemanticPreparation = async (
-      preparation: SemanticAnchorPreparation
-    ): Promise<SemanticAnchorPreparation> => {
-      try {
-        await verifyLeases();
-        if (preparation.payload !== null) {
-          await atomicWriteFile(
-            path.join(runDir, SEMANTIC_ANCHOR_INPUT_FILE),
-            preparation.payload,
-            root
-          );
-        }
-        await atomicWriteFile(
-          path.join(runDir, SEMANTIC_ANCHOR_RECEIPT_FILE),
-          `${JSON.stringify(preparation.receipt, null, 2)}\n`,
-          root
-        );
-        semanticAnchorReceiptPersisted = true;
-        return preparation;
-      } catch (error) {
-        if (error instanceof ArtifactLockLeaseLostError) throw error;
-        // A receipt failure after the payload write must not leave an orphaned
-        // model input that looks usable. Non-READY preparation retains no file.
-        await verifyLeases();
-        await rm(
-          reviewEntryPath(root, path.join(runDir, SEMANTIC_ANCHOR_INPUT_FILE), 'review run file'),
-          { force: true }
-        ).catch(() => {});
-        const failed: SemanticAnchorPreparation = {
-          payload: null,
-          items: preparation.items,
-          blockCatalog: preparation.blockCatalog,
-          receipt: {
-            ...preparation.receipt,
-            status: 'UNAVAILABLE',
-            reason: 'PREPARED_INPUT_WRITE_FAILED',
-            error_message: error instanceof Error ? error.message : String(error),
-            payload_file: null,
-          },
-        };
-        try {
-          await verifyLeases();
-          await atomicWriteFile(
-            path.join(runDir, SEMANTIC_ANCHOR_RECEIPT_FILE),
-            `${JSON.stringify(failed.receipt, null, 2)}\n`,
-            root
-          );
-          semanticAnchorReceiptPersisted = true;
-        } catch (receiptError) {
-          if (receiptError instanceof ArtifactLockLeaseLostError) throw receiptError;
-          semanticAnchorReceiptPersisted = false;
-        }
-        return failed;
-      }
-    };
-    semanticAnchorPreparation = await persistSemanticPreparation(semanticAnchorPreparation);
-    const finalizedAt = new Date();
-    const elapsedMs = Math.max(0, finalizedAt.getTime() - Date.parse(run.created_at));
-    const latency = latencyProfileFor(run.latency_input_bytes);
-    const perLane: Record<Lane, IsolationStatus | null> = {
-      account: laneIsolation(run.attempts, 'account'),
-      forensic: laneIsolation(run.attempts, 'forensic'),
-    };
-    const usageEntries = run.attempts
-      .filter((a) => a.usage_tokens !== null)
-      .map((a) => ({ lane: a.lane, at: a.at, tokens: a.usage_tokens, source: a.usage_source }));
-    const record: Record<string, unknown> = {
-      // run-record-v1.json is a DISTINCT contract from the run file: the
-      // strictness cut bumped the run file to schema 2, but the record's
-      // shape is unchanged and its readers pin literal 1.
-      schema_version: TWOLANE_RUN_RECORD_SCHEMA_VERSION,
-      run_id: run.run_id,
-      branch: run.branch,
-      mode: run.mode,
-      created_at: run.created_at,
-      finalized_at: finalizedAt.toISOString(),
-      elapsed_ms: elapsedMs,
-      latency_input_bytes: latency.latency_input_bytes,
-      latency_tier: latency.latency_tier,
-      latency_budget_ms: latency.latency_budget_ms,
-      latency_status: elapsedMs <= latency.latency_budget_ms ? 'PASS' : 'MISSED',
-      runtime_identity: run.runtime_identity,
-      execution_profile: run.execution_profile,
-      outcome,
-      submission_count: run.attempts.length,
-      repairs_used:
-        2 -
-        run.slice_state.lanes.account.repairCredit -
-        run.slice_state.lanes.forensic.repairCredit,
-      repairs_by_lane: {
-        account: 1 - run.slice_state.lanes.account.repairCredit,
-        forensic: 1 - run.slice_state.lanes.forensic.repairCredit,
-      },
-      lane_inputs_served: run.lane_inputs_served,
-      attempts: run.attempts,
-      isolation: { per_lane: perLane, aggregate: aggregateIsolation(perLane) },
-      usage:
-        usageEntries.length > 0
-          ? { status: 'HOST_REPORTED', entries: usageEntries }
-          : { status: 'UNKNOWN', entries: [] },
-      input_shas: run.input_shas,
-      range_validation: rangeValidation,
-      ownership_summary: ownershipSummary,
-      account_lineage: run.account_lineage,
-      outputs,
-      semantic_anchor_input: {
-        ...semanticAnchorPreparation.receipt,
-        receipt_file: semanticAnchorReceiptPersisted ? SEMANTIC_ANCHOR_RECEIPT_FILE : null,
-      },
-    };
-    await verifyLeases();
-    await atomicWriteFile(
-      path.join(runDir, RUN_RECORD_FILE),
-      `${JSON.stringify(record, null, 2)}\n`,
-      root
-    );
-    run.finalized = { at: finalizedAt.toISOString(), outcome };
-    await verifyLeases();
-    await writeRunFile(root, runDir, run);
-    final = { status: 'done', record, markdown, runDir, currentStory: null };
-  });
-  // `withLock` invokes the callback synchronously from TypeScript's point of
-  // view, so control-flow analysis cannot see the assignments made inside it.
-  let resolvedFinal = final as FinalizeOutcome;
-  if (
-    (resolvedFinal.status === 'done' && resolvedFinal.record.outputs !== null) ||
-    (resolvedFinal.status === 'already' && resolvedFinal.outcome !== 'FAILED')
-  ) {
-    try {
-      const currentStory = await publishCurrentStoryForRun({
-        reviewDir: reviewDirFor(root, branch),
-        locksDir: path.join(root, '.orcaops', 'tmp', 'locks'),
-        containmentRoot: root,
-        branch,
-        runId,
-      });
-      resolvedFinal = { ...resolvedFinal, currentStory };
-    } catch (error) {
-      resolvedFinal = {
-        status: 'current-install-failed',
-        outcome:
-          resolvedFinal.status === 'done'
-            ? String(resolvedFinal.record.outcome)
-            : String(resolvedFinal.outcome),
-        at:
-          resolvedFinal.status === 'done'
-            ? String(resolvedFinal.record.finalized_at)
-            : String(resolvedFinal.at),
-        message: error instanceof Error ? error.message : String(error),
-        runDir,
-      };
-    }
-  }
-  return resolvedFinal;
-}
-
-const finalizeFiles = (record: Record<string, unknown>): string[] => [
-  RUN_RECORD_FILE,
-  ...(record.outputs === null
-    ? []
-    : ['review.md', 'brief.json', COMPOSED_STORY_FILE, STORY_REVIEW_MODEL_FILE]),
-  ...(() => {
-    const prepared = record.semantic_anchor_input as
-      | { receipt_file?: string | null; payload_file?: string | null }
-      | undefined;
-    return [prepared?.receipt_file, prepared?.payload_file].filter(
-      (file): file is string => typeof file === 'string'
-    );
-  })(),
-];
-
 const semanticAnchorResponse = (
-  root: string,
-  runDir: string,
-  record: Record<string, unknown>
+  terminal: TerminalRecord,
+  semanticPublicationId: string | null
 ): Record<string, unknown> => {
-  const prepared = record.semantic_anchor_input as Record<string, unknown>;
-  const qualify = (file: unknown): string | null =>
-    typeof file === 'string' ? path.relative(root, path.join(runDir, file)) : null;
+  const prepared = terminal.semantic_anchor_input;
   return {
     status: prepared.status,
     reason: prepared.reason,
     error_message: prepared.error_message,
-    payload_path: qualify(prepared.payload_file),
-    receipt_path: qualify(prepared.receipt_file),
+    publication_id: semanticPublicationId,
+    payload_file: prepared.payload_file,
+    receipt_file: prepared.receipt_file,
     payload_hash: prepared.payload_sha256,
     payload_bytes: prepared.payload_bytes,
     estimated_input_tokens: prepared.estimated_input_tokens,
@@ -1993,12 +1320,60 @@ const semanticAnchorResponse = (
   };
 };
 
-async function runFinalize(args: ReviewArgs, root: string, branch: string): Promise<number> {
+const retainedSemanticAnchorResponse = (
+  finalization: NonNullable<Awaited<ReturnType<typeof readCanonicalRunFinalization>>>
+): Record<string, unknown> => {
+  const semantic = finalization.publications.find((publication) => publication.kind === 'semantic');
+  const payload = semantic?.members.find((member) => member.name === SEMANTIC_ANCHOR_INPUT_FILE);
+  const ready = finalization.terminal.semantic_anchor_input.status === 'READY';
+  return {
+    ...semanticAnchorResponse(finalization.terminal, semantic?.publicationId ?? null),
+    review_id: finalization.reviewId,
+    run_id: finalization.runId,
+    payload_content: ready ? (payload?.text ?? null) : null,
+  };
+};
+
+async function performFinalize(
+  args: ReviewArgs,
+  root: string,
+  branch: string,
+  runId: string,
+  runtimeIdentity: ExecutableIdentity | null,
+  operationId: string
+) {
+  return finalizeCanonicalRun({
+    branch,
+    root,
+    ...(args.projectId === undefined ? {} : { projectId: args.projectId }),
+    runId,
+    finalizedAt: new Date().toISOString(),
+    runtimeIdentity,
+    operationId,
+    secretAllow: [],
+  });
+}
+
+async function runFinalize(
+  args: ReviewArgs,
+  root: string,
+  branch: string,
+  operationId: string
+): Promise<number> {
   if (!args.runId) return fail(args, 'finalize', '--run <run-id> is required', 2);
   let final: Awaited<ReturnType<typeof performFinalize>>;
   try {
-    final = await performFinalize(root, branch, args.runId, args.runtimeIdentity ?? null);
+    final = await performFinalize(
+      args,
+      root,
+      branch,
+      args.runId,
+      args.runtimeIdentity ?? null,
+      operationId
+    );
   } catch (error) {
+    const refusal = policyRefusal(args, 'finalize', error);
+    if (refusal !== null) return refusal;
     const { code, message } = classifyFinalizeError(error);
     return fail(
       args,
@@ -2007,30 +1382,12 @@ async function runFinalize(args: ReviewArgs, root: string, branch: string): Prom
       1
     );
   }
-  if (final.status === 'notfound')
-    return fail(args, 'finalize', `run ${args.runId} is not readable: ${final.message}`, 1);
-  if (final.status === 'current-install-failed') {
-    const message = `run ${args.runId} is terminal (${final.outcome} at ${final.at}), but the authoritative current Story could not be installed: ${final.message}. Re-run finalize to repair the pointer.`;
-    if (args.json)
-      emit({
-        ok: false,
-        error: {
-          verb: 'review finalize',
-          code: CURRENT_STORY_INSTALL_FAILED,
-          message,
-          run_finalized: true,
-          retry: `orcaops review finalize --branch ${branch} --run ${args.runId}`,
-        },
-      });
-    else process.stderr.write(`review finalize: ${CURRENT_STORY_INSTALL_FAILED}: ${message}\n`);
-    return 1;
-  }
-  if (final.status === 'already') {
+  if (final.status === 'already-sealed') {
     if (final.outcome === 'FAILED')
       return fail(
         args,
         'finalize',
-        `run ${args.runId} is already finalized FAILED (${final.at}); no Story output exists to publish`,
+        `run ${args.runId} is already finalized FAILED (${final.terminal.finalized_at}); no Story output exists to publish`,
         1
       );
     if (args.json)
@@ -2039,12 +1396,15 @@ async function runFinalize(args: ReviewArgs, root: string, branch: string): Prom
         status: 'already-finalized',
         run_id: args.runId,
         outcome: final.outcome,
-        finalized_at: final.at,
-        current_story: final.currentStory,
+        finalized_at: final.terminal.finalized_at,
+        current_story: {
+          publication_id: final.storyPublicationId,
+          generation: final.storyGeneration,
+        },
       });
     else
-      process.stdout.write(
-        `run ${args.runId} was already finalized (${final.outcome} at ${final.at}); current Story pointer verified\n`
+      writeReviewOutput(
+        `run ${args.runId} was already finalized (${final.outcome} at ${final.terminal.finalized_at}); its retained Story is selected\n`
       );
     return 0;
   }
@@ -2052,19 +1412,21 @@ async function runFinalize(args: ReviewArgs, root: string, branch: string): Prom
     emit({
       ok: true,
       run_id: args.runId,
-      outcome: final.record.outcome,
-      run_dir: path.relative(root, final.runDir),
-      files: finalizeFiles(final.record),
-      ownership_summary: final.record.ownership_summary,
-      semantic_anchor: semanticAnchorResponse(root, final.runDir, final.record),
-      current_story: final.currentStory,
-      run_record: final.record,
+      review_id: final.reviewId,
+      outcome: final.outcome,
+      story_publication_id: final.storyPublicationId,
+      files: finalizeFiles(final.terminal),
+      ownership_summary: final.terminal.ownership_summary,
+      semantic_anchor: semanticAnchorResponse(final.terminal, final.semanticPublicationId),
+      current_story: {
+        publication_id: final.storyPublicationId,
+        generation: final.storyGeneration,
+      },
+      run_record: final.terminal,
     });
-  } else if (final.markdown !== null) {
-    process.stdout.write(final.markdown);
   } else {
-    process.stdout.write(
-      `run ${args.runId} finalized: ${String(final.record.outcome)} (no lane accepted)\n`
+    writeReviewOutput(
+      `run ${args.runId} finalized: ${final.outcome}${final.terminal.outputs === null ? ' (no lane accepted)' : ''}\n`
     );
   }
   return 0;
@@ -2076,27 +1438,43 @@ async function runFinalize(args: ReviewArgs, root: string, branch: string): Prom
 // ---------------------------------------------------------------------------
 
 /**
- * `routine-start` (the floor + dossier are built by the dispatcher in run.ts
- * before this): mint the run and serve the forensic input in one envelope.
+ * `routine-start` (the floor is published by the dispatcher in run.ts before
+ * this): mint the run and serve the forensic input in one envelope.
  */
-async function runRoutineStart(args: ReviewArgs, root: string, branch: string): Promise<number> {
-  const minted = await mintRun(root, branch, args);
+async function runRoutineStart(
+  args: ReviewArgs,
+  root: string,
+  branch: string,
+  operationId: string
+): Promise<number> {
+  const minted = await mintRun(args, root, branch, operationId);
   if (!minted.ok) return fail(args, 'routine-start', minted.message, 2);
-  const served = await serveLaneEnvelope(root, branch, minted.runId, minted.runDir, 'forensic');
+  const read = await loadRun(args, root, branch, minted.minted.runId);
+  if (read === null) return fail(args, 'routine-start', 'the minted run is not retained', 1);
+  const served = await serveLaneEnvelope(
+    root,
+    branch,
+    args,
+    minted.minted.runId,
+    'forensic',
+    read.run,
+    read.dossierInputs,
+    deriveReviewOperationId(operationId, 'review.run.inputs-served')
+  );
   const envelope = {
     ok: true,
-    run_id: minted.runId,
+    run_id: minted.minted.runId,
+    review_id: minted.minted.reviewId,
     branch,
     mode: 'routine',
-    run_dir: path.relative(root, minted.runDir),
-    input_shas: minted.input_shas,
+    input_shas: minted.minted.inputShas,
     lane: 'forensic',
     ...served,
   };
   if (args.json) emit(envelope);
   else
-    process.stdout.write(
-      `run ${minted.runId}: forensic input at ${envelope.payload_path} (${envelope.payload_bytes} bytes)\n`
+    writeReviewOutput(
+      `run ${minted.minted.runId}: forensic input at ${envelope.payload_path} (${envelope.payload_bytes} bytes)\n`
     );
   return 0;
 }
@@ -2104,81 +1482,86 @@ async function runRoutineStart(args: ReviewArgs, root: string, branch: string): 
 /**
  * `routine-submit`: validate one lane submission; on forensic acceptance the
  * response carries the account input; on account acceptance the run is
- * finalized in the same call and the response carries the outcome + paths.
+ * finalized in the same call and the response carries the outcome + record.
  * A rejected submission returns diagnostics — the same command accepts the
  * repaired payload.
  */
-async function runRoutineSubmit(args: ReviewArgs, root: string, branch: string): Promise<number> {
+async function runRoutineSubmit(
+  args: ReviewArgs,
+  root: string,
+  branch: string,
+  operationId: string
+): Promise<number> {
   const parsed = await parseSubmitFlags(args, 'routine-submit');
   if (!parsed.ok) return parsed.exit;
   const flags = parsed.flags;
-  const outcome = await performSubmit(root, branch, flags);
-  if (outcome.status === 'notfound')
-    return fail(
-      args,
-      'routine-submit',
-      `run ${flags.runId} is not readable: ${outcome.message}`,
-      1
-    );
-  if (outcome.status === 'sealed')
-    return fail(
-      args,
-      'routine-submit',
-      `run ${flags.runId} is finalized; submissions are sealed`,
-      1
-    );
-  if (outcome.status === 'identity-drift')
-    return fail(args, 'routine-submit', `TWOLANE_EXECUTABLE_IDENTITY_DRIFT: ${outcome.message}`, 1);
+  const outcome = await performSubmit(root, branch, args, flags, operationId);
+  const failed = submitFailure(args, 'routine-submit', outcome);
+  if (failed !== null) return failed;
+  const done = outcome as Extract<SubmitOutcome, { status: 'done' }>;
+  const state = done.run.slice_state;
   const envelope: Record<string, unknown> = {
     ok: true,
     run_id: flags.runId,
     lane: flags.lane,
-    accepted: outcome.accepted,
-    diagnostics: outcome.diagnostics,
-    state: stateEnvelope(outcome.state),
+    accepted: done.accepted,
+    diagnostics: done.diagnostics,
+    state: stateEnvelope(state),
   };
   // Chaining is on TERMINALITY, not acceptance: a lane that
   // exhausts its repair still advances the program — the reviewer is never
   // stranded without a next step.
   const accountTerminal =
-    outcome.state.lanes.account.accepted ||
-    outcome.state.lanes.account.outcome === 'TERMINAL_REJECTED';
-  if (flags.lane === 'forensic' && forensicTerminal(outcome.state)) {
-    const runDir = runDirFor(root, branch, flags.runId);
-    envelope.account = await serveLaneEnvelope(root, branch, flags.runId, runDir, 'account');
+    state.lanes.account.accepted || state.lanes.account.outcome === 'TERMINAL_REJECTED';
+  if (flags.lane === 'forensic' && forensicTerminal(state)) {
+    const read = await loadRun(args, root, branch, flags.runId);
+    if (read !== null)
+      envelope.account = await serveLaneEnvelope(
+        root,
+        branch,
+        args,
+        flags.runId,
+        'account',
+        read.run,
+        read.dossierInputs,
+        deriveReviewOperationId(operationId, 'review.run.inputs-served')
+      );
   }
   if (flags.lane === 'account' && accountTerminal) {
-    // The submission is already accepted and persisted; a composition failure
+    // The submission is already accepted and retained; a composition failure
     // past this point is an ENGINE defect, never a payload problem. It must
     // not surface as a submit rejection (the reviewer would resubmit and burn
     // SLICE_SUBMIT_AFTER_ACCEPT) — it reports as a parseable finalize-stage
     // failure with the acceptance state explicit, and `review finalize` stays
     // retryable.
     try {
-      const final = await performFinalize(root, branch, flags.runId, flags.runtimeIdentity);
-      if (final.status === 'done') {
-        envelope.outcome = final.record.outcome;
-        envelope.run_dir = path.relative(root, final.runDir);
-        envelope.files = finalizeFiles(final.record);
-        envelope.ownership_summary = final.record.ownership_summary;
-        envelope.semantic_anchor = semanticAnchorResponse(root, final.runDir, final.record);
-        envelope.current_story = final.currentStory;
-        envelope.run_record = final.record;
-      } else if (final.status === 'current-install-failed') {
-        envelope.finalize_error = {
-          code: CURRENT_STORY_INSTALL_FAILED,
-          stage: 'current-story-install',
-          lane_accepted: outcome.accepted,
-          run_finalized: true,
-          message: final.message,
-          retry: `orcaops review finalize --branch ${branch} --run ${flags.runId}`,
-        };
-      }
+      const final = await performFinalize(
+        args,
+        root,
+        branch,
+        flags.runId,
+        flags.runtimeIdentity,
+        deriveReviewOperationId(operationId, 'review.run.finalize')
+      );
+      envelope.outcome = final.outcome;
+      envelope.review_id = final.reviewId;
+      envelope.story_publication_id = final.storyPublicationId;
+      envelope.files = finalizeFiles(final.terminal);
+      envelope.ownership_summary = final.terminal.ownership_summary;
+      envelope.semantic_anchor = semanticAnchorResponse(
+        final.terminal,
+        final.semanticPublicationId
+      );
+      envelope.current_story = {
+        publication_id: final.storyPublicationId,
+        generation: final.storyGeneration,
+      };
+      envelope.run_record = final.terminal;
     } catch (error) {
       envelope.finalize_error = {
         code: classifyFinalizeError(error).code,
         stage: 'finalize',
-        lane_accepted: outcome.accepted,
+        lane_accepted: done.accepted,
         run_finalized: false,
         message: (error as Error).message,
         retry: `orcaops review finalize --branch ${branch} --run ${flags.runId}`,
@@ -2187,8 +1570,8 @@ async function runRoutineSubmit(args: ReviewArgs, root: string, branch: string):
   }
   if (args.json) emit(envelope);
   else
-    process.stdout.write(
-      `lane ${flags.lane}: ${outcome.accepted ? 'accepted' : `rejected (${outcome.diagnostics.map((d) => d.code).join(', ') || 'no diagnostics'})`}${envelope.outcome !== undefined ? ` — finalized ${String(envelope.outcome)}` : ''}\n`
+    writeReviewOutput(
+      `lane ${flags.lane}: ${done.accepted ? 'accepted' : `rejected (${done.diagnostics.map((d) => d.code).join(', ') || 'no diagnostics'})`}${envelope.outcome !== undefined ? ` — finalized ${String(envelope.outcome)}` : ''}\n`
     );
   return 0;
 }
@@ -2207,18 +1590,26 @@ export const TWOLANE_RUN_VERBS = [
   'routine-submit',
 ] as const;
 
-export async function runTwolaneRun(args: ReviewArgs, root: string): Promise<number> {
+export async function runTwolaneRun(
+  args: ReviewArgs,
+  root: string,
+  operationId: string = uuidv7()
+): Promise<number> {
   const verb = args.sub ?? '';
   if (!args.branch) return fail(args, verb, '--branch is required', 2);
   try {
-    if (verb === 'start') return await runStart(args, root, args.branch);
-    if (verb === 'lane-input') return await runLaneInput(args, root, args.branch);
-    if (verb === 'lane-submit') return await runLaneSubmit(args, root, args.branch);
+    if (verb === 'start') return await runStart(args, root, args.branch, operationId);
+    if (verb === 'lane-input') return await runLaneInput(args, root, args.branch, operationId);
+    if (verb === 'lane-submit') return await runLaneSubmit(args, root, args.branch, operationId);
     if (verb === 'run-show') return await runRunShow(args, root, args.branch);
-    if (verb === 'finalize') return await runFinalize(args, root, args.branch);
-    if (verb === 'routine-start') return await runRoutineStart(args, root, args.branch);
-    if (verb === 'routine-submit') return await runRoutineSubmit(args, root, args.branch);
+    if (verb === 'finalize') return await runFinalize(args, root, args.branch, operationId);
+    if (verb === 'routine-start')
+      return await runRoutineStart(args, root, args.branch, operationId);
+    if (verb === 'routine-submit')
+      return await runRoutineSubmit(args, root, args.branch, operationId);
   } catch (error) {
+    const refusal = policyRefusal(args, verb, error);
+    if (refusal !== null) return refusal;
     return fail(args, verb, (error as Error).message, 1);
   }
   return fail(args, verb, 'unknown two-lane run verb', 2);

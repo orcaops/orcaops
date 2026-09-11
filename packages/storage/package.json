@@ -14,6 +14,78 @@
     "./locks": {
       "types": "./dist/locks.d.ts",
       "default": "./dist/locks.js"
+    },
+    "./history/authority": {
+      "types": "./dist/history/authority.d.ts",
+      "default": "./dist/history/authority.js"
+    },
+    "./history/database": {
+      "types": "./dist/history/database/index.d.ts",
+      "default": "./dist/history/database/index.js"
+    },
+    "./history/primitives": {
+      "types": "./dist/history/primitives.d.ts",
+      "default": "./dist/history/primitives.js"
+    },
+    "./history/artifact-operation-id": {
+      "types": "./dist/history/artifact-operation-id.d.ts",
+      "default": "./dist/history/artifact-operation-id.js"
+    },
+    "./history/git-ref-schema": {
+      "types": "./dist/history/git-ref-schema.d.ts",
+      "default": "./dist/history/git-ref-schema.js"
+    },
+    "./history/execution": {
+      "types": "./dist/history/execution.d.ts",
+      "default": "./dist/history/execution.js"
+    },
+    "./history/execution-focus": {
+      "types": "./dist/history/execution-focus.d.ts",
+      "default": "./dist/history/execution-focus.js"
+    },
+    "./history/usage-accounting": {
+      "types": "./dist/history/usage-accounting.d.ts",
+      "default": "./dist/history/usage-accounting.js"
+    },
+    "./history/seed-schema": {
+      "types": "./dist/history/seed-schema.d.ts",
+      "default": "./dist/history/seed-schema.js"
+    },
+    "./history/remote-target": {
+      "types": "./dist/history/remote-target.d.ts",
+      "default": "./dist/history/remote-target.js"
+    },
+    "./history/source-time": {
+      "types": "./dist/history/source-time.d.ts",
+      "default": "./dist/history/source-time.js"
+    },
+    "./history/metadata-row": {
+      "types": "./dist/history/metadata-row.d.ts",
+      "default": "./dist/history/metadata-row.js"
+    },
+    "./history/search-content": {
+      "types": "./dist/history/search-content/index.d.ts",
+      "default": "./dist/history/search-content/index.js"
+    },
+    "./history/database/review-retention": {
+      "types": "./dist/history/database/review-retention.d.ts",
+      "default": "./dist/history/database/review-retention.js"
+    },
+    "./history/database/execution-checkout": {
+      "types": "./dist/history/database/execution-checkout-api.d.ts",
+      "default": "./dist/history/database/execution-checkout-api.js"
+    },
+    "./history/database/session-branch": {
+      "types": "./dist/history/database/session-branch-api.d.ts",
+      "default": "./dist/history/database/session-branch-api.js"
+    },
+    "./history/database/artifact-push": {
+      "types": "./dist/history/database/artifact-push-api.d.ts",
+      "default": "./dist/history/database/artifact-push-api.js"
+    },
+    "./history/database/source-plan-upload": {
+      "types": "./dist/history/database/source-plan-upload-api.d.ts",
+      "default": "./dist/history/database/source-plan-upload-api.js"
     }
   },
   "files": [

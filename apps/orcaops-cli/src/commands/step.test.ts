@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildStepBrief, type StepBriefInput } from './step.js';
+import { buildStepBrief, type StepBriefInput } from '../lib/history-views.js';
 
 const STEP_A = {
   step_id: 'step-a',

@@ -1,6 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import {
@@ -20,12 +18,11 @@ import {
 } from './dossier.js';
 import type { PartTopology } from './storyOwnership.js';
 import {
-  installStoryReviewModel,
   parseStoryReviewModel,
   projectStoryReviewModel,
   resolvePartRangesAgainstDiff,
   serializeStoryReviewModel,
-  STORY_REVIEW_MODEL_FILE,
+  serializeStoryReviewModelForInstall,
   STORY_REVIEW_MODEL_SCHEMA_VERSION,
   storyReviewGeneration,
   StoryReviewModelInvariantError,
@@ -632,25 +629,17 @@ describe('review.md — concise standalone rendering', () => {
   });
 });
 
-describe('storyReviewModel — atomic install (validated write, no partial states)', () => {
-  let dir: string;
-  beforeAll(async () => {
-    dir = await mkdtemp(path.join(tmpdir(), 'story-model-'));
-  });
-
-  it('installs a validated model that reads back through the schema', async () => {
+describe('storyReviewModel publication bytes', () => {
+  it('serializes a validated model that reads back through the schema', () => {
     const model = projectDerived();
-    await installStoryReviewModel({ runDir: dir, model, diffText });
-    const raw = JSON.parse(await readFile(path.join(dir, STORY_REVIEW_MODEL_FILE), 'utf8'));
+    const raw = JSON.parse(serializeStoryReviewModelForInstall({ model, diffText }));
     const back = parseStoryReviewModel(raw);
     expect(back.schema_version).toBe(STORY_REVIEW_MODEL_SCHEMA_VERSION);
     expect(back.parts.map((p) => p.id)).toEqual(model.parts.map((p) => p.id));
     expect(back.overview).toEqual(model.overview);
-    await rm(dir, { recursive: true, force: true });
   });
 
-  it('refuses to install a model whose ranges do not resolve against diff.patch', async () => {
-    const tmp = await mkdtemp(path.join(tmpdir(), 'story-model-bad-'));
+  it('refuses to serialize a model whose ranges do not resolve against diff.patch', () => {
     const model = projectDerived();
     const part = model.parts.find((p) => p.segments.length > 0)!;
     const broken = {
@@ -666,9 +655,8 @@ describe('storyReviewModel — atomic install (validated write, no partial state
           : p
       ),
     };
-    await expect(
-      installStoryReviewModel({ runDir: tmp, model: broken, diffText })
-    ).rejects.toBeInstanceOf(StoryReviewModelInvariantError);
-    await rm(tmp, { recursive: true, force: true });
+    expect(() => serializeStoryReviewModelForInstall({ model: broken, diffText })).toThrow(
+      StoryReviewModelInvariantError
+    );
   });
 });

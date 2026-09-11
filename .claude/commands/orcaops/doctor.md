@@ -2,8 +2,8 @@
 name: "orcaops:doctor"
 description: "Diagnose adapter health, env, evaluator validity, cache, and watchdog signals."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "9e8afe585121"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "df2dee8cfea9"
 tags: ["orcaops", "read-only"]
 ---
 
@@ -20,10 +20,10 @@ Checks performed:
 | Check | What it verifies |
 |---|---|
 | `git-repo` | Current branch + HEAD resolvable. |
-| `init` | `.orcaops/` exists. |
-| `config` | `.orcaops/config.json` parses; agent + llm.tool resolvable. |
+| `init` | A configuration governs the worktree — its own, or the shared personal one in the git common dir. |
+| `config` | The governing configuration parses; agent + llm.tool resolvable. |
 | `cache` | SQLite cache opens; schema at `CURRENT_VERSION`; row counts. |
-| `evaluators` | Every pack declared in `.orcaops/evaluators.yaml` resolves + validates (manifest, specs, command runtimes, prompt files). |
+| `evaluators` | Every pack declared in the evaluator registration resolves + validates (manifest, specs, command runtimes, prompt files). |
 | `llm-tool` | Configured CLI (claude / codex) is on PATH. |
 | `agent-skills` | Configured adapter's skills + commands present and stamped at the current orcaops version. |
 | `stale-artifacts` | No active artifact has been idle >24h (suggests a forgotten summary). |

@@ -2,7 +2,6 @@ export * from './git/index.js';
 export * from './seed/index.js';
 export * from './config/index.js';
 export * from './digest/index.js';
-export * from './why/index.js';
 export * from './resume/index.js';
 export * from './lifecycle/index.js';
 export * from './repo-state/index.js';

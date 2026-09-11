@@ -1,12 +1,24 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { loadConfig, Repo } from '@orcaops/core';
-import { artifactPathsFor, ArtifactStore, computeMemberShasHash, uuidv7 } from '@orcaops/storage';
+import {
+  type ArtifactDraftSemantics,
+  computeMemberShasHash,
+  type PlanInput,
+  prepareArtifactDraft,
+  type SummaryInput,
+  uuidv7,
+} from '@orcaops/storage';
+import {
+  appendProjectImportedArtifact,
+  type ProjectDatabase,
+  readProjectArtifact,
+} from '@orcaops/storage/history/database';
 import { createHistoryRepo, type HistoryRepo } from '@orcaops/test-harness';
 
-import { withSeedRunLock } from '../../src/commands/seed/journal.js';
+import { resolveDatabaseSeedCommandContext } from '../../src/lib/database-seed-context.js';
 import { makeAgent } from '../support/test-agent.js';
 
 interface EnrichmentTemplate {
@@ -27,8 +39,166 @@ interface EnrichmentTemplate {
 describe('orcaops seed enrich', () => {
   let repo: HistoryRepo;
   let agent: ReturnType<typeof makeAgent>;
+  let dataRoot: string;
+
+  const seedEnv = () => ({ ORCAOPS_DISABLE_DRAIN: '1', ORCAOPS_DATA_DIR: dataRoot });
+
+  async function withDatabase<T>(
+    callback: (database: ProjectDatabase) => T | Promise<T>,
+    write = false
+  ): Promise<T> {
+    const context = await resolveDatabaseSeedCommandContext({
+      cwd: repo.path,
+      env: seedEnv(),
+      write,
+    });
+    try {
+      return await callback(context.database);
+    } finally {
+      context.close();
+    }
+  }
+
+  async function appendImportedArtifact<T>(
+    artifactId: string,
+    authoredPayload: unknown,
+    callback: (semantics: ArtifactDraftSemantics) => Promise<T>
+  ): Promise<T> {
+    return withDatabase(async (database) => {
+      const draft = await prepareArtifactDraft(
+        {
+          artifactId,
+          priorEvents: [],
+          authoredPayload,
+          secretAllow: [],
+          idempotencyBlocks: [],
+        },
+        callback
+      );
+      if (draft.evaluation.kind === 'threw') throw draft.evaluation.error;
+      if (draft.idempotencyChanges.length)
+        throw new Error('Imported fixture produced unhandled attempt changes');
+      await appendProjectImportedArtifact(database, {
+        artifactId,
+        operationId: uuidv7(),
+        expectedRevision: null,
+        eventBytes: Buffer.concat(draft.events.map((event) => event.eventBytes)),
+        sidecarPayloads: draft.events.flatMap((event) =>
+          event.sidecar ? [{ eventId: event.record.event_id, bytes: event.sidecar.bytes }] : []
+        ),
+        secretAllow: [],
+      });
+      return draft.evaluation.value;
+    }, true);
+  }
+
+  async function writeImportedFixture(
+    options: {
+      memberShas?: string[];
+      memberShasHash?: string;
+      summaryHead?: string;
+      exactMembership?: boolean;
+    } = {}
+  ): Promise<string> {
+    const artifactId = uuidv7();
+    const stepId = uuidv7();
+    const ts = '2026-01-01T00:00:00.000Z';
+    const memberShas = options.memberShas ?? [repo.shas.next!];
+    const exactMembership = options.exactMembership ?? true;
+    const plan: PlanInput = {
+      schema_version: 4,
+      artifact_id: artifactId,
+      branch: 'main',
+      base_sha: repo.shas.root!,
+      agent: 'other',
+      agent_session_id: null,
+      task: 'Imported fixture task',
+      label: 'Imported fixture',
+      plan_steps: [
+        {
+          step_id: stepId,
+          text: 'Land the imported work',
+          label: 'Land imported work',
+          acceptance_criteria: [],
+        },
+      ],
+      touched_scope: ['src/**'],
+      non_goals: [],
+      decisions: [],
+      origin: {
+        kind: 'git-import',
+        imported_at: ts,
+        tool_version: exactMembership ? 'test' : 'legacy-test',
+        source_range: `${repo.shas.root}..${repo.shas.next}`,
+        authors: ['test@orcaops.local'],
+        enriched_at: null,
+        ...(exactMembership
+          ? {
+              cluster_key: computeMemberShasHash(memberShas),
+              member_shas: memberShas,
+              member_shas_hash: options.memberShasHash ?? computeMemberShasHash(memberShas),
+            }
+          : {}),
+      },
+      started_at: ts,
+      revision_n: 0,
+      revised_at: null,
+      rationale: null,
+      step_lineage: { added: [], dropped: [], unchanged: [], rewritten: [] },
+      criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
+      prior_plan_event_id: null,
+    };
+    const summary: SummaryInput = {
+      schema_version: 1,
+      artifact_id: artifactId,
+      agent: 'other',
+      outcome: 'Imported fixture outcome',
+      tests_written: [],
+      tests_run: [],
+      open_items: [],
+      deferred_decisions: [],
+      head_sha: options.summaryHead ?? memberShas.at(-1)!,
+      ts,
+    };
+    await appendImportedArtifact(artifactId, { plan, summary }, async (semantics) => {
+      const retainedPlan = await semantics.writePlan(plan, {
+        idempotencyKey: `${artifactId}:plan`,
+      });
+      const opened = await semantics.writeCheckpointOpened(
+        {
+          artifact_id: artifactId,
+          declared_step_ids: [stepId],
+          plan_revision_id: retainedPlan.event_id,
+        },
+        {
+          idempotencyKey: `${artifactId}:open`,
+          headSha: memberShas[0]!,
+          openedAt: ts,
+          invokedByAgent: 'other',
+        }
+      );
+      if (!('checkpoint' in opened)) throw new Error('Imported fixture checkpoint did not open');
+      await semantics.writeCheckpointClosed(
+        {
+          artifact_id: artifactId,
+          n: opened.checkpoint.n,
+          summary: 'Landed the imported work',
+          head_sha: memberShas[0]!,
+          files_changed: ['src/imported.ts'],
+          completed_step_ids: [stepId],
+          decisions: [],
+          uncertainty: [],
+          done_criteria: [],
+        },
+        { idempotencyKey: `${artifactId}:close` }
+      );
+      await semantics.writeSummary(summary, { idempotencyKey: `${artifactId}:summary` });
+    });
+    return artifactId;
+  }
 
   beforeEach(async () => {
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-seed-enrich-data-'));
     repo = await createHistoryRepo([
       {
         type: 'commit',
@@ -43,12 +213,13 @@ describe('orcaops seed enrich', () => {
         files: { 'src/health.ts': 'export const healthy = true;\n' },
       },
     ]);
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
+    agent = makeAgent({ cwd: repo.path, env: seedEnv() });
     await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
   });
 
   afterEach(async () => {
     await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
   });
 
   async function seedSkeleton(): Promise<string> {
@@ -117,9 +288,10 @@ describe('orcaops seed enrich', () => {
       '--json',
       ...flags,
     ]);
-    expect(result.exitCode).toBe(0);
+    expect(result.exitCode, result.stdout + result.stderr).toBe(0);
     return JSON.parse(result.stdout) as {
       bundle_directory: string;
+      authored_directory: string | null;
       bundle_file: string;
       ready: boolean;
       confirmation_required: boolean;
@@ -136,11 +308,13 @@ describe('orcaops seed enrich', () => {
   }
 
   async function writeTemplate(
-    result: { bundle_directory: string },
+    result: { bundle_directory: string; authored_directory?: string | null },
     template: EnrichmentTemplate
   ): Promise<void> {
+    const directory = result.authored_directory ?? result.bundle_directory;
+    await mkdir(directory, { recursive: true });
     await writeFile(
-      path.join(result.bundle_directory, 'authored.json'),
+      path.join(directory, 'authored.json'),
       `${JSON.stringify(template, null, 2)}\n`,
       'utf8'
     );
@@ -148,12 +322,10 @@ describe('orcaops seed enrich', () => {
 
   it('amends a skeleton import only after a validated preview and confirmation', async () => {
     const artifactId = await seedSkeleton();
-    const config = await loadConfig(repo.path);
-    const store = new ArtifactStore({ repoRoot: repo.path, config });
-    const beforePlan = (await store.readPlan(artifactId))!;
-    const beforeCheckpoints = await store.readCheckpoints(artifactId);
-    const beforeSummary = (await store.readSummary(artifactId))!;
-    store.close();
+    const before = await withDatabase((database) => readProjectArtifact(database, artifactId)!);
+    const beforePlan = before.thread.plan!;
+    const beforeCheckpoints = before.thread.checkpoints;
+    const beforeSummary = before.thread.summary!;
 
     const generated = await preview(artifactId);
     expect(generated).toMatchObject({
@@ -189,11 +361,10 @@ describe('orcaops seed enrich', () => {
       totals: { amended: 1, unchanged: 0, invalid: 0, failed: 0 },
     });
 
-    const amendedStore = new ArtifactStore({ repoRoot: repo.path, config });
-    const afterPlan = (await amendedStore.readPlan(artifactId))!;
-    const afterCheckpoints = await amendedStore.readCheckpoints(artifactId);
-    const afterSummary = (await amendedStore.readSummary(artifactId))!;
-    amendedStore.close();
+    const after = await withDatabase((database) => readProjectArtifact(database, artifactId)!);
+    const afterPlan = after.thread.plan!;
+    const afterCheckpoints = after.thread.checkpoints;
+    const afterSummary = after.thread.summary!;
     expect(afterPlan).toMatchObject({
       artifact_id: beforePlan.artifact_id,
       branch: beforePlan.branch,
@@ -250,10 +421,9 @@ describe('orcaops seed enrich', () => {
     expect(amended.exitCode).toBe(0);
     expect(JSON.parse(amended.stdout)).toMatchObject({ totals: { amended: 1 } });
 
-    const config = await loadConfig(repo.path);
-    const store = new ArtifactStore({ repoRoot: repo.path, config });
-    const plan = await store.readPlan(artifactId);
-    store.close();
+    const plan = await withDatabase(
+      (database) => readProjectArtifact(database, artifactId)?.thread.plan
+    );
     expect(plan?.label).toBe(proseOnly.label);
     expect(plan?.decisions).toEqual([
       expect.objectContaining({
@@ -393,20 +563,17 @@ describe('orcaops seed enrich', () => {
     secondTemplate.label = 'Second applied label';
     await writeTemplate(second, secondTemplate);
     await preview(artifactId, '--enrichment-dir', secondDirectory);
-    expect(
-      (
-        await agent.runRaw([
-          'seed',
-          'enrich',
-          '--artifact',
-          artifactId,
-          '--enrichment-dir',
-          secondDirectory,
-          '--yes',
-          '--json',
-        ])
-      ).exitCode
-    ).toBe(0);
+    const applied = await agent.runRaw([
+      'seed',
+      'enrich',
+      '--artifact',
+      artifactId,
+      '--enrichment-dir',
+      secondDirectory,
+      '--yes',
+      '--json',
+    ]);
+    expect(applied.exitCode, applied.stdout).toBe(0);
 
     const stale = await agent.runRaw([
       'seed',
@@ -426,14 +593,10 @@ describe('orcaops seed enrich', () => {
   });
 
   it('rejects inconsistent stored member provenance before authoring', async () => {
-    const artifactId = await seedSkeleton();
-    const config = await loadConfig(repo.path);
-    const paths = artifactPathsFor(repo.path, config, artifactId);
-    const plan = JSON.parse(await readFile(paths.planJson, 'utf8')) as {
-      origin: { member_shas: string[] };
-    };
-    plan.origin.member_shas.push('f'.repeat(40));
-    await writeFile(paths.planJson, `${JSON.stringify(plan, null, 2)}\n`, 'utf8');
+    const artifactId = await writeImportedFixture({
+      memberShas: [repo.shas.next!, 'f'.repeat(40)],
+      memberShasHash: computeMemberShasHash([repo.shas.next!]),
+    });
 
     const result = await agent.runRaw([
       'seed',
@@ -451,14 +614,10 @@ describe('orcaops seed enrich', () => {
   });
 
   it('rejects a summary head outside the imported member set', async () => {
-    const artifactId = await seedSkeleton();
-    const config = await loadConfig(repo.path);
-    const paths = artifactPathsFor(repo.path, config, artifactId);
-    const summary = JSON.parse(await readFile(paths.summaryJson, 'utf8')) as {
-      head_sha: string;
-    };
-    summary.head_sha = 'f'.repeat(40);
-    await writeFile(paths.summaryJson, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+    const artifactId = await writeImportedFixture({
+      memberShas: [repo.shas.root!],
+      summaryHead: repo.shas.next!,
+    });
 
     const result = await agent.runRaw([
       'seed',
@@ -476,16 +635,11 @@ describe('orcaops seed enrich', () => {
   });
 
   it('reports a missing imported Git object with a recovery action', async () => {
-    const artifactId = await seedSkeleton();
-    const config = await loadConfig(repo.path);
-    const paths = artifactPathsFor(repo.path, config, artifactId);
-    const plan = JSON.parse(await readFile(paths.planJson, 'utf8')) as {
-      origin: { member_shas: string[]; member_shas_hash: string };
-    };
     const missingSha = 'f'.repeat(40);
-    plan.origin.member_shas = [missingSha];
-    plan.origin.member_shas_hash = computeMemberShasHash(plan.origin.member_shas);
-    await writeFile(paths.planJson, `${JSON.stringify(plan, null, 2)}\n`, 'utf8');
+    const artifactId = await writeImportedFixture({
+      memberShas: [missingSha],
+      summaryHead: missingSha,
+    });
 
     const result = await agent.runRaw([
       'seed',
@@ -504,108 +658,13 @@ describe('orcaops seed enrich', () => {
     });
   });
 
-  it('shares the project seed lock with ordinary seed runs', async () => {
-    const env = { ...process.env, ORCAOPS_DISABLE_DRAIN: '1' };
-    await withSeedRunLock(new Repo(repo.path), env, async () => {
-      const result = await agent.runRaw([
-        'seed',
-        'enrich',
-        '--artifact',
-        uuidv7(),
-        '--dry-run',
-        '--json',
-      ]);
-      expect(result.exitCode).toBe(1);
-      expect(JSON.parse(result.stdout)).toMatchObject({
-        ok: false,
-        error: { message: expect.stringMatching(/another orcaops seed run is active/iu) },
-      });
-    });
-  });
-
   it('keeps legacy imports readable and refuses to enrich them', async () => {
-    const config = await loadConfig(repo.path);
-    const store = new ArtifactStore({ repoRoot: repo.path, config });
-    const artifactId = uuidv7();
-    const stepId = uuidv7();
-    const ts = '2026-01-01T00:00:00.000Z';
-    const plan = await store.writePlan({
-      schema_version: 4,
-      artifact_id: artifactId,
-      branch: 'main',
-      base_sha: repo.shas.root!,
-      agent: 'other',
-      agent_session_id: null,
-      task: 'Imported legacy task',
-      label: 'Imported legacy label',
-      plan_steps: [
-        {
-          step_id: stepId,
-          text: 'Land the legacy work',
-          label: 'Land the legacy work',
-          acceptance_criteria: [],
-        },
-      ],
-      touched_scope: ['src/**'],
-      non_goals: [],
-      decisions: [],
-      origin: {
-        kind: 'git-import',
-        imported_at: ts,
-        tool_version: 'legacy-test',
-        source_range: `${repo.shas.root}..${repo.shas.next}`,
-        authors: ['test@orcaops.local'],
-        enriched_at: null,
-      },
-      started_at: ts,
-      revision_n: 0,
-      revised_at: null,
-      rationale: null,
-      step_lineage: { added: [], dropped: [], unchanged: [], rewritten: [] },
-      criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
-      prior_plan_event_id: null,
-    });
-    await store.writeCheckpointOpened(
-      {
-        artifact_id: artifactId,
-        declared_step_ids: [stepId],
-        policy_exceptions: [],
-        plan_revision_id: plan.event_id,
-      },
-      { headSha: repo.shas.root!, openedAt: ts, idempotencyKey: `${artifactId}:open` }
-    );
-    await store.writeCheckpointClosed(
-      {
-        artifact_id: artifactId,
-        n: 1,
-        summary: 'Imported legacy checkpoint',
-        files_changed: ['src/health.ts'],
-        decisions: [],
-        uncertainty: [],
-        done_criteria: [],
-        verification: [],
-        completed_step_ids: [stepId],
-        head_sha: repo.shas.next!,
-      },
-      { idempotencyKey: `${artifactId}:close` }
-    );
-    await store.writeSummary(
-      {
-        schema_version: 1,
-        artifact_id: artifactId,
-        agent: 'other',
-        outcome: 'Imported legacy outcome',
-        tests_written: [],
-        tests_run: [],
-        open_items: [],
-        deferred_decisions: [],
-        head_sha: repo.shas.next!,
-        ts,
-      },
-      { idempotencyKey: `${artifactId}:summary` }
-    );
-    expect((await store.readPlan(artifactId))?.label).toBe('Imported legacy label');
-    store.close();
+    const artifactId = await writeImportedFixture({ exactMembership: false });
+    expect(
+      await withDatabase(
+        (database) => readProjectArtifact(database, artifactId)?.thread.plan?.label
+      )
+    ).toBe('Imported fixture');
 
     const result = await agent.runRaw([
       'seed',

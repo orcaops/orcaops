@@ -1,5 +1,6 @@
 import { run } from 'effection';
 
+import type { Repo } from '@orcaops/core';
 import {
   type AbandonedCheckpointContext,
   type CheckpointContext,
@@ -18,19 +19,19 @@ import { createParamsValidator, dispatchEvaluators } from '@orcaops/evaluator-ru
 import { buildLLMClient } from '@orcaops/llm';
 import {
   type AbandonedCheckpoint,
+  type ArtifactJson,
   type Checkpoint,
   type ClosedCheckpoint,
-  type LifecycleFiresAt,
+  type Config,
+  type EvaluatorLog,
   type OpenCheckpoint,
   type Plan,
   type ProposedOpenCheckpoint,
   type SourcePlanPin,
   type Summary,
   uuidv7,
-  withNonDerivableWriteLease,
 } from '@orcaops/storage';
 
-import type { CliContext } from './context.js';
 import { discoverEvaluatorsForCli } from './evaluator-discovery.js';
 import { computePackTrustDecisions } from './evaluator-grants.js';
 import { reconcileLifecycleEvaluatorInventory } from './evaluator-inventory.js';
@@ -39,8 +40,27 @@ import { getInvocationEnv } from './invocation-context.js';
 import { computePrePrReviewFingerprints, type PrePrReviewFingerprints } from './pre-pr-review.js';
 import { writeTerminalSafeStderr } from '../io/output.js';
 
+export interface LifecycleEvaluatorContext {
+  repoRoot: string;
+  repo: Repo;
+  config: Config;
+  store: {
+    readPlan(artifactId: string): Promise<Plan | null>;
+    readPlanRevision(artifactId: string, revisionN: number): Promise<Plan | null>;
+    readCheckpoints(artifactId: string): Promise<Checkpoint[]>;
+    readSummary(artifactId: string): Promise<Summary | null>;
+    readArtifact(artifactId: string): Promise<ArtifactJson | null>;
+    readEvaluatorLog(artifactId: string): Promise<EvaluatorLog | null>;
+    writeEvaluatorRunPayload(
+      artifactId: string,
+      payload: EvaluatorRunPayload,
+      options?: { idempotencyKey?: string }
+    ): Promise<unknown>;
+  };
+}
+
 export interface RunLifecycleOptions {
-  ctx: CliContext;
+  ctx: LifecycleEvaluatorContext;
   artifactId: string;
   firesAt: EvaluatorPhase;
   /** Pin revision evaluators to the plan that caused this lifecycle pass. */
@@ -61,38 +81,6 @@ export interface RunLifecycleResult {
   evaluator_results: EvaluatorRunPayload[];
   blocking: boolean;
   pre_pr_review?: PrePrReviewFingerprints;
-}
-
-export interface LifecycleCompletionKey {
-  artifactId: string;
-  firesAt: LifecycleFiresAt;
-  sequenceN?: number;
-}
-
-export function hasLifecycleCompletion(ctx: CliContext, key: LifecycleCompletionKey): boolean {
-  return ctx.store.store.hasLifecycle({
-    artifact_id: key.artifactId,
-    fires_at: key.firesAt,
-    cp_n: key.sequenceN,
-  });
-}
-
-export async function recordLifecycleCompletion(
-  ctx: CliContext,
-  key: LifecycleCompletionKey
-): Promise<void> {
-  const completedAt = new Date().toISOString();
-  await withNonDerivableWriteLease(
-    ctx.repoRoot,
-    () =>
-      ctx.store.store.recordLifecycle({
-        artifact_id: key.artifactId,
-        fires_at: key.firesAt,
-        cp_n: key.sequenceN,
-        triggered_at: completedAt,
-      }),
-    { retryOnLeaseLoss: true }
-  );
 }
 
 /**
@@ -277,7 +265,7 @@ function computeDryRunBlocking(runs: readonly EvaluatorRunPayload[]): boolean {
  * re-implementing the projection-read + checkpoint-context plumbing.
  */
 export async function buildEvaluatorContext(opts: {
-  ctx: CliContext;
+  ctx: LifecycleEvaluatorContext;
   artifactId: string;
   firesAt: EvaluatorPhase;
   checkpointN?: number;
@@ -289,7 +277,7 @@ export async function buildEvaluatorContext(opts: {
 }
 
 async function buildBaseContext(opts: {
-  ctx: CliContext;
+  ctx: LifecycleEvaluatorContext;
   artifactId: string;
   firesAt: EvaluatorPhase;
   checkpointN?: number;

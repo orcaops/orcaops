@@ -3,7 +3,8 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { baselineRefName } from '@orcaops/core';
+import { resolveDatabaseHistoryScope } from '@orcaops/project-scope/history/database';
+import { readProjectArtifact } from '@orcaops/storage/history/database';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -273,7 +274,7 @@ describe('capture plan — the baseline snapshot honours capture.exclude', () =>
     await repo.cleanup();
   });
 
-  it('keeps an excluded file out of the ref the first command of a task pins', async () => {
+  it('keeps an excluded file out of the retained baseline tree', async () => {
     // The baseline is captured by `capture plan` — the FIRST orcaops command of
     // every task — and pinned to a durable ref reachable from no branch. Every
     // checkpoint path threaded the excludes; this one was called with no options
@@ -299,11 +300,27 @@ describe('capture plan — the baseline snapshot honours capture.exclude', () =>
     expect(res.exitCode).toBe(0);
     const { artifact_id: artifactId } = JSON.parse(res.stdout) as { artifact_id: string };
 
-    const entries = execFileSync(
-      'git',
-      ['ls-tree', '-r', '--name-only', `${baselineRefName(artifactId)}^{tree}`],
-      { cwd: repo.path, encoding: 'utf8' }
-    )
+    const scope = await resolveDatabaseHistoryScope({
+      cwd: repo.path,
+      root: process.env.ORCAOPS_DATA_DIR,
+      profile: 'exact',
+      selector: {},
+    });
+    let baselineTree: string | null | undefined;
+    try {
+      const database = scope.projects[0]?.database;
+      if (!scope.completeness.complete || !database) throw new Error('Fixture history unavailable');
+      baselineTree = readProjectArtifact(database, artifactId)?.thread.artifactJson
+        ?.baseline_seed_tree_sha;
+    } finally {
+      scope.close();
+    }
+    expect(baselineTree).toMatch(/^[0-9a-f]{40,64}$/);
+
+    const entries = execFileSync('git', ['ls-tree', '-r', '--name-only', baselineTree!], {
+      cwd: repo.path,
+      encoding: 'utf8',
+    })
       .split('\n')
       .filter(Boolean);
 

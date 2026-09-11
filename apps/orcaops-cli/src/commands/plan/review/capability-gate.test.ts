@@ -1,10 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
- * These exercise the REAL `withReviewCloud` — the sibling action tests stub it
- * out, which is right for their purpose but means nothing there covers the
- * capability gate. Only the cloud client and the repo context are faked here,
- * so the ping-then-gate-then-operate ordering under test is the shipped one.
+ * These exercise the real `withReviewCloud`. The canonical client boundary and
+ * registered database context are faked so the public composition is covered
+ * without credentials, project files, or a network request.
  */
 const cloud: {
   handshake: unknown;
@@ -12,53 +11,93 @@ const cloud: {
   called: string[];
   /** How many cli.ping requests the harness issued. */
   pings: number;
-} = { handshake: null, called: [], pings: 0 };
+  contextError: Error | null;
+  responses: Record<string, unknown>;
+} = { handshake: null, called: [], pings: 0, contextError: null, responses: {} };
 
 vi.mock('@orcaops/core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@orcaops/core')>();
   return {
     ...actual,
-    resolveCredentialStore: () => ({ kind: 'file', read: () => ({ orgId: 'org_1' }) }),
+    resolveCredentialStore: () => ({ kind: 'file' }),
     resolveCloudTarget: () => 'https://cloud.example',
-    createCloudClient: async () => ({
-      client: {
-        cli: {
-          ping: async () => {
-            cloud.pings += 1;
-            return {
-              ok: true,
-              orgId: 'org_1',
-              userId: 'user_1',
-              handshake: cloud.handshake,
-            };
-          },
-        },
-        // Any procedure reached here is a request the gate failed to prevent.
-        sourcePlan: new Proxy(
-          {},
-          {
-            get: (_target, name) => async (): Promise<never> => {
-              cloud.called.push(String(name));
-              throw new Error(`the wire was reached: sourcePlan.${String(name)}`);
-            },
-          }
-        ),
-      },
-      credentials: { orgId: 'org_1' },
-    }),
   };
 });
 
-vi.mock('../../../lib/context.js', () => ({
-  buildContext: async () => ({
-    repoRoot: '/tmp/unused',
-    repo: {},
-    store: { close: (): void => {} },
+vi.mock('@orcaops/core/history', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@orcaops/core/history')>();
+  const core = await import('@orcaops/core');
+  return {
+    ...actual,
+    createCanonicalCloudClient: async (input: {
+      requires: readonly string[];
+      operation: string;
+      cliVersion: string;
+    }) => {
+      cloud.pings += 1;
+      core.assertCloudSupports(
+        { handshake: cloud.handshake },
+        input.requires as never,
+        input.operation,
+        { cliVersion: input.cliVersion }
+      );
+      return {
+        client: {
+          // Any procedure reached here is a request the gate failed to prevent.
+          sourcePlan: new Proxy(
+            {},
+            {
+              get: (_target, name) => async (): Promise<unknown> => {
+                cloud.called.push(String(name));
+                if (String(name) in cloud.responses) return cloud.responses[String(name)];
+                throw new Error(`the wire was reached: sourcePlan.${String(name)}`);
+              },
+            }
+          ),
+        },
+        target: {
+          server_url: 'https://cloud.example',
+          org_id: 'org_1',
+          account_id: 'user_1',
+        },
+        credentialStore: {},
+      };
+    },
+  };
+});
+
+vi.mock('../../../lib/database-capture-context.js', () => ({
+  resolveDatabaseCaptureContext: async () => {
+    if (cloud.contextError) throw cloud.contextError;
+    return {
+      registered: { git: { worktreeRoot: '/tmp/unused' } },
+      env: {},
+      invokingAgent: { agent: 'codex', source: 'ambient' },
+      repo: {},
+      project: { database: {} },
+      config: { redact: { allow: [] } },
+      close: (): void => {},
+    };
+  },
+  openDatabaseCaptureWriter: async () => {
+    throw new Error('writer should not open');
+  },
+}));
+
+vi.mock('../../../lib/database-source-plan-review-mutations.js', () => ({
+  createDatabaseSourcePlanReviewMutationClient: (input: { client: unknown }) => ({
+    ...(input.client as object),
+    didDispatch: () => true,
   }),
+}));
+
+vi.mock('../../../lib/database-source-plan-review.js', () => ({
+  createDatabasePlanReviewPersistence: () => undefined,
 }));
 
 import { withReviewCloud } from './shared.js';
 import { reviewVerdictAction } from './verdict.js';
+import { buildProgram } from '../../../cli/program.js';
 
 const FULL_HANDSHAKE = {
   server_version: '1.4.0',
@@ -75,6 +114,8 @@ beforeEach(() => {
   cloud.handshake = FULL_HANDSHAKE;
   cloud.called = [];
   cloud.pings = 0;
+  cloud.contextError = null;
+  cloud.responses = {};
   out = [];
   stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
     out.push(String(chunk));
@@ -87,6 +128,47 @@ afterEach(() => {
 });
 
 describe('the gate runs before the operation', () => {
+  it('routes the registered verdict command through the database and canonical client defaults', async () => {
+    cloud.responses.setReviewerVerdict = {
+      externalId: 'ext-1',
+      reviewer: 'alex@example.com',
+      state: 'APPROVED',
+      note: null,
+      updatedAt: null,
+    };
+    await buildProgram({ cloudBaseUrl: 'https://cloud.example' }).parseAsync([
+      'node',
+      'orcaops',
+      'plan',
+      'review',
+      'verdict',
+      'ext-1',
+      '--approve',
+      '--json',
+    ]);
+    expect(cloud.pings).toBe(1);
+    expect(cloud.called).toEqual(['setReviewerVerdict']);
+    expect(out.join('')).toContain('"external_id":"ext-1"');
+  });
+
+  it('refuses the registered command when project history is missing before cloud setup', async () => {
+    cloud.contextError = new Error('Select the original registered project');
+    await expect(
+      buildProgram({ cloudBaseUrl: 'https://cloud.example' }).parseAsync([
+        'node',
+        'orcaops',
+        'plan',
+        'review',
+        'verdict',
+        'ext-1',
+        '--approve',
+        '--json',
+      ])
+    ).rejects.toThrow();
+    expect(cloud.pings).toBe(0);
+    expect(cloud.called).toEqual([]);
+  });
+
   it('never invokes the operation when the capability is missing', async () => {
     cloud.handshake = { ...FULL_HANDSHAKE, capabilities: [] };
     let operationRan = false;

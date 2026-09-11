@@ -292,9 +292,8 @@ export interface DossierAccountCore {
    */
   criterionEvidence: { citationId: string; text: string; parent?: string }[];
   /**
-   * Verified-close records (`verification[]`): commands run fresh at close with
-   * their exit codes. Until this field landed the name held EVALUATOR RUNS —
-   * see `evaluatorRuns` below, which is what that data actually was.
+   * Agent-supplied command reports, distinct from evaluator execution records.
+   * The subsequent close snapshot does not establish the command target.
    */
   verification: { citationId: string; text: string }[];
   /**
@@ -2036,6 +2035,9 @@ function renderMarkdown(dossier: DossierV1): string {
   const c = dossier.account_core;
   const lines: string[] = [];
   lines.push(`# Review dossier — ${dossier.branch}`);
+  lines.push(
+    'Findings and conclusions are agent-reported; command results and evaluator statuses do not establish independent reproduction.'
+  );
   lines.push('');
   lines.push(
     `Floor \`${dossier.floor_input_hash.slice(0, 12)}\` · diff \`${dossier.retained_diff_hash.slice(0, 12)}\` · ledger \`${dossier.ledger_hash.slice(0, 12)}\` · risk-signals v${dossier.risk_signals_version}`
@@ -2081,8 +2083,11 @@ function renderMarkdown(dossier: DossierV1): string {
     lines.push('');
   }
   if (c.verification.length > 0) {
-    lines.push('## Verified close');
-    for (const v of c.verification) lines.push(`- ${clipText(v.text, 200).text}`);
+    lines.push('## Commands the agent reports running');
+    lines.push(
+      'Agent-supplied command results do not establish the command target or prove a finding.'
+    );
+    for (const v of c.verification) lines.push(`- ${v.text}`);
     lines.push('');
   }
   if (c.evaluatorRuns.length > 0) {

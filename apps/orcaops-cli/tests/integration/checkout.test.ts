@@ -1,319 +1,224 @@
-import { mkdtemp, readdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { access, rm } from 'node:fs/promises';
+import { describe, expect, it } from 'vitest';
 
-import { loadConfig } from '@orcaops/core';
-import { artifactPathsFor, readEventLog } from '@orcaops/storage';
-import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
+import { uuidv7 } from '@orcaops/storage';
+import {
+  projectDatabasePath,
+  readProjectArtifact,
+  readProjectExecution,
+} from '@orcaops/storage/history/database';
+import { initializeUnboundExecution } from '@orcaops/storage/history/execution';
 
+import { readProjectExecutionFocus } from '../../../../packages/storage/dist/history/database/execution-focus.js';
+import {
+  prepareExecutionRecords,
+  settleExecutionRecords,
+} from '../../../../packages/storage/dist/history/database/execution-records.js';
+import { runProjectOperation } from '../../../../packages/storage/dist/history/database/transactions.js';
+import { fixture, git, inventory } from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
-import { plantBlockViolation, withCleanSession } from '../support/test-helpers.js';
 
-interface CheckoutOk {
-  ok: true;
-  action: 'pinned' | 'cleared';
-  artifact_id?: string;
-  branch?: string;
-  shell_key: { kind: string; value?: string };
-  pin_file?: string;
-  displaced_artifact_id?: string | null;
-  cleared?: boolean;
-  previous_artifact_id?: string | null;
+function agent(f: Awaited<ReturnType<typeof fixture>>, cwd = f.main, session = 'checkout-session') {
+  return makeAgent({
+    cwd,
+    env: {
+      CLAUDE_SESSION_ID: '',
+      CLAUDE_CODE_SESSION_ID: '',
+      CODEX_SESSION_ID: session,
+      TMUX_PANE: '',
+      STY: '',
+      WINDOW: '',
+      TTY: '',
+      XDG_STATE_HOME: f.temporary + '/unused-state',
+      ORCAOPS_ROOT: cwd,
+      ORCAOPS_DATA_DIR: f.root,
+      ORCAOPS_DISABLE_DRAIN: '1',
+    },
+  });
 }
-
-interface ErrEnvelope {
-  ok: false;
-  error: { code: string; message: string };
+async function checkout(
+  f: Awaited<ReturnType<typeof fixture>>,
+  args: string[],
+  cwd = f.main,
+  session = 'checkout-session'
+) {
+  const raw = await agent(f, cwd, session).runRaw(['checkout', ...args, '--json']);
+  return { raw, result: JSON.parse(raw.stdout) };
 }
-
-async function readPinDisplacedEvents(repoCwd: string, artifactId: string): Promise<unknown[]> {
-  const config = await loadConfig(repoCwd);
-  const paths = artifactPathsFor(repoCwd, config, artifactId);
-  const result = await readEventLog({
-    eventLogPath: paths.eventsNdjson,
-    sidecarsDir: paths.sidecarsDir,
+function focus(f: Awaited<ReturnType<typeof fixture>>, session = 'checkout-session') {
+  return readProjectExecutionFocus(f.writer, {
+    rootKey: f.authority.rootKey,
+    projectId: f.authority.projectId,
+    repositoryInstanceId: f.authority.repositoryInstanceId,
+    storeInstanceId: f.authority.storeInstanceId,
+    worktreeId: f.context.worktreeId!,
+    shellKey: { kind: 'codex_session', value: session },
   });
-  return result.events.filter((e) => e.type === 'pin_displaced');
 }
-
-describe('orcaops checkout', () => {
-  let repo: TempRepo;
-  let xdgState: string;
-
-  beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    xdgState = await mkdtemp(path.join(tmpdir(), 'orcaops-checkout-xdg-'));
-    const initAgent = makeAgent({
-      cwd: repo.path,
-      env: withCleanSession({ XDG_STATE_HOME: xdgState, CLAUDE_SESSION_ID: 'sess_test' }),
+async function retainUnbound(
+  f: Awaited<ReturnType<typeof fixture>>,
+  id: string,
+  reason: 'legacy_unknown' | 'imported'
+) {
+  const operationId = uuidv7();
+  const state = initializeUnboundExecution({
+    artifactId: id,
+    operationId,
+    reason,
+    ts: '2026-09-05T00:00:00.000Z',
+  });
+  const prepared = prepareExecutionRecords({
+    state,
+    artifactRevision: readProjectArtifact(f.writer, id)!.revision,
+    previous: null,
+    operationId,
+    secretAllow: [],
+  });
+  await runProjectOperation(
+    f.writer,
+    {
+      operationId,
+      kind: 'execution.initialize',
+      target: { artifactId: id },
+      payload: {},
+      expectedState: null,
+      intentChange: false,
+    },
+    (tx) => settleExecutionRecords(tx, prepared)
+  );
+}
+describe('registered database checkout', { timeout: 30_000 }, () => {
+  it('retains exact focus and clear replay without file pins, displacement events or ownership changes', async () => {
+    const f = await fixture();
+    const first = await f.capture();
+    const second = await f.capture();
+    const original = readProjectArtifact(f.writer, first)!;
+    const execution = readProjectExecution(f.writer, first)!;
+    const set = await checkout(f, [first, '--project', f.authority.projectId]);
+    expect(set.raw.exitCode, set.raw.stdout + set.raw.stderr).toBe(0);
+    expect(set.result).toMatchObject({
+      schema_version: 3,
+      action: 'focused',
+      artifact_id: first,
+      binding: { state: 'unchanged' },
+      shell_key: { kind: 'codex_session' },
     });
-    await initAgent.runRaw(['init', '--no-llm']);
+    expect(set.result).not.toHaveProperty('pin_file');
+    await expect(access(f.temporary + '/unused-state')).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(focus(f)).toMatchObject({ status: 'present', pin: { artifact_id: first } });
+    await checkout(f, [second]);
+    expect(readProjectArtifact(f.writer, first)!.thread.events).toEqual(original.thread.events);
+    expect(readProjectExecution(f.writer, first)!.state).toEqual(execution.state);
+    const before = await inventory(f.temporary);
+    const replay = await checkout(f, ['--operation-id', set.result.operation_id]);
+    expect(replay.raw.exitCode, replay.raw.stderr).toBe(0);
+    expect(replay.result.focus.publication.replayed).toBe(true);
+    expect(replay.result).toMatchObject({ action: 'replayed', focus: { state: 'replayed' } });
+    expect(focus(f)).toMatchObject({ status: 'present', pin: { artifact_id: second } });
+    expect(await inventory(f.temporary)).toEqual(before);
+    await git(f.main, ['checkout', '-qb', 'changed-context']);
+    const clear = await checkout(f, ['--clear']);
+    expect(clear.raw.exitCode, clear.raw.stderr).toBe(0);
+    expect(focus(f)).toMatchObject({ status: 'cleared' });
+    const cleared = await inventory(f.temporary);
+    expect(
+      (await checkout(f, ['--operation-id', clear.result.operation_id])).result.focus.publication
+        .replayed
+    ).toBe(true);
+    expect(await inventory(f.temporary)).toEqual(cleared);
+    expect((await checkout(f, ['--clear'])).result.action).toBe('cleared');
   });
-
-  afterEach(async () => {
-    await repo.cleanup();
-  });
-
-  function agentForSession(sessionId = 'sess_test') {
-    return makeAgent({
-      cwd: repo.path,
-      env: withCleanSession({ XDG_STATE_HOME: xdgState, CLAUDE_SESSION_ID: sessionId }),
+  it('requires explicit handoff and replays its original distinct binding and focus identities', async () => {
+    const f = await fixture();
+    const id = await f.capture(undefined, { cwd: f.linked });
+    const before = await inventory(f.temporary);
+    expect((await checkout(f, [id])).result.error.code).toBe('EXECUTION_BOUND_ELSEWHERE');
+    expect(await inventory(f.temporary)).toEqual(before);
+    const handoff = await checkout(f, [id, '--handoff', '--reason', 'Continue in this worktree']);
+    expect(handoff.raw.exitCode, handoff.raw.stderr).toBe(0);
+    expect(handoff.result.binding.state).toBe('committed');
+    expect(handoff.result.operation_id).not.toBe(handoff.result.focus_operation_id);
+    expect(readProjectExecution(f.writer, id)!.state.current_binding?.worktree_id).toBe(
+      f.context.worktreeId
+    );
+    const retained = await inventory(f.temporary);
+    expect(
+      (await checkout(f, ['--operation-id', handoff.result.operation_id])).result.binding.replayed
+    ).toBe(true);
+    expect(await inventory(f.temporary)).toEqual(retained);
+    await f.mutate(id, { open: true }, async (semantics) => {
+      const plan = await semantics.readPlan(id);
+      return semantics.writeCheckpointOpened(
+        { artifact_id: id, declared_step_ids: [plan!.plan_steps[0].step_id] },
+        { idempotencyKey: uuidv7(), headSha: f.context.headOid! }
+      );
     });
-  }
-
-  function agentHeadless() {
-    return makeAgent({
-      cwd: repo.path,
-      env: withCleanSession({ XDG_STATE_HOME: xdgState }),
+    const open = await inventory(f.temporary);
+    expect((await checkout(f, [id, '--handoff'], f.linked)).result.error.code).toBe(
+      'OPEN_CHECKPOINTS'
+    );
+    expect(await inventory(f.temporary)).toEqual(open);
+  });
+  it('first-binds an explicitly selected retained unbound task with exact selectors', async () => {
+    const f = await fixture();
+    const id = await f.capture(undefined, { reason: 'legacy_unknown' });
+    await retainUnbound(f, id, 'legacy_unknown');
+    const before = readProjectExecution(f.writer, id)!;
+    const result = await checkout(f, [id]);
+    expect(result.raw.exitCode, result.raw.stdout + result.raw.stderr).toBe(0);
+    const after = readProjectExecution(f.writer, id)!;
+    expect(after.version).toBe(before.version + 1);
+    expect(after.state.binding_generation).toBe(before.state.binding_generation + 1);
+    expect(after.state.binding_history.at(-1)?.action).toBe('first_bind');
+    expect(result.result.binding.state).toBe('committed');
+  });
+  it('allows explicit completed and imported focus without treating them as implicit tasks', async () => {
+    const f = await fixture();
+    const completed = await f.capture(undefined, { reason: 'completed' });
+    const imported = await f.capture(undefined, { reason: 'imported' });
+    await retainUnbound(f, imported, 'imported');
+    for (const id of [completed, imported]) {
+      const execution = readProjectExecution(f.writer, id)!;
+      const result = await checkout(f, [id]);
+      expect(result.raw.exitCode, result.raw.stdout + result.raw.stderr).toBe(0);
+      expect(result.result.binding.state).toBe('unchanged');
+      expect(readProjectExecution(f.writer, id)!.state).toEqual(execution.state);
+      const resume = await agent(f).runRaw(['resume', '--json']);
+      expect(JSON.parse(resume.stdout).resolved).toBe(false);
+    }
+  });
+  it('isolates sessions and refuses invalid inputs, unknown targets and secrets before publication', async () => {
+    const f = await fixture();
+    const id = await f.capture();
+    await checkout(f, [id]);
+    expect(focus(f, 'other')).toMatchObject({ status: 'absent' });
+    const before = await inventory(f.temporary);
+    for (const args of [
+      [],
+      [id, '--clear'],
+      ['--operation-id', uuidv7(), id],
+      [id, '--recover-orphaned'],
+    ]) {
+      const result = await checkout(f, args);
+      expect(result.result.error.code).toBe('INVALID_INPUT');
+    }
+    expect((await checkout(f, [uuidv7()])).result.error.code).toBe('UNKNOWN_ARTIFACT');
+    expect((await checkout(f, [id], f.main, '')).result.error.code).toBe('NO_SHELL_KEY');
+    const refused = await checkout(f, [id, '--handoff', '--reason', 'ghp_' + 'a'.repeat(36)]);
+    expect(refused.result.error.code).toBe('SECRET_IN_PAYLOAD');
+    expect(refused.raw.stdout).not.toContain('ghp_' + 'a'.repeat(36));
+    expect(await inventory(f.temporary)).toEqual(before);
+  });
+  it('does not initialize a replacement when the expected database is missing', async () => {
+    const f = await fixture();
+    const id = await f.capture();
+    f.writer.close();
+    await rm(projectDatabasePath(f.authority));
+    const result = await checkout(f, [id]);
+    expect(result.result.error.code).toBe('HISTORY_MISSING');
+    expect(result.raw.exitCode).toBe(1);
+    await expect(access(projectDatabasePath(f.authority))).rejects.toMatchObject({
+      code: 'ENOENT',
     });
-  }
-
-  async function planArtifact(): Promise<string> {
-    const planRes = await agentForSession().runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
-    ]);
-    const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
-    return plan.artifact_id;
-  }
-
-  /**
-   * Plan an artifact in a headless env (no shell-key) so the auto-pin
-   * stays silent. Tests below that exercise the EXPLICIT checkout flow
-   * use this helper to avoid mixing auto-pin pin_displaced events into
-   * their assertions.
-   */
-  async function planArtifactHeadless(): Promise<string> {
-    const planRes = await agentHeadless().runRaw([
-      'capture',
-      'plan',
-      '--no-llm',
-      '--input',
-      inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
-    ]);
-    const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
-    return plan.artifact_id;
-  }
-
-  it('--json: pins an existing artifact and writes a pin file under XDG_STATE_HOME', async () => {
-    const artifactId = await planArtifact();
-    const res = await agentForSession().runRaw(['checkout', artifactId, '--json']);
-    expect(res.exitCode).toBe(0);
-    const out = JSON.parse(res.stdout) as CheckoutOk;
-    expect(out.ok).toBe(true);
-    expect(out.action).toBe('pinned');
-    expect(out.artifact_id).toBe(artifactId);
-    expect(out.shell_key.kind).toBe('claude_session');
-    expect(out.pin_file).toBeDefined();
-    expect(out.pin_file?.startsWith(xdgState)).toBe(true);
-    expect(out.displaced_artifact_id).toBeNull();
-  });
-
-  it('rejects an unknown artifact id with UNKNOWN_ARTIFACT', async () => {
-    const res = await agentForSession().runRaw(['checkout', 'no-such-id', '--json']);
-    expect(res.exitCode).toBe(1);
-    const env = JSON.parse(res.stdout) as ErrEnvelope;
-    expect(env.error.code).toBe('UNKNOWN_ARTIFACT');
-  });
-
-  it('rejects a summarized artifact instead of creating a stale pin', async () => {
-    const artifactId = await planArtifactHeadless();
-    const summary = await agentHeadless().runRaw([
-      'capture',
-      'summary',
-      '--input',
-      inputFile(
-        JSON.stringify({
-          idempotency_key: 'summarize-before-checkout',
-          artifact_id: artifactId,
-          outcome: 'complete',
-        })
-      ),
-    ]);
-    expect(summary.exitCode, summary.stdout).toBe(0);
-
-    const res = await agentForSession().runRaw(['checkout', artifactId, '--json']);
-    expect(res.exitCode).toBe(1);
-    const env = JSON.parse(res.stdout) as ErrEnvelope;
-    expect(env.error.code).toBe('INVALID_INPUT');
-    expect(env.error.message).toMatch(/Cannot pin summarized artifact/);
-  });
-
-  it('rejects with INVALID_INPUT when called with neither an id nor --clear', async () => {
-    const res = await agentForSession().runRaw(['checkout', '--json']);
-    expect(res.exitCode).toBe(1);
-    const env = JSON.parse(res.stdout) as ErrEnvelope;
-    expect(env.error.code).toBe('INVALID_INPUT');
-  });
-
-  it('rejects with INVALID_INPUT when --clear is mixed with an id', async () => {
-    const artifactId = await planArtifact();
-    const res = await agentForSession().runRaw(['checkout', artifactId, '--clear', '--json']);
-    expect(res.exitCode).toBe(1);
-    const env = JSON.parse(res.stdout) as ErrEnvelope;
-    expect(env.error.code).toBe('INVALID_INPUT');
-  });
-
-  it('rejects with NO_SHELL_KEY when env has no recognized session var', async () => {
-    const artifactId = await planArtifact();
-    const res = await agentHeadless().runRaw(['checkout', artifactId, '--json']);
-    expect(res.exitCode).toBe(1);
-    const env = JSON.parse(res.stdout) as ErrEnvelope;
-    expect(env.error.code).toBe('NO_SHELL_KEY');
-  });
-
-  it('--clear removes the pin and reports cleared:true', async () => {
-    const artifactId = await planArtifact();
-    await agentForSession().runRaw(['checkout', artifactId, '--json']);
-    const res = await agentForSession().runRaw(['checkout', '--clear', '--json']);
-    expect(res.exitCode).toBe(0);
-    const out = JSON.parse(res.stdout) as CheckoutOk;
-    expect(out.action).toBe('cleared');
-    expect(out.cleared).toBe(true);
-    expect(out.previous_artifact_id).toBe(artifactId);
-  });
-
-  it('--clear is idempotent when no pin exists (cleared:false)', async () => {
-    const res = await agentForSession().runRaw(['checkout', '--clear', '--json']);
-    expect(res.exitCode).toBe(0);
-    const out = JSON.parse(res.stdout) as CheckoutOk;
-    expect(out.cleared).toBe(false);
-    expect(out.previous_artifact_id).toBeNull();
-  });
-
-  async function captureCheckpointHeadless(artifactId: string, n: number): Promise<void> {
-    const agent = agentHeadless();
-    const showRes = await agent.runRaw(['show', artifactId, '--json']);
-    const showJson = JSON.parse(showRes.stdout) as {
-      artifact?: { plan?: { plan_steps?: Array<{ step_id: string }> } };
-    };
-    const stepIds = showJson.artifact?.plan?.plan_steps?.map((s) => s.step_id) ?? [];
-    const openRes = await agent.runRaw([
-      'capture',
-      'checkpoint',
-      'open',
-      '--input',
-      inputFile(
-        JSON.stringify({
-          artifact_id: artifactId,
-          declared_step_ids: [stepIds[n - 1]],
-        })
-      ),
-    ]);
-    expect(openRes.exitCode).toBe(0);
-    const res = await agent.runRaw([
-      'capture',
-      'checkpoint',
-      'close',
-      '--input',
-      inputFile(
-        JSON.stringify({
-          artifact_id: artifactId,
-          n,
-          summary: `cp-${n}`,
-          verification: [{ command: 'test fixture', exit_code: 0 }],
-          completed_step_ids: [stepIds[n - 1]],
-        })
-      ),
-    ]);
-    expect(res.exitCode).toBe(0);
-  }
-
-  it('overwriting a pin pointing to an active artifact emits pin_displaced on the prior', async () => {
-    // Plan in headless so the auto-pin path stays silent; the explicit
-    // checkouts below are the only source of pin_displaced events.
-    const a = await planArtifactHeadless();
-    await captureCheckpointHeadless(a, 1); // planned → active
-    const b = await planArtifactHeadless();
-    // Pin A first.
-    await agentForSession().runRaw(['checkout', a, '--json']);
-    // Now pin B — A is active; pin_displaced should fire on A.
-    const res = await agentForSession().runRaw(['checkout', b, '--json']);
-    expect(res.exitCode).toBe(0);
-    const out = JSON.parse(res.stdout) as CheckoutOk;
-    expect(out.displaced_artifact_id).toBe(a);
-    const events = await readPinDisplacedEvents(repo.path, a);
-    expect(events).toHaveLength(1);
-  });
-
-  it('overwriting a pin pointing to a PLANNED artifact does NOT emit pin_displaced', async () => {
-    // Spec: displacement only fires when prior is `active` or `blocked`.
-    // A pure planned artifact (no checkpoints) is treated like summarized.
-    const a = await planArtifactHeadless();
-    const b = await planArtifactHeadless();
-    await agentForSession().runRaw(['checkout', a, '--json']);
-    const res = await agentForSession().runRaw(['checkout', b, '--json']);
-    expect(res.exitCode).toBe(0);
-    const out = JSON.parse(res.stdout) as CheckoutOk;
-    expect(out.displaced_artifact_id).toBeNull();
-    const events = await readPinDisplacedEvents(repo.path, a);
-    expect(events).toHaveLength(0);
-  });
-
-  it('overwriting a pin pointing to a SUMMARIZED artifact does NOT emit pin_displaced', async () => {
-    const a = await planArtifactHeadless();
-    const b = await planArtifactHeadless();
-    // Pin A, then summarize A.
-    await agentForSession().runRaw(['checkout', a, '--json']);
-    const sum = await agentForSession().runRaw([
-      'capture',
-      'summary',
-      '--input',
-      inputFile(JSON.stringify({ artifact_id: a, outcome: 'shipped' })),
-    ]);
-    expect(sum.exitCode).toBe(0);
-    // Now pin B — A is summarized, so the overwrite is silent.
-    const res = await agentForSession().runRaw(['checkout', b, '--json']);
-    expect(res.exitCode).toBe(0);
-    const out = JSON.parse(res.stdout) as CheckoutOk;
-    expect(out.displaced_artifact_id).toBeNull();
-    const events = await readPinDisplacedEvents(repo.path, a);
-    expect(events).toHaveLength(0);
-  });
-
-  it('overwriting a pin pointing to a BLOCKED artifact emits pin_displaced', async () => {
-    const a = await planArtifactHeadless();
-    const b = await planArtifactHeadless();
-    await agentForSession().runRaw(['checkout', a, '--json']);
-    await plantBlockViolation({
-      cwd: repo.path,
-      artifactId: a,
-      evaluatorRef: 'test-pack/api-stub',
-    });
-    const res = await agentForSession().runRaw(['checkout', b, '--json']);
-    expect(res.exitCode).toBe(0);
-    const out = JSON.parse(res.stdout) as CheckoutOk;
-    expect(out.displaced_artifact_id).toBe(a);
-  });
-
-  it('different shell-keys (different sessions) do not displace each other', async () => {
-    const a = await planArtifactHeadless();
-    const b = await planArtifactHeadless();
-    await agentForSession('sess_one').runRaw(['checkout', a, '--json']);
-    const res = await agentForSession('sess_two').runRaw(['checkout', b, '--json']);
-    expect(res.exitCode).toBe(0);
-    const out = JSON.parse(res.stdout) as CheckoutOk;
-    // Different shell-key means no displacement of A.
-    expect(out.displaced_artifact_id).toBeNull();
-
-    // And the on-disk pin file count is 2 (one per shell-key).
-    const repoIdDir = path.dirname(out.pin_file as string);
-    const entries = await readdir(repoIdDir);
-    expect(entries.filter((e) => e.endsWith('.json'))).toHaveLength(2);
-  });
-
-  it('checkout against the same artifact a second time is silent (no displaced event)', async () => {
-    const a = await planArtifactHeadless();
-    await agentForSession().runRaw(['checkout', a, '--json']);
-    const res = await agentForSession().runRaw(['checkout', a, '--json']);
-    expect(res.exitCode).toBe(0);
-    const out = JSON.parse(res.stdout) as CheckoutOk;
-    expect(out.displaced_artifact_id).toBeNull();
-    const events = await readPinDisplacedEvents(repo.path, a);
-    expect(events).toHaveLength(0);
   });
 });

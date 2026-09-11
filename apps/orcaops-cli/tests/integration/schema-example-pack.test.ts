@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -26,6 +26,7 @@ describe('the emitted exemplars form a runnable pack', () => {
   let agent: ReturnType<typeof makeAgent>;
   let packPath: string;
   let fixturePath: string;
+  let binPath: string;
 
   /**
    * The runtime deliberately imports nothing. A temp pack outside the workspace
@@ -74,7 +75,15 @@ describe('the emitted exemplars form a runnable pack', () => {
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
-    agent = makeAgent({ cwd: repo.path });
+    binPath = path.join(repo.path, 'bin');
+    await mkdir(binPath);
+    const pathOnlyNode = path.join(binPath, 'path-only-node');
+    await writeFile(pathOnlyNode, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`);
+    await chmod(pathOnlyNode, 0o755);
+    agent = makeAgent({
+      cwd: repo.path,
+      env: { PATH: `${binPath}${path.delimiter}${process.env.PATH ?? ''}` },
+    });
     await agent.init({ noLlm: true });
     await rm(grantsFilePath(), { force: true });
     packPath = path.join(repo.path, 'exemplar-pack');
@@ -116,8 +125,12 @@ describe('the emitted exemplars form a runnable pack', () => {
     expect(result.stdout).toContain('timeout_ms');
   });
 
-  it('regression: without env.inherit PATH the runtime cannot spawn', async () => {
-    await writePack((spec) => spec.replace(/\n {2}env:\n(?:.*\n)*? {6}- PATH/, ''));
+  it('cannot spawn a PATH-only runtime without env.inherit PATH', async () => {
+    await writePack((spec) =>
+      spec
+        .replace('\n    - node\n', '\n    - path-only-node\n')
+        .replace(/\n {2}env:\n(?:.*\n)*? {6}- PATH/, '')
+    );
     expect((await register()).exitCode).toBe(0);
 
     const result = await runIt();

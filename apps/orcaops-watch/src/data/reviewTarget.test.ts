@@ -1,276 +1,174 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { Repo } from '@orcaops/core';
-import { registryPath } from '@orcaops/storage';
-import { createTempRepo, type TempRepo, writeProjectConfig } from '@orcaops/test-harness';
+import { setupProjectDatabase } from '@orcaops/core/history/database-setup';
+import { createTempRepo, writeProjectConfig } from '@orcaops/test-harness';
 
 import { resolveReviewTarget } from './reviewTarget';
 
 const execFileAsync = promisify(execFile);
-
 const PID_A = '019f0000-aaaa-7000-8000-000000000001';
 const PID_B = '019f0000-bbbb-7000-8000-000000000002';
-
-// git realpath-resolves macOS tmpdir symlinks (/var → /private/var), so the
-// worktree path it reports differs from the raw path we created. Compare by
-// basename — unique per temp dir in these tests.
-const base = (p: string): string => path.basename(p);
-
-// Track everything we create so a test never leaks a worktree or data dir.
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  for (const c of cleanups.splice(0).reverse()) await c();
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
-
-async function initProject(projectId?: string): Promise<TempRepo> {
+async function directory() {
+  const root = await mkdtemp(path.join(tmpdir(), 'orcaops-review-target-'));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  return root;
+}
+async function fixture(projectId = PID_A) {
   const repo = await createTempRepo({ initialBranch: 'main' });
   cleanups.push(repo.cleanup);
-  // Governed by a project config: a bare `.orcaops` dir no longer counts.
+  const dataRoot = await directory();
+  const setup = await setupProjectDatabase({
+    cwd: repo.path,
+    root: dataRoot,
+    projectId,
+    authoredPayloads: [],
+    secretAllow: [],
+  });
   await writeProjectConfig(repo.path);
-  if (projectId !== undefined) {
-    await new Repo(repo.path).setLocalConfig('orcaops.projectid', projectId);
-  }
-  return repo;
-}
-
-async function addWorktree(repoPath: string, wtPath: string, branch: string): Promise<void> {
-  await execFileAsync('git', ['worktree', 'add', wtPath, '-b', branch], { cwd: repoPath });
-  await writeProjectConfig(wtPath);
-  cleanups.push(async () => {
-    await rm(wtPath, { recursive: true, force: true });
-  });
-}
-
-/** A throwaway non-git directory, so discoverGitRoot(cwd) resolves to null — keeps
- *  the hot-project cwd candidate out of tests that only exercise the registry. */
-async function nonRepoDir(): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'orcaops-cwd-'));
-  cleanups.push(async () => {
-    await rm(dir, { recursive: true, force: true });
-  });
-  return dir;
-}
-
-/** Write `<dataDir>/projects.json` and return an env scoped to it. */
-async function withRegistry(projects: Record<string, string[]>): Promise<NodeJS.ProcessEnv> {
-  const dataDir = await mkdtemp(path.join(tmpdir(), 'orcaops-data-'));
-  cleanups.push(async () => {
-    await rm(dataDir, { recursive: true, force: true });
-  });
-  const registry = {
-    schema_version: 1,
-    projects: Object.fromEntries(
-      Object.entries(projects).map(([id, paths]) => [
-        id,
-        {
-          display_name: id,
-          last_seen_paths: paths,
-          remotes: [],
-          root_commit_shas: [],
-          last_seen_at: '',
-        },
-      ])
-    ),
+  const commonDirectory = await new Repo(repo.path).getCommonDirAbsolute();
+  return {
+    repo,
+    options: {
+      projectId,
+      branch: 'main',
+      dataRoot,
+      storeInstanceId: setup.registration.authority.store_instance_id,
+      repository: { commonDirectory, instanceId: setup.registration.repository_instance_id },
+      env: { ORCAOPS_DATA_DIR: dataRoot },
+      cwd: await directory(),
+    },
+    registration: path.join(commonDirectory, 'orcaops', 'registration.json'),
+    database: path.join(dataRoot, 'projects', projectId, 'history.sqlite3'),
   };
-  await writeFile(registryPath(dataDir), JSON.stringify(registry), 'utf8');
-  return { ORCAOPS_DATA_DIR: dataDir };
+}
+async function addWorktree(repoPath: string, branch: string) {
+  const worktree = path.join(await directory(), branch);
+  await execFileAsync('git', ['worktree', 'add', worktree, '-b', branch], { cwd: repoPath });
+  await writeProjectConfig(worktree);
+  return worktree;
 }
 
-describe('resolveReviewTarget', () => {
-  it('resolves to the worktree that has the branch checked out (cross-project via registry)', async () => {
-    const repo = await initProject(PID_A);
-    const wt = `${repo.path}-feature`;
-    await addWorktree(repo.path, wt, 'feature');
-    const env = await withRegistry({ [PID_A]: [repo.path] });
+// Git resolves macOS's temporary-directory aliases before reporting worktree paths.
+const basename = (value: string) => path.basename(value);
 
-    const res = await resolveReviewTarget({
-      projectId: PID_A,
-      branch: 'feature',
-      env,
-      cwd: await nonRepoDir(),
+describe('registered review worktree selection', () => {
+  it('finds another project branch from its canonical locator without writing history', async () => {
+    const f = await fixture();
+    const worktree = await addWorktree(f.repo.path, 'feature');
+    const before = await Promise.all([readFile(f.registration), readFile(f.database)]);
+    const result = await resolveReviewTarget({ ...f.options, branch: 'feature' });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(basename(result.root)).toBe(basename(worktree));
+    const after = await Promise.all([readFile(f.registration), readFile(f.database)]);
+    for (const [index, bytes] of after.entries()) expect(bytes.equals(before[index]!)).toBe(true);
+    await expect(readFile(path.join(f.options.dataRoot, 'projects.json'))).rejects.toMatchObject({
+      code: 'ENOENT',
     });
-    expect(res.ok).toBe(true);
-    expect(res.ok && base(res.root)).toBe(base(wt));
   });
 
-  it('refuses with a no-live-worktree notice when the branch is not checked out anywhere', async () => {
-    const repo = await initProject(PID_A);
-    const env = await withRegistry({ [PID_A]: [repo.path] });
-
-    const res = await resolveReviewTarget({
-      projectId: PID_A,
-      branch: 'ghost',
-      env,
-      cwd: await nonRepoDir(),
+  it('distinguishes an absent branch from an absent repository', async () => {
+    const f = await fixture();
+    const branch = await resolveReviewTarget({ ...f.options, branch: 'ghost' });
+    expect(branch.ok).toBe(false);
+    if (!branch.ok) expect(branch.reason).toContain('no live worktree');
+    const missing = await resolveReviewTarget({
+      ...f.options,
+      repository: undefined,
+      projectLabel: 'my-project',
     });
-    expect(res.ok).toBe(false);
-    expect(res.ok === false && res.reason).toContain('no live worktree');
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.reason).toContain('could not locate');
+      expect(missing.reason).toContain('my-project');
+    }
   });
 
-  it('refuses with a not-locatable notice when the project cannot be found on disk', async () => {
-    const env = await withRegistry({ [PID_A]: ['/definitely/not/a/real/path'] });
-
-    const res = await resolveReviewTarget({
-      projectId: PID_A,
-      branch: 'feature',
-      projectLabel: 'my-proj',
-      env,
-      cwd: await nonRepoDir(),
-    });
-    expect(res.ok).toBe(false);
-    expect(res.ok === false && res.reason).toContain('could not locate');
-    expect(res.ok === false && res.reason).toContain('my-proj');
+  it('rejects foreign project, store and repository identities', async () => {
+    const f = await fixture(PID_B);
+    for (const changed of [
+      { projectId: PID_A },
+      { storeInstanceId: PID_A },
+      { repository: { ...f.options.repository, instanceId: PID_A } },
+    ]) {
+      const result = await resolveReviewTarget({ ...f.options, ...changed });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toContain('could not locate');
+    }
   });
 
-  it('reports a broken candidate config instead of treating it as uninitialized', async () => {
-    const repo = await initProject(PID_A);
-    const configPath = path.join(repo.path, '.orcaops', 'config.json');
-    await writeFile(configPath, '{ broken', 'utf8');
-    const env = await withRegistry({ [PID_A]: [repo.path] });
-
-    const result = await resolveReviewTarget({
-      projectId: PID_A,
-      branch: 'main',
-      env,
-      cwd: await nonRepoDir(),
-    });
-
+  it('reports broken configuration without treating it as an uninitialized worktree', async () => {
+    const f = await fixture();
+    const config = path.join(f.repo.path, '.orcaops', 'config.json');
+    await writeFile(config, '{ broken');
+    const result = await resolveReviewTarget(f.options);
     expect(result.ok).toBe(false);
-    expect(result.ok === false && result.reason).toContain('configuration error');
-    expect(result.ok === false && result.reason).toContain(configPath);
-    expect(result.ok === false && result.reason).toContain('not valid JSON');
+    if (!result.ok) {
+      expect(result.reason).toContain('configuration error');
+      expect(result.reason).toContain(config);
+    }
   });
 
-  it('rejects a foreign candidate path whose project id does not match', async () => {
-    const other = await initProject(PID_B); // a different project's repo
-    // The registry hint for PID_A wrongly points at PID_B's repo.
-    const env = await withRegistry({ [PID_A]: [other.path] });
-
-    const res = await resolveReviewTarget({
-      projectId: PID_A,
-      branch: 'main',
-      env,
-      cwd: await nonRepoDir(),
+  it('discloses invalid registration and continues to a later valid candidate', async () => {
+    const broken = await fixture(PID_B);
+    const valid = await fixture();
+    await writeFile(broken.registration, '{ invalid');
+    const missing = await resolveReviewTarget(broken.options);
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.reason).toContain('invalid stored project identity');
+      expect(missing.reason).toContain('orcaops doctor');
+    }
+    const found = await resolveReviewTarget({ ...valid.options, launchRoot: broken.repo.path });
+    expect(found.ok).toBe(true);
+    if (found.ok) expect(basename(found.root)).toBe(basename(valid.repo.path));
+    const absentBranch = await resolveReviewTarget({
+      ...valid.options,
+      launchRoot: broken.repo.path,
+      branch: 'ghost',
     });
-    expect(res.ok).toBe(false);
-    // Foreign path is rejected, so the repo is treated as not located at all.
-    expect(res.ok === false && res.reason).toContain('could not locate');
+    expect(absentBranch.ok).toBe(false);
+    if (!absentBranch.ok) {
+      expect(absentBranch.reason).toContain('no live worktree');
+      expect(absentBranch.reason).toContain('invalid stored project identity');
+    }
   });
 
-  it('adds an invalid-candidate diagnostic without mislabeling the requested repository', async () => {
-    const repo = await initProject('not-a-uuid');
-    const env = await withRegistry({ [PID_A]: [repo.path] });
+  it.each(['launch', 'cwd', 'environment'] as const)(
+    'finds the current registered project through %s',
+    async (source) => {
+      const f = await fixture();
+      const result = await resolveReviewTarget({
+        ...f.options,
+        repository: undefined,
+        ...(source === 'launch'
+          ? { launchRoot: f.repo.path }
+          : source === 'cwd'
+            ? { cwd: f.repo.path }
+            : { env: { ...f.options.env, ORCAOPS_ROOT: f.repo.path } }),
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(basename(result.root)).toBe(basename(f.repo.path));
+    }
+  );
 
-    const res = await resolveReviewTarget({
-      projectId: PID_A,
-      branch: 'main',
-      env,
-      cwd: await nonRepoDir(),
-    });
-    expect(res.ok).toBe(false);
-    expect(res.ok === false && res.reason).toContain('could not locate');
-    expect(res.ok === false && res.reason).toContain(
-      'unreadable or invalid stored project identity'
-    );
-    expect(res.ok === false && res.reason).toContain('orcaops doctor');
-  });
-
-  it('continues past an invalid candidate and prefers a later valid match', async () => {
-    const invalid = await initProject('not-a-uuid');
-    const valid = await initProject(PID_A);
-    const env = await withRegistry({ [PID_A]: [valid.path] });
-
-    const res = await resolveReviewTarget({
-      projectId: PID_A,
-      branch: 'main',
-      launchRoot: invalid.path,
-      env,
-      cwd: await nonRepoDir(),
-    });
-    expect(res.ok).toBe(true);
-    expect(res.ok && base(res.root)).toBe(base(valid.path));
-  });
-
-  it('keeps an identity diagnostic when a valid repository lacks the requested worktree', async () => {
-    const invalid = await initProject('not-a-uuid');
-    const valid = await initProject(PID_A);
-    const env = await withRegistry({ [PID_A]: [valid.path] });
-
-    const res = await resolveReviewTarget({
-      projectId: PID_A,
-      branch: 'not-checked-out',
-      launchRoot: invalid.path,
-      env,
-      cwd: await nonRepoDir(),
-    });
-    expect(res.ok).toBe(false);
-    expect(res.ok === false && res.reason).toContain('no live worktree');
-    expect(res.ok === false && res.reason).toContain(
-      'unreadable or invalid stored project identity'
-    );
-  });
-
-  it('resolves the hot project from launchRoot without a registry entry', async () => {
-    const repo = await initProject(PID_A);
-    const env = await withRegistry({}); // empty registry
-
-    const res = await resolveReviewTarget({
-      projectId: PID_A,
-      branch: 'main',
-      launchRoot: repo.path,
-      env,
-      cwd: await nonRepoDir(),
-    });
-    expect(res.ok).toBe(true);
-    expect(res.ok && base(res.root)).toBe(base(repo.path));
-  });
-
-  it('resolves a null-projectId hot project purely from launchRoot', async () => {
-    const repo = await initProject(); // no minted project id
-    const env = await withRegistry({});
-
-    const res = await resolveReviewTarget({
-      projectId: null,
-      branch: 'main',
-      launchRoot: repo.path,
-      env,
-      cwd: await nonRepoDir(),
-    });
-    expect(res.ok).toBe(true);
-    expect(res.ok && base(res.root)).toBe(base(repo.path));
-  });
-
-  it('resolves the hot project from the cwd git root when launchRoot is undefined (archive disabled)', async () => {
-    // Archive disabled: no minted project id, no registry entry, no --root.
-    const repo = await initProject();
-    const env = await withRegistry({});
-
-    const res = await resolveReviewTarget({
-      projectId: null,
-      branch: 'main',
-      env,
-      cwd: repo.path, // discoverGitRoot(cwd) is the only signal here
-    });
-    expect(res.ok).toBe(true);
-    expect(res.ok && base(res.root)).toBe(base(repo.path));
-  });
-
-  it('resolves the hot project from ORCAOPS_ROOT when set', async () => {
-    const repo = await initProject(PID_A);
-    const env = { ...(await withRegistry({})), ORCAOPS_ROOT: repo.path };
-
-    const res = await resolveReviewTarget({
-      projectId: PID_A,
-      branch: 'main',
-      env,
-      cwd: await nonRepoDir(), // no launchRoot; ORCAOPS_ROOT is the signal
-    });
-    expect(res.ok).toBe(true);
-    expect(res.ok && base(res.root)).toBe(base(repo.path));
+  it('never treats missing registration or a missing project identity as a fresh review target', async () => {
+    const f = await fixture();
+    await rm(f.registration);
+    const result = await resolveReviewTarget({ ...f.options, launchRoot: f.repo.path });
+    expect(result.ok).toBe(false);
+    await expect(readFile(f.registration)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(
+      await resolveReviewTarget({ ...f.options, projectId: null, launchRoot: f.repo.path })
+    ).toMatchObject({ ok: false });
   });
 });

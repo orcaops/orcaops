@@ -1186,7 +1186,7 @@ export function renderSlice(input: {
   );
   lines.push('');
   lines.push(
-    '_Findings reflect the payload-time head: lane payloads were produced against the floor above, not necessarily the current worktree._'
+    '_All findings are agent-reported. Lane payloads refer to the floor above, not necessarily the current worktree; agreement between lanes does not establish independent reproduction._'
   );
   lines.push('');
   // Degradation banner — CODE-ONLY / DEGRADED ownership is stated loudly and
@@ -1326,7 +1326,7 @@ export function renderSlice(input: {
   lines.push('');
   for (const m of merge.mustDecide)
     lines.push(
-      `- **[${m.severity}]** (${m.lane}) ${md(clip(m.text, 600))}${m.file ? ` — \`${code(m.file)}\`` : ''}` +
+      `- **[${m.severity}]** _(agent-reported)_ (${m.lane}) ${md(clip(m.text, 600))}${m.file ? ` — \`${code(m.file)}\`` : ''}` +
         renderRelatedFiles(m)
     );
   lines.push('');
@@ -1351,7 +1351,7 @@ export function renderSlice(input: {
       for (const m of group) {
         const fold = m.foldedWith ? ` _(also raised by ${m.foldedWith.join(', ')})_` : '';
         lines.push(
-          `- [${m.severity}] (${m.lane} ${m.kind}) ${md(clip(m.text, 600))}${renderRelatedFiles(m)}${fold}`
+          `- [${m.severity}] _(agent-reported)_ (${m.lane} ${m.kind}) ${md(clip(m.text, 600))}${renderRelatedFiles(m)}${fold}`
         );
       }
       lines.push('');

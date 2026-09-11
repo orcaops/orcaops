@@ -9,65 +9,43 @@ export const orcaopsSearchSkill: SkillTemplate = {
   tags: ['orcaops', 'read'],
   body: (prefix: string) => `# When to use
 
-Invoke when the user (or you, while reasoning) need to find prior work
-on a topic across **all captured artifacts** — not just the current
-branch. Useful before suggesting an approach ("did we already try
-this?"), when investigating a bug ("when was this last touched?"), or
-when picking up a long-running thread.
+Use captured-history search to find prior decisions, implementation and evidence
+before suggesting an approach or investigating earlier work.
 
-Triggers:
-
-- "search orcaops for X", "have we worked on X before?"
-- "did I already do Y?", "look up prior context on Z"
-- "find every artifact that mentioned <term>"
-
-# How to invoke
-
-The user typically gives you the query. If not, pick one from context:
+# Search scope
 
 \`\`\`bash
-orcaops search "rate limit"             # ranked across all branches
-orcaops search redis --branch feat/x    # restrict to one branch
-orcaops search redis --type checkpoint  # restrict to one indexed kind; see --help
-orcaops search redis --limit 5          # cap result count (default 25)
-orcaops search redis --json             # machine-readable
+orcaops search "rate limit" --json
+orcaops search redis --branch feat/x --type checkpoint --json
+orcaops search redis --touching 'src/**' --limit 5 --json
+orcaops search redis --scope worktree --json
+orcaops search redis --scope all-projects --json
+orcaops search redis --project <project-id> --origin captured --json
 \`\`\`
 
-# Cross-project curiosity (archive)
+The default searches the current project across branches. Branch names are literal;
+\`--touching\` filters actual touched paths before the result limit. Use explicit project
+or all-projects scope outside Git. All-projects search merges each project database's
+ranked results; it does not read another project's local checkout.
 
-When the question spans EVERY project on this machine — "have we solved
-this before anywhere?", "did any repo touch this pattern?" — and the
-archive is enabled (\`archive.enabled: true\`), add \`--all-projects\`:
+# Read the result
 
-\`\`\`bash
-orcaops search "<term>" --all-projects --json
-\`\`\`
+Cite \`project_id\`, \`artifact_id\` and the exact \`source_id\`. Each hit includes
+its source kind, match class, evidence time and snippet. An unknown evidence time
+stays unknown. Matching totals are null when unavailable; returned totals describe
+only the current page. If completeness is false, disclose the reported issues and
+do not present the available matches as exhaustive.
 
-It works from inside any repo or linked worktree and from outside one.
-The current project includes both hot and retained archive history;
-duplicate artifact IDs use the freshest projection (archive only when
-strictly newer, tie to hot). Each hit carries a \`project\` field — cite
-it. Without the archive this flag has nothing to read: run the
-current-repo search and say the sweep was repo-local.
+For the next page, use the returned \`page.next_offset\` with \`--offset\`. Pages are
+fresh queries; intervening captures may change their order. No cursor freezes history
+across projects.
 
-# Interpreting the output
+Open an exact hit with \`${commandRef('show', prefix)} <artifact-id> --project <project-id>\`.
+Use \`${skillRef('digest', prefix)}\` for a reviewer-facing digest.
 
-Each row shows: artifact id, source (\`plan\` / \`checkpoint:N\` /
-\`summary\`), branch, timestamp, and a snippet with matched terms wrapped
-in \`<<term>>\` markers. Multi-item content (plan steps, file lists)
-renders with \` · \` separators inside snippets — that's intentional, not
-a parsing artifact.
-
-For a deeper read on a current-repository hit, invoke the
-\`${commandRef('show', prefix)}\` command with the artifact id. \`show\` is
-current-repository-only; use cross-project \`decisions\` or \`loose-ends\`
-for archived detail from other projects. For a polished version, invoke
-\`${skillRef('digest', prefix)}\`.
-
-# Notes
-
-- Hyphenated queries like \`rate-limit\` are handled (no FTS5 syntax error).
-- Indexed content is the SQLite cache, which mirrors \`.orcaops/artifacts/\`.
-  If the cache is suspected stale, the user can run \`orcaops rebuild\`.
+Search reads existing databases without changing application history, rebuilding
+indexes or initializing missing history. If a project is unavailable, preserve its
+existing data and follow the reported recovery action. A missing expected database
+is never permission to create an empty replacement.
 `,
 };

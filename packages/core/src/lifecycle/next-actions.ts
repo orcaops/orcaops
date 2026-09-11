@@ -78,7 +78,7 @@ export interface OpenCheckpoint {
 
 /**
  * The minimal lifecycle state `nextActions` reasons over. Derived from the
- * store + repo by `deriveLifecycleSnapshot`; kept dependency-free here so the
+ * canonical task readers; kept dependency-free here so the
  * decision logic is unit-testable in isolation.
  */
 export interface LifecycleSnapshot {
@@ -108,9 +108,7 @@ export interface LifecycleSnapshot {
    * True when the artifact has no checkpoints yet (none open, closed, or
    * abandoned) — the next open is the FIRST checkpoint. Lets the open hint
    * render the cadence-setting first-cp wording distinctly from the recurring
-   * next-open string. Optional: only the production `deriveLifecycleSnapshot`
-   * sets it; absent ⇒ treated as false (the recurring wording), so existing
-   * snapshot fixtures need no change.
+   * next-open string. Absent means false (the recurring wording).
    */
   no_checkpoints_yet?: boolean;
   /** Usage fingerprint from the digest sidecar; null when absent or invalid. */

@@ -33,9 +33,6 @@ export function resolveSkillGates(env: NodeJS.ProcessEnv): SkillGates {
 export function currentSkillCapabilities(config: Config, gates: SkillGates): SkillCapability[] {
   return [
     ...(config.diff_fingerprint.enabled ? (['diff-fingerprint'] as const) : []),
-    // The archive capability gates precedent/handoff — they
-    // materialize the moment archive.enabled flips on (+ `orcaops update`).
-    ...(config.archive.enabled ? (['archive'] as const) : []),
     // BOTH consumption capabilities key on the same knob —
     // `diff_fingerprint.enabled` is the snapshot/fingerprint kill-switch
     // (capture/checkpoint.ts returns skipped boundaries when it is off), so

@@ -2,8 +2,8 @@
 name: "Orcaops: task review"
 description: "Generate the Orcaops Task Review for a branch, anchor its reasoning to changed code, or address its comments. Select it only for an Orcaops or Task Review request, or the explicit reasoning-anchor action: \"generate the Orcaops Task Review\", \"anchor the review reasoning to code\", or \"address the open Task Review comments\"."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "a2008c26058c"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "4a3a835366da"
 tags: ["orcaops", "review"]
 ---
 
@@ -22,8 +22,8 @@ execution mode — never request deep-research, high-effort, or extended
 reasoning modes for a routine review, and do not spawn subagents for it.
 The CLI builds inputs, enforces pass order and output caps, validates,
 derives code ownership, merges, and renders — it never calls a model, and
-you never call one through any other CLI. Never edit files under
-.orcaops/reviews/ by hand.
+you never call one through any other CLI. Never edit retained review state by
+hand; use only the documented review commands to read or advance it.
 
 Reading discipline for both passes: a SINGLE ORDERED PASS over the served
 payload file. Read every chunk once, in order — multiple Read calls over
@@ -38,8 +38,7 @@ returning zero or one finding is preferred to further deliberation, and you
 never compare every hunk to optimize a ranking. Done is a feature.
 
 Current routine contract versions are run schema 2, slice state schema 5,
-Story review model schema 4, current Story pointer schema 1, durable
-review-state version 4, and floor producer version 11.
+Story review model schema 4, and floor producer version 11.
 
 # Mode A — routine review (forensic-first, two lenses, one reviewer)
 
@@ -48,8 +47,8 @@ review-state version 4, and floor producer version 11.
     orcaops review routine-start --branch <b> [--execution-profile-json '<json>'] --json
 
 This checks/builds the floor, builds the routine dossier, mints an
-immutable run, and returns the forensic payload path + contract in one
-envelope. Retain its run_id. Stop if it reports an unhealthy floor;
+immutable run, and returns the forensic `payload_path` + `contract` in one
+envelope. Retain its `run_id`. Stop if it reports an unhealthy floor;
 never bypass the floor-health marker. Zero model calls have happened.
 
 The execution profile is optional, field-level metadata. Supply it only when
@@ -74,7 +73,8 @@ served.
 
 ## 2. Forensic pass — the code alone, before you see the account
 
-Read the file at the served payload_path in one ordered pass: a header
+Read the file named by the top-level `payload_path` in the response in one
+ordered pass: a header
 (coverage and degradation status), the changed-file inventory, then the
 literal diff — the FULL eligible diff, chunk by chunk in order. That file
 is your only input for this pass, and it is capture-blind by construction:
@@ -112,14 +112,15 @@ payload files:
 If rejected, fix exactly what the diagnostics name and resubmit ONCE with
 the same command — that consumes the forensic lane's independent repair credit. Once the
 forensic lane is terminal (accepted, or its repair exhausted) the
-response carries the ACCOUNT payload path + contract — follow the
-response; never invent commands. The engine refuses account context
+response carries the ACCOUNT `payload_path` + `contract` under its `account`
+field — follow the response; never invent commands. The engine refuses account context
 before forensic terminality (TWOLANE_ROUTINE_ORDER), which is what keeps
 this pass honest.
 
 ## 3. Story pass — curate a causal Story from the captured account
 
-Read the file at the account payload_path in one ordered pass. It opens
+Read the file named by `account.payload_path` in that response in one ordered
+pass. It opens
 with a THIS RUN block — facts about the review you are authoring right
 now — then the captured account:
 ALL in-scope completed checkpoints across ALL floor
@@ -288,7 +289,7 @@ Submit on stdin in ONE command — never write payload files:
 If rejected and the account lane's independent repair credit remains, fix exactly what the
 diagnostics name and resubmit once. Once the account lane is terminal
 (accepted, or its repair exhausted) the same response finalizes the run
-and carries the outcome, the run record, and the review path — a
+and carries the outcome, the run record, and the retained output filenames — a
 degraded outcome is finalized for you; never invent commands and never
 back-fill a missing lane. It also carries a semantic_anchor preparation
 receipt. This receipt is deterministic metadata, not a model result, and
@@ -301,28 +302,37 @@ step only when the user explicitly asks to associate captured reasoning with
 changed code for a completed run. The core Story remains complete and valid
 without anchors; anchor failure never changes its outcome.
 
-Use the semantic_anchor object returned by the final account submission:
+Retrieve the validated semantic input after finalization, including in a
+later session:
 
-- READY: read exactly the returned payload_path.
+    orcaops review run-show --branch <b> --run <run-id> --semantic-input --json
+
+Use the returned `semantic_anchor` object. Verify its `run_id` matches the
+top-level `run_id`, and retain its `publication_id`:
+
+- null: the run is not finalized; stop semantic anchoring.
+- READY: read exactly `payload_content`. The `payload_hash` and
+  `payload_bytes` identify the validated immutable evidence member.
 - TOO_LARGE: stop and report its reason. Complete evidence refuses; never
   truncate, sample, or select around the registered profile.
 - NOT_ELIGIBLE: report that this review has no eligible Story, citations,
   or changed rows, as named by the reason.
 - UNAVAILABLE: report the preparation failure. Do not reconstruct or edit
-  files under .orcaops/reviews/.
+  retained evidence.
 
-In a later session given only a run id, locate exactly one canonical
-.orcaops/reviews/<branch-slug>/twolane/<run-id>/semantic-anchor-input-v4.md
-file. Stop on zero or multiple matches. Do not substitute another run,
-reconstruct the payload, or read unrelated run artifacts.
+The final account response reports status and identity, but its `payload_file`
+is only a basename. Always use `run-show` to retrieve the content. If
+`run-show` says the run is not retained or refuses evidence integrity, stop.
+Do not substitute another run, reconstruct the payload, or inspect unrelated
+retained evidence.
 
 The READY payload contains the accepted Story, every eligible account item,
 the complete policy-eligible diff annotated with deterministic change blocks,
 and a per-file
 inventory of paths excluded by explicit review policy. The inventory discloses
 the target-space boundary; it never implies that a citation refers to excluded
-code. Read that ONE file in a
-single ordered pass, in full: no re-read, grep, selective search, truncation,
+code. Read that `payload_content` once, in a single ordered pass, in full: no
+re-read, grep, selective search, truncation,
 repository browsing, or inference from checkpoint ownership. The only eligible
 citation kinds are exactly PLAN_DECISION, PLAN_ALTERNATIVE,
 CHECKPOINT_DECISION, CHECKPOINT_ALTERNATIVE, and
@@ -523,8 +533,6 @@ Map each named signal to its repair:
   - TWOLANE_EXECUTABLE_IDENTITY_DRIFT: the finalizing executable is not the
     one that started the run — rerun `review finalize` with the original
     build.
-  - PINNED_DIFF_UNREADABLE: the run's pinned `diff.patch` is recorded but
-    unreadable — restore the run directory before finalizing again.
   - STORY_MODEL_CATALOG_INVALID, STORY_MODEL_PROJECTION_INVALID,
     STORY_MODEL_RANGES_UNRESOLVED, STORY_MODEL_INVARIANT,
     PART_OWNERSHIP_INVARIANT, STORY_MODEL_SCHEMA_INVALID: deterministic

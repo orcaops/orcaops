@@ -23,7 +23,7 @@ function thread(index: number): WatchThread {
     branch: 'feat/task-pane-polish',
     title: `Member ${index + 1} title long enough to need an ellipsis at narrow widths`,
     agent: 'claude-code',
-    sessions: [{ agent: 'claude-code', session_id: `s-${index}`, tokens: 12_000 }],
+    sessions: [{ agent: 'claude-code', session_id: `s-${index}`, status: 'exact', tokens: 12_000 }],
     openCheckpoints: 1,
     openComments: index === 0 ? 2 : 0,
     isCurrentCheckout: index === 0,
@@ -97,6 +97,27 @@ test('a populated pane keeps hierarchy and full metrics at a wide width', async 
   // Member metrics keep the verbose spelling and the open-checkpoint suffix.
   expect(frame).toContain('steps · 1cp/1 open');
   expect(frame).toContain('THREADS · 3');
+  harness.renderer.destroy();
+});
+
+test('task usage deduplicates sessions and discloses a mixed exact and incomplete lower bound', async () => {
+  const first = thread(0);
+  first.sessions = [
+    { agent: 'claude-code', session_id: 'shared', status: 'exact', tokens: 20_000 },
+  ];
+  const second = thread(1);
+  second.sessions = [
+    { agent: 'claude-code', session_id: 'shared', status: 'incomplete', tokens: 10_000 },
+  ];
+  const third = thread(2);
+  third.sessions = [
+    { agent: 'claude-code', session_id: 'partial', status: 'incomplete', tokens: 5_000 },
+  ];
+  const harness = await mountPane({ width: 100, threads: [first, second, third] });
+  const frame = harness.captureCharFrame();
+  expect(frame).toContain('2 sessions');
+  expect(frame).toContain('≥25.0k observed session tokens');
+  expect(frame).not.toContain('35.0k');
   harness.renderer.destroy();
 });
 

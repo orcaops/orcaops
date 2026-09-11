@@ -68,7 +68,7 @@ import {
   railLineOffset,
   type RailSelectionAnchor,
   railSelectionAnchor,
-  repoNames,
+  repositoryOptions,
   resolveRailSelection,
   type StatusFilter,
   totalThreads,
@@ -82,21 +82,21 @@ import {
 } from './watchCommands';
 
 const INLINE_NOTICE_GLYPH_WIDTH = 2;
-export const MIXED_ARCHIVE_NOTICE_PREFIX = 'ID+archive · doctor/repair · ';
+export const HISTORY_INCOMPLETE_NOTICE_PREFIX = 'History incomplete · ';
 
 /**
- * Persistent archive disclosure wins the left edge of the one-row footer.
+ * Persistent history disclosure wins the left edge of the one-row footer.
  * A transient notice still follows it, but only that transient half is
  * truncated while the compact persistent prefix fits.
  */
 export function composeWatchFooterNotice(
   notice: string | null,
-  archiveIssueNotice: string | null,
+  historyIssueNotice: string | null,
   width: number,
   persistentPrefix: string
 ): string | null {
-  if (archiveIssueNotice === null) return notice;
-  if (notice === null) return archiveIssueNotice;
+  if (historyIssueNotice === null) return notice;
+  if (notice === null) return historyIssueNotice;
   const copyWidth = Math.max(0, width - INLINE_NOTICE_GLYPH_WIDTH);
   const transientWidth = Math.max(0, copyWidth - displayLen(persistentPrefix));
   return `${persistentPrefix}${truncate(notice, transientWidth)}`;
@@ -179,76 +179,23 @@ export function App({ options }: { options: AppOptions }) {
     [snapshot, nowMs]
   );
   const live = connected ? classifiedSnapshot : null;
-  const archiveIssueDisclosure = useMemo(() => {
-    const issues = classifiedSnapshot?.archiveIssues ?? [];
-    if (issues.length === 0) return null;
-    const identityIssues = issues.filter((issue) => issue.kind === 'project_identity_unavailable');
-    const artifactIssues = issues.filter((issue) => issue.kind === 'artifact_unavailable');
-    const indexIssues = issues.filter((issue) => issue.kind === 'project_index_degraded');
-    const projectionIssues = issues.filter((issue) => issue.kind === 'hot_projection_incomplete');
-    if (
-      identityIssues.length > 0 &&
-      artifactIssues.length > 0 &&
-      indexIssues.length === 0 &&
-      projectionIssues.length === 0
-    ) {
-      return {
-        full: 'Project identity problem · Partial archive · doctor + archive repair',
-        compact: MIXED_ARCHIVE_NOTICE_PREFIX,
-      };
-    }
-    if (
-      [
-        identityIssues.length > 0,
-        artifactIssues.length > 0,
-        indexIssues.length > 0,
-        projectionIssues.length > 0,
-      ].filter(Boolean).length > 1
-    ) {
-      return {
-        full: 'Multiple data problems · doctor + archive repair',
-        compact: 'Data degraded · doctor · ',
-      };
-    }
-    if (identityIssues.length > 0) {
-      return {
-        full:
-          `Project identity problem · ${identityIssues.length} ` +
-          `${identityIssues.length === 1 ? 'project needs' : 'projects need'} attention · ` +
-          'run doctor or inspect archive projects',
-        compact: 'Identity · doctor · ',
-      };
-    }
-    if (indexIssues.length > 0) {
-      return {
-        full:
-          `Archive index degraded · ${indexIssues.length} ` +
-          `${indexIssues.length === 1 ? 'project needs' : 'projects need'} a retry · run doctor`,
-        compact: 'Index degraded · doctor · ',
-      };
-    }
-    if (projectionIssues.length > 0) {
-      return {
-        full:
-          `Local projection incomplete · ${projectionIssues.length} ` +
-          `${projectionIssues.length === 1 ? 'project needs' : 'projects need'} repair · ` +
-          'run doctor, then rebuild',
-        compact: 'Projection incomplete · doctor · ',
-      };
-    }
-    const projects = [...new Set(artifactIssues.map((issue) => issue.project))].join(', ');
-    // Deliberately NOT `archive status`: that command diffs the hot store
-    // against the archive, so an artifact the archive holds alone is never
-    // examined and it answers "all clean". Repair completes the archived log
-    // from the hot copy, which only the worktree owning it has; prune is the
-    // only exit once no worktree does. Which case applies is unknowable from
-    // here — watch sees just this checkout's hot store — so name both.
+  const historyIssueDisclosure = useMemo(() => {
+    const completeness = classifiedSnapshot?.completeness;
+    if (!completeness || completeness.complete) return null;
+    const issues = completeness.issues;
+    const projects = new Set(
+      issues.flatMap((issue) => (issue.project_id === null ? [] : [issue.project_id]))
+    );
+    const first = issues[0];
+    const where =
+      projects.size === 0
+        ? 'history root'
+        : `${projects.size} ${projects.size === 1 ? 'project' : 'projects'}`;
     return {
       full:
-        `Partial archive data · ${artifactIssues.length} ` +
-        `${artifactIssues.length === 1 ? 'artifact' : 'artifacts'} unavailable in ${projects} · ` +
-        'archive repair from the owning worktree, else archive prune',
-      compact: 'Partial archive · repair/prune · ',
+        `History incomplete · ${issues.length} ${issues.length === 1 ? 'issue' : 'issues'} in ${where}` +
+        `${first ? ` · ${first.code}: ${first.message}` : ''} · preserve history and inspect before repair`,
+      compact: HISTORY_INCOMPLETE_NOTICE_PREFIX,
     };
   }, [classifiedSnapshot]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -315,9 +262,9 @@ export function App({ options }: { options: AppOptions }) {
   const [notice, setNotice] = useState<string | null>(null);
   const footerNotice = composeWatchFooterNotice(
     notice,
-    archiveIssueDisclosure?.full ?? null,
+    historyIssueDisclosure?.full ?? null,
     width,
-    archiveIssueDisclosure?.compact ?? ''
+    historyIssueDisclosure?.compact ?? ''
   );
   // Cockpit theme selector (t): open state + live preview id. Plain setState —
   // functional updaters keep the j/k cycle burst-safe without a cur-store.
@@ -355,16 +302,15 @@ export function App({ options }: { options: AppOptions }) {
     .map((group) => `${group.key}:${group.rows.map((row) => row.id).join(',')}`)
     .join('|');
 
-  // Repo dropdown menu: "all repos" + each distinct project name (deduped/sorted).
-  const repoOptions = useMemo(() => {
-    const names = classifiedSnapshot
-      ? [...new Set(repoNames(classifiedSnapshot))].sort((a, b) => a.localeCompare(b))
-      : [];
-    return [
+  const repoOptions = useMemo(
+    () => [
       { name: 'all repos', value: null as string | null },
-      ...names.map((r) => ({ name: r, value: r as string | null })),
-    ];
-  }, [classifiedSnapshot]);
+      ...(classifiedSnapshot ? repositoryOptions(classifiedSnapshot) : []),
+    ],
+    [classifiedSnapshot]
+  );
+  const repoLabel =
+    repo === null ? null : (repoOptions.find((option) => option.value === repo)?.name ?? repo);
   // Index of the repo currently in effect (where the highlight lands when the menu opens).
   const repoActiveIdx = Math.max(
     0,
@@ -488,6 +434,12 @@ export function App({ options }: { options: AppOptions }) {
       branch,
       launchRoot: options.root,
       projectLabel: activeProject ?? undefined,
+      repository: snapshot?.projects.find((project) => project.projectId === selectedProjectId)
+        ?.repository,
+      storeInstanceId:
+        snapshot?.projects.find((project) => project.projectId === selectedProjectId)
+          ?.authorityKey ?? undefined,
+      dataRoot: snapshot?.dataRoot,
     })
       .then((target) => {
         if (!target.ok) {
@@ -1656,7 +1608,7 @@ export function App({ options }: { options: AppOptions }) {
               rows={topBarHeight}
               railWidth={railWidth}
               filter={filter}
-              repo={repo}
+              repo={repoLabel}
               repoOpen={repoOpen}
               onFilter={setFilter}
               onRepo={() => setRepoOpen((o) => !o)}
@@ -1696,7 +1648,7 @@ export function App({ options }: { options: AppOptions }) {
                     id="watch-empty-filter"
                     variant="screen"
                     title="No destinations match this filter"
-                    message={`The ${filter} filter excludes every captured destination${repo === null ? '.' : ` in ${repo}.`}`}
+                    message={`The ${filter} filter excludes every captured destination${repo === null ? '.' : ` in ${repoLabel}.`}`}
                     action={{
                       id: 'watch-clear-empty-filter',
                       label: 'Clear filter',
@@ -1707,7 +1659,7 @@ export function App({ options }: { options: AppOptions }) {
                   <EmptyState
                     id="watch-empty-repo"
                     variant="screen"
-                    title={`No captured work in ${repo}`}
+                    title={`No captured work in ${repoLabel}`}
                     message="Other repositories still have captured destinations."
                     action={{
                       id: 'watch-clear-empty-repo',

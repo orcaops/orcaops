@@ -2,6 +2,7 @@ import { ORCAOPS_CAPABILITIES } from '@orcaops/core';
 import type { OssSourcePlanReviewVerdict, SourcePlanReviewVerdictResponse } from '@orcaops/sdk';
 
 import {
+  createReviewMutation,
   mapPlanCloudReadError,
   mapReviewAuthzError,
   requireRef,
@@ -17,7 +18,7 @@ import {
   writeSecretWarnings,
 } from '../../../lib/cloud-secret-gate.js';
 import { loadSecretAllowlist } from '../../../lib/run-capture.js';
-import { reviewUsageStamp, stampPlanReviewUsage } from '../../../lib/usage-stamp.js';
+import { reviewUsageStamp } from '../../../lib/usage-stamp.js';
 
 export interface ReviewVerdictOptions {
   approve?: boolean;
@@ -139,7 +140,12 @@ export async function reviewVerdictAction(
     // the client-injected core tests drive.
     assertNoSecretsOutbound(
       'plan-review-verdict',
-      [['note', opts.note]],
+      [
+        ['external_id', ref],
+        ['verdict', verdict],
+        ['note', opts.note],
+        ['base_url', opts.baseUrl],
+      ],
       await loadSecretAllowlist()
     );
 
@@ -149,20 +155,24 @@ export async function reviewVerdictAction(
         requires: [ORCAOPS_CAPABILITIES.SOURCE_PLAN_REVIEW],
         operation: 'plan review verdict',
       },
-      (ctx) =>
-        runReviewVerdict({
-          client: ctx.client,
+      async (ctx) => {
+        const mutation = createReviewMutation(ctx, {
+          verb: 'verdict',
+          externalId: ref,
+          verdict,
+          note: opts.note ?? null,
+        });
+        const result = await runReviewVerdict({
+          client: mutation.client,
           externalId: ref,
           verdict,
           ...(opts.note !== undefined ? { note: opts.note } : {}),
-        })
+        });
+        if (mutation.didDispatch() && opts.note !== undefined && opts.note.trim().length > 0)
+          await ctx.stampUsage(reviewUsageStamp('verdict', result.external_id, opts.note));
+        return result;
+      }
     );
-
-    // Stamp only a SUBSTANTIVE verdict (a non-empty --note); a bare verdict is
-    // ~0 authoring and is excluded.
-    if (opts.note !== undefined && opts.note.trim().length > 0) {
-      await stampPlanReviewUsage(reviewUsageStamp('verdict', result.external_id, opts.note));
-    }
 
     writeSecretWarnings(result.secret_warnings);
     if (opts.json) {

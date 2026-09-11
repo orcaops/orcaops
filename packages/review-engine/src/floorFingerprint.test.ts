@@ -23,7 +23,6 @@ import {
   isFloorCacheHealthClean,
 } from './floor.js';
 import type { AssemblyInput, ReviewArtifact, ReviewCheckpoint } from './model.js';
-import { REVIEW_STATE_VERSION } from './reviewState.js';
 import type { ScopeInputs } from './scope.js';
 
 function cp(overrides: Partial<ReviewCheckpoint> = {}): ReviewCheckpoint {
@@ -394,10 +393,9 @@ describe('computeInputHash — truncation gate', () => {
 });
 
 describe('floor versioning — shape vs producer', () => {
-  it('pins the floor contract and durable reviewer-state versions', () => {
+  it('pins the floor contract and producer versions', () => {
     expect(FLOOR_SCHEMA_VERSION).toBe(4);
     expect(FLOOR_PRODUCER_VERSION).toBe('11');
-    expect(REVIEW_STATE_VERSION).toBe(4);
   });
 
   it('a floor carrying every current citation relationship parses at schema 4', () => {

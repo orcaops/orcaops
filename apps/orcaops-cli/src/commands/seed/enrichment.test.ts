@@ -13,7 +13,7 @@ import {
   splitEvidenceCitation,
   writeSeedEnrichmentBundles,
 } from './enrichment.js';
-import { seedStateDir } from './journal.js';
+import { seedStateDir } from './state.js';
 import { synthesizeSeedCluster } from './synthesize.js';
 
 async function fixture() {

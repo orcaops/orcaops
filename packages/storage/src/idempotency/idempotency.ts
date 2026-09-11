@@ -203,9 +203,8 @@ export type ArtifactScopedResult =
  * matches. Returns first-call if none. Compares payloads with
  * canonical JSON to distinguish replay vs conflict.
  *
- * Caller is responsible for having read the event log via
- * `readEventLog` (which filters out corrupt entries — those should
- * never be a basis for replay).
+ * Caller supplies only validated retained events; corrupt bytes must
+ * never be a basis for replay.
  */
 export async function findArtifactScopedReplay(
   input: ArtifactScopedIdempotencyInput

@@ -5,10 +5,12 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type SourcePlanReviewProposeResponse, TrpcRequestError } from '@orcaops/sdk';
-import { readReviewProposal, sourcePlanCacheDir } from '@orcaops/storage';
 
 import { reviewProposeAction, type ReviewProposeClient, runReviewPropose } from './propose.js';
-import { seedCandidate } from './test-helpers.js';
+import {
+  createMemoryPlanReviewPersistence,
+  seedCandidate,
+} from '../../../../tests/support/plan-review-persistence.js';
 
 const sha = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex');
 const EDITED = '# proposal\n\nedited body';
@@ -31,7 +33,9 @@ function proposeClient(
 
 describe('runReviewPropose', () => {
   let repoRoot: string;
+  let persistence: ReturnType<typeof createMemoryPlanReviewPersistence>;
   beforeEach(async () => {
+    persistence = createMemoryPlanReviewPersistence();
     repoRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-review-propose-'));
   });
   afterEach(async () => {
@@ -39,6 +43,7 @@ describe('runReviewPropose', () => {
   });
 
   const base = (root: string) => ({
+    persistence,
     repoRoot: root,
     baseUrl: 'https://cloud.example',
     orgId: 'org_1',
@@ -61,7 +66,7 @@ describe('runReviewPropose', () => {
   });
 
   it('rejects a body with a forbidden control character before any wire call', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewPropose = vi.fn(async () => proposeResp());
     await expect(
       runReviewPropose({
@@ -74,7 +79,7 @@ describe('runReviewPropose', () => {
   });
 
   it('resolves base_version_id from the cached candidate + persists the proposal record', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewPropose = vi.fn(async () => proposeResp({ proposalId: 'prop_77' }));
     const result = await runReviewPropose({
       client: proposeClient(reviewPropose),
@@ -84,18 +89,13 @@ describe('runReviewPropose', () => {
     expect(reviewPropose).toHaveBeenCalledWith(
       expect.objectContaining({ base_version_id: 'ver_4', content_hash: sha(EDITED) })
     );
-    const prop = await readReviewProposal(
-      sourcePlanCacheDir(repoRoot),
-      'https://cloud.example',
-      'org_1',
-      'prop_77'
-    );
+    const prop = await persistence.readProposal('ext-1', 'prop_77');
     expect(prop?.proposal_id).toBe('prop_77');
     expect(prop?.body).toBe(EDITED);
   });
 
   it('ships the authoring baseline on the wire (null when the arg is omitted)', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const baseline = {
       repo_url: 'https://github.com/foo/bar',
       branch: 'main',
@@ -111,7 +111,7 @@ describe('runReviewPropose', () => {
   });
 
   it('surfaces needs_rebase', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const result = await runReviewPropose({
       client: proposeClient(vi.fn(async () => proposeResp({ needsRebase: true }))),
       ...base(repoRoot),
@@ -146,7 +146,7 @@ describe('runReviewPropose', () => {
   });
 
   it('maps a --supersedes FORBIDDEN to the friendly own-OPEN-proposal message', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewPropose = vi.fn(async () => {
       throw new TrpcRequestError('forbidden', { code: 'FORBIDDEN', httpStatus: 403 });
     });

@@ -130,9 +130,9 @@ in a new artifact.
 
 # Automatic digest after summary
 
-A successful summary automatically materializes the reviewer-facing digest,
-caches it, and writes its search entry. Only run \`orcaops digest --artifact
-<artifact_id>\` yourself when the response reports
+A successful summary automatically renders the reviewer-facing digest, embeds
+its markdown in the response, and writes its search entry. Only run \`orcaops
+digest --artifact <artifact_id>\` yourself when the response reports
 \`finalized_without_digest\` and returns that repair command.
 
 For inspection, \`orcaops show <artifact_id>\` displays the full thread

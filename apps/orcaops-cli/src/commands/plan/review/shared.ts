@@ -1,6 +1,4 @@
 import {
-  assertCloudSupports,
-  createCloudClient,
   isBelowMinimumError,
   isConflictError,
   isForbiddenError,
@@ -12,23 +10,77 @@ import {
   resolveCloudTarget,
   resolveCredentialStore,
 } from '@orcaops/core';
+import { createCanonicalCloudClient } from '@orcaops/core/history';
+import type { CredentialStore, OrcaCloudClient } from '@orcaops/sdk';
+import {
+  type ProjectDatabase,
+  type ProjectOperationOptions,
+} from '@orcaops/storage/history/database';
+import type { RemoteTarget } from '@orcaops/storage/history/remote-target';
 
 import { ErrorCodes, OrcaopsError } from '../../../io/errors.js';
+import { writeTerminalSafeStderr } from '../../../io/output.js';
 import { CLI_VERSION } from '../../../lib/cli-version.js';
-import { buildContext } from '../../../lib/context.js';
+import {
+  openDatabaseCaptureWriter,
+  resolveDatabaseCaptureContext,
+} from '../../../lib/database-capture-context.js';
+import { createDatabaseSourcePlanReviewMutationClient } from '../../../lib/database-source-plan-review-mutations.js';
+import { createDatabasePlanReviewPersistence } from '../../../lib/database-source-plan-review.js';
+import { stampDatabaseUsage } from '../../../lib/database-usage-stamp.js';
+import type { UsageStampDescriptor } from '../../../lib/usage-stamp-types.js';
 
-type CloudClient = Awaited<ReturnType<typeof createCloudClient>>['client'];
-type CredentialStore = ReturnType<typeof resolveCredentialStore>;
+type OpenWriter = () => Promise<ProjectDatabase>;
 
 export interface ReviewCloudContext {
-  client: CloudClient;
+  client: OrcaCloudClient;
   repoRoot: string;
-  /** The invocation's Repo — baseline resolution + wire repo_url read off it. */
   repo: Repo;
   baseUrl: string;
   orgId: string;
-  /** The resolved credential store — `status` reads the authed identity off it. */
   credentialStore: CredentialStore;
+  target: RemoteTarget;
+  reader: ProjectDatabase;
+  secretAllow: readonly string[];
+  signal: AbortSignal;
+  onWait: NonNullable<ProjectOperationOptions['onWait']>;
+  openWriter: OpenWriter;
+  openSettlementWriter: OpenWriter;
+  stampUsage(descriptor: UsageStampDescriptor): Promise<void>;
+}
+
+export function createReviewMutation(
+  context: ReviewCloudContext,
+  command: Readonly<Record<string, unknown>>,
+  options: { publicationAt?: string } = {}
+) {
+  const transport = createDatabaseSourcePlanReviewMutationClient({
+    reader: context.reader,
+    openWriter: context.openWriter,
+    openSettlementWriter: context.openSettlementWriter,
+    client: context.client,
+    target: context.target,
+    command,
+    secretAllow: context.secretAllow,
+    now: () => new Date().toISOString(),
+    publicationAt: options.publicationAt,
+    signal: context.signal,
+    onWait: context.onWait,
+  });
+  return {
+    client: transport,
+    didDispatch: transport.didDispatch,
+    publicationAdmission: transport.publicationAdmission,
+    persistence: createDatabasePlanReviewPersistence({
+      reader: context.reader,
+      openWriter: context.openSettlementWriter,
+      target: context.target,
+      secretAllow: context.secretAllow,
+      signal: context.signal,
+      onWait: context.onWait,
+      publicationAdmission: transport.publicationAdmission,
+    }),
+  };
 }
 
 /**
@@ -50,33 +102,69 @@ export async function withReviewCloud<T>(
   },
   fn: (ctx: ReviewCloudContext) => Promise<T>
 ): Promise<T> {
-  const credentialStore = resolveCredentialStore();
-  const baseUrl = resolveCloudTarget(opts.baseUrl);
-  const ctx = await buildContext();
+  const controller = new AbortController();
+  const interrupt = () => controller.abort();
+  process.on('SIGINT', interrupt);
+  let context: Awaited<ReturnType<typeof resolveDatabaseCaptureContext>> | undefined;
   try {
-    const { client } = await createCloudClient({
+    const baseUrl = resolveCloudTarget(opts.baseUrl);
+    context = await resolveDatabaseCaptureContext({ signal: controller.signal });
+    const credentialStore = resolveCredentialStore();
+    const connected = await createCanonicalCloudClient({
       baseUrl,
       store: credentialStore,
       cliVersion: CLI_VERSION,
+      requires: opts.requires,
+      operation: opts.operation,
+      signal: controller.signal,
     });
-    // This ping carries the credential handshake. Nothing authored is in it —
-    // each verb's `*Action` runs the outbound secret gate before calling in
-    // here, so a refusal precedes the handshake as well as the mutation, and
-    // the wrappers' order is pinned by
-    // `tests/integration/cloud-gate-precedes-handshake.test.ts`.
-    const ping = await client.cli.ping();
-    assertCloudSupports(ping, opts.requires, opts.operation, { cliVersion: CLI_VERSION });
-    const orgId = ping.orgId;
+    let waiting = false;
+    const onWait = () => {
+      if (waiting) return;
+      waiting = true;
+      writeTerminalSafeStderr(
+        `Waiting for ${opts.operation} on the selected project database; Ctrl-C cancels the wait.\n`
+      );
+    };
     return await fn({
-      client,
-      repoRoot: ctx.repoRoot,
-      repo: ctx.repo,
-      baseUrl,
-      orgId,
-      credentialStore,
+      client: connected.client,
+      repoRoot: context.registered.git.worktreeRoot,
+      repo: context.repo,
+      baseUrl: connected.target.server_url,
+      orgId: connected.target.org_id,
+      credentialStore: connected.credentialStore,
+      target: connected.target,
+      reader: context.project.database,
+      secretAllow: context.config.redact.allow,
+      signal: controller.signal,
+      onWait,
+      openWriter: () => openDatabaseCaptureWriter(context!, controller.signal),
+      openSettlementWriter: () => openDatabaseCaptureWriter(context!),
+      stampUsage: async (descriptor) => {
+        let writer: ProjectDatabase | undefined;
+        try {
+          writer = await openDatabaseCaptureWriter(context!, controller.signal);
+          await stampDatabaseUsage(
+            writer,
+            {
+              descriptor,
+              invokingAgent: context!.invokingAgent.agent,
+              env: context!.env,
+              cwd: context!.registered.git.worktreeRoot,
+              secretAllow: context!.config.redact.allow,
+            },
+            { signal: controller.signal, onWait }
+          );
+        } catch {
+          // Usage accounting never changes the command result.
+        } finally {
+          writer?.close();
+        }
+      },
     });
   } finally {
-    ctx.store.close();
+    context?.close();
+    process.off('SIGINT', interrupt);
   }
 }
 

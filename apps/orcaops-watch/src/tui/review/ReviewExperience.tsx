@@ -1031,7 +1031,7 @@ function ContextualReviewRail({
                 flexDirection="column"
                 paddingTop={1}
               >
-                <text fg={ACCENT}>OUTCOME</text>
+                <text fg={ACCENT}>AGENT-REPORTED OUTCOME</text>
                 <text fg={FG}>{trail?.summary ?? page.label}</text>
               </box>
               {uncertainties.length > 0 ? (
@@ -1103,7 +1103,7 @@ function ContextualReviewRail({
             <>
               {page.actTitle !== null ? <text fg={DIM}>{page.actTitle}</text> : null}
               <box flexDirection="column" paddingTop={1}>
-                <text fg={ACCENT}>OUTCOME</text>
+                <text fg={ACCENT}>AGENT-REPORTED OUTCOME</text>
                 <text fg={FG}>{page.part.interpretation}</text>
                 {page.part.contextOnly ? (
                   <text fg={DIM}>Context-only · no changed rows are owned by this Part</text>

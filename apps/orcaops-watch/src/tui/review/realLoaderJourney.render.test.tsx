@@ -4,21 +4,52 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { buildReviewFloorFixture, slugifyBranch } from '@orcaops/review-core';
-import { FsWatch } from '@orcaops/watch-data';
 
 import { mountReviewApp } from '../../../tests/review/mountReviewApp';
-import { loadInstalledReview, loadReview, readReviewGenerations } from '../../data/reviewSource';
-import { readWorktreeProbe } from '../../data/staleness';
+import { loadReview } from '../../data/reviewSource';
 
 const roots: string[] = [];
-const diff = [
-  'diff --git a/src/fixture.ts b/src/fixture.ts',
-  '--- a/src/fixture.ts',
-  '+++ b/src/fixture.ts',
-  '@@ -1,0 +1 @@',
-  '+stable fixture row',
-  '',
-].join('\n');
+const PANE_SIDECAR = `
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+const root = process.env.ORCAOPS_ROOT;
+const branch = process.argv[process.argv.indexOf('--branch') + 1];
+const dir = path.join(root, '.orcaops', 'reviews', branch);
+let floor = null;
+try {
+  floor = JSON.parse(readFileSync(path.join(dir, 'floor.json'), 'utf8'));
+} catch {
+  process.stdout.write(JSON.stringify({ ok: false, code: 'REVIEW_NOT_FOUND' }) + '\\n');
+  process.exit(1);
+}
+let diff = '';
+try {
+  diff = readFileSync(path.join(dir, 'diff.patch'), 'utf8');
+} catch {}
+const generations = {
+  floor: 'floor:' + diff.length,
+  story: null,
+  storyInstallation: null,
+  storyAnchors: null,
+  comments: '0:0',
+  workflow: '0',
+};
+const routineStory = {
+  model: null,
+  status: 'absent',
+  issue: null,
+  runId: null,
+  generation: null,
+  anchors: { model: null, status: 'absent', issue: null, generation: null },
+};
+if (process.argv.includes('--generations-only')) {
+  process.stdout.write(JSON.stringify({ ok: true, generations }) + '\\n');
+} else {
+  process.stdout.write(
+    JSON.stringify({ ok: true, reviewId: 'review', floor, diff, routineStory, generations }) + '\\n'
+  );
+}
+`;
 
 function buildRetainedHunkFixture(branch: string, changedRows = 25_402) {
   const floor = structuredClone(buildReviewFloorFixture('clean').floor);
@@ -53,60 +84,16 @@ afterEach(async () => {
 });
 
 describe('real loader to mounted ReviewApp', () => {
-  test('real filesystem events keep an installed legacy narrative off the TUI', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'orcaops-watch-loader-'));
-    roots.push(root);
-    const live = buildReviewFloorFixture('clean');
-    live.floor.scope.branch = 'probe';
-    live.floor.scope.branch_slug = 'probe';
-    const reviewDir = path.join(root, '.orcaops', 'reviews', 'probe');
-    const sidecar = path.join(root, 'sidecar.mjs');
-    await mkdir(reviewDir, { recursive: true });
-    await writeFile(path.join(reviewDir, 'floor.json'), `${JSON.stringify(live.floor)}\n`);
-    await writeFile(path.join(reviewDir, 'diff.patch'), diff);
-    // This is deliberately a one-shot sidecar stub, not a real producer process.
-    // The test's production seams are loadReview, real installed files, FsWatch,
-    // the live-generation refresh coordinator, and the mounted ReviewApp.
-    await writeFile(sidecar, 'process.exitCode = 0;\n');
-
-    const reviewLoader = () => loadReview({ root, branch: 'probe', sidecarPath: sidecar });
-    const app = await mountReviewApp({
-      scenario: 'no-narrative',
-      root,
-      autoLoad: true,
-      reviewLoader,
-      installedReviewLoader: loadInstalledReview,
-      reviewGenerationLoader: readReviewGenerations,
-      worktreeProbeLoader: readWorktreeProbe,
-      liveRefreshThrottleMs: 0,
-    });
-    await app.settleUntil((frame) => frame.includes('CAPTURED WORK'));
-    expect(app.frame()).toContain('CAPTURED WORK');
-
-    const watcher = new FsWatch({
-      roots: [reviewDir],
-      debounceMs: 10,
-      onTick: () => {
-        void app.liveRefresh();
-      },
-    });
-    expect(watcher.start()).toBe(true);
-    try {
-      await writeFile(path.join(reviewDir, 'narrative.json'), '{retired publication bytes');
-      await app.settle();
-      expect(app.frame()).toContain('CAPTURED WORK');
-      expect(app.frame()).not.toContain('Preserve deterministic review truth');
-
-      await writeFile(path.join(reviewDir, 'diff.patch'), '');
-      await app.settleUntil((frame) => frame.includes('COVERAGE UNAVAILABLE'));
-      expect(app.frame()).toContain('COVERAGE UNAVAILABLE');
-      expect(app.frame()).toContain('no retained parent hunk in diff.patch');
-    } finally {
-      watcher.close();
-      app.unmount();
-    }
-  });
-
+  // The file-watching probe test that lived here drove the retired file-based
+  // installed-review seam: it wrote floor.json/diff.patch/narrative.json into the
+  // review directory and let FsWatch + loadInstalledReview refresh the TUI off
+  // those files. The canonical loader reads the retained store through the
+  // sidecar, not the review directory, so that seam is gone. Its two assertions
+  // survive elsewhere: a legacy narrative never reaching the TUI is inherent (the
+  // pane never reads it), and an empty diff yielding COVERAGE UNAVAILABLE is
+  // reviewSource.test.ts's "reports an unusable diff instead of presenting unknown
+  // rows as healthy". The giant-hunk journey below keeps the real loader-to-mount
+  // seam under test through the pane sidecar.
   test('keeps a retained 25,402-row hunk navigable and mount-bounded through the real loader seam', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'orcaops-watch-giant-hunk-'));
     roots.push(root);
@@ -116,7 +103,7 @@ describe('real loader to mounted ReviewApp', () => {
     await mkdir(reviewDir, { recursive: true });
     await writeFile(path.join(reviewDir, 'floor.json'), `${JSON.stringify(live.floor)}\n`);
     await writeFile(path.join(reviewDir, 'diff.patch'), live.diffText);
-    await writeFile(sidecar, 'process.exitCode = 0;\n');
+    await writeFile(sidecar, PANE_SIDECAR);
 
     const app = await mountReviewApp({
       scenario: 'no-narrative',

@@ -72,7 +72,7 @@ async function main(): Promise<void> {
     'shell-menu-item-story-lens',
     'shell-menu-item-captured-checkpoint-lens',
     'help-entry-0-3',
-    'watch-task-row-task:journey-project:probe',
+    'watch-task-row-task:journey-project-id:probe',
     'watch-task-member:thread:journey-artifact',
     'review-help-backdrop',
     'review-input-modal-action-save',

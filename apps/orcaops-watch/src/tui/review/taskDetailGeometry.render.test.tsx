@@ -41,11 +41,11 @@ function thread(id: string, lastWriteMs: number): WatchThread {
   return {
     artifactId: id,
     artifactStatus: 'active',
-    source: 'hot',
+    version: '1:retained',
     branch: 'feature/demo-detail',
     title: `Thread ${id}`,
     agent: 'codex',
-    sessions: [{ agent: 'codex', session_id: `session-${id}`, tokens: 12_345 }],
+    sessions: [{ agent: 'codex', session_id: `session-${id}`, status: 'exact', tokens: 12_345 }],
     openCheckpoints: 0,
     openComments: 0,
     isCurrentCheckout: false,
@@ -61,6 +61,8 @@ function thread(id: string, lastWriteMs: number): WatchThread {
     planDecisions: [],
     nonGoals: [],
     recentEvents: [],
+    omittedEvents: 0,
+    activityWindowComplete: true,
   };
 }
 

@@ -16,12 +16,24 @@ describe('parseArgs', () => {
     expect(parseArgs(['--probe', '--root', '/repo'])).toMatchObject({ probe: true, root: '/repo' });
   });
 
-  it('ignores unknown flags and keeps the defaults', () => {
-    expect(parseArgs(['--nope'])).toEqual({
-      intervalMs: 2000,
-      version: false,
-      selfcheck: false,
-      probe: false,
+  it('refuses unknown arguments even in a headless mode', () => {
+    for (const argv of [['--nope'], ['unexpected'], ['--probe', '--nope']])
+      expect(() => parseArgs(argv)).toThrow('Unknown Watch argument');
+  });
+
+  it('requires an explicit root value and a finite positive interval', () => {
+    for (const argv of [['--root'], ['--root', ''], ['--root', '--probe']])
+      expect(() => parseArgs(argv)).toThrow('--root requires a path');
+    for (const value of [undefined, '', '0', '-1', 'Infinity', 'not-a-number', '--probe'])
+      expect(() => parseArgs(value === undefined ? ['--interval'] : ['--interval', value])).toThrow(
+        '--interval requires a finite positive number'
+      );
+    expect(
+      parseArgs(['--root', '/repo with spaces', '--interval', '500', '--probe'])
+    ).toMatchObject({
+      root: '/repo with spaces',
+      intervalMs: 500,
+      probe: true,
     });
   });
 });

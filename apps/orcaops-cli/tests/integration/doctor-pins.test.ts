@@ -3,10 +3,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { loadConfig } from '@orcaops/core';
-import { ArtifactStore, type Pin, pinFilePath, uuidv7 } from '@orcaops/storage';
-import { createTempRepo, gitClient, type TempRepo } from '@orcaops/test-harness';
+import { type Pin, pinFilePath, uuidv7 } from '@orcaops/storage';
+import { gitClient } from '@orcaops/test-harness';
 
+import { fixture } from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
 import { withCleanSession } from '../support/test-helpers.js';
 
@@ -57,110 +57,53 @@ async function plantPin(opts: {
 }
 
 describe('orcaops doctor — pin checks', () => {
-  let repo: TempRepo;
+  let history: Awaited<ReturnType<typeof fixture>>;
   let xdgState: string;
-  let store: ArtifactStore;
-  let headSha: string;
-  const stepIds = new Map<string, string>();
 
   beforeEach(async () => {
-    repo = await createTempRepo({ initialBranch: 'main' });
-    headSha = (await gitClient(repo.path).revparse(['HEAD'])).trim();
+    history = await fixture();
     xdgState = await mkdtemp(path.join(tmpdir(), 'orcaops-doctor-xdg-'));
     const init = makeAgent({
-      cwd: repo.path,
-      env: withCleanSession({ XDG_STATE_HOME: xdgState }),
+      cwd: history.main,
+      env: withCleanSession({ XDG_STATE_HOME: xdgState, ORCAOPS_DATA_DIR: history.root }),
     });
     await init.runRaw(['init', '--no-llm']);
-    store = new ArtifactStore({ repoRoot: repo.path, config: await loadConfig(repo.path) });
   });
 
   afterEach(async () => {
-    store.close();
-    stepIds.clear();
-    await repo.cleanup();
+    await history.cleanup();
     await rm(xdgState, { recursive: true, force: true });
   });
 
   function agentHeadless() {
     return makeAgent({
-      cwd: repo.path,
-      env: withCleanSession({ XDG_STATE_HOME: xdgState }),
+      cwd: history.main,
+      env: withCleanSession({ XDG_STATE_HOME: xdgState, ORCAOPS_DATA_DIR: history.root }),
     });
   }
 
   function agentWithSession(sessionId = 'sess_test') {
     return makeAgent({
-      cwd: repo.path,
-      env: withCleanSession({ XDG_STATE_HOME: xdgState, CLAUDE_SESSION_ID: sessionId }),
+      cwd: history.main,
+      env: withCleanSession({
+        XDG_STATE_HOME: xdgState,
+        ORCAOPS_DATA_DIR: history.root,
+        CLAUDE_SESSION_ID: sessionId,
+      }),
     });
   }
 
   async function planArtifactHeadless(agentSessionId: string | null = null): Promise<string> {
-    const artifactId = uuidv7();
-    const stepId = uuidv7();
-    stepIds.set(artifactId, stepId);
-    await store.writePlan(
-      {
-        schema_version: 4,
-        artifact_id: artifactId,
-        branch: 'main',
-        base_sha: headSha,
-        agent: 'other',
-        agent_session_id: agentSessionId,
-        task: 'doctor pin fixture',
-        label: 'doctor pin fixture',
-        plan_steps: [
-          {
-            step_id: stepId,
-            text: 'create the doctor pin fixture',
-            label: 'create fixture',
-            acceptance_criteria: [],
-          },
-        ],
-        touched_scope: [],
-        non_goals: [],
-        decisions: [],
-        started_at: new Date().toISOString(),
-        revision_n: 0,
-        revised_at: null,
-        rationale: null,
-        step_lineage: { added: [], dropped: [], unchanged: [], rewritten: [] },
-        criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
-        prior_plan_event_id: null,
-      },
-      { idempotencyKey: uuidv7() }
-    );
-    return artifactId;
+    return history.capture(undefined, { agentSessionId, task: 'Doctor pin fixture' });
   }
 
-  async function captureCheckpointHeadless(artifactId: string, n: number): Promise<void> {
-    const stepId = stepIds.get(artifactId);
-    if (!stepId) throw new Error(`missing fixture step for ${artifactId}`);
-    await store.writeCheckpointOpened(
-      { artifact_id: artifactId, declared_step_ids: [stepId] },
-      { idempotencyKey: uuidv7(), headSha }
-    );
-    await store.writeCheckpointClosed(
-      {
-        artifact_id: artifactId,
-        n,
-        summary: `cp-${n}`,
-        files_changed: [],
-        decisions: [],
-        uncertainty: [],
-        done_criteria: [],
-        verification: [{ command: 'test fixture', exit_code: 0 }],
-        completed_step_ids: [stepId],
-        head_sha: headSha,
-      },
-      { idempotencyKey: uuidv7() }
-    );
+  async function captureCheckpointHeadless(artifactId: string, _n: number): Promise<void> {
+    await history.recordFiles(artifactId, []);
   }
 
   async function summarizeArtifact(artifactId: string): Promise<void> {
-    await store.writeSummary(
-      {
+    await history.mutate(artifactId, { outcome: 'shipped' }, (semantics) =>
+      semantics.writeSummary({
         schema_version: 1,
         artifact_id: artifactId,
         outcome: 'shipped',
@@ -168,10 +111,9 @@ describe('orcaops doctor — pin checks', () => {
         tests_run: [],
         open_items: [],
         deferred_decisions: [],
-        head_sha: headSha,
+        head_sha: history.registeredContext.binding!.git_context.head_sha!,
         ts: new Date().toISOString(),
-      },
-      { idempotencyKey: uuidv7() }
+      })
     );
   }
 
@@ -187,7 +129,7 @@ describe('orcaops doctor — pin checks', () => {
       await captureCheckpointHeadless(a, 1);
       // Plant a pin that the lifecycle won't auto-clear (different shell key).
       await plantPin({
-        cwd: repo.path,
+        cwd: history.main,
         xdgState,
         artifactId: a,
         shellKey: { kind: 'claude_session', value: 'orphan-shell' },
@@ -204,7 +146,7 @@ describe('orcaops doctor — pin checks', () => {
 
     it('warns when a pin points at a missing artifact id', async () => {
       await plantPin({
-        cwd: repo.path,
+        cwd: history.main,
         xdgState,
         artifactId: 'never-existed',
         shellKey: { kind: 'claude_session', value: 'ghost' },
@@ -244,7 +186,7 @@ describe('orcaops doctor — pin checks', () => {
       const a = await planArtifactHeadless();
       await captureCheckpointHeadless(a, 1);
       await plantPin({
-        cwd: repo.path,
+        cwd: history.main,
         xdgState,
         artifactId: a,
         shellKey: { kind: 'claude_session', value: 'fresh' },
@@ -261,7 +203,7 @@ describe('orcaops doctor — pin checks', () => {
       // Pin from 10 days ago.
       const tenDaysAgo = new Date(Date.now() - 10 * 86_400_000).toISOString();
       await plantPin({
-        cwd: repo.path,
+        cwd: history.main,
         xdgState,
         artifactId: a,
         shellKey: { kind: 'claude_session', value: 'parked' },
@@ -271,7 +213,7 @@ describe('orcaops doctor — pin checks', () => {
       const r = JSON.parse(res.stdout) as DoctorReport;
       const check = findCheck(r, 'aged-pin');
       expect(check.status).toBe('warn');
-      expect(check.details?.some((d) => d.includes('10d ago'))).toBe(true);
+      expect(check.details?.some((d) => d.includes(tenDaysAgo))).toBe(true);
     });
   });
 
@@ -291,7 +233,7 @@ describe('orcaops doctor — pin checks', () => {
       const a = await planArtifactHeadless();
       await captureCheckpointHeadless(a, 1);
       await plantPin({
-        cwd: repo.path,
+        cwd: history.main,
         xdgState,
         artifactId: a,
         shellKey: { kind: 'claude_session', value: 'owner' },
@@ -299,7 +241,9 @@ describe('orcaops doctor — pin checks', () => {
       });
       const res = await agentHeadless().runRaw(['doctor', '--json']);
       const r = JSON.parse(res.stdout) as DoctorReport;
-      expect(findCheck(r, 'pin-orphan').summary).toMatch(/all pinned/);
+      expect(findCheck(r, 'pin-orphan').summary).toBe(
+        '0 of 1 active artifact(s) have no ephemeral pin'
+      );
     });
   });
 
@@ -324,7 +268,9 @@ describe('orcaops doctor — pin checks', () => {
       const check = findCheck(r, 'same-session-multi-active');
       // Informational: status stays 'pass'; surfaces grouping in details.
       expect(check.status).toBe('pass');
-      expect(check.summary).toMatch(/1 \(branch, session\)/);
+      expect(check.summary).toBe(
+        '1 branch and authoring-session group(s) have multiple active artifacts'
+      );
     });
   });
 
@@ -341,9 +287,13 @@ describe('orcaops doctor — pin checks', () => {
       const a = await planArtifactHeadless();
       await captureCheckpointHeadless(a, 1); // a is now active
       const b = await planArtifactHeadless();
-      // Pin a explicitly, then pin b → displaces a.
-      await agentWithSession().runRaw(['checkout', a, '--json']);
-      await agentWithSession().runRaw(['checkout', b, '--json']);
+      await history.mutate(a, { displacedBy: b }, (semantics) =>
+        semantics.writePinDisplaced(a, {
+          displaced_by_artifact_id: b,
+          shell_key: { kind: 'claude_session', value: 'sess_test' },
+          reason: 'explicit-checkout',
+        })
+      );
       const res = await agentHeadless().runRaw(['doctor', '--json']);
       const r = JSON.parse(res.stdout) as DoctorReport;
       const check = findCheck(r, 'pin-displaced');
@@ -356,8 +306,13 @@ describe('orcaops doctor — pin checks', () => {
       const a = await planArtifactHeadless();
       await captureCheckpointHeadless(a, 1);
       const b = await planArtifactHeadless();
-      await agentWithSession().runRaw(['checkout', a, '--json']);
-      await agentWithSession().runRaw(['checkout', b, '--json']);
+      await history.mutate(a, { displacedBy: b }, (semantics) =>
+        semantics.writePinDisplaced(a, {
+          displaced_by_artifact_id: b,
+          shell_key: { kind: 'claude_session', value: uuidv7() },
+          reason: 'explicit-checkout',
+        })
+      );
       // Summarize a — once summarized, we no longer flag a's displaced event.
       await summarizeArtifact(a);
       const res = await agentHeadless().runRaw(['doctor', '--json']);

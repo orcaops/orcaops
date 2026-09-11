@@ -74,9 +74,7 @@ export interface ReviewCheckpoint {
    */
   doneCriteria: Array<{ criterionId: string; evidence: string }>;
   /**
-   * Verified-close evidence (`verification[]`): commands run fresh at close
-   * with their exit codes. A non-zero exit is valid evidence, not an error.
-   * NOT the evaluator log — that is `ReviewArtifact.evaluatorRuns`.
+   * Agent-supplied command reports, not execution receipts or evaluator runs.
    */
   verification: Array<{
     command: string;

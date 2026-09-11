@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CLOUD_HIDDEN_COMMANDS } from '@orcaops/adapters';
 import { FileStore } from '@orcaops/core';
-import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
+import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { loginAction } from '../../src/commands/login.js';
 import { logoutAction } from '../../src/commands/logout.js';
@@ -52,6 +52,7 @@ describe('cloud gate lifecycle (real credential detection)', () => {
   let mock: MockOAuthServer;
   let repo: TempRepo;
   let configHome: string;
+  let dataRoot: string;
   let store: FileStore;
   let originalExit: typeof process.exit;
 
@@ -59,10 +60,12 @@ describe('cloud gate lifecycle (real credential detection)', () => {
     mock = await startMockOAuthServer();
     repo = await createTempRepo({ initialBranch: 'main' });
     configHome = await mkdtemp(path.join(tmpdir(), 'orcaops-gate-cfg-'));
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-gate-history-'));
     store = new FileStore({ dir: configHome });
     // The gate resolves the credentials file from this, so it is what makes
     // detection real rather than forced.
     vi.stubEnv('ORCAOPS_CONFIG_HOME', configHome);
+    vi.stubEnv('ORCAOPS_DATA_DIR', dataRoot);
     originalExit = process.exit;
     Object.defineProperty(process, 'exit', {
       value: ((code?: number) => {
@@ -86,6 +89,7 @@ describe('cloud gate lifecycle (real credential detection)', () => {
     await mock.shutdown();
     await repo.cleanup();
     await rm(configHome, { recursive: true, force: true });
+    await rm(dataRoot, { recursive: true, force: true });
     Object.defineProperty(process, 'exit', {
       value: originalExit,
       configurable: true,
@@ -638,8 +642,7 @@ describe('cloud gate lifecycle (real credential detection)', () => {
     await rm(globalRoot, { recursive: true, force: true });
   });
 
-  it('emits no cloud-named check and recommends no hidden command', async () => {
-    // General-purpose: catches the next leaked recommendation, not just this one.
+  it('reports canonical cloud state without recommending a hidden command', async () => {
     const report = await makeAgent({
       cwd: repo.path,
       env: {
@@ -649,8 +652,9 @@ describe('cloud gate lifecycle (real credential detection)', () => {
     }).runRaw(['doctor', '--json']);
     const checks = (JSON.parse(report.stdout) as DoctorReport).checks;
 
-    for (const c of checks)
-      expect(c.name, `check "${c.name}" names the cloud`).not.toMatch(/cloud/);
+    expect(checks.find((check) => check.name === 'cloud-sync-pending')).toMatchObject({
+      status: 'pass',
+    });
 
     const prose = checks.map((c) => [c.summary, ...(c.details ?? [])].join('\n')).join('\n');
     for (const command of CLOUD_HIDDEN_COMMANDS) {
@@ -825,7 +829,17 @@ describe('cloud gate lifecycle (real credential detection)', () => {
   });
 
   it('captures without a cloud warning on a machine with no credentials', async () => {
-    const r = await makeAgent({ cwd: repo.path, env: { ORCAOPS_CONFIG_HOME: configHome } }).runRaw([
+    await gitClient(repo.path).raw([
+      'remote',
+      'add',
+      'origin',
+      'https://git.example.test/orcaops/repo.git',
+    ]);
+    const r = await makeAgent({
+      cwd: repo.path,
+      cloudBaseUrl: mock.baseUrl,
+      env: { ORCAOPS_CONFIG_HOME: configHome },
+    }).runRaw([
       'capture',
       'plan',
       '--no-llm',
@@ -873,7 +887,11 @@ describe('cloud gate lifecycle (real credential detection)', () => {
       }),
       { mode: 0o600 }
     );
-    const r = await makeAgent({ cwd: repo.path, env: { ORCAOPS_CONFIG_HOME: configHome } }).runRaw([
+    const r = await makeAgent({
+      cwd: repo.path,
+      cloudBaseUrl: mock.baseUrl,
+      env: { ORCAOPS_CONFIG_HOME: configHome },
+    }).runRaw([
       'capture',
       'plan',
       '--no-llm',

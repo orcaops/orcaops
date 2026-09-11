@@ -1,8 +1,6 @@
-import { captureWorktreeTreeSha } from '@orcaops/core';
+import { captureWorktreeTreeSha, type Repo } from '@orcaops/core';
 import type { EvaluatorContext, ResolvedEvaluator } from '@orcaops/evaluator-protocol';
 import { canonicalJson, combineEvaluatorFingerprints, sha256 } from '@orcaops/evaluator-runner';
-
-import type { CliContext } from './context.js';
 
 export interface PrePrReviewFingerprints {
   evaluator_set_fingerprint: string;
@@ -16,7 +14,7 @@ export function requiresRepositoryFingerprint(evaluators: readonly ResolvedEvalu
 }
 
 export async function computePrePrReviewFingerprints(opts: {
-  ctx: Pick<CliContext, 'repo'>;
+  ctx: { repo: Repo };
   evaluators: readonly ResolvedEvaluator[];
   context: EvaluatorContext;
 }): Promise<PrePrReviewFingerprints> {

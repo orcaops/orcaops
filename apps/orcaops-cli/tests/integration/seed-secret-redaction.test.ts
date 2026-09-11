@@ -1,9 +1,12 @@
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { queryProjectArtifacts, readProjectArtifact } from '@orcaops/storage/history/database';
 import { createHistoryRepo, type HistoryRepo } from '@orcaops/test-harness';
 
+import { resolveDatabaseSeedCommandContext } from '../../src/lib/database-seed-context.js';
 import { makeAgent } from '../support/test-agent.js';
 
 // Real-shape, semantically dead. Refuse-tier everywhere else in the codebase.
@@ -17,8 +20,10 @@ const FAKE_GH_TOKEN = 'ghp_ABCDEF1234567890abcdef1234567890ABCDEF';
 describe('seed redacts secrets carried in commit history', () => {
   let repo: HistoryRepo;
   let agent: ReturnType<typeof makeAgent>;
+  let dataRoot: string;
 
   beforeEach(async () => {
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-seed-redaction-data-'));
     repo = await createHistoryRepo([
       {
         type: 'commit',
@@ -33,39 +38,47 @@ describe('seed redacts secrets carried in commit history', () => {
         files: { 'deploy.sh': 'echo deploying safely\n' },
       },
     ]);
-    agent = makeAgent({ cwd: repo.path });
+    agent = makeAgent({
+      cwd: repo.path,
+      env: { ORCAOPS_DATA_DIR: dataRoot, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
     await agent.init({ noLlm: true });
   });
 
   afterEach(async () => {
     await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
   });
 
   it('keeps the token out of the event log while still seeding the commit', async () => {
     const applied = await agent.runRaw(['seed', '--yes', '--json']);
     expect(applied.exitCode).toBe(0);
 
-    const orcaopsDir = path.join(repo.path, '.orcaops', 'artifacts');
-    const { readdir } = await import('node:fs/promises');
-    const artifacts = await readdir(orcaopsDir);
-    expect(artifacts.length).toBeGreaterThan(0);
+    const context = await resolveDatabaseSeedCommandContext({
+      cwd: repo.path,
+      env: { ORCAOPS_DATA_DIR: dataRoot, ORCAOPS_DISABLE_DRAIN: '1' },
+      write: false,
+    });
+    try {
+      const artifacts = queryProjectArtifacts(context.database, { origin: 'imported' }).rows;
+      expect(artifacts.length).toBeGreaterThan(0);
 
-    let sawRedaction = false;
-    for (const artifact of artifacts) {
-      const log = path.join(orcaopsDir, artifact, 'events.ndjson');
-      let contents: string;
-      try {
-        contents = await readFile(log, 'utf8');
-      } catch {
-        continue;
+      let sawRedaction = false;
+      for (const artifact of artifacts) {
+        const contents = readProjectArtifact(
+          context.database,
+          artifact.artifactId
+        )!.eventBytes.toString('utf8');
+        expect(contents).not.toContain(FAKE_GH_TOKEN);
+        if (contents.includes('[REDACTED_SECRET]')) sawRedaction = true;
       }
-      expect(contents).not.toContain(FAKE_GH_TOKEN);
-      if (contents.includes('[REDACTED_SECRET]')) sawRedaction = true;
-    }
 
-    // Redaction, not omission: the commit is still seeded, with the token
-    // replaced. A backfill that silently dropped the commit would also pass
-    // the assertion above.
-    expect(sawRedaction).toBe(true);
+      // Redaction, not omission: the commit is still seeded, with the token
+      // replaced. A backfill that silently dropped the commit would also pass
+      // the assertion above.
+      expect(sawRedaction).toBe(true);
+    } finally {
+      context.close();
+    }
   });
 });

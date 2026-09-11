@@ -1,37 +1,23 @@
-// Pure semantic-anchor v3 submission validation and current-generation reading.
+// Pure semantic-anchor v3 submission validation and persisted schemas.
 // Model proposals create associations only. They never mutate or adjudicate
 // Story topology, checkpoint ownership, findings, or uncertainty state.
 
-import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
 import { z } from 'zod';
 
 import { executableIdentitySchema } from '@orcaops/review-core';
 
-import {
-  type AccountProjection,
-  parseAccountProjectionJson,
-  parseForensicInputJson,
-} from './dossier.js';
+import { type AccountProjection } from './dossier.js';
 import {
   collectEligibleSemanticAnchorCitations,
   ELIGIBLE_SEMANTIC_ANCHOR_CITATION_KINDS,
-  parseSemanticAnchorInputReceipt,
-  prepareSemanticAnchorInput,
-  SEMANTIC_ANCHOR_RECEIPT_FILE,
   type SemanticAnchorCitation,
-  semanticAnchorStoryCatalogIssue,
 } from './semanticAnchors.js';
-import type { CoverageInput } from './storyOwnership.js';
-import { parseStoryReviewModel, STORY_REVIEW_MODEL_FILE } from './storyReviewModel.js';
 import {
   canonicalJson,
   canonicalJsonSha256,
   normalizeSubmission,
   type SubmissionNormalizationCode,
 } from './submissionNormalization.js';
-import { readTwolaneRunFile, TwolaneRunFileError } from './twolaneRunFile.js';
 
 export const SEMANTIC_ANCHOR_SUBMISSION_SCHEMA_VERSION = 3;
 export const SEMANTIC_ANCHOR_ATTEMPT_SCHEMA_VERSION = 3;
@@ -311,7 +297,7 @@ export const semanticAnchorModelSchema = z
   .strictObject({
     schema_version: z.literal(SEMANTIC_ANCHOR_MODEL_SCHEMA_VERSION),
     generation_id: uuid,
-    run_id: uuid,
+    run_id: nonEmpty,
     floor_input_hash: nonEmpty,
     prepared_payload_sha256: sha256String,
     source: z.literal(SEMANTIC_ANCHOR_SOURCE),
@@ -342,7 +328,7 @@ export const semanticAnchorAttemptSchema = z
   .strictObject({
     schema_version: z.literal(SEMANTIC_ANCHOR_ATTEMPT_SCHEMA_VERSION),
     generation_id: uuid,
-    run_id: uuid,
+    run_id: nonEmpty,
     attempt: z.union([z.literal(1), z.literal(2)]),
     started_at: z.iso.datetime(),
     submitted_at: z.iso.datetime(),
@@ -398,7 +384,7 @@ export const semanticAnchorManifestSchema = z
   .strictObject({
     schema_version: z.literal(SEMANTIC_ANCHOR_MANIFEST_SCHEMA_VERSION),
     generation_id: uuid,
-    run_id: uuid,
+    run_id: nonEmpty,
     status: z.enum(['VALID', 'REJECTED']),
     created_at: z.iso.datetime(),
     lifecycle_started_at: z.iso.datetime(),
@@ -484,7 +470,7 @@ export type SemanticAnchorManifest = z.infer<typeof semanticAnchorManifestSchema
 
 export const semanticAnchorCurrentPointerSchema = z.strictObject({
   schema_version: z.literal(SEMANTIC_ANCHOR_POINTER_SCHEMA_VERSION),
-  run_id: uuid,
+  run_id: nonEmpty,
   generation_id: uuid,
   manifest_file: z.literal(SEMANTIC_ANCHOR_MANIFEST_FILE),
   manifest_sha256: sha256String,
@@ -512,8 +498,6 @@ export interface NormalizedSemanticAnchorSubmission {
   normalized: unknown;
   canonical: Record<string, unknown> | null;
 }
-
-const sha256 = (bytes: string): string => createHash('sha256').update(bytes).digest('hex');
 
 /** Parse raw JSON and, only when it is a JSON string, one additional JSON object layer. */
 export function normalizeSemanticAnchorSubmission(
@@ -844,293 +828,6 @@ export function validateSemanticAnchorSubmission(input: {
       items,
     }),
   };
-}
-
-const attemptFile = (dir: string, attempt: number): string =>
-  path.join(dir, `attempt-${attempt}-v3.json`);
-
-async function validateGenerationAgainstFinalizedRun(
-  runDir: string,
-  pointer: SemanticAnchorCurrentPointer,
-  manifest: SemanticAnchorManifest,
-  model: SemanticAnchorModel
-): Promise<string | null> {
-  try {
-    // The strict persisted-schema read: a corrupt run file throws
-    // TwolaneRunFileError, which the catch below names distinctly from
-    // a missing file.
-    const [run, recordRaw] = await Promise.all([
-      readTwolaneRunFile(runDir),
-      readFile(path.join(runDir, 'run-record-v1.json'), 'utf8'),
-    ]);
-    const record = JSON.parse(recordRaw) as Record<string, unknown>;
-    if (
-      run.finalized === null ||
-      run.run_id !== pointer.run_id ||
-      record.run_id !== pointer.run_id ||
-      record.outcome !== run.finalized.outcome ||
-      record.finalized_at !== run.finalized.at ||
-      JSON.stringify(record.input_shas) !== JSON.stringify(run.input_shas)
-    )
-      return 'current generation does not match a terminal finalized run record';
-    const preparedRecord = record.semantic_anchor_input;
-    if (preparedRecord === null || typeof preparedRecord !== 'object')
-      return 'current generation has no finalized prepared-input receipt';
-    const { receipt_file: receiptFile, ...receiptFields } = preparedRecord as Record<
-      string,
-      unknown
-    >;
-    const receipt = parseSemanticAnchorInputReceipt(receiptFields);
-    if (
-      receipt.status !== 'READY' ||
-      receipt.payload_file === null ||
-      receipt.payload_sha256 === null ||
-      manifest.prepared_payload_sha256 !== receipt.payload_sha256 ||
-      JSON.stringify(manifest.source_hashes) !== JSON.stringify(receipt.source_hashes)
-    )
-      return 'current generation does not match the finalized prepared-input receipt';
-    if (receiptFile !== SEMANTIC_ANCHOR_RECEIPT_FILE)
-      return 'current generation prepared-input receipt file is absent';
-    const receiptRaw = await readFile(path.join(runDir, receiptFile), 'utf8');
-    if (sha256(receiptRaw) !== manifest.prepared_receipt_sha256)
-      return 'current generation prepared-input receipt hash is stale';
-    const receiptDisk = parseSemanticAnchorInputReceipt(JSON.parse(receiptRaw));
-    if (JSON.stringify(receiptDisk) !== JSON.stringify(receipt))
-      return 'current generation prepared-input receipt differs from the run record';
-    const accountLineage = record.account_lineage as
-      | {
-          accepted_envelope_sha256?: unknown;
-          compiled_payload_sha256?: unknown;
-        }
-      | null
-      | undefined;
-    if (
-      accountLineage === null ||
-      accountLineage === undefined ||
-      typeof accountLineage.accepted_envelope_sha256 !== 'string' ||
-      typeof accountLineage.compiled_payload_sha256 !== 'string'
-    )
-      return 'current generation has no finalized accepted-account lineage';
-    const [story, projection, coverage, diff, forensicInput, payload, acceptedAccountRaw] =
-      await Promise.all([
-        readFile(path.join(runDir, STORY_REVIEW_MODEL_FILE), 'utf8'),
-        readFile(path.join(runDir, 'account-projection-v1.json'), 'utf8'),
-        readFile(path.join(runDir, 'coverage-v1.json'), 'utf8'),
-        readFile(path.join(runDir, 'diff.patch'), 'utf8'),
-        readFile(path.join(runDir, 'forensic-input-v1.json'), 'utf8'),
-        readFile(path.join(runDir, receipt.payload_file), 'utf8'),
-        readFile(path.join(runDir, 'accepted-account.json'), 'utf8'),
-      ]);
-    const acceptedAccount = JSON.parse(acceptedAccountRaw) as { compiled_payload?: unknown };
-    if (
-      sha256(story) !== manifest.source_hashes.story_review_model_sha256 ||
-      sha256(projection) !== manifest.source_hashes.account_projection_sha256 ||
-      sha256(coverage) !== manifest.source_hashes.coverage_sha256 ||
-      sha256(diff) !== manifest.source_hashes.diff_sha256 ||
-      canonicalJsonSha256(acceptedAccount) !==
-        manifest.source_hashes.accepted_account_envelope_sha256 ||
-      canonicalJsonSha256(acceptedAccount.compiled_payload) !==
-        manifest.source_hashes.compiled_account_payload_sha256 ||
-      accountLineage.accepted_envelope_sha256 !==
-        manifest.source_hashes.accepted_account_envelope_sha256 ||
-      accountLineage.compiled_payload_sha256 !==
-        manifest.source_hashes.compiled_account_payload_sha256 ||
-      sha256(payload) !== manifest.prepared_payload_sha256 ||
-      Buffer.byteLength(payload) !== receipt.payload_bytes
-    )
-      return 'current generation source or prepared-payload hash is stale';
-    const storyModel = parseStoryReviewModel(JSON.parse(story));
-    const rerendered = prepareSemanticAnchorInput({
-      runId: pointer.run_id,
-      storyModel,
-      storyModelBytes: story,
-      accountProjection: parseAccountProjectionJson(
-        projection,
-        `${runDir}/account-projection-v1.json`
-      ),
-      accountProjectionBytes: projection,
-      coverage: JSON.parse(coverage) as CoverageInput,
-      coverageBytes: coverage,
-      pinnedDiffText: diff,
-      forensicInput: parseForensicInputJson(forensicInput, `${runDir}/forensic-input-v1.json`),
-      forensicInputBytes: forensicInput,
-      accountLineage: {
-        acceptedEnvelopeSha256: accountLineage.accepted_envelope_sha256,
-        compiledPayloadSha256: accountLineage.compiled_payload_sha256,
-      },
-    });
-    if (
-      rerendered.receipt.status !== 'READY' ||
-      rerendered.receipt.payload_sha256 !== receipt.payload_sha256 ||
-      JSON.stringify(rerendered.receipt.source_hashes) !== JSON.stringify(receipt.source_hashes) ||
-      JSON.stringify(rerendered.receipt.derivation_hashes) !==
-        JSON.stringify(receipt.derivation_hashes) ||
-      JSON.stringify(rerendered.receipt.target_scope) !== JSON.stringify(receipt.target_scope)
-    )
-      return 'current generation prepared input is stale against immutable policy inputs';
-    const catalogIssue = semanticAnchorStoryCatalogIssue(storyModel, rerendered.items);
-    if (catalogIssue !== null) return `current generation ${catalogIssue}`;
-    const expectedItems = rerendered.items.map((item) => ({ id: item.id, kind: item.kind }));
-    const installedItems = model.items.map((item) => ({
-      id: item.citation_id,
-      kind: item.citation_kind,
-    }));
-    if (JSON.stringify(installedItems) !== JSON.stringify(expectedItems))
-      return 'current generation does not contain every eligible item exactly once in source order';
-    return null;
-  } catch (error) {
-    // Distinguish the three failure families instead of flattening them:
-    // a typed run-file violation names the contract, a missing file names
-    // the absence, and anything else stays a generic invalid-contract
-    // disposition.
-    if (error instanceof TwolaneRunFileError) {
-      return `current generation run file violates the persisted contract: ${error.message}`;
-    }
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return `current generation is missing a required run file: ${
-        error instanceof Error ? error.message : String(error)
-      }`;
-    }
-    return `current generation finalized-run contract is invalid: ${
-      error instanceof Error ? error.message : String(error)
-    }`;
-  }
-}
-
-export type CurrentSemanticAnchorGeneration =
-  | { status: 'ABSENT' }
-  | { status: 'STALE'; reason: string }
-  | { status: 'INVALID'; reason: string }
-  | {
-      status: 'OK';
-      pointer: SemanticAnchorCurrentPointer;
-      manifest: SemanticAnchorManifest;
-      model: SemanticAnchorModel;
-    };
-
-/** Read exactly the v3 pointed generation. */
-export async function loadCurrentSemanticAnchorGeneration(
-  runDir: string
-): Promise<CurrentSemanticAnchorGeneration> {
-  const anchors = path.join(runDir, 'anchors');
-  const pointerPath = path.join(anchors, SEMANTIC_ANCHOR_CURRENT_FILE);
-  let pointerRaw: string;
-  try {
-    pointerRaw = await readFile(pointerPath, 'utf8');
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') return { status: 'ABSENT' };
-    return { status: 'INVALID', reason: `current pointer is unreadable: ${String(error)}` };
-  }
-  let pointerJson: unknown;
-  try {
-    pointerJson = JSON.parse(pointerRaw);
-  } catch {
-    return { status: 'INVALID', reason: 'current pointer is not valid JSON' };
-  }
-  const pointer = semanticAnchorCurrentPointerSchema.safeParse(pointerJson);
-  if (!pointer.success) return { status: 'INVALID', reason: 'current pointer schema is invalid' };
-  const generationDir = path.join(anchors, 'generations', pointer.data.generation_id);
-  try {
-    const manifestRaw = await readFile(
-      path.join(generationDir, pointer.data.manifest_file),
-      'utf8'
-    );
-    if (sha256(manifestRaw) !== pointer.data.manifest_sha256)
-      return { status: 'INVALID', reason: 'current manifest hash does not match the pointer' };
-    const manifestJson = JSON.parse(manifestRaw) as unknown;
-    const manifest = semanticAnchorManifestSchema.parse(manifestJson);
-    if (
-      manifest.status !== 'VALID' ||
-      manifest.generation_id !== pointer.data.generation_id ||
-      manifest.run_id !== pointer.data.run_id ||
-      manifest.model_sha256 === null ||
-      manifest.accepted_attempt_sha256 === null
-    )
-      return {
-        status: 'INVALID',
-        reason: 'current manifest identity or terminal status is invalid',
-      };
-    const acceptedAttemptHashes: string[] = [];
-    let firstAttemptStartedAt: string | null = null;
-    let finalAttemptOutcome: SemanticAnchorAttemptOutcome | null = null;
-    let finalRuntimeIdentity: unknown = null;
-    for (let index = 0; index < manifest.attempt_count; index += 1) {
-      const attemptRaw = await readFile(attemptFile(generationDir, index + 1), 'utf8');
-      const attemptSha = sha256(attemptRaw);
-      if (attemptSha !== manifest.attempt_sha256s[index])
-        return { status: 'INVALID', reason: 'current attempt hash does not match its manifest' };
-      const attempt = semanticAnchorAttemptSchema.parse(JSON.parse(attemptRaw));
-      if (
-        attempt.generation_id !== manifest.generation_id ||
-        attempt.run_id !== manifest.run_id ||
-        attempt.attempt !== index + 1
-      )
-        return { status: 'INVALID', reason: 'current attempt identity is invalid' };
-      if (
-        (attempt.normalized_submission !== null &&
-          canonicalJsonSha256(attempt.normalized_submission) !==
-            attempt.normalized_submission_sha256) ||
-        (attempt.accepted && attempt.normalized_submission === null)
-      )
-        return { status: 'INVALID', reason: 'current attempt normalized lineage is invalid' };
-      if (attempt.accepted) acceptedAttemptHashes.push(attemptSha);
-      firstAttemptStartedAt ??= attempt.started_at;
-      finalAttemptOutcome = attempt.outcome;
-      finalRuntimeIdentity = attempt.runtime_identity;
-    }
-    if (
-      manifest.lifecycle_started_at !== firstAttemptStartedAt ||
-      manifest.final_attempt_outcome !== finalAttemptOutcome ||
-      JSON.stringify(manifest.runtime_identity) !== JSON.stringify(finalRuntimeIdentity)
-    )
-      return { status: 'INVALID', reason: 'current generation attempt lifecycle is invalid' };
-    if (
-      acceptedAttemptHashes.length !== 1 ||
-      acceptedAttemptHashes[0] !== manifest.accepted_attempt_sha256
-    )
-      return { status: 'INVALID', reason: 'current accepted-attempt lineage is invalid' };
-    const modelRaw = await readFile(path.join(generationDir, manifest.model_file), 'utf8');
-    if (sha256(modelRaw) !== manifest.model_sha256)
-      return { status: 'INVALID', reason: 'current model hash does not match its manifest' };
-    const modelJson = JSON.parse(modelRaw) as unknown;
-    const model = semanticAnchorModelSchema.parse(modelJson);
-    if (
-      model.generation_id !== manifest.generation_id ||
-      model.run_id !== manifest.run_id ||
-      model.prepared_payload_sha256 !== manifest.prepared_payload_sha256
-    )
-      return { status: 'INVALID', reason: 'current model identity does not match its manifest' };
-    const runContractIssue = await validateGenerationAgainstFinalizedRun(
-      runDir,
-      pointer.data,
-      manifest,
-      model
-    );
-    // The pointed files are internally valid immutable evidence, but no longer
-    // describe the finalized run inputs installed beside them. Do not reinterpret
-    // or remap those targets: a new floor/Story requires a new anchor generation.
-    if (runContractIssue !== null) {
-      const stale =
-        runContractIssue ===
-          'current generation does not match the finalized prepared-input receipt' ||
-        runContractIssue === 'current generation prepared-input receipt hash is stale' ||
-        runContractIssue === 'current generation source or prepared-payload hash is stale' ||
-        runContractIssue ===
-          'current generation prepared input is stale against immutable policy inputs';
-      return stale
-        ? { status: 'STALE', reason: runContractIssue }
-        : { status: 'INVALID', reason: runContractIssue };
-    }
-    return { status: 'OK', pointer: pointer.data, manifest, model };
-  } catch (error) {
-    return {
-      status: 'INVALID',
-      reason: `current generation is corrupt: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    };
-  }
 }
 
 /** Stable first-sentence presentation helper; never model-authored. */

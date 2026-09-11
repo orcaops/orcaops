@@ -9,10 +9,12 @@ import {
   type SourcePlanReviewPushResponse,
   TrpcRequestError,
 } from '@orcaops/sdk';
-import { readReviewCandidate, readReviewProposal, sourcePlanCacheDir } from '@orcaops/storage';
 
 import { reviewPushAction, type ReviewPushClient, runReviewPush } from './push.js';
-import { seedCandidate } from './test-helpers.js';
+import {
+  createMemoryPlanReviewPersistence,
+  seedCandidate,
+} from '../../../../tests/support/plan-review-persistence.js';
 
 const sha = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex');
 const EDITED = '# edited\n\nnew body';
@@ -47,7 +49,9 @@ function pushClient(over: Partial<ReviewPushClient['sourcePlan']> = {}): ReviewP
 
 describe('runReviewPush', () => {
   let repoRoot: string;
+  let persistence: ReturnType<typeof createMemoryPlanReviewPersistence>;
   beforeEach(async () => {
+    persistence = createMemoryPlanReviewPersistence();
     repoRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-review-push-'));
   });
   afterEach(async () => {
@@ -55,6 +59,7 @@ describe('runReviewPush', () => {
   });
 
   const base = (root: string) => ({
+    persistence,
     repoRoot: root,
     baseUrl: 'https://cloud.example',
     orgId: 'org_1',
@@ -80,7 +85,7 @@ describe('runReviewPush', () => {
   });
 
   it('rejects a body with a forbidden control character before any wire call', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     let called = 0;
     const client = {
       sourcePlan: {
@@ -102,7 +107,7 @@ describe('runReviewPush', () => {
   });
 
   it('published: overwrites the local candidate record with the new version', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const result = await runReviewPush({
       client: pushClient(),
       onConflict: 'fail',
@@ -110,19 +115,14 @@ describe('runReviewPush', () => {
     });
     expect(result.status).toBe('published');
     expect(result.candidate_version_number).toBe(5);
-    const rec = await readReviewCandidate(
-      sourcePlanCacheDir(repoRoot),
-      'https://cloud.example',
-      'org_1',
-      'ext-1'
-    );
+    const rec = await persistence.readCandidate('ext-1');
     expect(rec?.version_id).toBe('ver_5');
     expect(rec?.version_number).toBe(5);
     expect(rec?.body).toBe(EDITED);
   });
 
   it('sends expected_candidate_version_id + raw content_hash from the cached candidate', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewPush = vi.fn(async () => published('ver_5', 5));
     await runReviewPush({
       client: pushClient({ reviewPush }),
@@ -135,7 +135,7 @@ describe('runReviewPush', () => {
   });
 
   it('ships the authoring baseline on the push wire call (null when unresolved)', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const baseline = {
       repo_url: 'https://github.com/foo/bar',
       branch: 'main',
@@ -160,7 +160,7 @@ describe('runReviewPush', () => {
   });
 
   it('carries the same baseline onto the conflict-conversion propose (provenance survives)', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const baseline = {
       repo_url: 'https://github.com/foo/bar',
       branch: 'main',
@@ -178,7 +178,7 @@ describe('runReviewPush', () => {
   });
 
   it('published with a null candidate version reports published but does NOT advance the record', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewPush = vi.fn(async () => published(null, null));
     const result = await runReviewPush({
       client: pushClient({ reviewPush }),
@@ -188,17 +188,12 @@ describe('runReviewPush', () => {
     expect(result.status).toBe('published');
     // The skip-the-write fail-safe: a null version can't advance the CAS token, so
     // the seeded ver_4 stays — the next op re-pulls rather than trusting a gap.
-    const rec = await readReviewCandidate(
-      sourcePlanCacheDir(repoRoot),
-      'https://cloud.example',
-      'org_1',
-      'ext-1'
-    );
+    const rec = await persistence.readCandidate('ext-1');
     expect(rec?.version_id).toBe('ver_4');
   });
 
   it('conflict + fail: throws REVIEW_PUSH_CONFLICT carrying current_version_number, record un-advanced', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewPush = vi.fn(async () => conflict(9));
     const err = await runReviewPush({
       client: pushClient({ reviewPush }),
@@ -213,17 +208,12 @@ describe('runReviewPush', () => {
       details: { current_version_number: 9 },
     });
     // The local record is NOT advanced — push fails closed, the user re-pulls.
-    const rec = await readReviewCandidate(
-      sourcePlanCacheDir(repoRoot),
-      'https://cloud.example',
-      'org_1',
-      'ext-1'
-    );
+    const rec = await persistence.readCandidate('ext-1');
     expect(rec?.version_id).toBe('ver_4');
   });
 
   it('conflict + propose: re-files the SAME body as a proposal based on expected', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewPush = vi.fn(async () => conflict(9));
     const reviewPropose = vi.fn(async () => proposed('prop_77'));
     const result = await runReviewPush({
@@ -237,17 +227,12 @@ describe('runReviewPush', () => {
     expect(reviewPropose).toHaveBeenCalledWith(
       expect.objectContaining({ base_version_id: 'ver_4', body: EDITED })
     );
-    const prop = await readReviewProposal(
-      sourcePlanCacheDir(repoRoot),
-      'https://cloud.example',
-      'org_1',
-      'prop_77'
-    );
+    const prop = await persistence.readProposal('ext-1', 'prop_77');
     expect(prop?.proposal_id).toBe('prop_77');
   });
 
   it('maps a non-author FORBIDDEN to the friendly author-only message', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewPush = vi.fn(async () => {
       throw new TrpcRequestError('forbidden', { code: 'FORBIDDEN', httpStatus: 403 });
     });
@@ -264,7 +249,7 @@ describe('runReviewPush', () => {
   });
 
   it('maps an APPROVED/PINNED CONFLICT (thrown) to "no longer in review"', async () => {
-    await seedCandidate(repoRoot, { versionId: 'ver_4', versionNumber: 4 });
+    await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewPush = vi.fn(async () => {
       throw new TrpcRequestError('conflict', { code: 'CONFLICT', httpStatus: 409 });
     });

@@ -2,8 +2,8 @@
 name: "Orcaops: diagnose install"
 description: "Diagnose or repair Orcaops setup. Use for \"is Orcaops set up correctly?\", \"diagnose Orcaops\", or when an orcaops command fails unexpectedly."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "cf325a18454b"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "ed8eb5bbb037"
 tags: ["orcaops", "read", "diagnostic"]
 ---
 

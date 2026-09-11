@@ -9,7 +9,7 @@ import * as gitBarrel from './index.js';
  * Surface tests for the `packages/core/src/git/` barrel.
  *
  * These guard against accidental re-exposure of snapshot internals
- * (`runGit`, `allocateTempIndex`, `snapshotRefName`, `parseSnapshotRefName`,
+ * (`runGit`, `allocateTempIndex`, `snapshotRefName`,
  * `classifySnapshotFailure`, plus the `RunGitOptions` / `RunGitResult`
  * type-only internals) through the `@orcaops/core` package barrel.
  * (`resolveRepoTopLevel` IS public surface — see `git/index.ts`.)
@@ -73,6 +73,7 @@ const EXPECTED_PUBLIC_VALUE_EXPORTS = [
   'listRawBaselineRefNames',
   'listRawBaselineRefIdentities',
   'parseBaselineRefName',
+  'parseSnapshotRefName',
   'pinBaselineTree',
   'pruneBaselineRefs',
   'pruneBaselineRefsIfUnchanged',
@@ -91,7 +92,6 @@ const INTERNAL_VALUE_NAMES_THAT_MUST_NOT_LEAK = [
   'runGit',
   'allocateTempIndex',
   'snapshotRefName',
-  'parseSnapshotRefName',
   'classifySnapshotFailure',
   // The shared temp-index core is exported from snapshots.js for
   // colocated tests but is an internal detail, like runGit — it must NOT
@@ -162,6 +162,7 @@ describe('packages/core/src/git barrel — public surface', () => {
       'listRawBaselineRefNames',
       'listRawBaselineRefIdentities',
       'parseBaselineRefName',
+      'parseSnapshotRefName',
       'pinBaselineTree',
       'pruneBaselineRefs',
       'pruneBaselineRefsIfUnchanged',

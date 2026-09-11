@@ -1,8 +1,7 @@
 // Local attribution matcher: exact hunk-hash matching of a live diff
 // against checkpoint manifests, plus the line-membership primitive.
 // Small module — the whole surface is public contract for
-// `orcaops diff --attribution`, the `resolveWhy` line tier, and the
-// agent-trace exporter.
+// `orcaops diff --attribution`, provenance resolution, and the agent-trace exporter.
 export { isKnownWeakHunk, matchDiffAgainstManifests } from './matcher.js';
 export type {
   AttributedHunk,

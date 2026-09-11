@@ -5,8 +5,8 @@ export default defineConfig({
     name: '@orcaops/watch-data',
     include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
     pool: 'forks',
-    // The engine/snapshot tests build real archive fixtures, so they need the
-    // hermetic ORCAOPS_* scrub and throwaway data/cache dirs.
+    // The engine and sidecar tests build real project databases, so they need
+    // the hermetic ORCAOPS_* scrub and throwaway data/cache dirs.
     setupFiles: ['./vitest.setup.ts'],
   },
 });

@@ -1,11 +1,7 @@
-// The persisted two-lane run file (`run-v1.json`): its shape, its strict
-// schema, and its single reader. Deliberately dependency-neutral — it imports
-// from neither twolaneRunCli.ts (which writes the file) nor currentStory.ts
-// (which cross-checks it against the run record), so both can consume the
-// same strict contract without a cycle.
+// The persisted two-lane run file (`run-v1.json`): its shape and strict schema.
+// Deliberately dependency-neutral so retained database records and the run
+// command share the same contract.
 
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
 import { z } from 'zod';
 
 import { type ExecutableIdentity, executableIdentitySchema } from '@orcaops/review-core';
@@ -158,7 +154,7 @@ const sliceRunStateSchema = z.strictObject({
   }),
 });
 
-const twolaneAttemptRecordSchema = z.strictObject({
+export const twolaneAttemptRecordSchema = z.strictObject({
   lane: z.enum(LANES),
   at: z.string(),
   accepted: z.boolean(),
@@ -175,7 +171,7 @@ const twolaneAttemptRecordSchema = z.strictObject({
   usage_source: z.string().nullable(),
 });
 
-const accountSubmissionLineageSchema = z.strictObject({
+export const accountSubmissionLineageSchema = z.strictObject({
   raw_submission_sha256: z.string(),
   normalized_authored_sha256: z.string(),
   compiled_payload_sha256: z.string(),
@@ -229,55 +225,3 @@ export const twolaneRunFileSchema: z.ZodType<TwolaneRunFile> = z.strictObject({
     .strictObject({ at: z.string().datetime(), outcome: z.enum(['FULL', 'DEGRADED', 'FAILED']) })
     .nullable(),
 });
-
-/**
- * Thrown by the version probes below. Exported so boundary catches can
- * distinguish a run-file contract violation from an I/O error (ENOENT).
- */
-export class TwolaneRunFileError extends Error {
-  override readonly name = 'TwolaneRunFileError';
-}
-
-/**
- * The ONLY reader of the persisted run file — every consumer (the two-lane
- * verbs, the semantic-anchor path, and the current-Story pointer validation)
- * goes through the strict schema here, so a corrupt run file fails typed
- * instead of flowing on as an unchecked cast. Throws; callers that prefer a
- * softer disposition catch at their boundary.
- */
-export async function readTwolaneRunFile(runDir: string): Promise<TwolaneRunFile> {
-  const raw = await readFile(path.join(runDir, TWOLANE_RUN_FILE), 'utf8');
-  let decoded: {
-    schema_version?: unknown;
-    slice_state?: { schema_version?: unknown };
-  } | null;
-  try {
-    decoded = JSON.parse(raw) as typeof decoded;
-  } catch (err) {
-    // A truncated or garbled file is a contract violation of the run
-    // file itself, not an I/O failure — keep the typed error boundary.
-    throw new TwolaneRunFileError(
-      `${TWOLANE_RUN_FILE} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`
-    );
-  }
-  // Version probes come first so ANY reader — including the branchless
-  // run locator and the watch app, which do not pass through the
-  // review-state gate — names the version of a pre-cut or foreign file
-  // instead of surfacing a pile of shape issues.
-  if (decoded?.schema_version !== TWOLANE_RUN_SCHEMA_VERSION)
-    throw new TwolaneRunFileError(
-      `run schema ${String(decoded?.schema_version)} is unsupported by current schema ${TWOLANE_RUN_SCHEMA_VERSION}`
-    );
-  if (decoded.slice_state?.schema_version !== SLICE_SCHEMA_VERSION)
-    throw new TwolaneRunFileError(
-      `slice schema ${String(decoded.slice_state?.schema_version)} is unsupported by current schema ${SLICE_SCHEMA_VERSION}`
-    );
-  const parsed = twolaneRunFileSchema.safeParse(decoded);
-  if (!parsed.success)
-    throw new TwolaneRunFileError(
-      `${TWOLANE_RUN_FILE} violates the persisted run schema: ${parsed.error.issues
-        .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
-        .join('; ')}`
-    );
-  return parsed.data;
-}

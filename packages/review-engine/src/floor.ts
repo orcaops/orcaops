@@ -25,7 +25,6 @@ import {
   type UnassignedWork,
 } from '@orcaops/review-core';
 
-import type { BlameCache } from './blameCache.js';
 import { buildCitations } from './citations.js';
 import { buildLandmarks } from './landmarks.js';
 import { blameLineage } from './lineage.js';
@@ -39,20 +38,12 @@ export interface BuildFloorOptions {
   branch: string;
   base?: string;
   /**
-   * Preamble snapshot captured for this build attempt. Supplying it avoids a
-   * second store/config/worktree/base pass while the caller retains the first.
+   * The resolved scope this build assembles over. Floor preparation derives it
+   * from the review's retained membership and basis.
    */
-  scopeInputs?: ScopeInputs;
+  scopeInputs: ScopeInputs;
   /** ISO timestamp for `generated_at` (injected so assembly stays deterministic in tests). */
   now: string;
-  /**
-   * Directory holding the persistent blame cache (`.orcaops/reviews/<slug>/`).
-   * When set, per-file blame is memoized across builds and the returned
-   * `nextBlameCache` should be persisted by the caller inside the commit lock.
-   * Omitted → no blame caching (direct callers pay full blame; the on-disk cache
-   * is left untouched).
-   */
-  blameCacheDir?: string;
   /** Optional cold-build diagnostic sink; omitted in normal production runs. */
   onStageTiming?: (timing: FloorBuildStageTiming) => void;
 }
@@ -128,20 +119,13 @@ export interface BuildFloorResult {
    */
   attributionLines: AttributionLine[];
   /**
-   * The cache fingerprint of the inputs THIS build was actually assembled over
-   * (either captured by the caller or resolved inside `buildFloor`). The caller
+   * The cache fingerprint of the inputs THIS build was actually assembled over. The caller
    * installs the marker under this and rechecks current inputs at commit time,
    * so a floor can never be installed under a marker for a different snapshot.
    */
   fingerprint: string;
   /** Whether this build is safe to bless into the whole-floor cache marker. */
   cacheHealth: FloorCacheHealth;
-  /**
-   * The blame cache to persist (reused + newly computed entries), or null to
-   * leave the on-disk cache untouched (no `blameCacheDir`, a disabled cache, or a
-   * thrown lineage failure). The caller writes it atomically inside the commit lock.
-   */
-  nextBlameCache: BlameCache | null;
 }
 
 /** Add/delete row counts of a slice, from its (contiguous) per-side ranges. */
@@ -296,7 +280,7 @@ export async function computeInputHash(
   // inputs are exactly what they were before the cap split.
   const truncParts = retainedHunkKeys === null ? [] : ['truncated', ...retainedHunkKeys];
   // Domain v2 = the slice-native projection: every Story installed against a
-  // v1 floor reads STALE through the current pointer's floor input hash and
+  // v1 floor reads stale through the selected Story's floor input hash and
   // requires a fresh routine run. Older Stories used the dominant-owner
   // projection and may omit newly visible checkpoint work.
   return stableHash64('orcaops.review.floor_input.v2', [
@@ -406,9 +390,8 @@ function projectFingerprintInput(input: AssemblyInput): unknown {
  * The complete, producer-versioned whole-floor cache fingerprint. Hashes the
  * projected AssemblyInput (every normalized assembly input), BOTH runtime caps
  * (each changes truncation → coverage, on its own axis), and the pre-diff
- * topology disclosures, under a producer-version domain. Computable from
- * `resolveScopeInputs` ALONE, so a cache hit-check pays none of the
- * diff/derive/blame cost. Deliberately excludes worktreeHead + generated_at
+ * topology disclosures, under a producer-version domain. Computable before the
+ * diff/derive/blame work. Deliberately excludes worktreeHead + generated_at
  * (live) and reviewDiff/truncation state (deterministic products of trees + caps,
  * guarded by the health gate). Distinct from `computeInputHash`, which is the
  * narrower content identity for current Story staleness.
@@ -430,20 +413,16 @@ export async function computeFloorFingerprint(scopeInputs: ScopeInputs): Promise
 }
 
 export async function buildFloor(opts: BuildFloorOptions): Promise<BuildFloorResult> {
+  const scopeInputs = opts.scopeInputs;
   const scope = await timeBuildStage(opts, 'scope_diff_manifest', () =>
-    resolveScope({
-      root: opts.root,
-      branch: opts.branch,
-      base: opts.base,
-      scopeInputs: opts.scopeInputs,
-    })
+    resolveScope({ root: opts.root, scopeInputs })
   );
   const { input } = scope;
 
   // The fingerprint of the inputs THIS build actually saw. Computed from the
   // build's resolved scope (the projection deep-strips derivedManifestHash, so a
   // populated full-build value hashes identically to the preamble's null), so it
-  // equals what resolveScopeInputs produced for this captured tree state.
+  // equals what database preparation produced for this captured tree state.
   const fingerprint = await computeFloorFingerprint({
     input: scope.input,
     fingerprintMaxDiffBytes: scope.fingerprintMaxDiffBytes,
@@ -473,15 +452,11 @@ export async function buildFloor(opts: BuildFloorOptions): Promise<BuildFloorRes
   let lineOwners: LineOwner[] = [];
   let lineageFailed = false;
   let blameFailed = false;
-  // null leaves the on-disk blame cache untouched — the default on a thrown
-  // lineage failure, so a transient glitch never wipes accumulated entries.
-  let nextBlameCache: BlameCache | null = null;
   await timeBuildStage(opts, 'lineage_blame', async () => {
     try {
-      const lineage = await blameLineage(opts.root, chain, scope.reviewDiff, opts.blameCacheDir);
+      const lineage = await blameLineage(opts.root, chain, scope.reviewDiff);
       lineOwners = lineage.lineOwners;
       blameFailed = lineage.blameFailed;
-      nextBlameCache = lineage.nextBlameCache;
     } catch {
       lineageFailed = true;
     }
@@ -671,6 +646,5 @@ export async function buildFloor(opts: BuildFloorOptions): Promise<BuildFloorRes
       lineageFailed,
       blameFailed,
     },
-    nextBlameCache,
   };
 }

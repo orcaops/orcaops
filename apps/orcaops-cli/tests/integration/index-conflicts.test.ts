@@ -1,9 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { resolveDatabaseHistoryScope } from '@orcaops/project-scope/history/database';
+import { readProjectArtifact } from '@orcaops/storage/history/database';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -90,13 +92,35 @@ describe('unmerged-index read surfaces', () => {
     return { artifact_id: ok.artifact_id, step_ids: ok.plan_steps.map((s) => s.step_id) };
   }
 
-  it('status: index_conflicts + stderr nudge only while conflicted', async () => {
+  async function readCheckpoint(artifactId: string, n: number) {
+    const scope = await resolveDatabaseHistoryScope({
+      cwd: repo.path,
+      root: process.env.ORCAOPS_DATA_DIR,
+      profile: 'exact',
+      selector: {},
+    });
+    try {
+      const database = scope.projects[0]?.database;
+      if (!scope.completeness.complete || !database) throw new Error('Fixture history unavailable');
+      const checkpoint = readProjectArtifact(database, artifactId)?.thread.checkpoints.find(
+        (candidate) => candidate.n === n
+      );
+      if (checkpoint?.status !== 'closed')
+        throw new Error(`Closed fixture checkpoint ${n} unavailable`);
+      return checkpoint;
+    } finally {
+      scope.close();
+    }
+  }
+
+  it('status reports index conflicts only while the index is conflicted', async () => {
     const clean = await agent.runRaw(['status', '--json']);
-    expect(
-      (JSON.parse(clean.stdout) as { index_conflicts?: unknown }).index_conflicts
-    ).toBeUndefined();
+    expect((JSON.parse(clean.stdout) as { index_conflicts?: unknown }).index_conflicts).toEqual({
+      state: 'available',
+      unmerged_paths: [],
+    });
     const cleanHuman = await agent.runRaw(['status']);
-    expect(cleanHuman.stderr).not.toMatch(/unresolved merge conflicts/);
+    expect(cleanHuman.stdout).not.toMatch(/Unmerged index paths/);
 
     forgeConflict(repo.path, 'conflict.txt');
     const json = await agent.runRaw(['status', '--json']);
@@ -104,18 +128,22 @@ describe('unmerged-index read surfaces', () => {
     const parsed = JSON.parse(json.stdout) as {
       index_conflicts?: { unmerged_paths: string[] };
     };
-    expect(parsed.index_conflicts).toEqual({ unmerged_paths: ['conflict.txt'] });
+    expect(parsed.index_conflicts).toEqual({
+      state: 'available',
+      unmerged_paths: ['conflict.txt'],
+    });
     const human = await agent.runRaw(['status']);
     expect(human.exitCode).toBe(0);
-    expect(human.stderr).toMatch(/unresolved merge conflicts/);
-    expect(human.stderr).toMatch(/conflict\.txt/);
-    expect(human.stdout).toMatch(/Branch:/); // report still renders to stdout
+    expect(human.stdout).toMatch(/Unmerged index paths/);
+    expect(human.stdout).toMatch(/conflict\.txt/);
+    expect(human.stdout).toMatch(/Branch:/);
 
     resolveConflict(repo.path, 'conflict.txt', 'resolved\n');
     const after = await agent.runRaw(['status', '--json']);
-    expect(
-      (JSON.parse(after.stdout) as { index_conflicts?: unknown }).index_conflicts
-    ).toBeUndefined();
+    expect((JSON.parse(after.stdout) as { index_conflicts?: unknown }).index_conflicts).toEqual({
+      state: 'available',
+      unmerged_paths: [],
+    });
   });
 
   it('doctor: index-conflicts passes clean, warns with paths while conflicted', async () => {
@@ -260,17 +288,7 @@ describe('unmerged-index read surfaces', () => {
     expect(c.warnings?.some((w) => w.code === 'unmerged-paths-degraded')).toBe(false);
 
     // The unverified window is durably persisted.
-    const projPath = path.join(
-      repo.path,
-      '.orcaops',
-      'artifacts',
-      plan.artifact_id,
-      'checkpoint-1.json'
-    );
-    const proj = JSON.parse(await readFile(projPath, 'utf8')) as {
-      attribution_degraded?: { unmerged_paths: string[]; probe_failed?: true };
-      diff_fingerprint_summary: { status: string };
-    };
+    const proj = await readCheckpoint(plan.artifact_id, 1);
     expect(proj.attribution_degraded).toEqual({ unmerged_paths: [], probe_failed: true });
     expect(proj.diff_fingerprint_summary.status).toBe('captured');
 
@@ -307,11 +325,10 @@ describe('unmerged-index read surfaces', () => {
     // why downgrades WINDOW-WIDE: work.ts was never unmerged, but the
     // checkpoint's exclusion set is unverified.
     interface WhyJson {
-      best: { degraded?: string; reason: string } | null;
+      best: { reasons: string[] } | null;
     }
     const why = parseOk<WhyJson>(await agent.runRaw(['why', 'work.ts', '--json']));
-    expect(why.best?.degraded).toBe('probe_failed');
-    expect(why.best?.reason).toMatch(/could not be verified, window-wide/);
+    expect(why.best?.reasons.join('\n')).toMatch(/boundary attribution is degraded/);
   });
 
   it('why annotates a degraded path in whole-file and line mode', async () => {
@@ -357,16 +374,14 @@ describe('unmerged-index read surfaces', () => {
     );
 
     interface WhyJson {
-      best: { degraded?: string; reason: string } | null;
+      best: { reasons: string[] } | null;
     }
     const whole = parseOk<WhyJson>(await agent.runRaw(['why', 'conflict.txt', '--json']));
     expect(whole.best).not.toBeNull();
-    expect(whole.best?.degraded).toBe('unmerged_paths');
-    expect(whole.best?.reason).toMatch(/degraded attribution/);
+    expect(whole.best?.reasons).toContain('Checkpoint boundary attribution is degraded');
 
     const line = parseOk<WhyJson>(await agent.runRaw(['why', 'conflict.txt:1', '--json']));
     expect(line.best).not.toBeNull();
-    expect(line.best?.degraded).toBe('unmerged_paths');
-    expect(line.best?.reason).toMatch(/degraded attribution/);
+    expect(line.best?.reasons).toContain('Checkpoint boundary attribution is degraded');
   });
 });

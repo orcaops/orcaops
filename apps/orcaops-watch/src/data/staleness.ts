@@ -38,17 +38,20 @@ export interface WorktreeProbe {
  * degrades to `{ headSha: null, porcelainDigest: '' }` — the banner simply does
  * not fire rather than crashing the review.
  */
-export async function readWorktreeProbe(root: string): Promise<WorktreeProbe> {
+export async function readWorktreeProbe(
+  root: string,
+  env?: NodeJS.ProcessEnv
+): Promise<WorktreeProbe> {
   const [headSha, porcelainDigest] = await Promise.all([
-    revParseHead(root),
-    porcelainStatusDigest(root),
+    revParseHead(root, env),
+    porcelainStatusDigest(root, env),
   ]);
   return { headSha, porcelainDigest };
 }
 
-async function revParseHead(root: string): Promise<string | null> {
+async function revParseHead(root: string, env?: NodeJS.ProcessEnv): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: root });
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: root, env });
     const sha = stdout.trim();
     return sha.length > 0 ? sha : null;
   } catch {
@@ -56,10 +59,11 @@ async function revParseHead(root: string): Promise<string | null> {
   }
 }
 
-async function porcelainStatusDigest(root: string): Promise<string> {
+async function porcelainStatusDigest(root: string, env?: NodeJS.ProcessEnv): Promise<string> {
   try {
     const { stdout } = await execFileAsync('git', ['status', '--porcelain', '-unormal'], {
       cwd: root,
+      env,
       maxBuffer: 8 * 1024 * 1024,
     });
     return createHash('sha1').update(stdout).digest('hex');

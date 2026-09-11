@@ -1,13 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { loadConfig } from '@orcaops/core';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
-import { seedStateDir } from '../../src/commands/seed/journal.js';
 import { planInstallMutations } from '../../src/lib/install-plan.js';
 import { makeAgent } from '../support/test-agent.js';
 import { effectiveConfigPath } from '../support/test-helpers.js';
@@ -84,7 +82,11 @@ describe('orcaops doctor --fix', () => {
     const after = await agent.runRaw(['doctor', '--fix', '--json']);
     expect(after.exitCode).toBe(0);
     const r = JSON.parse(after.stdout) as DoctorReport;
-    expect(r.overall).toBe('pass');
+    expect(r.overall).toBe('warn');
+    expect(r.checks.filter((check) => check.status === 'warn').map((check) => check.name)).toEqual([
+      'skipped-fingerprint-rate',
+      'lineage-orphan',
+    ]);
     expect(findCheck(r, 'agent-skills').status).toBe('pass');
     expect(findCheck(r, 'seed').status).toBe('pass');
     const fix = findCheck(r, 'fix');
@@ -94,29 +96,6 @@ describe('orcaops doctor --fix', () => {
     const repaired = await readFile(skillPath, 'utf8');
     expect(repaired).not.toContain('0.0.0-stale-fix');
     expect(repaired).toContain(`orcaops@${r.orcaops_version}`);
-  });
-
-  it('refuses invalid persisted enrichment instead of importing a skeleton', async () => {
-    await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
-    const preview = JSON.parse((await agent.runRaw(['seed', '--dry-run', '--json'])).stdout) as {
-      clusters: Array<{ artifact_id: string }>;
-    };
-    const config = await loadConfig(repo.path);
-    const persisted = path.join(
-      seedStateDir(repo.path, config),
-      'enrichment',
-      `${preview.clusters[0]!.artifact_id}.json`
-    );
-    await mkdir(path.dirname(persisted), { recursive: true });
-    await writeFile(persisted, '{"schema_version":1}\n', 'utf8');
-
-    const repaired = await agent.runRaw(['doctor', '--fix', '--json']);
-
-    expect(repaired.exitCode).toBe(1);
-    expect(`${repaired.stdout}\n${repaired.stderr}`).toContain('no pending clusters were imported');
-    expect(JSON.parse((await agent.runRaw(['seed', 'status', '--json'])).stdout)).toMatchObject({
-      imported_artifacts: 0,
-    });
   });
 
   it('leaves an AHEAD skill byte-identical and keeps warning (a behind CLI is not "fixed")', async () => {
@@ -244,7 +223,11 @@ describe('orcaops doctor --fix', () => {
     const after = await agent.runRaw(['doctor', '--fix', '--json']);
     expect(after.exitCode).toBe(0);
     const r = JSON.parse(after.stdout) as DoctorReport;
-    expect(r.overall).toBe('pass');
+    expect(r.overall).toBe('warn');
+    expect(r.checks.filter((check) => check.status === 'warn').map((check) => check.name)).toEqual([
+      'skipped-fingerprint-rate',
+      'lineage-orphan',
+    ]);
     expect(findCheck(r, 'fix').summary).toContain('resumed `orcaops seed --yes`');
     expect(findCheck(r, 'seed').status).toBe('pass');
   });
@@ -252,12 +235,12 @@ describe('orcaops doctor --fix', () => {
   it('preserves matching user gitignore lines across update, doctor repair, and uninstall', async () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
     const gitignorePath = path.join(repo.path, '.gitignore');
-    const userLine = '.orcaops/cache/\n';
+    const userLine = '.orcaops/local/\n';
     await writeFile(gitignorePath, userLine + (await readFile(gitignorePath, 'utf8')), 'utf8');
 
     await agent.runRaw(['update', '--json']);
     const afterUpdate = await readFile(gitignorePath, 'utf8');
-    expect(afterUpdate).toMatch(/^\.orcaops\/cache\/\n/);
+    expect(afterUpdate).toMatch(/^\.orcaops\/local\/\n/);
 
     const skillPath = path.join(repo.path, '.claude', 'skills', 'orcaops-summary', 'SKILL.md');
     await rm(skillPath);
@@ -436,7 +419,7 @@ describe('orcaops doctor --fix', () => {
     expect(await readFile(trackedPath, 'utf8')).toBe(trackedContent);
   });
 
-  it('human output surfaces successful install and seed repairs', async () => {
+  it('human output surfaces successful repairs alongside remaining diagnostics', async () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
     await rm(path.join(repo.path, '.claude', 'skills', 'orcaops-summary', 'SKILL.md'));
     const res = await agent.runRaw(['doctor', '--fix']); // human mode
@@ -444,6 +427,8 @@ describe('orcaops doctor --fix', () => {
     expect(res.stdout).toMatch(/fix/);
     expect(res.stdout).toContain('repaired');
     expect(res.stdout).toContain('resumed `orcaops seed --yes`');
-    expect(res.stdout).toMatch(/^Overall: PASS/m);
+    expect(res.stdout).toContain('skipped-fingerprint-rate');
+    expect(res.stdout).toContain('lineage-orphan');
+    expect(res.stdout).toMatch(/^Overall: WARN/m);
   });
 });

@@ -1,6 +1,6 @@
 // UI-side comment loader/actions. Mirrors journalSource.ts: spawn the app's own
-// Node sidecar (`review comments` / `review comment …`) so the locked appends
-// and the re-anchor enrichment stay off the Bun UI. Every verb prints the fresh
+// Node sidecar (`review comments` / `review comment …`) so the settlements and
+// the re-anchor enrichment stay off the Bun UI. Every verb prints the fresh
 // enriched payload to stdout — comments are human-authored and small, so stdout
 // capture is safe. Renderer-free (the src/data rule).
 
@@ -26,28 +26,9 @@ export interface CommentsSourceOptions {
   nodeBin?: string;
 }
 
-const ARCHIVE_WARNING_CODES = new Set<string>([
-  'REVIEW_ARCHIVE_SETUP_FAILED',
-  'REVIEW_ARCHIVE_WRITE_FAILED',
-]);
-
 export function parsePayload(text: string): CommentsPayload {
   const data = JSON.parse(text) as CommentsPayload;
-  const warnings: unknown = (data as { warnings?: unknown } | null)?.warnings;
-  if (
-    data === null ||
-    typeof data !== 'object' ||
-    !Array.isArray(data.comments) ||
-    (warnings !== undefined &&
-      (!Array.isArray(warnings) ||
-        warnings.some(
-          (warning: unknown) =>
-            warning === null ||
-            typeof warning !== 'object' ||
-            !ARCHIVE_WARNING_CODES.has(String((warning as { code?: unknown }).code)) ||
-            typeof (warning as { message?: unknown }).message !== 'string'
-        )))
-  ) {
+  if (data === null || typeof data !== 'object' || !Array.isArray(data.comments)) {
     throw new Error('unexpected review comments shape');
   }
   return data;

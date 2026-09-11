@@ -18,12 +18,11 @@
 //   · Every Part's ranges must round-trip against the run's diff.patch —
 //     `resolvePartRangesAgainstDiff` is the check, run at install time (fail
 //     closed) and asserted by the acceptance tests.
-//   · It lives in the run dir as story-review-model-v4.json because the model is
-//     a per-run artifact.
-//   · Install is atomic + validated: the model is schema-parsed (fail closed)
-//     and round-tripped before an atomic write, so no partial states are visible.
+//   · Its retained publication key is story-review-model-v4.json because the
+//     model is a per-run artifact.
+//   · Publication bytes are validated: the model is schema-parsed (fail closed)
+//     and round-tripped before callers publish it.
 
-import path from 'node:path';
 import { z } from 'zod';
 
 import {
@@ -33,10 +32,9 @@ import {
   parseCitationId,
   stableHash64,
 } from '@orcaops/review-core';
-import { atomicWriteFile } from '@orcaops/storage';
 
-import { parsePatchHunks } from './comments.js';
 import type { AccountProjection } from './dossier.js';
+import { parsePatchHunks } from './patchHunks.js';
 import { collectEligibleSemanticAnchorCitations } from './semanticAnchors.js';
 import type {
   CaptureQualityMetrics,
@@ -991,15 +989,6 @@ export function serializeStoryReviewModelForInstall(input: {
     }
   }
   return serializeStoryReviewModel(parsed);
-}
-
-export async function installStoryReviewModel(input: {
-  runDir: string;
-  model: StoryReviewModel;
-  diffText?: string;
-}): Promise<void> {
-  const bytes = serializeStoryReviewModelForInstall(input);
-  await atomicWriteFile(path.join(input.runDir, STORY_REVIEW_MODEL_FILE), bytes);
 }
 
 /** Parse installed bytes strictly. Historical models are unsupported, never upgraded. */

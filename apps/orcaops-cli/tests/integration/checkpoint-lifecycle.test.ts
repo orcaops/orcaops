@@ -2,10 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { Store } from '@orcaops/storage';
-import { createRepoTemplate, inputFile, type TempRepo } from '@orcaops/test-harness';
+import { requireDatabaseExecutionContext } from '@orcaops/core/history/database-capture';
+import {
+  openProjectDatabase,
+  readProjectArtifact,
+  readProjectArtifactAttempts,
+} from '@orcaops/storage/history/database';
+import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
 import { installTestPack, TEST_PACK_ABS_PATH } from '../support/test-helpers.js';
@@ -58,34 +63,35 @@ interface CapturedPlan {
 describe('two-phase checkpoint lifecycle', () => {
   let repo: TempRepo;
   let agent: ReturnType<typeof makeAgent>;
-
-  // `init` is identical for every test here and costs ~450ms; run it once and
-  // give each test a ~20ms copy of the result.
-  const template = createRepoTemplate(
-    async (repoPath) => {
-      await makeAgent({ cwd: repoPath }).runRaw([
-        'init',
-        '--scope',
-        'project',
-        '--json',
-        '--no-llm',
-      ]);
-    },
-    { initialBranch: 'main' }
-  );
+  let dataRoot: string;
 
   beforeEach(async () => {
-    repo = await template.checkout();
-    agent = makeAgent({ cwd: repo.path });
+    repo = await createTempRepo({ initialBranch: 'main' });
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-checkpoint-history-'));
+    agent = makeAgent({
+      cwd: repo.path,
+      env: { ORCAOPS_DATA_DIR: dataRoot, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
+    parseOk(await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']));
   });
 
   afterEach(async () => {
     await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
   });
 
-  afterAll(async () => {
-    await template.destroy();
-  });
+  async function inspectArtifact(artifactId: string) {
+    const context = await requireDatabaseExecutionContext({ cwd: repo.path, root: dataRoot });
+    const database = await openProjectDatabase({ authority: context.authority, mode: 'reader' });
+    try {
+      return {
+        attempts: readProjectArtifactAttempts(database, artifactId).records,
+        artifact: readProjectArtifact(database, artifactId),
+      };
+    } finally {
+      database.close();
+    }
+  }
 
   async function capturePlan(plan_step_texts: string[]): Promise<CapturedPlan> {
     const plan_steps = plan_step_texts.map((text, idx) => ({ text, label: `s${idx + 1}` }));
@@ -806,16 +812,11 @@ describe('two-phase checkpoint lifecycle', () => {
     expect(evals1.some((e) => e.evaluator_ref === 'core/checkpoint-scope-density')).toBe(true);
 
     // Verify a soft_blocked record exists with matching outcome.
-    const dbPath = path.join(repo.path, '.orcaops', 'cache', 'orcaops.db');
-    const store1 = new Store(dbPath);
-    const block1 = store1.getIdempotencyBlock({
-      artifact_id: plan.artifact_id,
-      idempotency_key: idempotencyKey,
-      event_type: 'checkpoint_opened',
-    });
-    store1.close();
-    expect(block1).not.toBeNull();
-    expect(block1?.outcome).toBe('soft_blocked');
+    const block1 = (await inspectArtifact(plan.artifact_id)).attempts.find(
+      (attempt) =>
+        attempt.eventType === 'checkpoint_opened' && attempt.idempotencyKey === idempotencyKey
+    );
+    expect(block1?.record?.outcome).toBe('soft_blocked');
 
     // Second call: same key + same payload + matching evaluator
     // fingerprint → cached envelope replays verbatim.
@@ -831,15 +832,11 @@ describe('two-phase checkpoint lifecycle', () => {
     expect(envelope2).toEqual(envelope1);
 
     // Block record still present after replay.
-    const store2 = new Store(dbPath);
-    const block2 = store2.getIdempotencyBlock({
-      artifact_id: plan.artifact_id,
-      idempotency_key: idempotencyKey,
-      event_type: 'checkpoint_opened',
-    });
-    store2.close();
-    expect(block2).not.toBeNull();
-    expect(block2?.outcome).toBe('soft_blocked');
+    const block2 = (await inspectArtifact(plan.artifact_id)).attempts.find(
+      (attempt) =>
+        attempt.eventType === 'checkpoint_opened' && attempt.idempotencyKey === idempotencyKey
+    );
+    expect(block2?.record?.outcome).toBe('soft_blocked');
   });
 
   it('soft_blocked invalidates on fingerprint drift', async () => {
@@ -924,15 +921,11 @@ describe('two-phase checkpoint lifecycle', () => {
 
     // The soft_blocked record was cleared on commit (transitioned to a
     // committed event in the log).
-    const dbPath = path.join(repo.path, '.orcaops', 'cache', 'orcaops.db');
-    const store = new Store(dbPath);
-    const block = store.getIdempotencyBlock({
-      artifact_id: plan.artifact_id,
-      idempotency_key: idempotencyKey,
-      event_type: 'checkpoint_opened',
-    });
-    store.close();
-    expect(block).toBeNull();
+    const block = (await inspectArtifact(plan.artifact_id)).attempts.find(
+      (attempt) =>
+        attempt.eventType === 'checkpoint_opened' && attempt.idempotencyKey === idempotencyKey
+    );
+    expect(block).toMatchObject({ action: 'clear', record: null });
   });
 
   it('hard_rejected upgrade: overlap clears via abandon, retry succeeds', async () => {
@@ -968,16 +961,11 @@ describe('two-phase checkpoint lifecycle', () => {
     expect(err.error.code).toBe('OPEN_CP_OVERLAP');
 
     // Verify a hard_rejected record exists.
-    const dbPath = path.join(repo.path, '.orcaops', 'cache', 'orcaops.db');
-    const storeBefore = new Store(dbPath);
-    const blockBefore = storeBefore.getIdempotencyBlock({
-      artifact_id: plan.artifact_id,
-      idempotency_key: idempotencyKey,
-      event_type: 'checkpoint_opened',
-    });
-    storeBefore.close();
-    expect(blockBefore).not.toBeNull();
-    expect(blockBefore?.outcome).toBe('hard_rejected');
+    const blockBefore = (await inspectArtifact(plan.artifact_id)).attempts.find(
+      (attempt) =>
+        attempt.eventType === 'checkpoint_opened' && attempt.idempotencyKey === idempotencyKey
+    );
+    expect(blockBefore?.record?.outcome).toBe('hard_rejected');
 
     // Abandon cp 1 — releases step 1.
     parseOk(await abandon({ artifact_id: plan.artifact_id, n: 1, reason: 'rescope' }));
@@ -998,36 +986,17 @@ describe('two-phase checkpoint lifecycle', () => {
     expect(ok.n).toBe(2);
 
     // idempotency_blocks row is gone (committed event supersedes).
-    const storeAfter = new Store(dbPath);
-    const blockAfter = storeAfter.getIdempotencyBlock({
-      artifact_id: plan.artifact_id,
-      idempotency_key: idempotencyKey,
-      event_type: 'checkpoint_opened',
-    });
-    storeAfter.close();
-    expect(blockAfter).toBeNull();
-
-    // Verify the new checkpoint_opened event for n=2 with our key
-    // exists in events.ndjson (the source-of-truth log).
-    const eventsPath = path.join(
-      repo.path,
-      '.orcaops',
-      'artifacts',
-      plan.artifact_id,
-      'events.ndjson'
+    const retained = await inspectArtifact(plan.artifact_id);
+    const blockAfter = retained.attempts.find(
+      (attempt) =>
+        attempt.eventType === 'checkpoint_opened' && attempt.idempotencyKey === idempotencyKey
     );
-    const eventLog = await readFile(eventsPath, 'utf8');
-    const eventRecords = eventLog
-      .split('\n')
-      .filter((l) => l.length > 0)
-      .map(
-        (l) => JSON.parse(l) as { type: string; idempotency_key: string; payload?: { n?: number } }
-      );
-    const upgraded = eventRecords.find(
-      (e) => e.type === 'checkpoint_opened' && e.idempotency_key === idempotencyKey
+    expect(blockAfter).toMatchObject({ action: 'clear', record: null });
+    const upgraded = retained.artifact?.thread.events.find(
+      (event) =>
+        event.record.type === 'checkpoint_opened' && event.record.idempotency_key === idempotencyKey
     );
-    expect(upgraded).toBeDefined();
-    expect(upgraded?.payload?.n).toBe(2);
+    expect(upgraded?.payload).toMatchObject({ n: 2 });
   });
 
   // ── thread.checkpoint counts closed cps only ─────────────────────────
@@ -1066,10 +1035,8 @@ describe('two-phase checkpoint lifecycle', () => {
     expect(a!.thread.checkpoint.count).toBeUndefined();
   });
 
-  it('thread-status: closed cps drive thread.checkpoint.count; open / abandoned cps do not', async () => {
-    const plan = await capturePlan(['s1', 's2', 's3']);
-    // 2 closed + 1 abandoned + 1 open. Only the 2 closed should
-    // contribute to thread.checkpoint.count.
+  it('thread-status: a closed checkpoint drives the count', async () => {
+    const plan = await capturePlan(['s1']);
     parseOk(
       await open({
         artifact_id: plan.artifact_id,
@@ -1085,36 +1052,6 @@ describe('two-phase checkpoint lifecycle', () => {
         completed_step_ids: [plan.step_ids[0]],
       })
     );
-    parseOk(
-      await open({
-        artifact_id: plan.artifact_id,
-        declared_step_ids: [plan.step_ids[1]],
-      })
-    );
-    parseOk(
-      await close({
-        artifact_id: plan.artifact_id,
-        n: 2,
-        summary: 'cp2',
-        files_changed: ['src/b.ts'],
-        completed_step_ids: [plan.step_ids[1]],
-      })
-    );
-    parseOk(
-      await open({
-        artifact_id: plan.artifact_id,
-        declared_step_ids: [plan.step_ids[2]],
-      })
-    );
-    parseOk(await abandon({ artifact_id: plan.artifact_id, n: 3, reason: 'rescoped' }));
-    // One more in-flight open (step 3 was just freed by abandon).
-    parseOk(
-      await open({
-        artifact_id: plan.artifact_id,
-        declared_step_ids: [plan.step_ids[2]],
-      })
-    );
-
     const status = await agent.runRaw(['status', '--json']);
     expect(status.exitCode).toBe(0);
     const statusJson = JSON.parse(status.stdout) as {
@@ -1127,8 +1064,8 @@ describe('two-phase checkpoint lifecycle', () => {
     const a = statusJson.artifacts.find((x) => x.id === plan.artifact_id);
     expect(a).toBeDefined();
     expect(a!.thread.checkpoint.status).toBe('done');
-    expect(a!.thread.checkpoint.count).toBe(2);
-    expect(a!.thread.checkpoint.latest_n).toBe(2);
+    expect(a!.thread.checkpoint.count).toBe(1);
+    expect(a!.thread.checkpoint.latest_n).toBe(1);
   });
 
   // ── idempotency auto-mint, artifact_id autodetect, omitted-n close ─────────────

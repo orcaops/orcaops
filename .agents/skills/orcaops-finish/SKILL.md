@@ -2,8 +2,8 @@
 name: "Orcaops: finish workflow"
 description: "Finalize completed work by running checks, handling warnings, saving the summary, syncing, and rendering the digest. Use for \"finish this work\", \"wrap this up\", or \"get this ready for a PR\"."
 metadata:
-  generatedBy: "orcaops@0.1.0"
-  contentHash: "f97addb3fea6"
+  generatedBy: "orcaops@0.2.0-rc.2"
+  contentHash: "b7e1dc371819"
 ---
 
 # When to use
@@ -73,4 +73,4 @@ acceptance is refused. Capture later work in a new artifact.
 Every capture command returns a `cloud_sync` object. Branch on `cloud_sync.status`:
 
 - `"ok"` or `"skipped"` — nothing to do. Continue.
-- `"paused"` — this artifact was NOT recorded and it will not fix itself. **STOP and tell the user.** Quote `cloud_sync.message` and `cloud_sync.action` verbatim; `cloud_sync.pending` is how many artifacts are waiting locally. Do NOT re-run the capture hoping it clears: a replay writes nothing new, and the fault needs the remediation in `cloud_sync.action`.
+- `"paused"` — the capture is saved locally, but its current state is NOT confirmed on the cloud. **STOP and tell the user.** Quote `cloud_sync.message` and `cloud_sync.action` verbatim; `cloud_sync.pending` when present is the number of artifacts waiting in the selected project; an omitted count is unknown. Do NOT re-run the capture hoping it clears: replaying a completed capture does not resend it, and the fault needs the remediation in `cloud_sync.action`.
