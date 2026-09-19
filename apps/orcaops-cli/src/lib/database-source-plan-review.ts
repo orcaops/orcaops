@@ -111,6 +111,28 @@ const admissionPayload = z.strictObject({
   publicationAt: z.string().min(1),
 });
 
+const refAliasTarget = z.strictObject({
+  ref: z.string().min(1),
+  target: z.strictObject({
+    server_url: z.string().min(1),
+    org_id: z.string().min(1),
+    account_id: z.string().min(1),
+  }),
+});
+const refAliasPayload = z.strictObject({
+  external_id: z.string().min(1),
+  pulled_at: z.string().min(1),
+});
+
+interface RefAliasRow {
+  intentChange: number;
+  targetJson: string;
+  payloadJson: string;
+  payloadHash: string;
+  expectedJson: string;
+  resultJson: string;
+}
+
 function databasePlanReviewNamespace(
   reader: ProjectDatabase,
   target: RemoteTarget
@@ -450,6 +472,80 @@ export function createDatabasePlanReviewPersistence(
             recordBytes,
           },
           { secretAllow, signal: input.signal, onWait: input.onWait }
+        );
+      } finally {
+        writer.close();
+      }
+    },
+    async readRefAliases(ref) {
+      const rows = reader.read((view) =>
+        view.all<RefAliasRow>(
+          `SELECT intent_change AS intentChange,target_json AS targetJson,
+          payload_json AS payloadJson,payload_hash AS payloadHash,
+          expected_state_json AS expectedJson,result_json AS resultJson FROM operations
+          WHERE operation_kind='source_plan.review.alias'
+            AND json_extract(target_json,'$.ref')=?
+            AND json_extract(target_json,'$.target.server_url')=?
+            AND json_extract(target_json,'$.target.org_id')=?
+            AND json_extract(target_json,'$.target.account_id')=?
+          ORDER BY committed_write_sequence DESC`,
+          ref,
+          target.server_url,
+          target.org_id,
+          target.account_id
+        )
+      ).value;
+      const found = new Map<string, string>();
+      for (const row of rows) {
+        try {
+          if (
+            row.intentChange !== 0 ||
+            row.expectedJson !== 'null' ||
+            row.payloadHash !== sha256Hex(row.payloadJson)
+          )
+            continue;
+          const retainedTarget = refAliasTarget.parse(parseCanonical(row.targetJson));
+          const payload = refAliasPayload.parse(parseCanonical(row.payloadJson));
+          if (
+            retainedTarget.ref !== ref ||
+            canonicalJson(retainedTarget.target) !== canonicalJson(target) ||
+            canonicalJson(parseCanonical(row.resultJson)) !== canonicalJson({ recorded: true })
+          )
+            continue;
+          // Rows arrive newest-written first, so `>` breaks a tie by write order.
+          const seen = found.get(payload.external_id);
+          if (seen === undefined || payload.pulled_at > seen)
+            found.set(payload.external_id, payload.pulled_at);
+        } catch {
+          continue;
+        }
+      }
+      return [...found].map(([externalId, pulledAt]) => ({ externalId, pulledAt }));
+    },
+    async writeRefAlias(alias) {
+      const targetValue = { ref: alias.ref, target };
+      const payload = { external_id: alias.externalId, pulled_at: alias.pulledAt };
+      assertNoSecretsInPayload({ target: targetValue, payload }, secretAllow);
+      const writer = await input.openWriter();
+      try {
+        // The instant is part of the identity so every pull appends; keying on
+        // ref + id alone replays, freezing the mapping at first-seen.
+        await runProjectOperation(
+          writer,
+          {
+            operationId: derivedId(projectId, 'source_plan.review.alias', {
+              ...targetValue,
+              externalId: alias.externalId,
+              pulledAt: alias.pulledAt,
+            }),
+            kind: 'source_plan.review.alias',
+            target: targetValue,
+            payload,
+            expectedState: null,
+            intentChange: false,
+          },
+          () => ({ recorded: true }),
+          { signal: input.signal, onWait: input.onWait }
         );
       } finally {
         writer.close();

@@ -1,5 +1,6 @@
 import path from 'node:path';
 
+import { type BootstrapContent, resolveBootstrapContent, type ToolId } from '@orcaops/adapters';
 import {
   configFromSource,
   probeWorktree,
@@ -8,11 +9,15 @@ import {
   type WorktreeProbe,
 } from '@orcaops/core';
 import { resolveDatabaseHistoryScope } from '@orcaops/project-scope/history/database';
+import type { Config } from '@orcaops/storage';
 import { inspectHistoryPath } from '@orcaops/storage/history/authority';
 import { projectDatabasePath, readProjectTaskContext } from '@orcaops/storage/history/database';
 
+import { instructionFileCarriesRouting } from './instruction-block.js';
 import { getInvocationCwd, getInvocationEnv } from './invocation-context.js';
+import { resolveManagedInstructionFiles } from './managed-instruction-files.js';
 import { resolveExplicitOverride } from './resolve-root.js';
+import { enabledSkillTemplates } from './skill-set.js';
 import { deriveThreadStatus } from './thread-status.js';
 
 /**
@@ -37,20 +42,35 @@ export interface SessionStartArtifact {
   openCheckpoints: SessionStartOpenCheckpoint[];
 }
 
+/**
+ * The bootstrap rows every emitting payload renders, plus whether the hook is
+ * the only surface carrying skill routing. Both are resolved ONCE per session
+ * start, before the payload branch, so the `static` short-circuit and every
+ * degraded `ready` path render the same content model.
+ */
+export interface SessionStartBootstrap {
+  content: BootstrapContent;
+  /**
+   * No managed block is actually carrying routing, so the hook renders its
+   * own. See `resolveHooksOnly` for what "actually" means.
+   */
+  hooksOnly: boolean;
+}
+
 export type SessionStartState =
   | { kind: 'uninitialized' }
   /**
    * `session_hooks.payload: 'static'` (the default): the hook emits a fixed
    * prefix-aware nudge without opening project history.
    */
-  | { kind: 'static'; prefix: string }
-  | {
+  | ({ kind: 'static'; prefix: string } & SessionStartBootstrap)
+  | ({
       kind: 'ready';
       branch: string;
       prefix: string;
       cacheStatus: 'available' | 'missing';
       inFlight: SessionStartArtifact[];
-    };
+    } & SessionStartBootstrap);
 
 export interface SessionStartLocation {
   /** The worktree the hook runs in (an explicit override wins over discovery). */
@@ -98,7 +118,8 @@ export async function resolveSessionStartRoot(cwd?: string): Promise<string | nu
  */
 export async function readSessionStartState(
   cwd?: string,
-  resolved?: SessionStartLocation | null
+  resolved?: SessionStartLocation | null,
+  agent?: ToolId
 ): Promise<SessionStartState> {
   try {
     const location = resolved === undefined ? await resolveSessionStartLocation(cwd) : resolved;
@@ -120,6 +141,9 @@ export async function readSessionStartState(
     // immediately instead of waiting for the next update's strip.
     if (!config.session_hooks.enabled) return { kind: 'uninitialized' };
     const prefix = config.naming.prefix;
+    // Resolved before the payload branch: `static` is also the degraded target
+    // for every `ready`-path failure, so both kinds must carry the same rows.
+    const bootstrap = await resolveSessionStartBootstrap(repoRoot, config, agent);
 
     // The payload mode is read fresh HERE, each session start — never baked
     // into the installed settings entries — so switching modes
@@ -128,7 +152,7 @@ export async function readSessionStartState(
     // any state read: it works in a commitless repo and shrugs off a corrupt
     // cache, which is exactly its reduced failure surface.
     if (config.session_hooks.payload === 'static') {
-      return { kind: 'static', prefix };
+      return { kind: 'static', prefix, ...bootstrap };
     }
 
     // The branch came with the probe; only an overridden root that git could
@@ -138,7 +162,7 @@ export async function readSessionStartState(
       try {
         branch = await new Repo(repoRoot).getCurrentBranch();
       } catch {
-        return { kind: 'static', prefix };
+        return { kind: 'static', prefix, ...bootstrap };
       }
     }
     if (branch === 'HEAD') branch = 'detached HEAD';
@@ -152,13 +176,20 @@ export async function readSessionStartState(
         env: getInvocationEnv(),
       });
     } catch {
-      return { kind: 'ready', branch, prefix, cacheStatus: 'missing', inFlight: [] };
+      return { kind: 'ready', branch, prefix, cacheStatus: 'missing', inFlight: [], ...bootstrap };
     }
     try {
       if (scope.projects.length === 0)
-        return { kind: 'ready', branch, prefix, cacheStatus: 'missing', inFlight: [] };
+        return {
+          kind: 'ready',
+          branch,
+          prefix,
+          cacheStatus: 'missing',
+          inFlight: [],
+          ...bootstrap,
+        };
       const project = scope.projects[0];
-      if (scope.projects.length !== 1 || !project) return { kind: 'static', prefix };
+      if (scope.projects.length !== 1 || !project) return { kind: 'static', prefix, ...bootstrap };
       if (!project.database) {
         const exists = project.authority
           ? await inspectHistoryPath(
@@ -167,8 +198,8 @@ export async function readSessionStartState(
             )
           : null;
         return exists === null
-          ? { kind: 'ready', branch, prefix, cacheStatus: 'missing', inFlight: [] }
-          : { kind: 'static', prefix };
+          ? { kind: 'ready', branch, prefix, cacheStatus: 'missing', inFlight: [], ...bootstrap }
+          : { kind: 'static', prefix, ...bootstrap };
       }
       const snapshot = readProjectTaskContext(project.database, { branch });
       const nowMs = Date.now();
@@ -217,13 +248,88 @@ export async function readSessionStartState(
           ];
         }
       );
-      return { kind: 'ready', branch, prefix, cacheStatus: 'available', inFlight };
+      return { kind: 'ready', branch, prefix, cacheStatus: 'available', inFlight, ...bootstrap };
     } catch {
-      return { kind: 'static', prefix };
+      return { kind: 'static', prefix, ...bootstrap };
     } finally {
       scope.close();
     }
   } catch {
     return { kind: 'uninitialized' };
   }
+}
+
+/**
+ * Resolve the content model the payload renders and whether the hook is the
+ * only surface carrying routing.
+ *
+ * A resolution failure degrades to `fallbackBootstrapContent` rather than
+ * propagating: the hook's contract is exit 0 with useful text, and the
+ * lifecycle guidance is worth emitting even when a config's skill overrides or
+ * hint keys cannot be resolved.
+ */
+async function resolveSessionStartBootstrap(
+  repoRoot: string,
+  config: Config,
+  agent: ToolId | undefined
+): Promise<SessionStartBootstrap> {
+  const prefix = config.naming.prefix;
+  try {
+    const content = resolveBootstrapContent({
+      prefix,
+      // The cloud gate is hardcoded off because `resolveSkillGates` reads a
+      // credentials file outside the repo, I/O this hook has never done. It is
+      // routing-equivalent: no cloud-gated template declares a trigger line,
+      // asserted in the adapters containment guard.
+      enabledSkills: enabledSkillTemplates(config, { cloud: false }),
+      hints: config.workflow.hints,
+      commitInsideWindow: config.workflow.commit_inside_window,
+      suppressedRouting: config.workflow.routing.suppress,
+    });
+    return { content, hooksOnly: await resolveHooksOnly(repoRoot, config, agent) };
+  } catch {
+    return { content: fallbackBootstrapContent(prefix), hooksOnly: false };
+  }
+}
+
+/**
+ * Is the hook the only surface carrying routing FOR THIS AGENT? True when the
+ * block is the user's (`manual`), when the install manages no instruction file
+ * the invoking agent loads, or when none of those files carries a managed block
+ * whose own region holds the routing sentinel.
+ *
+ * Per-agent, not per-repository: the agent that loads AGENTS.md is not covered
+ * by a block in CLAUDE.md. Doctor's payload check and its no-surface warning
+ * both call this per agent for the same reason. An undetermined agent falls
+ * back to the whole managed set.
+ */
+export async function resolveHooksOnly(
+  repoRoot: string,
+  config: Config,
+  agent: ToolId | undefined
+): Promise<boolean> {
+  if (config.bootstrap === 'manual') return true;
+  const files = resolveManagedInstructionFiles(config, agent);
+  if (files.length === 0) return true;
+  for (const rel of files) {
+    if (await instructionFileCarriesRouting(repoRoot, rel)) return false;
+  }
+  return true;
+}
+
+/**
+ * The degraded content: lifecycle and skip prose with no routing and no hints,
+ * and the commit clause on — what the hook emitted before it resolved content
+ * at all. Takes no config input beyond the prefix, so the config that broke
+ * resolution cannot break this too.
+ */
+function fallbackBootstrapContent(prefix: string): BootstrapContent {
+  const base = resolveBootstrapContent({
+    prefix,
+    enabledSkills: undefined,
+    hints: undefined,
+    commitInsideWindow: true,
+    suppressedRouting: [],
+  });
+  return { ...base, routing: [], surveyTail: null, hints: [] };
 }

@@ -4,8 +4,12 @@ import { firstForbiddenControlChar } from '@orcaops/storage';
 
 import type { PlanReviewPersistence } from './persistence.js';
 import {
+  aliasedRefError,
+  cloudRetryFlags,
   createReviewMutation,
   mapReviewAuthzError,
+  pulledRefMissError,
+  refuseAliasedRef,
   requireRef,
   withReviewCloud,
 } from './shared.js';
@@ -70,6 +74,7 @@ export interface RunRootCommentArgs extends RunReviewCommentBase {
   /** `--proposal <id>` selects the proposal target (else the candidate). */
   proposalId?: string;
   persistence: PlanReviewPersistence;
+  retryFlags?: readonly string[];
 }
 
 /**
@@ -80,10 +85,44 @@ export interface RunRootCommentArgs extends RunReviewCommentBase {
 export interface RunReplyCommentArgs extends RunReviewCommentBase {
   kind: 'reply';
   replyTo: string;
+  persistence: PlanReviewPersistence;
+  retryFlags?: readonly string[];
 }
 
 /** Discriminated on `kind` so the anchor/reply conflict is unrepresentable. */
 export type RunReviewCommentArgs = RunRootCommentArgs | RunReplyCommentArgs;
+
+export function commentRetryFlags(opts: ReviewCommentOptions): string[] {
+  return [
+    ...(opts.replyTo !== undefined ? ['--reply-to', opts.replyTo] : []),
+    ...(opts.proposal !== undefined ? ['--proposal', opts.proposal] : []),
+    ...(opts.quote !== undefined ? ['--quote', opts.quote] : []),
+    ...(opts.disambiguator !== undefined ? ['--disambiguator', opts.disambiguator] : []),
+    ...cloudRetryFlags(opts),
+  ];
+}
+
+function fallbackRetryFlags(args: RunReviewCommentArgs): string[] {
+  if (args.kind === 'reply') return ['--reply-to', args.replyTo];
+  return [
+    ...(args.proposalId !== undefined ? ['--proposal', args.proposalId] : []),
+    ...(args.quote !== undefined ? ['--quote', args.quote] : []),
+    ...(args.disambiguator !== undefined ? ['--disambiguator', args.disambiguator] : []),
+  ];
+}
+
+function commentRefusal(args: RunReviewCommentArgs) {
+  const proposalId = args.kind === 'root' ? args.proposalId : undefined;
+  const flags = args.retryFlags ?? fallbackRetryFlags(args);
+  return {
+    persistence: args.persistence,
+    ref: args.externalId,
+    command: 'comment' as const,
+    retryFlags: flags,
+    escape: 'pass --proposal <id> to comment on a proposal',
+    ...(proposalId !== undefined ? { proposalId } : {}),
+  };
+}
 
 /**
  * I/O-light core: derive EXACTLY ONE target from the local record(s) — a
@@ -105,6 +144,10 @@ export async function runReviewComment(
   );
   // A reply inherits the parent comment's target and carries no anchor, so no
   // local candidate/proposal record is needed — bypass the target derivation.
+  // A reply reads no local record, but accepting here what the root arm refuses
+  // would make the rule depend on which flag was passed.
+  await refuseAliasedRef(commentRefusal(args));
+
   if (args.kind === 'reply') {
     // The opts boundary guards empties for the CLI; this backstops a programmatic
     // caller passing an empty id (the SDK forwards input without local parsing, so
@@ -151,25 +194,23 @@ export async function runReviewComment(
   if (args.proposalId !== undefined) {
     const prop = await args.persistence.readProposal(args.externalId, args.proposalId);
     if (!prop) {
-      throw new OrcaopsError(
-        ErrorCodes.NO_INPUT,
-        `No pulled proposal "${args.proposalId}" for "${args.externalId}". ` +
-          `Run \`orcaops plan review pull ${args.externalId} --proposal ${args.proposalId}\` first.`,
-        'plan-review-comment'
+      const aliased = await aliasedRefError(commentRefusal(args));
+      throw (
+        aliased ??
+        new OrcaopsError(
+          ErrorCodes.NO_INPUT,
+          `No pulled proposal "${args.proposalId}" for "${args.externalId}". ` +
+            `Run \`orcaops plan review pull ${args.externalId} --proposal ${args.proposalId}\` first ` +
+            `(pull takes a slug and echoes the canonical externalId this verb needs).`,
+          'plan-review-comment'
+        )
       );
     }
     targetProposalId = args.proposalId;
     target = 'proposal';
   } else {
     const cand = await args.persistence.readCandidate(args.externalId);
-    if (!cand || cand.version_id === null) {
-      throw new OrcaopsError(
-        ErrorCodes.NO_INPUT,
-        `No pulled candidate for "${args.externalId}". Run \`orcaops plan review pull ${args.externalId}\` first, ` +
-          `or pass --proposal <id> to comment on a proposal.`,
-        'plan-review-comment'
-      );
-    }
+    if (!cand || cand.version_id === null) throw await pulledRefMissError(commentRefusal(args));
     targetVersionId = cand.version_id;
     target = 'candidate';
   }
@@ -338,6 +379,8 @@ export async function reviewCommentAction(
                 externalId: ref,
                 body,
                 replyTo: opts.replyTo,
+                persistence: mutation.persistence,
+                retryFlags: commentRetryFlags(opts),
               }
             : {
                 kind: 'root',
@@ -351,6 +394,7 @@ export async function reviewCommentAction(
                 ...(opts.disambiguator !== undefined ? { disambiguator: opts.disambiguator } : {}),
                 ...(opts.proposal !== undefined ? { proposalId: opts.proposal } : {}),
                 persistence: mutation.persistence,
+                retryFlags: commentRetryFlags(opts),
               }
         );
         if (mutation.didDispatch())

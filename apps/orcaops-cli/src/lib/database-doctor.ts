@@ -632,13 +632,15 @@ async function lineageCheck(
   }));
   const orphaned: typeof rows = [];
   const uncertain: typeof rows = [];
+  const reachability = await repo.checkReachabilityFromTips(
+    rows.map((row) => row.lineage.head_sha),
+    tips.tips
+  );
   for (const row of rows) {
-    const reachability = await Promise.all(
-      tips.tips.map((tip) => repo.checkReachability(row.lineage.head_sha, tip))
-    );
-    if (reachability.includes('reachable')) continue;
-    if (reachability.includes('unknown')) uncertain.push(row);
-    else orphaned.push(row);
+    const state = reachability.get(row.lineage.head_sha);
+    if (state === 'reachable') continue;
+    if (state === 'unreachable') orphaned.push(row);
+    else uncertain.push(row);
   }
   if (!orphaned.length && !uncertain.length)
     return {

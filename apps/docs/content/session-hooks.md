@@ -242,17 +242,27 @@ status` gets no proactive alert; there is no background monitoring, polling,
 `session_hooks.payload` selects what the hook emits, read fresh at every
 session start:
 
-- `static` (default) — the same short capture nudge every session, rendered by
-  the installed CLI (prefix-aware, never stale on disk) with **zero state
-  reads**: no git call, no SQLite open. It points the agent at
-  `orcaops status --json` for thread state.
+- `static` (default) — the same capture nudge every session, rendered by the
+  installed CLI (never stale on disk) with **zero project-state reads**: no git
+  call, no SQLite open. It points the agent at `orcaops status --json` for
+  thread state. "Static" means it reads no capture state, not that it is a
+  constant: the payload is rendered from your configuration, so the scope, the
+  install set, the enabled skills, `workflow.hints`,
+  `workflow.commit_inside_window` and `workflow.routing.suppress` all shape it.
+  When no managed block is carrying skill routing, the payload carries the
+  phrasing-to-skill routing too, which is what makes a hooks-only repository
+  work; where the block already carries it, the hook stays short.
 - `state-aware` (**experimental**) — reads the branch's capture state and
   tailors the guidance: names the in-flight thread, flags an open or stale
   checkpoint, and recommends the next lifecycle step. Opt-in until A/B data
   shows it beats the constant reminder. Missing cache state is named as
   unknown rather than treated as proof that no thread exists; a commitless
   repo falls back to the static reminder. Other failures degrade to silence,
-  never a broken session.
+  never a broken session. It _prepends_ that state to the same closing rows
+  every payload shares, rather than replacing them, so the pointer at
+  `orcaops status --json` still appears below a thread the payload has already
+  named. The shared tail is deliberate: a branch that rendered its own was how
+  the hook once came to carry the lifecycle and nothing else.
 
 The mode is deliberately NOT baked into the installed hook entries — they are
 byte-identical across modes — so switching arms is a config flip with no
@@ -287,7 +297,10 @@ session-start hooks never block a session in any supported agent.
 
 Enable with `orcaops init --session-hooks` (or pick a mode interactively);
 disable with `orcaops update --no-session-hooks`, which strips the entries and
-prunes the plugin. `orcaops doctor` owns the health check (`session-hooks`),
-and `orcaops uninstall` strips the entries even without a manifest.
+prunes the plugin. `orcaops doctor` owns the health checks: `session-hooks` for
+the surfaces, and `session-hook-payload`, which warns once the rendered payload
+passes 6000 characters — a long `workflow.hints.custom` is the usual cause, and
+nothing is ever truncated. `orcaops uninstall` strips the entries even without
+a manifest.
 `--session-hook-payload` never enables hooks by itself — it only sets the
 mode, which takes effect while hooks are enabled.

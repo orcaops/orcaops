@@ -15,7 +15,7 @@ export const orcaopsDecisionsSkill: SkillTemplate = {
   group: 'insight',
   defaultEnabled: false,
   blockTriggerLine: (prefix: string) =>
-    `decision recall ("what did we decide about X and why?") → \`${skillRef('decisions', prefix)}\``,
+    `"what did we decide about X?", "why did we choose Y over Z?", "turn these decisions into ADRs" → \`${skillRef('decisions', prefix)}\``,
   body: (prefix: string) => `# When to use
 
 Triggers (user phrasing):

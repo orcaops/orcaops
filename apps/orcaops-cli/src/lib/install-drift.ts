@@ -11,16 +11,18 @@ import {
   readOrcaopsSectionStampVersions,
   renderOpencodeSessionPlugin,
   renderOrcaopsAgentsMdSection,
-  resolveHintLines,
 } from '@orcaops/adapters';
 import { assertCanonicalRelativePath, type Config, type SupportedAgentId } from '@orcaops/storage';
 
 import { reconcileInfoExclude } from './git-info-exclude.js';
 import { readInstallManifest, toPortableManifestPath } from './install-manifest.js';
+import { resolveManagedInstructionFiles } from './managed-instruction-files.js';
 import { readRepositoryRegularFileOrNull, repositoryRegularFileExists } from './mutations.js';
 import { desiredPersonalExcludeLines } from './personal-manifest.js';
 import { planSessionHookSettings } from './session-hooks.js';
 import { CLOUD_GATED_SKILL_IDS, enabledSkillTemplates, type SkillGates } from './skill-set.js';
+
+export { resolveManagedInstructionFiles };
 
 /** Stale-install signal split by surface (drift nudge). */
 export interface InstallDrift {
@@ -136,15 +138,6 @@ export async function classifyGeneratedFile(
  * doctor checks, which suppress the agents-md warning under manual but keep
  * checking skills/commands.
  */
-/**
- * The instruction files orcaops manages for this install. Personal scope
- * manages none; every other scope unions the install set's adapter agentsFiles.
- */
-export function resolveManagedInstructionFiles(config: Config): string[] {
-  if (config.install.scope === 'personal') return [];
-  return [...new Set(config.install.agents.flatMap((id) => getToolAdapter(id)?.agentsFiles ?? []))];
-}
-
 export async function detectInstallDrift(
   repoRoot: string,
   config: Config,
@@ -233,8 +226,10 @@ export async function detectInstallDrift(
     const desiredBlock = renderOrcaopsAgentsMdSection({
       generatedBy: currentVersion,
       prefix,
-      hints: resolveHintLines(config.workflow.hints),
+      hints: config.workflow.hints,
       enabledSkills: expectedSkills,
+      commitInsideWindow: config.workflow.commit_inside_window,
+      suppressedRouting: config.workflow.routing.suppress,
     });
     for (const rel of instructionFiles) {
       const abs = path.join(repoRoot, rel);

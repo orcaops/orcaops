@@ -118,6 +118,7 @@ function runGitCommand(
     });
     const stdout: Buffer[] = [];
     let stderr = '';
+    let stdinError: Error | undefined;
     proc.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
     proc.stderr?.setEncoding('utf8');
     proc.stderr?.on('data', (chunk: string) => {
@@ -125,8 +126,17 @@ function runGitCommand(
     });
     proc.on('error', reject);
     proc.on('close', (code) => {
-      if (code === 0) resolve(Buffer.concat(stdout));
-      else reject(new Error(`git ${args[0] ?? 'command'} failed (${code ?? 'signal'}): ${stderr}`));
+      if (code !== 0)
+        reject(new Error(`git ${args[0] ?? 'command'} failed (${code ?? 'signal'}): ${stderr}`));
+      else if (stdinError) reject(stdinError);
+      else resolve(Buffer.concat(stdout));
+    });
+    // Git exits before draining a batch that outgrows the pipe buffer, so the
+    // write fails with EPIPE. Hold it instead of rejecting here: the exit code
+    // and stderr say WHY git quit, where EPIPE only says the pipe closed. The
+    // listener still has to exist — unhandled, it takes down the process.
+    proc.stdin?.on('error', (error: Error) => {
+      stdinError = error;
     });
     proc.stdin?.end(stdin);
   });
@@ -584,6 +594,7 @@ export class Repo {
       let kept: Buffer[] = [];
       let byteCount = 0;
       let stderr = '';
+      let stdinError: Error | undefined;
 
       const marker = (): Buffer | null => {
         const pair = pairs[pairIndex + (started ? 1 : 0)];
@@ -647,7 +658,15 @@ export class Repo {
           reject(new Error(`git diff-tree failed (${code ?? 'signal'}): ${stderr}`));
           return;
         }
+        if (stdinError) {
+          reject(stdinError);
+          return;
+        }
         resolve(result);
+      });
+      // Its own spawn, so the hold in runGitCommand does not reach it.
+      proc.stdin.on('error', (error: Error) => {
+        stdinError = error;
       });
       proc.stdin.end(`${pairs.map((pair) => `${pair.headSha} ${pair.parentSha}`).join('\n')}\n`);
     });
@@ -811,6 +830,80 @@ export class Repo {
     if (result.code === 0) return 'reachable';
     if (result.code === 1) return 'unreachable';
     return 'unknown';
+  }
+
+  /**
+   * Reachability of full commit SHAs from a captured set of tips. Two Git
+   * processes when every tip is readable; a tip whose object is missing fails
+   * the whole walk, so that case costs two more to drop the bad tips and retry.
+   */
+  async checkReachabilityFromTips(
+    commitShas: readonly string[],
+    tips: readonly string[]
+  ): Promise<Map<string, GitReachability>> {
+    const result = new Map<string, GitReachability>(commitShas.map((sha) => [sha, 'unknown']));
+    if (result.size === 0 || tips.length === 0) return result;
+    const isOid = (sha: string) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(sha);
+    const uniqueTips = [...new Set(tips)];
+    if (!uniqueTips.every(isOid)) return result;
+    const candidates = [...result.keys()].filter(isOid);
+    if (candidates.length === 0) return result;
+
+    const walk = async (from: readonly string[]): Promise<Set<string> | null> => {
+      try {
+        const output = await this.runGitCommand(['rev-list', '--stdin'], `${from.join('\n')}\n`);
+        return new Set(output.toString('utf8').trimEnd().split('\n'));
+      } catch {
+        return null;
+      }
+    };
+    const objectTypes = async (oids: readonly string[]): Promise<string[] | null> => {
+      try {
+        const output = await this.runGitCommand(
+          ['cat-file', '--batch-check=%(objectname) %(objecttype)'],
+          `${oids.join('\n')}\n`
+        );
+        const lines = output.toString('utf8').trimEnd().split('\n');
+        return lines.length === oids.length ? lines : null;
+      } catch {
+        return null;
+      }
+    };
+
+    // One tip whose object is missing fails the walk outright, which would
+    // report every candidate as uncertain. Drop the unreadable tips and walk
+    // the rest. Retrying is only worth a process when a tip actually dropped —
+    // otherwise the walk failed for some other reason and will fail again.
+    let reachable = await walk(uniqueTips);
+    let tipsDropped = false;
+    if (!reachable) {
+      const types = await objectTypes(uniqueTips);
+      if (!types) return result;
+      const usable = uniqueTips.filter(
+        (tip, index) => types[index] === `${tip} commit` || types[index] === `${tip} tag`
+      );
+      if (usable.length === 0 || usable.length === uniqueTips.length) return result;
+      tipsDropped = true;
+      reachable = await walk(usable);
+      if (!reachable) return result;
+    }
+
+    const absent: string[] = [];
+    for (const sha of candidates) {
+      if (reachable.has(sha)) result.set(sha, 'reachable');
+      else absent.push(sha);
+    }
+    // A tip we could not read may well have led to the rest, so they stay
+    // uncertain rather than being called unreachable on partial evidence.
+    if (absent.length === 0 || tipsDropped) return result;
+
+    // Absence from the walk proves unreachability only if the candidate commit exists locally.
+    const types = await objectTypes(absent);
+    if (!types) return result;
+    for (const [index, sha] of absent.entries()) {
+      if (types[index] === `${sha} commit`) result.set(sha, 'unreachable');
+    }
+    return result;
   }
 
   /**

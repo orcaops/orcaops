@@ -9,7 +9,6 @@ import {
   planGenerateForTool,
   type PlannedFile,
   renderOpencodeSessionPlugin,
-  resolveHintLines,
   type ToolAdapter,
 } from '@orcaops/adapters';
 import { commonOrcaopsDirFrom, Repo, resolveCommonDir } from '@orcaops/core';
@@ -69,11 +68,10 @@ export interface PlanInstallMutationsInput {
    * skills/commands into the repo; `'global'` skips that (they materialize
    * globally via planGlobalInstall) but still plans the project block +
    * committed manifest. `'personal'` (the invisible fresh-init default;
-   * every overlay-backed agent) also skips project generation, targets the
-   * bootstrap block at `CLAUDE.local.md` ONLY (the one Claude-ism —
-   * personalScopeWarnings advises when other agents are present), writes NO
-   * committed install.json — the manifest lives in the git-excluded
-   * install.local.json alone — and reconciles the info/exclude section.
+   * every overlay-backed agent) also skips project generation, manages no
+   * instruction file at all, writes NO committed install.json — the manifest
+   * lives in the git-excluded install.local.json alone — and reconciles the
+   * info/exclude section.
    */
   scope?: 'project' | 'global' | 'personal';
   config: Config;
@@ -351,8 +349,10 @@ export async function planInstallMutations(
       instructionFiles: outgoingInstructionFiles.filter((f) => !removedBySymlinkGuard.has(f)),
       generatedBy,
       prefix: config.naming.prefix,
-      hints: resolveHintLines(config.workflow.hints),
+      hints: config.workflow.hints,
       enabledSkills,
+      commitInsideWindow: config.workflow.commit_inside_window,
+      suppressedRouting: config.workflow.routing.suppress,
       reason: 'scope-transition',
     });
     for (const mutation of removal.mutations) {
@@ -384,8 +384,10 @@ export async function planInstallMutations(
       instructionFiles,
       generatedBy,
       prefix: config.naming.prefix,
-      hints: resolveHintLines(config.workflow.hints),
+      hints: config.workflow.hints,
       enabledSkills,
+      commitInsideWindow: config.workflow.commit_inside_window,
+      suppressedRouting: config.workflow.routing.suppress,
       force: input.force,
       overrideAhead: input.allowDowngrade,
     });
@@ -406,8 +408,10 @@ export async function planInstallMutations(
       instructionFiles,
       generatedBy,
       prefix: config.naming.prefix,
-      hints: resolveHintLines(config.workflow.hints),
+      hints: config.workflow.hints,
       enabledSkills,
+      commitInsideWindow: config.workflow.commit_inside_window,
+      suppressedRouting: config.workflow.routing.suppress,
     });
     mutations.push(...removal.mutations);
     agentsMd.push(...removal.results);

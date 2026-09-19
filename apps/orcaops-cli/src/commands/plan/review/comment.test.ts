@@ -8,6 +8,7 @@ import { type SourcePlanReviewCommentResponse, TrpcRequestError } from '@orcaops
 import {
   assertNonEmptyCommentOptions,
   assertReplyTargetingExclusive,
+  commentRetryFlags,
   reviewCommentAction,
   type ReviewCommentClient,
   type RunReplyCommentArgs,
@@ -63,6 +64,7 @@ describe('runReviewComment', () => {
     externalId: 'ext-1',
     body: 'a comment',
     replyTo,
+    persistence,
   });
 
   it('action rejects a dirty body or quote before credential resolution', async () => {
@@ -140,6 +142,137 @@ describe('runReviewComment', () => {
     expect(reviewComment).toHaveBeenCalledWith(
       expect.objectContaining({ quote: 'some span', disambiguator: 'preceding' })
     );
+  });
+
+  it('refuses an aliased slug naming the canonical ref, with no cloud call', async () => {
+    const canonical = 'a'.repeat(64);
+    await seedCandidate(persistence, {
+      externalId: canonical,
+      versionId: 'ver_4',
+      versionNumber: 4,
+    });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: canonical,
+      pulledAt: '2026-06-09T00:00:00.000Z',
+    });
+    const reviewComment = vi.fn(async () => commentResp());
+
+    const err = await runReviewComment({
+      client: commentClient(reviewComment),
+      ...base(repoRoot),
+      externalId: 'plan-slug',
+    }).then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect(err).toMatchObject({ code: 'INVALID_INPUT' });
+    expect((err as Error).message).toContain(`orcaops plan review comment ${canonical}`);
+    expect(reviewComment).not.toHaveBeenCalled();
+  });
+
+  it('names --reply-to in a reply refusal the caller passed no flags for', async () => {
+    const canonical = 'a'.repeat(64);
+    await seedCandidate(persistence, {
+      externalId: canonical,
+      versionId: 'ver_4',
+      versionNumber: 4,
+    });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: canonical,
+      pulledAt: '2026-06-09T00:00:00.000Z',
+    });
+    const reviewComment = vi.fn(async () => commentResp());
+
+    const err = await runReviewComment({
+      ...replyArgs(reviewComment),
+      externalId: 'plan-slug',
+    }).then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect((err as Error).message).toContain(
+      `orcaops plan review comment ${canonical} --reply-to cmt_parent`
+    );
+    expect(reviewComment).not.toHaveBeenCalled();
+  });
+
+  it('refuses an aliased slug on a reply, which publishes without touching the cache', async () => {
+    const canonical = 'a'.repeat(64);
+    await seedCandidate(persistence, {
+      externalId: canonical,
+      versionId: 'ver_4',
+      versionNumber: 4,
+    });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: canonical,
+      pulledAt: '2026-06-09T00:00:00.000Z',
+    });
+    const reviewComment = vi.fn(async () => commentResp());
+
+    const err = await runReviewComment({
+      ...replyArgs(reviewComment),
+      externalId: 'plan-slug',
+    }).then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect(err).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(reviewComment).not.toHaveBeenCalled();
+  });
+
+  it('refuses an aliased slug proved by a pulled proposal alone', async () => {
+    const canonical = 'a'.repeat(64);
+    await seedProposal(persistence, { externalId: canonical, proposalId: 'prop_9' });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: canonical,
+      pulledAt: '2026-06-09T00:00:00.000Z',
+    });
+    const reviewComment = vi.fn(async () => commentResp());
+
+    const err = await runReviewComment({
+      client: commentClient(reviewComment),
+      ...base(repoRoot),
+      externalId: 'plan-slug',
+      proposalId: 'prop_9',
+    }).then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect(err).toMatchObject({ code: 'INVALID_INPUT' });
+    expect((err as Error).message).toContain(canonical);
+    expect(reviewComment).not.toHaveBeenCalled();
+  });
+
+  it('refuses an aliased slug on --proposal naming the canonical ref', async () => {
+    const canonical = 'a'.repeat(64);
+    await seedCandidate(persistence, {
+      externalId: canonical,
+      versionId: 'ver_4',
+      versionNumber: 4,
+    });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: canonical,
+      pulledAt: '2026-06-09T00:00:00.000Z',
+    });
+    const reviewComment = vi.fn(async () => commentResp());
+
+    const err = await runReviewComment({
+      client: commentClient(reviewComment),
+      ...base(repoRoot),
+      externalId: 'plan-slug',
+      proposalId: 'prop_9',
+    }).then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect(err).toMatchObject({ code: 'INVALID_INPUT' });
+    expect((err as Error).message).toContain(`${canonical} --proposal prop_9`);
+    expect(reviewComment).not.toHaveBeenCalled();
   });
 
   it('hard-errors NO_INPUT with no cached record', async () => {
@@ -261,6 +394,7 @@ describe('assertNonEmptyCommentOptions', () => {
 
 describe('RunReviewCommentArgs union', () => {
   it('rejects an anchor on a reply at BOTH construction and use sites', () => {
+    const persistence = createMemoryPlanReviewPersistence();
     const reply: RunReplyCommentArgs = {
       kind: 'reply',
       client: commentClient(vi.fn(async () => commentResp())),
@@ -269,6 +403,7 @@ describe('RunReviewCommentArgs union', () => {
       externalId: 'ext-1',
       body: 'a comment',
       replyTo: 'cmt_parent',
+      persistence,
     };
     // Use-site: the reply variant has no `quote`, so reading it must not compile.
     // @ts-expect-error — RunReplyCommentArgs has no `quote`.
@@ -286,6 +421,7 @@ describe('RunReviewCommentArgs union', () => {
       externalId: 'ext-1',
       body: 'a comment',
       replyTo: 'cmt_parent',
+      persistence,
       // @ts-expect-error — `quote` is not a property of RunReplyCommentArgs.
       quote: 'oops',
     };
@@ -307,5 +443,35 @@ describe('RunReviewCommentArgs union', () => {
     void _badUnion;
 
     expect(reply.replyTo).toBe('cmt_parent');
+  });
+});
+
+describe('commentRetryFlags', () => {
+  it('echoes every flag that changes what the command does', () => {
+    expect(
+      commentRetryFlags({
+        replyTo: 'cmt_parent',
+        proposal: 'prop_9',
+        quote: 'some span',
+        disambiguator: 'preceding',
+        input: 'c1.md',
+        baseUrl: 'https://staging.example',
+        json: true,
+      })
+    ).toEqual([
+      '--reply-to',
+      'cmt_parent',
+      '--proposal',
+      'prop_9',
+      '--quote',
+      'some span',
+      '--disambiguator',
+      'preceding',
+      '--input',
+      'c1.md',
+      '--base-url',
+      'https://staging.example',
+      '--json',
+    ]);
   });
 });

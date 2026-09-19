@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   assertConfigVersionCurrent,
   CONFIG_SCHEMA_VERSION,
+  ConfigSchema,
+  DEFAULT_CONFIG,
   getDefaultConfig,
   resolveConfig,
 } from './config.js';
@@ -38,7 +40,7 @@ describe('config schema — naming / bootstrap / workflow + install fields', () 
     expect(c.naming.prefix).toBe('orcaops');
     expect(c.bootstrap).toBe('managed');
     expect(c.workflow.hints).toEqual({ keys: [], custom: [] });
-    expect(c.schema_version).toBe(6);
+    expect(c.schema_version).toBe(CONFIG_SCHEMA_VERSION);
     expect(c.review.include_untracked).toEqual([]);
   });
 
@@ -64,11 +66,15 @@ describe('config schema — naming / bootstrap / workflow + install fields', () 
     expect(() => resolveConfig({ workflow: { hints: { keys: ['nope'], custom: [] } } })).toThrow();
   });
 
-  it('is at config schema version 6 (capture exclude set)', () => {
-    expect(CONFIG_SCHEMA_VERSION).toBe(6);
+  it('is at config schema version 7 (workflow commit guidance and routing)', () => {
+    expect(CONFIG_SCHEMA_VERSION).toBe(7);
   });
 
-  it('assertConfigVersionCurrent: exactly the number 6 passes', () => {
+  it('assertConfigVersionCurrent: exactly the number 7 passes', () => {
+    expect(() => assertConfigVersionCurrent({ schema_version: 7 })).not.toThrow();
+  });
+
+  it('accepts version 6, whose only delta is two defaulted workflow keys', () => {
     expect(() => assertConfigVersionCurrent({ schema_version: 6 })).not.toThrow();
   });
 
@@ -79,20 +85,20 @@ describe('config schema — naming / bootstrap / workflow + install fields', () 
   it('rejects non-current versions with regeneration guidance', () => {
     for (const v of [1, 2, 3, 4]) {
       expect(() => assertConfigVersionCurrent({ schema_version: v })).toThrow(
-        /requires 6.*orcaops init --force --reset-config/s
+        /requires 7.*orcaops init --force --reset-config/s
       );
     }
-    expect(() => assertConfigVersionCurrent({})).toThrow(/missing.*requires 6/s);
+    expect(() => assertConfigVersionCurrent({})).toThrow(/missing.*requires 7/s);
   });
 
   it('rejects a STRINGIFIED version naming the type error instead of coercing', () => {
-    expect(() => assertConfigVersionCurrent({ schema_version: '6' })).toThrow(
-      /number 6.*string "6".*--reset-config/s
+    expect(() => assertConfigVersionCurrent({ schema_version: '7' })).toThrow(
+      /number 7.*string "7".*--reset-config/s
     );
   });
 
   it('keeps the newer-orcaops message for a version ahead of this build', () => {
-    expect(() => assertConfigVersionCurrent({ schema_version: 7 })).toThrow(/Upgrade orcaops/);
+    expect(() => assertConfigVersionCurrent({ schema_version: 8 })).toThrow(/Upgrade orcaops/);
   });
 
   it.each(['__proto__', 'constructor', 'prototype'])(
@@ -111,6 +117,58 @@ describe('config schema — naming / bootstrap / workflow + install fields', () 
       expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     }
   );
+});
+
+describe('config schema — workflow commit guidance and routing suppression', () => {
+  it('defaults to commit guidance on and nothing suppressed', () => {
+    const c = getDefaultConfig();
+    expect(c.workflow.commit_inside_window).toBe(true);
+    expect(c.workflow.routing.suppress).toEqual([]);
+    // A config written before either key existed resolves to the same values.
+    const existing = resolveConfig({ workflow: { hints: { keys: ['checkpoint-cadence'] } } });
+    expect(existing.workflow.commit_inside_window).toBe(true);
+    expect(existing.workflow.routing.suppress).toEqual([]);
+  });
+
+  it('fills both keys when the whole workflow block is absent', () => {
+    // zod returns the outer `.default()` literal verbatim, so a key missing
+    // from it is a key that silently never defaults.
+    const { workflow: _absent, ...rest } = structuredClone(DEFAULT_CONFIG);
+    expect(ConfigSchema.parse(rest).workflow).toEqual({
+      hints: { keys: [], custom: [] },
+      commit_inside_window: true,
+      routing: { suppress: [] },
+    });
+  });
+
+  it('accepts suppression of known skill ids and rejects an unknown one', () => {
+    const c = resolveConfig({ workflow: { routing: { suppress: ['digest', 'why'] } } });
+    expect(c.workflow.routing.suppress).toEqual(['digest', 'why']);
+    expect(() =>
+      resolveConfig({ workflow: { routing: { suppress: ['future-skill'] } } })
+    ).toThrowError(expect.objectContaining({ path: 'workflow.routing.suppress.0' }));
+  });
+
+  it('loads commit guidance switched off while the hint key pins it on', () => {
+    // Redundant, not invalid: the resolver drops the key and honors the
+    // boolean, and doctor's `workflow-hints` check names the combination.
+    // Refusing the load would take every command in the repository with it.
+    const c = resolveConfig({
+      workflow: { commit_inside_window: false, hints: { keys: ['commit-on-checkpoint-close'] } },
+    });
+    expect(c.workflow.commit_inside_window).toBe(false);
+    expect(c.workflow.hints.keys).toEqual(['commit-on-checkpoint-close']);
+  });
+
+  it('accepts each half of that pair on its own', () => {
+    expect(resolveConfig({ workflow: { commit_inside_window: false } }).workflow).toMatchObject({
+      commit_inside_window: false,
+    });
+    expect(
+      resolveConfig({ workflow: { hints: { keys: ['commit-on-checkpoint-close'] } } }).workflow
+        .commit_inside_window
+    ).toBe(true);
+  });
 });
 
 describe('config schema — skills block', () => {
@@ -172,6 +230,7 @@ describe('config schema — closed nested sections', () => {
     ['naming.extra', { naming: { extra: true } }],
     ['workflow.extra', { workflow: { extra: true } }],
     ['workflow.hints.extra', { workflow: { hints: { extra: true } } }],
+    ['workflow.routing.extra', { workflow: { routing: { extra: true } } }],
   ])('rejects %s', (path, partial) => {
     expect(() => resolveConfig(partial)).toThrowError(expect.objectContaining({ path }));
   });

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -122,6 +122,52 @@ describe('Repo batched seed plumbing', () => {
       const capped = await repo.diffCommitPairs([pairs[0]!], 8);
       expect(capped.get(secondSha)).toMatchObject({ truncated: true });
       expect(capped.get(secondSha)?.diff).toHaveLength(8);
+    } finally {
+      await history.cleanup();
+    }
+  });
+
+  it('surfaces the Git failure when a ref batch outgrows the pipe buffer', async () => {
+    const history = await createHistoryRepo([
+      { type: 'commit', label: 'root', files: { 'root.txt': 'root\n' } },
+    ]);
+    try {
+      const repo = new Repo(history.path);
+      // Git rejects the first update and exits without draining the rest, so
+      // the write only breaks once the batch passes the 64KB pipe buffer.
+      const updates = [
+        { ref: 'refs/orcaops/batch/invalid', sha: 'not-a-sha' },
+        ...Array.from({ length: 20_000 }, (_, index) => ({
+          ref: `refs/orcaops/batch/fill/${index}`,
+          sha: history.shas.root!,
+        })),
+      ];
+
+      await expect(repo.updateRefsBatch(updates)).rejects.toThrow(/failed \(128\).*not-a-sha/s);
+    } finally {
+      await history.cleanup();
+    }
+  });
+
+  it('surfaces the Git failure when a diff batch outgrows the pipe buffer', async () => {
+    const history = await createHistoryRepo([
+      { type: 'commit', label: 'root', files: { 'root.txt': 'root\n' } },
+    ]);
+    try {
+      const bin = path.join(history.path, 'bin');
+      await mkdir(bin);
+      await writeFile(path.join(bin, 'git'), '#!/bin/sh\nexit 128\n', { mode: 0o700 });
+      const repo = new Repo(history.path, {
+        env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` },
+      });
+      const pairs = Array.from({ length: 2_000 }, () => ({
+        parentSha: history.shas.root!,
+        headSha: history.shas.root!,
+      }));
+
+      await expect(repo.diffCommitPairs(pairs, 100_000)).rejects.toThrow(
+        /diff-tree failed \(128\)/
+      );
     } finally {
       await history.cleanup();
     }
@@ -465,6 +511,204 @@ describe('Repo.resolveMergeBase', () => {
     } finally {
       await temp.cleanup();
     }
+  });
+});
+
+describe('Repo.checkReachabilityFromTips', () => {
+  let repo: TempRepo;
+  let initialSha: string;
+  let unreachableSha: string;
+  let env: NodeJS.ProcessEnv;
+  let log: string;
+
+  beforeEach(async () => {
+    repo = await createTempRepo({ initialBranch: 'main' });
+    initialSha = (await gitClient(repo.path).revparse(['HEAD'])).trim();
+    const tree = (await gitClient(repo.path).revparse(['HEAD^{tree}'])).trim();
+    unreachableSha = (
+      await gitClient(repo.path).raw(['commit-tree', tree, '-m', 'Unreachable'])
+    ).trim();
+    const bin = path.join(repo.path, 'bin');
+    await mkdir(bin);
+    log = path.join(repo.path, 'git-probes');
+    await writeFile(log, '');
+    await writeFile(
+      path.join(bin, 'git'),
+      '#!/bin/sh\n' +
+        'printf "%s\\n" "$1" >> "$GIT_PROBE_LOG"\n' +
+        'if [ "$1" = "$GIT_FAIL_COMMAND" ]; then cat >/dev/null; exit 128; fi\n' +
+        'exec "$REAL_GIT" "$@"\n',
+      { mode: 0o700 }
+    );
+    env = {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`,
+      REAL_GIT: execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim(),
+      GIT_PROBE_LOG: log,
+      GIT_FAIL_COMMAND: '',
+    };
+  });
+
+  afterEach(async () => {
+    await repo.cleanup();
+  });
+
+  it('distinguishes reachable commits, unreachable commits, and missing or non-commit objects', async () => {
+    const head = await commit(repo.path, 'a.ts', 'a\n', 'Advance');
+    const tree = (await gitClient(repo.path).revparse(['HEAD^{tree}'])).trim();
+    const missing = 'deadbeef'.repeat(5);
+    const r = new Repo(repo.path, { env });
+
+    expect(
+      await r.checkReachabilityFromTips([initialSha, head, unreachableSha, missing, tree], [head])
+    ).toEqual(
+      new Map([
+        [initialSha, 'reachable'],
+        [head, 'reachable'],
+        [unreachableSha, 'unreachable'],
+        [missing, 'unknown'],
+        [tree, 'unknown'],
+      ])
+    );
+    expect(await readFile(log, 'utf8')).toBe('rev-list\ncat-file\n');
+  });
+
+  it('uses the supplied tip snapshot after a branch advances', async () => {
+    const head = await commit(repo.path, 'a.ts', 'a\n', 'Advance');
+    const r = new Repo(repo.path, { env });
+
+    expect(await r.checkReachabilityFromTips([initialSha, head], [initialSha])).toEqual(
+      new Map([
+        [initialSha, 'reachable'],
+        [head, 'unreachable'],
+      ])
+    );
+  });
+
+  it('walks every supplied tip and skips object checks when all candidates are reachable', async () => {
+    const r = new Repo(repo.path, { env });
+
+    expect(
+      await r.checkReachabilityFromTips([initialSha, unreachableSha], [initialSha, unreachableSha])
+    ).toEqual(
+      new Map([
+        [initialSha, 'reachable'],
+        [unreachableSha, 'reachable'],
+      ])
+    );
+    expect(await readFile(log, 'utf8')).toBe('rev-list\n');
+  });
+
+  it('includes ancestors reached through either parent of a merge', async () => {
+    const tree = (await gitClient(repo.path).revparse(['HEAD^{tree}'])).trim();
+    const merge = (
+      await gitClient(repo.path).raw([
+        'commit-tree',
+        tree,
+        '-p',
+        initialSha,
+        '-p',
+        unreachableSha,
+        '-m',
+        'Merge',
+      ])
+    ).trim();
+    const r = new Repo(repo.path, { env });
+
+    expect(await r.checkReachabilityFromTips([initialSha, unreachableSha, merge], [merge])).toEqual(
+      new Map([
+        [initialSha, 'reachable'],
+        [unreachableSha, 'reachable'],
+        [merge, 'reachable'],
+      ])
+    );
+  });
+
+  it('bounds subprocesses when artifacts and branch tips repeat', async () => {
+    const r = new Repo(repo.path, { env });
+    const candidates = Array.from({ length: 432 }, (_, index) =>
+      index % 2 === 0 ? initialSha : unreachableSha
+    );
+    const tips = Array.from({ length: 204 }, () => initialSha);
+
+    expect(await r.checkReachabilityFromTips(candidates, tips)).toEqual(
+      new Map([
+        [initialSha, 'reachable'],
+        [unreachableSha, 'unreachable'],
+      ])
+    );
+    expect(await readFile(log, 'utf8')).toBe('rev-list\ncat-file\n');
+  });
+
+  it.each(['rev-list', 'cat-file'])('preserves uncertainty when %s fails', async (command) => {
+    const r = new Repo(repo.path, { env: { ...env, GIT_FAIL_COMMAND: command } });
+
+    expect(await r.checkReachabilityFromTips([initialSha, unreachableSha], [initialSha])).toEqual(
+      new Map([
+        [initialSha, command === 'rev-list' ? 'unknown' : 'reachable'],
+        [unreachableSha, 'unknown'],
+      ])
+    );
+  });
+
+  it('preserves uncertainty when Git cannot spawn', async () => {
+    const r = new Repo(repo.path, { env: { ...env, PATH: path.join(repo.path, 'missing') } });
+
+    expect(await r.checkReachabilityFromTips([initialSha], [initialSha])).toEqual(
+      new Map([[initialSha, 'unknown']])
+    );
+  });
+
+  it('preserves uncertainty when Git exits before reading a large tip batch', async () => {
+    await writeFile(path.join(repo.path, 'bin', 'git'), '#!/bin/sh\nexit 128\n', { mode: 0o700 });
+    const tips = Array.from({ length: 50_000 }, (_, index) => index.toString(16).padStart(40, '0'));
+    const r = new Repo(repo.path, { env });
+
+    expect(await r.checkReachabilityFromTips([initialSha], tips)).toEqual(
+      new Map([[initialSha, 'unknown']])
+    );
+  });
+
+  it('proves reachability from the readable tips when a tip object is missing', async () => {
+    const head = await commit(repo.path, 'a.ts', 'a\n', 'Advance');
+    const r = new Repo(repo.path, { env });
+
+    expect(
+      await r.checkReachabilityFromTips([initialSha, unreachableSha], [head, 'deadbeef'.repeat(5)])
+    ).toEqual(
+      new Map([
+        [initialSha, 'reachable'],
+        // Not 'unreachable': the tip that failed to read may have led here.
+        [unreachableSha, 'unknown'],
+      ])
+    );
+    expect(await readFile(log, 'utf8')).toBe('rev-list\ncat-file\nrev-list\n');
+  });
+
+  it('stays uncertain without retrying when no supplied tip can be read', async () => {
+    const r = new Repo(repo.path, { env });
+
+    expect(await r.checkReachabilityFromTips([initialSha], ['deadbeef'.repeat(5)])).toEqual(
+      new Map([[initialSha, 'unknown']])
+    );
+    expect(await readFile(log, 'utf8')).toBe('rev-list\ncat-file\n');
+  });
+
+  it('does not spawn Git for empty inputs or interpret invalid SHAs as stdin commands', async () => {
+    const r = new Repo(repo.path, { env });
+    const invalid = `${initialSha}\n--all`;
+
+    expect(await r.checkReachabilityFromTips([], [initialSha])).toEqual(new Map());
+    expect(await r.checkReachabilityFromTips([initialSha], [])).toEqual(
+      new Map([[initialSha, 'unknown']])
+    );
+    expect(await r.checkReachabilityFromTips([invalid], [initialSha])).toEqual(
+      new Map([[invalid, 'unknown']])
+    );
+    expect(await r.checkReachabilityFromTips([initialSha], [invalid])).toEqual(
+      new Map([[initialSha, 'unknown']])
+    );
+    expect(await readFile(log, 'utf8')).toBe('');
   });
 });
 

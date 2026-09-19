@@ -66,7 +66,9 @@ async function projectEntryStatus(
 
 /**
  * `orcaops hook session-start` — the command installed agent session hooks
- * execute. HARD CONTRACT: always exit 0 and never print an error. This runs
+ * execute. HARD CONTRACT: always exit 0 and never print an error, except that
+ * the fast path's deadline SIGKILLs an overrunning run — never a non-zero exit
+ * code either way. This runs
  * at every session start for everyone who clones a repo with hooks installed,
  * so a failure mode of "error banner in each teammate's session" is worse
  * than silence: uninitialized repos, non-git directories, unreadable configs,
@@ -96,7 +98,7 @@ export async function hookSessionStartAction(opts: HookSessionStartOptions = {})
     if (opts.user && (await projectEntryStatus(opts.agent, location?.root ?? null)) !== 'absent') {
       return;
     }
-    text = renderSessionStartGuidance(await readSessionStartState(opts.cwd, location));
+    text = renderSessionStartGuidance(await readSessionStartState(opts.cwd, location, opts.agent));
   } catch {
     text = null;
   }

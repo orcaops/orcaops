@@ -6,7 +6,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CloudWireError, type SourcePlanReviewPullResponse, TrpcRequestError } from '@orcaops/sdk';
 
-import { parseVersionFlag, type ReviewPullClient, runReviewPull } from './pull.js';
+import {
+  formatHumanReviewPull,
+  parseVersionFlag,
+  type ReviewPullClient,
+  type ReviewPullResult,
+  runReviewPull,
+} from './pull.js';
 import {
   createMemoryPlanReviewPersistence,
   seedCandidate,
@@ -83,6 +89,48 @@ describe('runReviewPull', () => {
     const rec = await persistence.readCandidate('ext-1');
     expect(rec?.body).toBe(body);
     expect(rec?.version_id).toBe('ver_4');
+  });
+
+  it('records the typed ref as an alias of the canonical externalId', async () => {
+    const body = '# Candidate\n\nbody';
+    const result = await runReviewPull({
+      client: client(vi.fn(async () => candidateResp(body))),
+      ...base(repoRoot),
+      externalId: 'plan-slug',
+    });
+    expect(result.ref).toBe('ext-1');
+    expect(await persistence.readCandidate('plan-slug')).toBeNull();
+    expect(await persistence.readRefAliases('plan-slug')).toEqual([
+      { externalId: 'ext-1', pulledAt: '2026-06-09T00:00:00.000Z' },
+    ]);
+  });
+
+  it('records no alias when the typed ref is already canonical', async () => {
+    const body = '# Candidate\n\nbody';
+    await runReviewPull({
+      client: client(vi.fn(async () => candidateResp(body))),
+      ...base(repoRoot),
+    });
+    expect(await persistence.readRefAliases('ext-1')).toEqual([]);
+  });
+
+  it('returns the pull result when the alias write fails', async () => {
+    const body = '# Candidate\n\nbody';
+    const failing = {
+      ...persistence,
+      writeRefAlias: vi.fn(async () => {
+        throw new Error('writer unavailable');
+      }),
+    };
+    const result = await runReviewPull({
+      client: client(vi.fn(async () => candidateResp(body))),
+      ...base(repoRoot),
+      persistence: failing,
+      externalId: 'plan-slug',
+    });
+    expect(result.ref).toBe('ext-1');
+    expect(failing.writeRefAlias).toHaveBeenCalledOnce();
+    expect(await persistence.readCandidate('ext-1')).not.toBeNull();
   });
 
   it('pulls a proposal with --proposal and caches a proposal record', async () => {
@@ -304,5 +352,28 @@ describe('runReviewPull', () => {
     ).rejects.toThrow();
     const rec = await persistence.readCandidate('ext-1');
     expect(rec).toBeNull();
+  });
+});
+
+describe('formatHumanReviewPull', () => {
+  const pulled: ReviewPullResult = {
+    external_id: 'ext-1',
+    target: 'candidate',
+    version_id: 'ver_4',
+    version_number: 4,
+    proposal_id: null,
+    base_version_number: null,
+    ref: 'ext-1',
+    base_url: 'https://cloud.example',
+  };
+
+  it('names the id a slug resolved to as the ref the write verbs take', () => {
+    const out = formatHumanReviewPull(pulled, 'plan-slug');
+    expect(out).toContain('"plan-slug" resolved to that id');
+    expect(out).toContain('orcaops plan review push ext-1');
+  });
+
+  it('says nothing about resolution when the canonical ref was typed', () => {
+    expect(formatHumanReviewPull(pulled, 'ext-1')).not.toContain('resolved to that id');
   });
 });

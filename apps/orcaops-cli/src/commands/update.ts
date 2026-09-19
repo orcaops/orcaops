@@ -1,7 +1,7 @@
 import path from 'node:path';
 
 import { configLocationForScope, Repo, resolveConfigSource } from '@orcaops/core';
-import { resolveConfig } from '@orcaops/storage';
+import { CONFIG_SCHEMA_VERSION, resolveConfig } from '@orcaops/storage';
 
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
@@ -247,6 +247,7 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
           naming?: Record<string, unknown>;
           install?: Record<string, unknown>;
           session_hooks?: Record<string, unknown>;
+          schema_version?: number;
         };
         if (prefixChange) {
           parsed.naming = { ...(parsed.naming ?? {}), prefix: opts.prefix };
@@ -291,6 +292,8 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
           };
           ctx.config.session_hooks.entries = opts.sessionHookEntries as 'project' | 'none';
         }
+        parsed.schema_version = CONFIG_SCHEMA_VERSION;
+
         const desired = `${JSON.stringify(parsed, null, 2)}\n`;
         const priorDestination = movingSource
           ? (adoptedPersonalContent ??

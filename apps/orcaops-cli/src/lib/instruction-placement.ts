@@ -2,6 +2,7 @@ import { lstat, readFile, readlink } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
+  type HintsInput,
   isVersionAhead,
   planInjectOrcaopsSection,
   planRemoveOrcaopsSection,
@@ -10,7 +11,7 @@ import {
   type SkillTemplate,
   type StampDivergence,
 } from '@orcaops/adapters';
-import { assertCanonicalRelativePath, assertResolvedWithin } from '@orcaops/storage';
+import { assertCanonicalRelativePath, assertResolvedWithin, type SkillId } from '@orcaops/storage';
 
 import {
   deleteMutation,
@@ -85,8 +86,12 @@ export interface ResolveInstructionPlacementInput {
   generatedBy: string;
   /** Skill naming prefix threaded into the managed block (default orcaops). */
   prefix?: string;
-  /** Resolved workflow-preference lines rendered into the block. */
-  hints?: string[];
+  /**
+   * Workflow preferences rendered into the block. Pass the raw
+   * `workflow.hints` so the renderer can drop the keys the lifecycle prose
+   * already states; a pre-resolved `string[]` renders verbatim.
+   */
+  hints?: HintsInput;
   /**
    * The enabled skill set — the block body is assembled from it.
    * Omitted ⇒ every shipped template.
@@ -103,6 +108,8 @@ export interface ResolveInstructionPlacementInput {
   mode?: 'safe' | 'force-collapse';
   /** Explicit canonical override (`orcaops link --canonical <file>`). */
   canonical?: string;
+  commitInsideWindow?: boolean;
+  suppressedRouting?: ReadonlyArray<SkillId>;
 }
 
 export interface InstructionPlacementResult {
@@ -252,6 +259,8 @@ export async function resolveInstructionPlacement(
     prefix: input.prefix,
     hints: input.hints,
     enabledSkills: input.enabledSkills,
+    commitInsideWindow: input.commitInsideWindow,
+    suppressedRouting: input.suppressedRouting,
   });
 
   const repairMalformed = mode === 'force-collapse' || force === true;
@@ -400,9 +409,16 @@ export interface RemoveInstructionBlocksInput {
   instructionFiles: string[];
   generatedBy: string;
   prefix?: string;
-  hints?: string[];
+  hints?: HintsInput;
   /** The enabled skill set — must match what rendered the on-disk block. */
   enabledSkills?: ReadonlyArray<SkillTemplate>;
+  /**
+   * Removal is byte-equality against this render, so these must match what
+   * WROTE the block — a default here strands a non-default block as
+   * `preserved-modified`.
+   */
+  commitInsideWindow?: boolean;
+  suppressedRouting?: ReadonlyArray<SkillId>;
   reason?: 'bootstrap-manual' | 'scope-transition';
 }
 
@@ -427,6 +443,8 @@ export async function planRemoveInstructionBlocks(
     prefix: input.prefix,
     hints: input.hints,
     enabledSkills: input.enabledSkills,
+    commitInsideWindow: input.commitInsideWindow,
+    suppressedRouting: input.suppressedRouting,
   });
   const files = [...new Set(input.instructionFiles)];
   const mutations: PlannedMutation[] = [];

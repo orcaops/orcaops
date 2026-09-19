@@ -33,7 +33,7 @@ orcaops doctor — v<version>
   repo: <repo>
 
 ✓ repository           8 checks passed
-✓ install surfaces     9 checks passed
+✓ install surfaces     10 checks passed
 ✓ artifact state       18/19 checks passed
 ⚠ seed                 Git history exists but the project database has no seed state
   Preview with `orcaops seed --dry-run`; apply with `orcaops seed --yes`.

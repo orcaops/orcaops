@@ -157,6 +157,31 @@ export async function repositoryRegularFileExists(
   }
 }
 
+/**
+ * Does an entry exist at this path at all? `lstat`, so a symlink counts — and a
+ * DANGLING one counts too. Callers that only need to know whether the user
+ * already put something there must not read through the link: reading would
+ * reject the symlink outright, and following it would answer for the target.
+ */
+export async function repositoryEntryExists(
+  target: string,
+  root: string,
+  label: string
+): Promise<boolean> {
+  const parent = assertResolvedWithin(path.dirname(target), root, `${label} parent`, {
+    allowRoot: true,
+    rejectSymlinks: true,
+  });
+  const entry = assertSafePathSegment(path.basename(target), `${label} entry`);
+  try {
+    await lstat(path.join(parent, entry));
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
 export async function readContainedRepositoryRegularFileOrNull(
   target: string,
   root: string,

@@ -179,6 +179,22 @@ describe('orcaops CLI program', () => {
     expect(help).toContain('--install-agent <id>');
   });
 
+  it('--no-agents-md help states when unattended init adds the block', () => {
+    const init = buildOfficialProgram().commands.find((command) => command.name() === 'init');
+    expect(init).toBeDefined();
+    const description = init!.options.find(
+      (option) => option.long === '--no-agents-md'
+    )?.description;
+    expect(description).toBeDefined();
+    expect(description).toMatch(/project or global/);
+    expect(description).toMatch(/personal scope never adds one/);
+    expect(description).toMatch(/session hooks/);
+    expect(description).toMatch(/already has an instruction file/);
+    // Unattended init writes the block under project and global scope, so the
+    // flag is no longer describing the default.
+    expect(description).not.toMatch(/the default for unattended init/);
+  });
+
   it('describes --no-llm as a skip and never claims an unevaluated pass', () => {
     const capture = buildOfficialProgram().commands.find((command) => command.name() === 'capture');
     const checkpoint = capture?.commands.find((command) => command.name() === 'checkpoint');

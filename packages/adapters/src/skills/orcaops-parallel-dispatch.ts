@@ -21,7 +21,7 @@ export const orcaopsParallelDispatchSkill: SkillTemplate = {
   group: 'orchestration',
   defaultEnabled: false,
   blockTriggerLine: (prefix: string) =>
-    `parallel dispatch ("split this plan across subagents") → \`${skillRef('parallel-dispatch', prefix)}\``,
+    `"parallelize this plan", "split this plan across subagents", "dispatch these steps to subagents" → \`${skillRef('parallel-dispatch', prefix)}\``,
   body: (prefix: string) => `# When to use
 
 Triggers (user phrasing):

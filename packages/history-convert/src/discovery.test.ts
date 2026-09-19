@@ -407,6 +407,65 @@ describe('repository source discovery', { timeout: 30_000 }, () => {
     );
   });
 
+  it('reads a config carrying keys the frozen legacy schema never knew', async () => {
+    const f = await fixture();
+    await write(
+      path.join(f.main, '.orcaops/config.json'),
+      JSON.stringify({
+        schema_version: 6,
+        artifacts: { path: '.retained/artifacts' },
+        cache: { path: '.local/cache.sqlite' },
+        workflow: {
+          hints: { keys: [], custom: [] },
+          commit_inside_window: false,
+          routing: { suppress: ['digest'] },
+        },
+      })
+    );
+    await write(path.join(f.main, '.retained/artifacts/retained.json'), 'private artifact payload');
+    await write(path.join(f.main, '.local/cache.sqlite'), 'unique operational bytes');
+    const result = await discoverLegacyRepository({ cwd: f.main, root: f.data });
+    expect(result.issues).toEqual([]);
+    expect(result.layouts[0]).toMatchObject({
+      artifacts: '.retained/artifacts',
+      sqlite: '.local/cache.sqlite',
+    });
+  });
+
+  it('reads a config written by a newer orcaops than the frozen profile', async () => {
+    const f = await fixture();
+    await write(
+      path.join(f.main, '.orcaops/config.json'),
+      JSON.stringify({
+        schema_version: 99,
+        artifacts: { path: '.retained/artifacts' },
+        cache: { path: '.local/cache.sqlite' },
+        workflow: { routing: { suppress: ['digest'] } },
+        some_block_invented_later: { enabled: true },
+      })
+    );
+    await write(path.join(f.main, '.retained/artifacts/retained.json'), 'private artifact payload');
+    await write(path.join(f.main, '.local/cache.sqlite'), 'unique operational bytes');
+
+    const result = await discoverLegacyRepository({ cwd: f.main, root: f.data });
+    expect(result.issues).toEqual([]);
+    expect(result.layouts[0]).toMatchObject({
+      artifacts: '.retained/artifacts',
+      sqlite: '.local/cache.sqlite',
+    });
+  });
+
+  it('still refuses a config older than the versions the frozen profile accepts', async () => {
+    const f = await fixture();
+    await write(
+      path.join(f.main, '.orcaops/config.json'),
+      JSON.stringify({ schema_version: 2, artifacts: { path: '.retained/artifacts' } })
+    );
+
+    const result = await discoverLegacyRepository({ cwd: f.main, root: f.data });
+    expect(result.issues.some((i) => /frozen supported profile/.test(i.reason))).toBe(true);
+  });
+
   it('rejects a config mutation after custom source selection', async () => {
     const f = await fixture();
     const file = path.join(f.main, '.orcaops/config.json');

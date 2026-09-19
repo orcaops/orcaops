@@ -290,15 +290,15 @@ export function buildProgram(options: BuildProgramOptions): Command {
     // default is undefined (tri-state: init distinguishes an explicit choice
     // from no flag), but reversed, the default becomes true and every
     // unattended init silently writes AGENTS.md again. Verified empirically;
-    // pinned by 'init defaults to no AGENTS.md / CLAUDE.md mutation' in
-    // tests/integration/cli.test.ts.
+    // pinned by 'unattended init leaves a hand-written AGENTS.md alone and
+    // stays manual' in tests/integration/cli.test.ts.
     .option(
       '--agents-md',
       'Add the recommended orcaops lifecycle block to AGENTS.md / CLAUDE.md for automatic capture on non-trivial tasks'
     )
     .option(
       '--no-agents-md',
-      'Do not manage an orcaops lifecycle block in AGENTS.md / CLAUDE.md (the default for unattended init)'
+      'Do not manage an orcaops lifecycle block in AGENTS.md / CLAUDE.md (under project or global scope, unattended init otherwise adds one unless enabled session hooks cover every selected agent or the repository already has an instruction file; personal scope never adds one)'
     )
     // ORDER IS LOAD-BEARING (same commander semantics as --agents-md above):
     // `--session-hooks` must be declared BEFORE `--no-session-hooks` so the

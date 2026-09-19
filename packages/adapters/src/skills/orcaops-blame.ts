@@ -16,7 +16,7 @@ export const orcaopsBlameSkill: SkillTemplate = {
   defaultEnabled: false,
   requires: ['matcher'],
   blockTriggerLine: (prefix: string) =>
-    `per-line provenance export ("which lines did the agent write?", agent-trace records) → \`${skillRef('blame', prefix)}\``,
+    `"which lines did the agent write?", "export the agent-trace for this commit" → \`${skillRef('blame', prefix)}\``,
   body: (prefix: string) => `# When to use
 
 Triggers:

@@ -21,6 +21,18 @@ export {
   type AgentsMdSectionOptions,
 } from './template.js';
 export {
+  ALWAYS_DROPPED_HINT_KEY,
+  nonRenderingHintKeys,
+  ORCAOPS_BLOCK_ROUTING_SENTINEL,
+  renderableHintKeys,
+  resolveBootstrapContent,
+  type BootstrapContent,
+  type BootstrapContentInput,
+  type BootstrapLifecycleStep,
+  type BootstrapRoutingEntry,
+  type HintRenderabilityInput,
+} from './bootstrap-content.js';
+export {
   CURATED_HINTS,
   resolveHintLines,
   type CuratedHint,

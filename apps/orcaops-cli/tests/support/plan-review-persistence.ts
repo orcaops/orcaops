@@ -2,13 +2,17 @@ import { createHash } from 'node:crypto';
 
 import type { ReviewPullRecord } from '@orcaops/storage';
 
-import type { PlanReviewPersistence } from '../../src/commands/plan/review/persistence.js';
+import type {
+  PlanReviewPersistence,
+  RefAlias,
+} from '../../src/commands/plan/review/persistence.js';
 
 const sha = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex');
 
 export function createMemoryPlanReviewPersistence(): PlanReviewPersistence {
   const candidates = new Map<string, ReviewPullRecord>();
   const proposals = new Map<string, ReviewPullRecord>();
+  const aliases = new Map<string, RefAlias[]>();
   return {
     preflight: async () => undefined,
     readCandidate: async (externalId) => structuredClone(candidates.get(externalId) ?? null),
@@ -21,6 +25,15 @@ export function createMemoryPlanReviewPersistence(): PlanReviewPersistence {
         candidates.set(record.external_id, structuredClone(record));
       else proposals.set(record.proposal_id!, structuredClone(record));
     },
+    // Newest first, so a caller taking the first entry rather than the newest
+    // `pulledAt` is caught rather than flattered.
+    readRefAliases: async (ref) => [...(aliases.get(ref) ?? [])].reverse(),
+    writeRefAlias: async ({ ref, externalId, pulledAt }) => {
+      const recorded = aliases.get(ref) ?? [];
+      const seen = recorded.find((alias) => alias.externalId === externalId);
+      if (seen === undefined) aliases.set(ref, [...recorded, { externalId, pulledAt }]);
+      else if (pulledAt > seen.pulledAt) seen.pulledAt = pulledAt;
+    },
   };
 }
 
@@ -31,6 +44,7 @@ export interface SeedCandidateOpts {
   baseUrl?: string;
   orgId?: string;
   body?: string;
+  pulledAt?: string;
 }
 
 /** Seed a candidate review-pull record so the propose/push CAS base resolves. */
@@ -51,7 +65,7 @@ export async function seedCandidate(
     body,
     base_url: opts.baseUrl ?? 'https://cloud.example',
     org_id: opts.orgId ?? 'org_1',
-    pulled_at: '2026-06-09T00:00:00.000Z',
+    pulled_at: opts.pulledAt ?? '2026-06-09T00:00:00.000Z',
   };
   await persistence.writeRecord(record);
 }

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { ConfigValidationError } from '@orcaops/storage';
+import { CONFIG_SCHEMA_VERSION, ConfigValidationError } from '@orcaops/storage';
 
 import {
   getConfigPath,
@@ -32,7 +32,7 @@ describe('loadConfig', () => {
 
   it('returns defaults when no config file exists', async () => {
     const cfg = await loadConfig(root);
-    expect(cfg.schema_version).toBe(6);
+    expect(cfg.schema_version).toBe(CONFIG_SCHEMA_VERSION);
     expect(cfg.install.agents).toEqual(['claude-code']);
   });
 
@@ -68,18 +68,18 @@ describe('loadConfig', () => {
       JSON.stringify({ schema_version: 4, install: { agents: ['codex'] } }),
     ]) {
       await writeConfig(raw);
-      await expect(loadConfig(root)).rejects.toThrow(/requires 6.*orcaops init --force/s);
+      await expect(loadConfig(root)).rejects.toThrow(/requires 7.*orcaops init --force/s);
       expect(await readFile(getConfigPath(root), 'utf8')).toBe(raw);
     }
   });
 
   it('rejects a stringified version naming the type error', async () => {
-    await writeConfig(JSON.stringify({ schema_version: '6', install: { agents: ['codex'] } }));
-    await expect(loadConfig(root)).rejects.toThrow(/number 6.*string "6"/s);
+    await writeConfig(JSON.stringify({ schema_version: '7', install: { agents: ['codex'] } }));
+    await expect(loadConfig(root)).rejects.toThrow(/number 7.*string "7"/s);
   });
 
   it('rejects a version ahead of this build with the newer-orcaops message', async () => {
-    await writeConfig(JSON.stringify({ schema_version: 7 }));
+    await writeConfig(JSON.stringify({ schema_version: 8 }));
     await expect(loadConfig(root)).rejects.toThrow(/Upgrade orcaops/);
   });
 
@@ -169,7 +169,7 @@ describe('loadReadOnlyProjectConfig', () => {
     });
 
     const config = await loadReadOnlyProjectConfig(root);
-    expect(config.schema_version).toBe(6);
+    expect(config.schema_version).toBe(CONFIG_SCHEMA_VERSION);
     expect(config.artifacts.path).toBe('.orcaops/legacy-artifacts');
     expect(config.cache.path).toBe('.orcaops/legacy-cache.db');
     expect(config.diff_fingerprint.max_diff_bytes).toBe(123_456);
@@ -204,7 +204,9 @@ describe('loadReadOnlyProjectConfig', () => {
   it('leaves strict operational config loading unchanged', async () => {
     await writeConfig({ schema_version: 4, llm: { default_timeout_ms: 30_000 } });
 
-    await expect(loadConfig(root)).rejects.toThrow(/requires 6/);
-    await expect(loadReadOnlyProjectConfig(root)).resolves.toMatchObject({ schema_version: 6 });
+    await expect(loadConfig(root)).rejects.toThrow(/requires 7/);
+    await expect(loadReadOnlyProjectConfig(root)).resolves.toMatchObject({
+      schema_version: CONFIG_SCHEMA_VERSION,
+    });
   });
 });

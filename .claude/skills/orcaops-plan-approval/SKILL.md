@@ -3,7 +3,7 @@ name: "Orcaops: plan approval (cloud source plan)"
 description: "Upload, read, download, approve, or pin a plan through the Orcaops cloud approval flow. Use for \"get this plan approved\", \"is my plan approved yet?\", \"read or download the plan body\", or \"pull the approved plan\"."
 metadata:
   generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "6c8986fa2e1b"
+  contentHash: "45d1ab1a6618"
 tags: ["orcaops", "capture"]
 ---
 
@@ -109,6 +109,14 @@ Match the user's intent to the verb. All read verbs take `--json` and print
 the ready-to-paste `cloud:<id>@<n>` pin ref wherever an approved version
 exists; none of them touch the local review cache (only `plan review pull`
 does).
+
+**`comment`, `push` and `propose` take the canonical externalId**, not a
+slug: they read the local review cache, which `plan review pull` keys by the
+id the cloud returned. When local history shows you pulled the plan under the
+ref you typed, they refuse and name the id to use. A ref nothing local
+recognizes still reaches the cloud, which may resolve it and publish — the
+result then reports that no local record was retained, so re-pull under the id
+it returns. The other verbs take a slug freely; the cloud resolves it for them.
 
 - **"What's the state of my plan review / any feedback?"** →
   `orcaops plan review status` (plans you authored + plans wanting your

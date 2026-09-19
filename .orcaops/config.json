@@ -66,9 +66,6 @@
   "workflow": {
     "hints": {
       "keys": [
-        "commit-on-checkpoint-close",
-        "open-checkpoint-before-edits",
-        "capture-on-nontrivial",
         "checkpoint-cadence"
       ],
       "custom": []

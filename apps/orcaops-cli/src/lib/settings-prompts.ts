@@ -1,4 +1,9 @@
-import { CURATED_HINTS, getAgentOverlay } from '@orcaops/adapters';
+import {
+  CURATED_HINTS,
+  getAgentOverlay,
+  type HintRenderabilityInput,
+  nonRenderingHintKeys,
+} from '@orcaops/adapters';
 import { type HintKey, SUPPORTED_AGENT_IDS, type SupportedAgentId } from '@orcaops/storage';
 
 /**
@@ -165,9 +170,35 @@ export const hintsPrompt = {
   message:
     'Pick extra one-line reminders to show your agent next to the workflow ' +
     '(you can add your own free-form lines next):',
-  options(): SettingsPromptOption<HintKey>[] {
-    return CURATED_HINTS.map((h) => ({ value: h.key, label: h.prose }));
+  /**
+   * A pinned key stays on the list: the editor returns what the multiselect
+   * returns, so dropping it would rewrite their config.
+   */
+  options(
+    renderability: HintRenderabilityInput,
+    current: readonly HintKey[] = []
+  ): SettingsPromptOption<HintKey>[] {
+    const dropped = nonRenderingHintKeys(renderability);
+    return CURATED_HINTS.filter((h) => !dropped.has(h.key) || current.includes(h.key)).map((h) => ({
+      value: h.key,
+      label: h.prose,
+      ...(dropped.has(h.key)
+        ? { hint: `pinned but not rendered — ${dropped.get(h.key) ?? ''}` }
+        : {}),
+    }));
   },
+};
+
+export const commitInsideWindowPrompt = {
+  message:
+    'Tell the agent to run formatters and tests and commit inside the ' +
+    'checkpoint window, before closing it?',
+};
+
+export const routingSuppressPrompt = {
+  message:
+    'Hide any of these skills from the read-intent routing both bootstrap ' +
+    'surfaces render? (the skill stays installed and usable)',
 };
 
 export const gitHooksPrompt = {

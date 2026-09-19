@@ -168,6 +168,17 @@ export async function runReviewPull(args: RunReviewPullArgs): Promise<ReviewPull
       pulled_at: args.pulledAt,
     };
     await args.persistence.writeRecord(record);
+    if (args.externalId !== externalId) {
+      try {
+        await args.persistence.writeRefAlias({
+          ref: args.externalId,
+          externalId,
+          pulledAt: args.pulledAt,
+        });
+      } catch {
+        // The alias only sharpens a later refusal; it never changes this pull.
+      }
+    }
   }
 
   return {
@@ -194,6 +205,34 @@ export function parseVersionFlag(raw: string, flag: string, inputPath: string): 
     );
   }
   return n;
+}
+
+export function formatHumanReviewPull(result: ReviewPullResult, ref: string): string {
+  if (result.target === 'version') {
+    let out = `Pulled sealed v${result.version_number} of ${result.external_id} (historical — read-only, NOT a push base)\n`;
+    if (result.out) out += `  wrote body → ${result.out}\n`;
+    out += `  diff it against the candidate: orcaops plan review diff ${result.ref} --from ${result.version_number}\n`;
+    return out;
+  }
+  let out = `Pulled ${result.target} of ${result.external_id}`;
+  if (result.target === 'candidate' && result.version_number !== null) {
+    out += ` (v${result.version_number})`;
+  } else if (result.target === 'proposal' && result.base_version_number !== null) {
+    out += ` (proposal ${result.proposal_id}, base v${result.base_version_number})`;
+  }
+  out += '\n';
+  if (ref !== result.external_id) {
+    out += `  ("${ref}" resolved to that id — push/propose/comment take the id, not the slug)\n`;
+  }
+  if (result.out) out += `  wrote body → ${result.out}\n`;
+  if (result.version_id) out += `  base version id: ${result.version_id}\n`;
+  if (result.target === 'candidate') {
+    out += `  edit it, then: orcaops plan review push ${result.ref} --input <file>  (author)\n`;
+    out += `             or: orcaops plan review propose ${result.ref} --input <file>\n`;
+  } else {
+    out += `  comment on it: orcaops plan review comment ${result.ref} --proposal ${result.proposal_id} --input <file>\n`;
+  }
+  return out;
 }
 
 /**
@@ -262,31 +301,7 @@ export async function reviewPullAction(ref: string, opts: ReviewPullOptions = {}
       emitOk(result);
       return;
     }
-    // Print the canonical ref to reuse (the response's externalId — a slug typed
-    // back would hash to a different cache key and miss this record).
-    if (result.target === 'version') {
-      let out = `Pulled sealed v${result.version_number} of ${result.external_id} (historical — read-only, NOT a push base)\n`;
-      if (result.out) out += `  wrote body → ${result.out}\n`;
-      out += `  diff it against the candidate: orcaops plan review diff ${result.ref} --from ${result.version_number}\n`;
-      writeTerminalSafeStdout(out);
-      return;
-    }
-    let out = `Pulled ${result.target} of ${result.external_id}`;
-    if (result.target === 'candidate' && result.version_number !== null) {
-      out += ` (v${result.version_number})`;
-    } else if (result.target === 'proposal' && result.base_version_number !== null) {
-      out += ` (proposal ${result.proposal_id}, base v${result.base_version_number})`;
-    }
-    out += '\n';
-    if (result.out) out += `  wrote body → ${result.out}\n`;
-    if (result.version_id) out += `  base version id: ${result.version_id}\n`;
-    if (result.target === 'candidate') {
-      out += `  edit it, then: orcaops plan review push ${result.ref} --input <file>  (author)\n`;
-      out += `             or: orcaops plan review propose ${result.ref} --input <file>\n`;
-    } else {
-      out += `  comment on it: orcaops plan review comment ${result.ref} --proposal ${result.proposal_id} --input <file>\n`;
-    }
-    writeTerminalSafeStdout(out);
+    writeTerminalSafeStdout(formatHumanReviewPull(result, ref));
   } catch (err) {
     emitError(toCloudErrorEnvelope(err));
   }

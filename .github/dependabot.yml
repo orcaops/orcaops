@@ -16,13 +16,10 @@ updates:
     directory: '/'
     schedule:
       interval: 'monthly'
-    # Version updates name the dev branch. On the private repo that is the
-    # default branch, so nothing changes; on the public mirror the branch does
-    # not exist, which keeps Dependabot from opening update PRs against a repo
-    # that only receives releases. Security updates are unaffected (they always
-    # follow the default branch).
-    target-branch: 'claude-poc'
-    open-pull-requests-limit: 5
+    # An explicit target keeps these options on version updates; security
+    # updates follow the default branch. Release exports set this limit to zero.
+    target-branch: 'main'
+    open-pull-requests-limit: 0
     cooldown:
       default-days: 7
     allow:
@@ -72,19 +69,16 @@ updates:
         update-types: ['minor', 'patch']
 
   # Actions stay SHA-pinned in the workflow files; Dependabot moves the SHA and
-  # its adjacent version comment together. The limit is 1 because the single
-  # catch-all version-update group yields at most one routine PR per run.
+  # its adjacent version comment together. The catch-all group yields one
+  # routine PR when version updates are enabled.
   - package-ecosystem: 'github-actions'
     directory: '/'
     schedule:
       interval: 'monthly'
-    # Version updates name the dev branch. On the private repo that is the
-    # default branch, so nothing changes; on the public mirror the branch does
-    # not exist, which keeps Dependabot from opening update PRs against a repo
-    # that only receives releases. Security updates are unaffected (they always
-    # follow the default branch).
-    target-branch: 'claude-poc'
-    open-pull-requests-limit: 1
+    # An explicit target keeps these options on version updates; security
+    # updates follow the default branch. Release exports set this limit to zero.
+    target-branch: 'main'
+    open-pull-requests-limit: 0
     cooldown:
       default-days: 7
     allow:

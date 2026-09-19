@@ -65,12 +65,14 @@ import {
   planInstallMutations,
   publishInstallManifestsLast,
 } from '../lib/install-plan.js';
+import { readInstructionBlock } from '../lib/instruction-block.js';
 import type { InstructionFileAction } from '../lib/instruction-placement.js';
 import {
   getInvocationCwd,
   getInvocationEnv,
   getInvocationRootOverride,
 } from '../lib/invocation-context.js';
+import { knownInstructionFiles } from '../lib/managed-instruction-files.js';
 import {
   deleteMutation,
   executeMutations,
@@ -80,12 +82,14 @@ import {
   type PlannedMutation,
   readRepositoryFileForOwnership,
   readRepositoryFileOrNull,
+  repositoryEntryExists,
   writeMutation,
 } from '../lib/mutations.js';
 import { readEffectiveLocalManifest } from '../lib/personal-manifest.js';
 import { adoptProjectId, readProjectId } from '../lib/project-identity.js';
 import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { bestEffortRealpath, discoverGitRoot } from '../lib/resolve-root.js';
+import { assessMachineSessionHookCoverage } from '../lib/session-hooks-coverage.js';
 import {
   type AppliedUserSessionHookInstall,
   applyUserSessionHookInstall,
@@ -97,6 +101,8 @@ import {
 import {
   codexConfigTomlPath,
   codexHooksJsonPath,
+  inspectUserSessionHooks,
+  readUserHooksRecord,
   userHookCapableAgents,
 } from '../lib/session-hooks-user.js';
 import {
@@ -166,8 +172,11 @@ export interface InitOptions {
   link?: 'copy' | 'symlink';
   /**
    * Explicit instruction-file choice. True opts into the managed lifecycle
-   * block; false opts out. Undefined lets interactive init recommend the block
-   * and defaults unattended fresh init to manual. Existing config is preserved.
+   * block; false opts out. Undefined lets interactive init recommend the block,
+   * and leaves an unattended fresh init to the coverage rule: managed under
+   * project or global scope unless enabled session hooks already cover every
+   * selected agent or the repository has an instruction file of its own, and
+   * always manual under personal scope. Existing config is preserved.
    */
   agentsMd?: boolean;
   /**
@@ -583,13 +592,10 @@ async function runInit(
     }
   } else {
     config = getDefaultConfig();
-    // Fresh init owns the launch-DX default and starts manual. Legacy configs
-    // that omit `bootstrap` are protected on the preserving branch above — the
-    // schema's zod default (`.default('managed')`, config.ts) fills the field
-    // in during resolveConfig, so a config omitting it never silently loses a
-    // block it relies on.
-    config.bootstrap = 'manual';
-    // Fresh init also owns the INVISIBLE default: personal scope — skills in
+    // `bootstrap` is decided further down, once the install set and the hook
+    // registrations that could cover it are known.
+    //
+    // Fresh init owns the INVISIBLE default: personal scope — skills in
     // the per-user global dirs, footprint hidden via the common dir's
     // info/exclude, zero tracked-file writes. Team/project mode is the
     // deliberate adoption step (`orcaops update --scope project`, then
@@ -613,9 +619,7 @@ async function runInit(
     }
     config.naming.prefix = opts.prefix;
   }
-  // An explicit flag always wins. Without one, fresh interactive init offers
-  // the proactive lifecycle block as a recommended opt-in; unattended init
-  // stays manual and never surprises a repository with top-level files.
+  // An explicit flag always wins over the coverage rule below.
   if (opts.agentsMd !== undefined) {
     config.bootstrap = opts.agentsMd ? 'managed' : 'manual';
   }
@@ -721,6 +725,16 @@ async function runInit(
   const expectedMachineAgents = new Set(
     stagedMachineHooks === null ? [] : stagedUserSessionHookAgents(stagedMachineHooks)
   );
+  if (!preservingConfig) {
+    // Coverage counts registrations that ALREADY exist on this machine, not
+    // only what this run stages. Codex has no project hook surface and an
+    // unattended run stages nothing, so without this a codex-bearing install
+    // set could never read as covered however it is registered.
+    const { surfaces, codexGate } = await inspectUserSessionHooks(await readUserHooksRecord());
+    for (const result of assessMachineSessionHookCoverage({ config, surfaces, codexGate })) {
+      if (result.state === 'covered') expectedMachineAgents.add(result.agent);
+    }
+  }
   const blockInitialChoice = (): 'managed' | 'manual' => {
     if (preservingConfig) return config.bootstrap;
     const hooksCoverInstallSet =
@@ -749,6 +763,16 @@ async function runInit(
     isInteractiveInit(opts)
   ) {
     await askBlockQuestion();
+  }
+  const gates = resolveSkillGates(getInvocationEnv());
+  if (!preservingConfig && opts.agentsMd === undefined && !blockQuestionAsked) {
+    // Nobody is here to approve an append, so a repository whose instruction
+    // file is someone else's keeps it: editing a file the user wrote,
+    // unprompted, is a worse failure than leaving this repository without a
+    // routing surface — which doctor then names, with the recovery steps for
+    // this scope.
+    const foreign = await unmanagedInstructionFile(repoRoot);
+    config.bootstrap = foreign === null ? blockInitialChoice() : 'manual';
   }
 
   // Customize-more branch — the settings init does not otherwise ask about
@@ -791,7 +815,12 @@ async function runInit(
         );
       }
       {
-        const picked = requireInitAnswer(await editHints(config.workflow.hints.keys));
+        const picked = requireInitAnswer(
+          await editHints(config.workflow.hints.keys, {
+            enabledSkills: enabledSkillTemplates(config, gates),
+            commitInsideWindow: config.workflow.commit_inside_window,
+          })
+        );
         const custom = requireInitAnswer(await editHintsCustom(config.workflow.hints.custom));
         config.workflow = {
           ...config.workflow,
@@ -930,9 +959,6 @@ async function runInit(
             ),
           ]
         : baseGitignore;
-  // init has no CliContext (it is what creates the install), so it resolves
-  // the machine-state gates directly.
-  const gates = resolveSkillGates(getInvocationEnv());
   const currentInstall = await readInstallManifest(repoRoot);
   const currentLocal = await readEffectiveLocalManifest(
     repoRoot,
@@ -1255,6 +1281,20 @@ async function runInit(
     dry_run: !!opts.dryRun,
     seed_suggested: seedSuggested,
   };
+}
+
+/**
+ * Every name the registry knows, not just the ones this install manages, and
+ * presence separate from ownership so a dangling link counts as someone else's.
+ */
+async function unmanagedInstructionFile(repoRoot: string): Promise<string | null> {
+  for (const rel of knownInstructionFiles()) {
+    const abs = path.join(repoRoot, rel);
+    if (!(await repositoryEntryExists(abs, repoRoot, 'instruction file'))) continue;
+    if ((await readInstructionBlock(repoRoot, rel)) !== null) continue;
+    return rel;
+  }
+  return null;
 }
 
 function reportRetainedDatabaseSetup(projectId: string): void {

@@ -4,7 +4,6 @@ import {
   getToolAdapter,
   planGenerateForTool,
   type PlannedFile,
-  resolveHintLines,
   type ToolAdapter,
 } from '@orcaops/adapters';
 import { Repo } from '@orcaops/core';
@@ -101,8 +100,10 @@ export async function linkAction(opts: LinkOptions = {}): Promise<void> {
         instructionFiles,
         generatedBy: CLI_VERSION,
         prefix: ctx.config.naming.prefix,
-        hints: resolveHintLines(ctx.config.workflow.hints),
+        hints: ctx.config.workflow.hints,
         enabledSkills: enabledSkillTemplates(ctx.config, ctx.gates),
+        commitInsideWindow: ctx.config.workflow.commit_inside_window,
+        suppressedRouting: ctx.config.workflow.routing.suppress,
         mode: 'force-collapse',
         canonical: opts.canonical,
       });

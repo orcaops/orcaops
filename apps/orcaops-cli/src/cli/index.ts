@@ -17,6 +17,9 @@ import { runInInvocationContext } from '../lib/invocation-context.js';
  *    not error every teammate's session start);
  *  - ANY failure here, including a broken module graph that would make the
  *    full CLI print "Internal error", still exits 0 with empty stdout.
+ *
+ * One exception: a run past SESSION_HOOK_DEADLINE_MS is terminated by signal,
+ * so it yields no exit code rather than a non-zero one.
  */
 // Installed before the hook fast path so both entry paths are covered.
 installPipeErrorHandling([process.stdout, process.stderr], (code) => process.exit(code));
@@ -65,7 +68,15 @@ if (fastPath.match) {
       // The deadline is a hard exit, so drain pending writes first —
       // process.exit does not flush Node's write queue and would truncate the
       // hook envelope on a slow pipe.
-      void flushStdio().finally(() => process.exit(0));
+      //
+      // SIGKILL, not process.exit: a libuv threadpool thread blocked in a
+      // syscall that never returns (open() on a FIFO with no writer) keeps
+      // Node's shutdown from completing, so process.exit leaves the hook
+      // hanging forever — the one failure this deadline exists to prevent.
+      // Nor can SIGKILL be deferred behind process.exit as a fallback: once
+      // exit wedges, the event loop stops and no timer fires. Killing is the
+      // only stage that works when this path is reached at all.
+      void flushStdio().finally(() => process.kill(process.pid, 'SIGKILL'));
     }, SESSION_HOOK_DEADLINE_MS);
     deadline.unref();
     try {

@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -49,6 +50,10 @@ async function fixture() {
   const openWriter = vi.fn(async () => openProjectDatabase({ authority, mode: 'writer' }));
   return { reader, openWriter };
 }
+
+const PULLED_AT = '2026-09-10T00:00:00.000Z';
+const LATER = '2026-09-11T00:00:00.000Z';
+const LATEST = '2026-09-12T00:00:00.000Z';
 
 const target: RemoteTarget = {
   server_url: 'https://cloud.example.test',
@@ -182,4 +187,179 @@ it('keeps review records within the authenticated account namespace', async () =
   await accountA.writeRecord(candidate());
   expect(await accountB.readCandidate('source-plan-id')).toBeNull();
   expect(await accountA.readCandidate('source-plan-id')).toEqual(candidate());
+});
+
+it('resolves a ref to the canonical externalId it was pulled under', async () => {
+  const f = await fixture();
+  const persistence = createDatabasePlanReviewPersistence({
+    reader: f.reader,
+    target,
+    secretAllow: [],
+    openWriter: f.openWriter,
+  });
+
+  expect(await persistence.readRefAliases('plan-slug')).toEqual([]);
+  expect(f.openWriter).not.toHaveBeenCalled();
+
+  await persistence.writeRefAlias({
+    ref: 'plan-slug',
+    externalId: 'source-plan-id',
+    pulledAt: PULLED_AT,
+  });
+  expect(await persistence.readRefAliases('plan-slug')).toEqual([
+    { externalId: 'source-plan-id', pulledAt: PULLED_AT },
+  ]);
+  expect(await persistence.readRefAliases('another-slug')).toEqual([]);
+});
+
+it('replays a ref alias re-recorded at the same instant without a second write', async () => {
+  const f = await fixture();
+  const persistence = createDatabasePlanReviewPersistence({
+    reader: f.reader,
+    target,
+    secretAllow: [],
+    openWriter: f.openWriter,
+  });
+
+  const alias = { ref: 'plan-slug', externalId: 'source-plan-id', pulledAt: PULLED_AT };
+  await persistence.writeRefAlias(alias);
+  const afterFirst = f.reader.read(() => null).counters;
+  await persistence.writeRefAlias(alias);
+  expect(f.reader.read(() => null).counters).toEqual(afterFirst);
+  expect(await persistence.readRefAliases('plan-slug')).toEqual([
+    { externalId: 'source-plan-id', pulledAt: PULLED_AT },
+  ]);
+});
+
+it('advances a ref alias re-recorded at a later instant', async () => {
+  const f = await fixture();
+  const persistence = createDatabasePlanReviewPersistence({
+    reader: f.reader,
+    target,
+    secretAllow: [],
+    openWriter: f.openWriter,
+  });
+
+  await persistence.writeRefAlias({
+    ref: 'plan-slug',
+    externalId: 'source-plan-id',
+    pulledAt: PULLED_AT,
+  });
+  await persistence.writeRefAlias({
+    ref: 'plan-slug',
+    externalId: 'source-plan-id',
+    pulledAt: LATER,
+  });
+  expect(await persistence.readRefAliases('plan-slug')).toEqual([
+    { externalId: 'source-plan-id', pulledAt: LATER },
+  ]);
+});
+
+it('retains every plan a ref has been pulled under', async () => {
+  const f = await fixture();
+  const persistence = createDatabasePlanReviewPersistence({
+    reader: f.reader,
+    target,
+    secretAllow: [],
+    openWriter: f.openWriter,
+  });
+
+  await persistence.writeRefAlias({
+    ref: 'plan-slug',
+    externalId: 'source-plan-id',
+    pulledAt: PULLED_AT,
+  });
+  await persistence.writeRefAlias({
+    ref: 'plan-slug',
+    externalId: 'later-plan-id',
+    pulledAt: LATER,
+  });
+  expect(
+    [...(await persistence.readRefAliases('plan-slug'))].sort((a, b) =>
+      a.externalId.localeCompare(b.externalId)
+    )
+  ).toEqual([
+    { externalId: 'later-plan-id', pulledAt: LATER },
+    { externalId: 'source-plan-id', pulledAt: PULLED_AT },
+  ]);
+});
+
+it('carries the newest instant for a ref pulled back onto an earlier plan', async () => {
+  const f = await fixture();
+  const persistence = createDatabasePlanReviewPersistence({
+    reader: f.reader,
+    target,
+    secretAllow: [],
+    openWriter: f.openWriter,
+  });
+
+  await persistence.writeRefAlias({ ref: 'plan-slug', externalId: 'plan-a', pulledAt: PULLED_AT });
+  await persistence.writeRefAlias({ ref: 'plan-slug', externalId: 'plan-b', pulledAt: LATER });
+  await persistence.writeRefAlias({ ref: 'plan-slug', externalId: 'plan-a', pulledAt: LATEST });
+
+  expect(await persistence.readRefAliases('plan-slug')).toEqual([
+    { externalId: 'plan-a', pulledAt: LATEST },
+    { externalId: 'plan-b', pulledAt: LATER },
+  ]);
+});
+
+it('keeps ref aliases within the authenticated account namespace', async () => {
+  const f = await fixture();
+  const accountA = createDatabasePlanReviewPersistence({
+    reader: f.reader,
+    target,
+    secretAllow: [],
+    openWriter: f.openWriter,
+  });
+  const accountB = createDatabasePlanReviewPersistence({
+    reader: f.reader,
+    target: { ...target, account_id: 'account-b' },
+    secretAllow: [],
+    openWriter: f.openWriter,
+  });
+
+  await accountA.writeRefAlias({
+    ref: 'plan-slug',
+    externalId: 'source-plan-id',
+    pulledAt: PULLED_AT,
+  });
+  expect(await accountB.readRefAliases('plan-slug')).toEqual([]);
+  expect(await accountA.readRefAliases('plan-slug')).toEqual([
+    { externalId: 'source-plan-id', pulledAt: PULLED_AT },
+  ]);
+});
+
+it('reads a damaged ref alias as absent rather than an integrity failure', async () => {
+  const f = await fixture();
+  const persistence = createDatabasePlanReviewPersistence({
+    reader: f.reader,
+    target,
+    secretAllow: [],
+    openWriter: f.openWriter,
+  });
+  await persistence.writeRefAlias({
+    ref: 'plan-slug',
+    externalId: 'source-plan-id',
+    pulledAt: PULLED_AT,
+  });
+
+  const raw = new Database(projectDatabasePath(f.reader.authority));
+  try {
+    // Operations are immutable by trigger; dropping it is the only way to
+    // hand the reader a tampered row.
+    const trigger = raw
+      .prepare("SELECT sql FROM sqlite_schema WHERE name='operations_no_update'")
+      .get() as { sql: string };
+    raw.exec('DROP TRIGGER operations_no_update');
+    raw
+      .prepare(
+        "UPDATE operations SET payload_json=? WHERE operation_kind='source_plan.review.alias'"
+      )
+      .run(canonicalJson({ external_id: 'tampered-plan-id', pulled_at: PULLED_AT }));
+    raw.exec(trigger.sql);
+  } finally {
+    raw.close();
+  }
+
+  await expect(persistence.readRefAliases('plan-slug')).resolves.toEqual([]);
 });

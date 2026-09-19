@@ -409,15 +409,19 @@ try {
     r.agent_skills_installed.length > 0,
     `init installed ${r.agent_skills_installed.length} skills`
   );
-  // Instruction-file injection is opt-in: a default init must leave the user's
-  // AGENTS.md / CLAUDE.md alone, and must not create them where none existed.
-  // An existing repo may legitimately be `bootstrap: managed` already, in which
-  // case preserving its block is the correct behavior, not a regression.
+  // The scratch repo has no instruction file and no session hook covering the
+  // install set, so unattended project init adopts the managed block. A repo
+  // that already has AGENTS.md / CLAUDE.md keeps them instead, which is why
+  // `--against-repo` asserts nothing here.
   if (!againstRepo) {
-    assert(r.agents_md.length === 0, 'init wrote no instruction file by default');
-    for (const f of ['AGENTS.md', 'CLAUDE.md']) {
-      assert(!existsSync(path.join(repo, f)), `init did not create ${f}`);
-    }
+    assert(
+      r.agents_md.some((entry) => entry.path === 'AGENTS.md' && entry.action === 'created'),
+      'init created AGENTS.md with the managed block'
+    );
+    assert(
+      readFileSync(path.join(repo, 'AGENTS.md'), 'utf8').includes('orcaops:start'),
+      'the created AGENTS.md carries the managed block'
+    );
     assert(
       r.gitignore_added.length > 0,
       `init reconciled .gitignore (${r.gitignore_added.length} entries)`
@@ -610,10 +614,10 @@ try {
       );
     }
 
-    // `claimed` was captured from the FIRST init, which wrote no block, so the
-    // check above cannot see the one the opt-in step just injected. Round-tripping
-    // the instruction file is the whole point of an opt-in injection: verify the
-    // managed region is gone, and that a file orcaops created is not left behind.
+    // `claimed` was captured from the FIRST init, so the check above cannot see
+    // the block state after the opt-in step. Round-tripping the instruction
+    // file is the point: verify the managed region is gone, and that a file
+    // orcaops created is not left behind.
     for (const f of ['AGENTS.md', 'CLAUDE.md']) {
       const p = path.join(repo, f);
       if (!existsSync(p)) continue;

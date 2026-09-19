@@ -109,6 +109,14 @@ the ready-to-paste \`cloud:<id>@<n>\` pin ref wherever an approved version
 exists; none of them touch the local review cache (only \`plan review pull\`
 does).
 
+**\`comment\`, \`push\` and \`propose\` take the canonical externalId**, not a
+slug: they read the local review cache, which \`plan review pull\` keys by the
+id the cloud returned. When local history shows you pulled the plan under the
+ref you typed, they refuse and name the id to use. A ref nothing local
+recognizes still reaches the cloud, which may resolve it and publish — the
+result then reports that no local record was retained, so re-pull under the id
+it returns. The other verbs take a slug freely; the cloud resolves it for them.
+
 - **"What's the state of my plan review / any feedback?"** →
   \`orcaops plan review status\` (plans you authored + plans wanting your
   verdict, with per-plan next actions and a current-vs-stale verdict rollup),

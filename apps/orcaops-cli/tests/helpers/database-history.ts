@@ -111,6 +111,9 @@ function databaseInventory(writer: ProjectDatabase) {
     return { schema, tables };
   });
 }
+const isGitLockFile = (relative: string) =>
+  relative.endsWith('.lock') && relative.split(path.sep).includes('.git');
+
 export async function inventory(root: string) {
   const result: Record<string, string> = {};
   for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
@@ -121,22 +124,21 @@ export async function inventory(root: string) {
       )
     )
       continue;
+    const relative = path.relative(root, file);
+    if (isGitLockFile(relative)) continue;
     const writer = writers.get(file);
     let content: string | Buffer | null;
     if (writer) content = JSON.stringify(databaseInventory(writer));
-    else if (entry.isFile()) {
-      try {
-        content = await readFile(file);
-      } catch (error) {
-        // Git's background maintenance creates and removes locks under .git
-        // while this walk runs, so an entry can exist at readdir and be gone
-        // by the read. Something that transient is not part of the tree's
-        // inventory; any other read failure still is.
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        continue;
-      }
-    } else content = null;
-    result[path.relative(root, file)] =
+    else if (!entry.isFile()) content = null;
+    else {
+      const read = await readFile(file).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (read === undefined) continue;
+      content = read;
+    }
+    result[relative] =
       content === null
         ? entry.isDirectory()
           ? 'directory'

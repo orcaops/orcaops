@@ -45,6 +45,7 @@ decision.
 For an OpenTUI update, run:
 
 ```bash
+pnpm turbo run build --filter=@orcaops/watch...
 pnpm --filter @orcaops/watch test:render
 pnpm --filter @orcaops/watch test:pty
 pnpm --filter @orcaops/watch perf:review-cap

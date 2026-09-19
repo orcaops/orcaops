@@ -151,6 +151,49 @@ describe('enabled skill set → install pipeline', () => {
     expect((await doctorCheck('skill-drift')).status).toBe('pass');
   });
 
+  async function setRoutingSuppress(ids: string[]): Promise<void> {
+    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as {
+      workflow?: Record<string, unknown>;
+    };
+    cfg.workflow = { ...(cfg.workflow ?? {}), routing: { suppress: ids } };
+    await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+  }
+
+  it('names a suppressed skill whose ref lingers after it is disabled', async () => {
+    expect(await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8')).toContain('orcaops-why');
+
+    await setRoutingSuppress(['why']);
+    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+    cfg.skills = { enabled: { why: false } };
+    await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+
+    const check = await doctorCheck('block-skill-refs');
+    expect(check.status).toBe('warn');
+    const details = (check.details ?? []).join('\n');
+    expect(details).toContain('orcaops-why');
+    expect(details).toContain('disabled');
+
+    await agent.runRaw(['update', '--json']);
+    expect(await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8')).not.toContain('orcaops-why');
+    expect((await doctorCheck('block-skill-refs')).status).toBe('pass');
+  });
+
+  it('names a ref the block still carries after the skill is hidden from routing', async () => {
+    await setRoutingSuppress(['why']);
+
+    const check = await doctorCheck('block-skill-refs');
+    expect(check.status).toBe('warn');
+    const details = (check.details ?? []).join('\n');
+    expect(details).toContain('orcaops-why');
+    expect(details).toContain('hidden from read-intent routing');
+    expect(details).not.toContain('which is disabled');
+
+    await agent.runRaw(['update', '--json']);
+    expect((await doctorCheck('block-skill-refs')).status).toBe('pass');
+  });
+
   it('doctor rejects an unknown skills.enabled override id', async () => {
     const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
     const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as {

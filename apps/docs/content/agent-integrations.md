@@ -120,13 +120,26 @@ footprint is pruned safely.
   hooks; only when both surfaces are off are you responsible for telling the
   agent when to use the lifecycle skills.
 
-Fresh initialization starts from `manual` and asks before editing instruction
-files. If enabled session hooks cover the selected agents, remaining on `manual`
-keeps the repository invisible without sacrificing automatic guidance. If hooks
-do not cover the install set, interactive initialization recommends a managed
-instruction block where the agent supports one.
+Fresh initialization decides the mode from session-hook coverage. If enabled
+session hooks cover every selected agent, `manual` keeps the repository
+invisible without sacrificing automatic guidance. If they do not — session hooks
+off, or an agent such as Codex with no registration on this machine — the
+managed block is what carries the guidance, so initialization chooses `managed`.
+Interactive initialization offers that answer and waits; unattended
+initialization applies it, except in a repository whose `AGENTS.md` or
+`CLAUDE.md` is someone else's — it exists and carries no orcaops block — which
+keeps `manual` rather than have that file edited with nobody watching. A file
+that already carries a block is orcaops's own, and stays managed.
 
-`orcaops init --no-agents-md` persists `bootstrap: "manual"`.
+Personal scope always stores `manual`; it owns no instruction file.
+
+`orcaops init --no-agents-md` persists `bootstrap: "manual"`, and `--agents-md`
+persists `managed`. Both override the coverage rule.
+
+When neither surface carries skill routing for an installed agent, the
+`session-hooks` check in `orcaops doctor` names that agent and the recovery
+steps for your scope — adopting the block under project or global scope, or
+enabling emission and registering the machine hook under personal scope.
 
 ## Generated files
 
@@ -141,15 +154,20 @@ instruction block where the agent supports one.
 Global installs are always per-user local materialization; this setting only
 applies to project-scope generated files.
 
-## Workflow hints
+## Workflow
 
-`workflow.hints` renders workflow preferences inside the managed Orcaops block:
+`workflow` shapes what both bootstrap surfaces say — the managed block and the
+session-hook payload render the same resolved content.
+
+### Hints
+
+`workflow.hints` declares workflow preferences:
 
 ```json
 {
   "workflow": {
     "hints": {
-      "keys": ["commit-on-checkpoint-close", "checkpoint-cadence"],
+      "keys": ["subagent-parallelism", "checkpoint-cadence"],
       "custom": ["Run pnpm -r test before summary."]
     }
   }
@@ -164,16 +182,49 @@ Curated keys render vetted text in a stable order. Current keys are:
 - `subagent-parallelism`
 - `checkpoint-cadence`
 
+Three of them render no bullet of their own, because the lifecycle guidance
+already states them: `open-checkpoint-before-edits` and `capture-on-nontrivial`
+whenever their lifecycle step is present, and `commit-on-checkpoint-close`
+always — it is a legacy alias for `workflow.commit_inside_window` below, and
+the only key the interactive picker does not offer.
+
 Custom hints render verbatim after curated hints. When hints are present, the
-managed block includes a section like:
+rendered preferences look like:
 
 ```md
 ### Workflow Preferences
 
-- Open the checkpoint, make changes, run formatters and tests, commit (including hook rewrites), then close.
+- Dispatch independent subagents concurrently; do not serialize them.
 - Use one checkpoint per coherent unit of work.
 - Run pnpm -r test before summary.
 ```
+
+The session hook injects all of this too, so a long `workflow.hints.custom`
+costs context at every session start; the `session-hook-payload` check in
+`orcaops doctor` warns once the rendered payload passes 6000 characters.
+Custom lines render as one bullet each, so interior whitespace is collapsed.
+
+### Commit guidance
+
+`workflow.commit_inside_window` (default `true`) puts "run tests and commit
+inside the window" in the checkpoint step of both surfaces. Set it to `false`
+to drop the clause everywhere. Pinning `commit-on-checkpoint-close` while the
+boolean is `false` is redundant, not invalid: the key asks for the guidance the
+boolean turns off, the resolver drops the key, and the `workflow-hints` check in
+`orcaops doctor` names the combination.
+
+### Routing suppression
+
+`workflow.routing.suppress` takes skill ids whose read-intent routing entry
+should not render on either surface:
+
+```json
+{ "workflow": { "routing": { "suppress": ["seed", "estimate"] } } }
+```
+
+The skill stays enabled and invocable; only the phrasing-to-skill line is
+dropped, and `orcaops doctor` does not treat its absence from the block as
+drift.
 
 ## Install manifest
 

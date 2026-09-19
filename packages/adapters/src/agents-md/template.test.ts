@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
+import { ORCAOPS_BLOCK_ROUTING_SENTINEL } from './bootstrap-content.js';
 import { renderOrcaopsAgentsMdSection } from './template.js';
 import { SKILL_TEMPLATES } from '../skills/index.js';
 
@@ -17,7 +18,11 @@ describe('renderOrcaopsAgentsMdSection — prefix + hints', () => {
   it('is byte-identical to the pre-prefix output at the default prefix + no hints', () => {
     expect(renderOrcaopsAgentsMdSection({ generatedBy: '0.0.0-fixture' })).toBe(DEFAULT_FIXTURE);
     expect(
-      renderOrcaopsAgentsMdSection({ generatedBy: '0.0.0-fixture', prefix: 'orcaops', hints: [] })
+      renderOrcaopsAgentsMdSection({
+        generatedBy: '0.0.0-fixture',
+        prefix: 'orcaops',
+        hints: { keys: [], custom: [] },
+      })
     ).toBe(DEFAULT_FIXTURE);
   });
 
@@ -131,6 +136,45 @@ describe('renderOrcaopsAgentsMdSection — prefix + hints', () => {
     expect(out.indexOf('orcaops-standup')).toBeLessThan(out.indexOf('**Attribution.**'));
   });
 
+  it('emits the routing sentinel only while some intent entry survives', () => {
+    expect(renderOrcaopsAgentsMdSection({ generatedBy: '9.9.9' })).toContain(
+      ORCAOPS_BLOCK_ROUTING_SENTINEL
+    );
+
+    const allSuppressed = renderOrcaopsAgentsMdSection({
+      generatedBy: '9.9.9',
+      suppressedRouting: SKILL_TEMPLATES.map((s) => s.id),
+    });
+    expect(allSuppressed).not.toContain(ORCAOPS_BLOCK_ROUTING_SENTINEL);
+    expect(allSuppressed).not.toContain('For broader survey questions');
+    // Suppression is a routing switch only — the lifecycle keeps its refs.
+    expect(allSuppressed).toContain('invoke **`orcaops-capture`**');
+  });
+
+  it('a suppressed skill loses its intent entry and nothing else', () => {
+    const out = renderOrcaopsAgentsMdSection({
+      generatedBy: '9.9.9',
+      suppressedRouting: ['resume', 'search'],
+    });
+    expect(out).toContain(ORCAOPS_BLOCK_ROUTING_SENTINEL);
+    expect(out).not.toContain('orcaops-resume');
+    expect(out).not.toContain('orcaops-search');
+    expect(out).not.toContain('For broader survey questions');
+    expect(out).toContain('`orcaops-why`');
+    expect(out).toContain('`orcaops-doctor`');
+  });
+
+  it('carries the commit clause in the checkpoint step unless commits are moved out of the window', () => {
+    expect(renderOrcaopsAgentsMdSection({ generatedBy: '9.9.9' })).toContain(
+      '(including hook rewrites) inside the window, before the close.'
+    );
+
+    const off = renderOrcaopsAgentsMdSection({ generatedBy: '9.9.9', commitInsideWindow: false });
+    expect(off).not.toContain('(including hook rewrites)');
+    expect(off).toContain('invoke **`orcaops-checkpoint`**');
+    expect(off).toContain('subagent coordination.');
+  });
+
   it('renders a Workflow Preferences sub-section only when hints are present', () => {
     expect(renderOrcaopsAgentsMdSection({ generatedBy: '9.9.9' })).not.toContain(
       '### Workflow Preferences'
@@ -138,20 +182,38 @@ describe('renderOrcaopsAgentsMdSection — prefix + hints', () => {
 
     const withHints = renderOrcaopsAgentsMdSection({
       generatedBy: '9.9.9',
-      hints: [
-        'Open the checkpoint, make changes, run formatters and tests, commit (including hook rewrites), then close.',
-        'Run pnpm -r test.',
-      ],
+      hints: { keys: [], custom: ['Prefer the workspace filter.', 'Run pnpm -r test.'] },
     });
     expect(withHints).toContain('### Workflow Preferences');
-    expect(withHints).toContain(
-      '- Open the checkpoint, make changes, run formatters and tests, commit (including hook rewrites), then close.'
-    );
+    expect(withHints).toContain('- Prefer the workspace filter.');
     expect(withHints).toContain('- Run pnpm -r test.');
     // The sub-section sits INSIDE the managed block (before the end marker).
     const subIdx = withHints.indexOf('### Workflow Preferences');
     const endIdx = withHints.indexOf('<!-- orcaops:end -->');
     expect(subIdx).toBeGreaterThan(0);
     expect(subIdx).toBeLessThan(endIdx);
+  });
+
+  it('raw hints lose the bullets the lifecycle section already states', () => {
+    const out = renderOrcaopsAgentsMdSection({
+      generatedBy: '9.9.9',
+      hints: {
+        keys: [
+          'capture-on-nontrivial',
+          'open-checkpoint-before-edits',
+          'commit-on-checkpoint-close',
+          'checkpoint-cadence',
+        ],
+        custom: ['Run pnpm -r test.'],
+      },
+    });
+    expect(out).not.toContain('- Capture a plan for any non-trivial coding task');
+    expect(out).not.toContain('- Open the checkpoint before changing the worktree.');
+    expect(out).not.toContain('- Open the checkpoint, make changes,');
+    expect(out).toContain('- Use one checkpoint per coherent unit of work.');
+    expect(out).toContain('- Run pnpm -r test.');
+    // The lifecycle still carries the guidance those three keys duplicate.
+    expect(out).toContain('**open the');
+    expect(out).toContain('(including hook rewrites) inside the window, before the close.');
   });
 });

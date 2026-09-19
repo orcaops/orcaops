@@ -92,6 +92,31 @@ describe('invisible-install never-touch guard', () => {
     });
   }
 
+  it('bootstrap=managed reaches the instruction file under project scope only', async () => {
+    const config = getDefaultConfig();
+    config.install.agents = ['claude-code'];
+    config.bootstrap = 'managed';
+    config.session_hooks = { enabled: false, payload: 'static', entries: 'project' };
+
+    const planFor = async (scope: 'personal' | 'project') =>
+      planInstallMutations({
+        repoRoot: repo.path,
+        agents: config.install.agents,
+        scope,
+        config: { ...config, install: { ...config.install, scope } },
+        gates: { cloud: false },
+        generatedBy: '9.9.9',
+        gitignoreLines: [],
+        prevInstall: null,
+        prevLocal: null,
+      });
+    const touchesAgentsMd = (plan: Awaited<ReturnType<typeof planFor>>): boolean =>
+      plan.mutations.some((m) => m.changed && m.path === 'AGENTS.md');
+
+    expect(touchesAgentsMd(await planFor('personal'))).toBe(false);
+    expect(touchesAgentsMd(await planFor('project'))).toBe(true);
+  });
+
   it('a lingering session-hook entry strips — the ONE sanctioned tracked write', async () => {
     await writeFile(
       path.join(repo.path, '.claude', 'settings.json'),

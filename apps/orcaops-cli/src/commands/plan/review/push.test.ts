@@ -10,7 +10,7 @@ import {
   TrpcRequestError,
 } from '@orcaops/sdk';
 
-import { reviewPushAction, type ReviewPushClient, runReviewPush } from './push.js';
+import { pushRetryFlags, reviewPushAction, type ReviewPushClient, runReviewPush } from './push.js';
 import {
   createMemoryPlanReviewPersistence,
   seedCandidate,
@@ -231,6 +231,21 @@ describe('runReviewPush', () => {
     expect(prop?.proposal_id).toBe('prop_77');
   });
 
+  it('files the conversion proposal without retaining it under a ref the cloud resolved', async () => {
+    const reviewPush = vi.fn(async () => conflict(9));
+    const reviewPropose = vi.fn(async () => proposed('prop_77'));
+    const result = await runReviewPush({
+      client: pushClient({ reviewPush, reviewPropose }),
+      onConflict: 'propose',
+      baseVersionIdOverride: 'ver_override',
+      ...base(repoRoot),
+      externalId: 'never-pulled-slug',
+    });
+    expect(result.status).toBe('filed_as_proposal');
+    expect(result.local_record_advanced).toBe(false);
+    expect(await persistence.readProposal('ext-1', 'prop_77')).toBeNull();
+  });
+
   it('maps a non-author FORBIDDEN to the friendly author-only message', async () => {
     await seedCandidate(persistence, { versionId: 'ver_4', versionNumber: 4 });
     const reviewPush = vi.fn(async () => {
@@ -264,6 +279,61 @@ describe('runReviewPush', () => {
     expect((err as Error).message).toMatch(/no longer in review/i);
   });
 
+  it('refuses an aliased slug without reaching the cloud, override included', async () => {
+    const canonical = 'a'.repeat(64);
+    await seedCandidate(persistence, {
+      externalId: canonical,
+      versionId: 'ver_4',
+      versionNumber: 4,
+    });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: canonical,
+      pulledAt: '2026-06-09T00:00:00.000Z',
+    });
+    const reviewPush = vi.fn(async () => published('ver_5', 5));
+
+    const refused = await runReviewPush({
+      client: pushClient({ reviewPush }),
+      onConflict: 'fail',
+      ...base(repoRoot),
+      externalId: 'plan-slug',
+    }).then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect(refused).toMatchObject({ code: 'INVALID_INPUT' });
+    expect((refused as Error).message).toContain(canonical);
+
+    const withOverride = await runReviewPush({
+      client: pushClient({ reviewPush }),
+      onConflict: 'fail',
+      baseVersionIdOverride: 'ver_override',
+      ...base(repoRoot),
+      externalId: 'plan-slug',
+    }).then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect(withOverride).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(reviewPush).not.toHaveBeenCalled();
+  });
+
+  it('reports an un-advanced record when the cloud resolved the ref to another id', async () => {
+    const reviewPush = vi.fn(async () => published('ver_2', 2));
+    const result = await runReviewPush({
+      client: pushClient({ reviewPush }),
+      onConflict: 'fail',
+      baseVersionIdOverride: 'ver_override',
+      ...base(repoRoot),
+      externalId: 'never-pulled-slug',
+    });
+    expect(result.status).toBe('published');
+    expect(result.local_record_advanced).toBe(false);
+    expect(await persistence.readCandidate('ext-1')).toBeNull();
+    expect(await persistence.readCandidate('never-pulled-slug')).toBeNull();
+  });
+
   it('hard-errors NO_INPUT with no local record; --base-version-id bypasses the cache read', async () => {
     const noRecord = await runReviewPush({
       client: pushClient(),
@@ -286,5 +356,29 @@ describe('runReviewPush', () => {
     expect(reviewPush).toHaveBeenCalledWith(
       expect.objectContaining({ expected_candidate_version_id: 'ver_override' })
     );
+  });
+});
+
+describe('pushRetryFlags', () => {
+  it('echoes every flag that changes what the command does', () => {
+    expect(
+      pushRetryFlags({
+        baseVersionId: 'ver_4',
+        onConflict: 'propose',
+        input: 'edit.md',
+        baseUrl: 'https://staging.example',
+        json: true,
+      })
+    ).toEqual([
+      '--base-version-id',
+      'ver_4',
+      '--on-conflict',
+      'propose',
+      '--input',
+      'edit.md',
+      '--base-url',
+      'https://staging.example',
+      '--json',
+    ]);
   });
 });

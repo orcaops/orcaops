@@ -13,8 +13,11 @@ import { firstForbiddenControlChar, sha256Hex } from '@orcaops/storage';
 
 import type { PlanReviewPersistence } from './persistence.js';
 import {
+  cloudRetryFlags,
   createReviewMutation,
   mapReviewAuthzError,
+  pulledRefMissError,
+  refuseAliasedRef,
   requireRef,
   withReviewCloud,
 } from './shared.js';
@@ -56,6 +59,7 @@ export interface ReviewPushResult {
   /** filed_as_proposal (on-conflict=propose): the new proposal + where the candidate moved. */
   proposal_id?: string;
   current_version_number?: number;
+  local_record_advanced?: false;
 }
 
 export interface RunReviewPushArgs {
@@ -69,6 +73,7 @@ export interface RunReviewPushArgs {
   /** `--base-version-id` escape hatch: take it verbatim, SKIP the cache read. */
   baseVersionIdOverride?: string;
   onConflict: 'fail' | 'propose';
+  retryFlags?: readonly string[];
   /** Advisory authoring baseline (resolved by the action; optional so fakes skip it). */
   baseline?: OssSourcePlanBaseline | null;
   pulledAt: string;
@@ -77,15 +82,18 @@ export interface RunReviewPushArgs {
 async function resolveExpectedCandidateVersionId(args: RunReviewPushArgs): Promise<string> {
   if (args.baseVersionIdOverride !== undefined) return args.baseVersionIdOverride;
   const rec = await args.persistence.readCandidate(args.externalId);
-  if (!rec || rec.version_id === null) {
-    throw new OrcaopsError(
-      ErrorCodes.NO_INPUT,
-      `No pulled candidate for "${args.externalId}". Run \`orcaops plan review pull ${args.externalId}\` first ` +
-        `(refs are externalIds — \`pull\` prints the canonical one), or pass --base-version-id <id>.`,
-      'plan-review-push'
-    );
-  }
+  if (!rec || rec.version_id === null) throw await pulledRefMissError(refusalRequest(args));
   return rec.version_id;
+}
+
+function refusalRequest(args: RunReviewPushArgs) {
+  return {
+    persistence: args.persistence,
+    ref: args.externalId,
+    command: 'push' as const,
+    ...(args.retryFlags ? { retryFlags: args.retryFlags } : {}),
+    escape: 'pass --base-version-id <id>',
+  };
 }
 
 /**
@@ -103,6 +111,8 @@ async function resolveExpectedCandidateVersionId(args: RunReviewPushArgs): Promi
 export async function runReviewPush(
   args: RunReviewPushArgs
 ): Promise<WithSecretWarnings<ReviewPushResult>> {
+  // Before any wire work, including when --base-version-id skips the cache read.
+  await refuseAliasedRef(refusalRequest(args));
   const secretWarnings = assertNoSecretsOutbound(
     'plan-review-push',
     [['body', args.body]],
@@ -150,7 +160,12 @@ export async function runReviewPush(
     // candidateVersionId/Number are nullable in the wire type; persist only when
     // both are present (a published candidate normally has them). If null, the
     // CAS token can't advance — skip the write; the next op re-pulls.
-    if (res.candidateVersionId !== null && res.candidateVersionNumber !== null) {
+    // Retaining a record whose id differs from the admission's typed ref raises
+    // IDEMPOTENCY_CONFLICT — after a successful publish.
+    const refWasCanonical = res.externalId === args.externalId;
+    const advanced =
+      refWasCanonical && res.candidateVersionId !== null && res.candidateVersionNumber !== null;
+    if (advanced) {
       await args.persistence.writeRecord(
         {
           schema_version: 1,
@@ -175,6 +190,7 @@ export async function runReviewPush(
         external_id: res.externalId,
         candidate_version_id: res.candidateVersionId,
         candidate_version_number: res.candidateVersionNumber,
+        ...(advanced ? {} : { local_record_advanced: false as const }),
       },
       secretWarnings
     );
@@ -204,25 +220,28 @@ export async function runReviewPush(
     } catch (err) {
       throw mapReviewAuthzError(err, { command: 'propose' });
     }
-    await args.persistence.writeRecord(
-      {
-        schema_version: 1,
-        target: 'proposal',
-        external_id: proposed.externalId,
-        version_id: null,
-        version_number: null,
-        proposal_id: proposed.proposalId,
-        base_version_number: null,
-        content_hash: contentHash,
-        body: args.body,
-        base_url: args.baseUrl,
-        org_id: args.orgId,
-        pulled_at: args.pulledAt,
-      },
-      { preserveEquivalent: true }
-    );
+    const proposedUnderTypedRef = proposed.externalId === args.externalId;
+    if (proposedUnderTypedRef)
+      await args.persistence.writeRecord(
+        {
+          schema_version: 1,
+          target: 'proposal',
+          external_id: proposed.externalId,
+          version_id: null,
+          version_number: null,
+          proposal_id: proposed.proposalId,
+          base_version_number: null,
+          content_hash: contentHash,
+          body: args.body,
+          base_url: args.baseUrl,
+          org_id: args.orgId,
+          pulled_at: args.pulledAt,
+        },
+        { preserveEquivalent: true }
+      );
     return withSecretWarnings(
       {
+        ...(proposedUnderTypedRef ? {} : { local_record_advanced: false as const }),
         status: 'filed_as_proposal',
         external_id: proposed.externalId,
         proposal_id: proposed.proposalId,
@@ -241,6 +260,20 @@ export async function runReviewPush(
     'plan-review-push',
     { current_version_number: currentVersionNumber }
   );
+}
+
+function unadvancedNote(result: ReviewPushResult): string {
+  return result.local_record_advanced === false
+    ? `  ⚠ local record not advanced — re-pull under ${result.external_id} before pushing again.\n`
+    : '';
+}
+
+export function pushRetryFlags(opts: ReviewPushOptions): string[] {
+  return [
+    ...(opts.baseVersionId !== undefined ? ['--base-version-id', opts.baseVersionId] : []),
+    ...(opts.onConflict !== undefined ? ['--on-conflict', opts.onConflict] : []),
+    ...cloudRetryFlags(opts),
+  ];
 }
 
 /**
@@ -318,6 +351,7 @@ export async function reviewPushAction(ref: string, opts: ReviewPushOptions = {}
           baseline: await resolveReviewBaseline(ctx.repo),
           pulledAt,
           persistence: mutation.persistence,
+          retryFlags: pushRetryFlags(opts),
         });
         if (mutation.didDispatch())
           await ctx.stampUsage(
@@ -341,10 +375,11 @@ export async function reviewPushAction(ref: string, opts: ReviewPushOptions = {}
       if (result.candidate_version_number != null) {
         out += ` → candidate v${result.candidate_version_number}`;
       }
-      writeTerminalSafeStdout(`${out}\n`);
+      writeTerminalSafeStdout(`${out}\n${unadvancedNote(result)}`);
     } else {
       writeTerminalSafeStdout(
-        `Candidate moved to v${result.current_version_number}; filed your edit as proposal ${result.proposal_id} on ${result.external_id}.\n`
+        `Candidate moved to v${result.current_version_number}; filed your edit as proposal ${result.proposal_id} on ${result.external_id}.\n` +
+          unadvancedNote(result)
       );
     }
   } catch (err) {

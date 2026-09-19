@@ -68,7 +68,13 @@ describe('orcaops update --scope global', () => {
         for (const flags of [[], ['--force'], ['--dry-run'], ['--dry-run', '--force']]) {
           const result = await agent.runRaw(['update', ...flags]);
           expect(result.exitCode).toBe(0);
-          expect(result.stdout).toContain('Everything is already up to date');
+          // Global scope carries a managed block, and --force re-injects it
+          // whether or not it differs, so only that combination reports work.
+          if (scope === 'global' && flags.includes('--force')) {
+            expect(result.stdout).toContain('Bootstrap section');
+          } else {
+            expect(result.stdout).toContain('Everything is already up to date');
+          }
           expect(result.stdout).toContain(
             `0 file(s) ${flags.includes('--dry-run') ? 'would change' : 'changed'}`
           );

@@ -19,7 +19,7 @@ export const orcaopsTimetravelSkill: SkillTemplate = {
   defaultEnabled: true,
   requires: ['snapshot-checkout'],
   blockTriggerLine: (prefix: string) =>
-    `bisect/salvage/replay checkpoint boundaries ("which checkpoint broke it?", "recover the abandoned attempt") → \`${skillRef('timetravel', prefix)}\``,
+    `"which checkpoint broke this test?", "recover the abandoned attempt", "replay how this came together" → \`${skillRef('timetravel', prefix)}\``,
   body: (prefix: string) => `# When to use
 
 Triggers (pick the verb):

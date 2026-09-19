@@ -4,6 +4,10 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import {
+  legacySourceCommitAvailable,
+  legacySourceGitOptions,
+} from './legacy-source-history.test-support.js';
+import {
   assertDecodedLegacyOperationalFile,
   decodeLegacyOperationalFile,
   type LegacyOperationalKind,
@@ -162,21 +166,21 @@ const cases: [LegacyOperationalKind, Record<string, unknown>][] = [
   ],
 ];
 const sourceError = expect.objectContaining({ code: 'SOURCE_INTEGRITY' });
+const manifest = JSON.parse(
+  readFileSync(new URL('../legacy-operational-sources.json', import.meta.url), 'utf8')
+) as {
+  source_revision: string;
+  sources: {
+    source_path: string;
+    source_sha256: string;
+    output_path: string;
+    output_sha256: string;
+    selected_symbols: string[];
+  }[];
+};
 
 describe('frozen operational source provenance', () => {
   it('pins schema dependencies and the complete SQLite baseline without old readers or migrations', () => {
-    const manifest = JSON.parse(
-      readFileSync(new URL('../legacy-operational-sources.json', import.meta.url), 'utf8')
-    ) as {
-      source_revision: string;
-      sources: {
-        source_path: string;
-        source_sha256: string;
-        output_path: string;
-        output_sha256: string;
-        selected_symbols: string[];
-      }[];
-    };
     expect(manifest.source_revision).toBe(LEGACY_SOURCE_REVISION);
     expect(manifest.sources).toHaveLength(9);
     expect(
@@ -188,9 +192,6 @@ describe('frozen operational source provenance', () => {
       )
     ).toBe(true);
     for (const source of manifest.sources) {
-      expect(
-        hash(execFileSync('git', ['show', `${LEGACY_SOURCE_REVISION}:${source.source_path}`]))
-      ).toBe(source.source_sha256);
       const output = readFileSync(new URL('../' + source.output_path, import.meta.url));
       expect(hash(output)).toBe(source.output_sha256);
       expect(output.toString('utf8')).not.toMatch(
@@ -198,6 +199,17 @@ describe('frozen operational source provenance', () => {
       );
       if (source.source_path.endsWith('/seed/journal.ts'))
         expect(source.selected_symbols).toContain('SeedJournalV1Schema');
+    }
+  });
+
+  it.skipIf(!legacySourceCommitAvailable)('matches the pinned original operational source', () => {
+    for (const source of manifest.sources) {
+      const original = execFileSync(
+        'git',
+        ['show', `${LEGACY_SOURCE_REVISION}:${source.source_path}`],
+        legacySourceGitOptions
+      );
+      expect(hash(original), source.source_path).toBe(source.source_sha256);
     }
   });
 });

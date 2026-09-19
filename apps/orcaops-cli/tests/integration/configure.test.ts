@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { CONFIG_SCHEMA_VERSION } from '@orcaops/storage';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -571,16 +572,208 @@ describe('orcaops configure (mocked TTY + clack)', () => {
     // Add one new line, then blank to finish. Fallback '' so an accidental
     // extra prompt terminates instead of looping on the default.
     prime(m.text, '', 'New rule.', '');
-    prime(m.confirm, false, true); // apply confirm
+    // confirm #1 = keep commit guidance on (unchanged), #2 = apply.
+    prime(m.confirm, false, true, true);
 
     const r = await agent.runRaw(['configure']);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain('custom reminders: 2 line(s) edited');
     const after = JSON.parse(await configJson()) as {
-      workflow: { hints: { keys: string[]; custom: string[] } };
+      workflow: {
+        hints: { keys: string[]; custom: string[] };
+        commit_inside_window?: boolean;
+        routing?: unknown;
+      };
     };
     expect(after.workflow.hints.keys).toEqual(['checkpoint-cadence']);
     expect(after.workflow.hints.custom).toEqual(['Old rule two.', 'New rule.']);
+    // Untouched siblings of the row stay absent.
+    expect(after.workflow.commit_inside_window).toBeUndefined();
+    expect(after.workflow.routing).toBeUndefined();
+  });
+
+  it('turning commit guidance off writes that key alone', async () => {
+    await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--yes',
+      '--json',
+      '--no-llm',
+      '--agents',
+      'claude-code',
+    ]);
+    const cfgPath = await effectiveConfigPath(repo.path);
+    const parsed = JSON.parse(await configJson()) as Record<string, unknown>;
+    delete parsed.workflow;
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(cfgPath, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+
+    const m = await mocks();
+    prime(m.select, 'discard', 'hints', 'apply');
+    prime(m.multiselect, [], [], []);
+    prime(m.text, '');
+    // confirm #1 = commit guidance off, #2 = apply.
+    prime(m.confirm, false, false, true);
+
+    const r = await agent.runRaw(['configure']);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('commit inside the checkpoint window: on → off');
+    const after = JSON.parse(await configJson()) as { workflow: Record<string, unknown> };
+    expect(after.workflow).toEqual({ commit_inside_window: false });
+  });
+
+  it('turning commit guidance off drops the reminder that asks for it back', async () => {
+    await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--yes',
+      '--json',
+      '--no-llm',
+      '--agents',
+      'claude-code',
+    ]);
+    const cfgPath = await effectiveConfigPath(repo.path);
+    const parsed = JSON.parse(await configJson()) as Record<string, unknown>;
+    // The picker no longer offers this key; a config can still carry it.
+    parsed.workflow = { hints: { keys: ['commit-on-checkpoint-close'], custom: [] } };
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(cfgPath, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+
+    const m = await mocks();
+    prime(m.select, 'discard', 'hints', 'apply');
+    prime(m.multiselect, [], ['commit-on-checkpoint-close'], []);
+    prime(m.text, '');
+    // confirm #1 = commit guidance off, #2 = apply.
+    prime(m.confirm, false, false, true);
+
+    const r = await agent.runRaw(['configure']);
+    expect(r.exitCode).toBe(0);
+    const after = JSON.parse(await configJson()) as {
+      workflow: { hints: { keys: string[] }; commit_inside_window: boolean };
+    };
+    expect(after.workflow.commit_inside_window).toBe(false);
+    expect(after.workflow.hints.keys).toEqual([]);
+
+    // The saved file still loads — every later command depends on it.
+    const doctor = await agent.runRaw(['doctor', '--json']);
+    expect(doctor.exitCode).toBe(0);
+  });
+
+  it('offers no workflow reminder the enabled skills already state', async () => {
+    await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--no-llm',
+      '--json',
+      '--agents',
+      'claude-code',
+    ]);
+
+    const m = await mocks();
+    prime(m.select, 'discard', 'hints');
+    prime(m.multiselect, [], [], []);
+    prime(m.text, '');
+    prime(m.confirm, false, true);
+
+    await agent.runRaw(['configure']);
+
+    const offered = (
+      m.multiselect.mock.calls[0]?.[0] as { options: { value: string }[] }
+    ).options.map((o) => o.value);
+    expect(offered).not.toContain('capture-on-nontrivial');
+    expect(offered).not.toContain('open-checkpoint-before-edits');
+    expect(offered).not.toContain('commit-on-checkpoint-close');
+    expect(offered).toContain('checkpoint-cadence');
+  });
+
+  it('keeps the reminders already answered when the routing question is cancelled', async () => {
+    await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--yes',
+      '--json',
+      '--no-llm',
+      '--agents',
+      'claude-code',
+    ]);
+
+    const m = await mocks();
+    prime(m.select, 'discard', 'hints', 'apply');
+    prime(m.multiselect, [], ['checkpoint-cadence'], CANCELLED);
+    prime(m.text, '');
+    prime(m.confirm, false, false, true);
+
+    const r = await agent.runRaw(['configure']);
+    expect(r.exitCode).toBe(0);
+    const after = JSON.parse(await configJson()) as { workflow: Record<string, unknown> };
+    expect(after.workflow).toEqual({
+      hints: { keys: ['checkpoint-cadence'], custom: [] },
+      commit_inside_window: false,
+    });
+    expect(after.workflow.routing).toBeUndefined();
+  });
+
+  it('applies the commit-guidance answer without the routing edit that was cancelled', async () => {
+    await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--yes',
+      '--json',
+      '--no-llm',
+      '--agents',
+      'claude-code',
+    ]);
+
+    const m = await mocks();
+    prime(m.select, 'discard', 'hints', 'apply');
+    prime(m.multiselect, [], [], CANCELLED);
+    prime(m.text, '');
+    prime(m.confirm, false, false, true);
+
+    const r = await agent.runRaw(['configure']);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('commit inside the checkpoint window: on → off');
+    const after = JSON.parse(await configJson()) as { workflow: Record<string, unknown> };
+    expect(after.workflow).toEqual({ commit_inside_window: false });
+  });
+
+  it('pins the current schema version when it rewrites the config', async () => {
+    await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--yes',
+      '--json',
+      '--no-llm',
+      '--agents',
+      'claude-code',
+    ]);
+    const cfgPath = await effectiveConfigPath(repo.path);
+    const parsed = JSON.parse(await configJson()) as Record<string, unknown>;
+    parsed.schema_version = 5;
+    delete parsed.workflow;
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(cfgPath, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+
+    const m = await mocks();
+    prime(m.select, 'discard', 'hints', 'apply');
+    prime(m.multiselect, [], [], []);
+    prime(m.text, '');
+    prime(m.confirm, false, false, true);
+
+    const r = await agent.runRaw(['configure']);
+    expect(r.exitCode).toBe(0);
+    const after = JSON.parse(await configJson()) as {
+      schema_version: number;
+      workflow: Record<string, unknown>;
+    };
+    expect(after.schema_version).toBe(CONFIG_SCHEMA_VERSION);
+    expect(after.workflow).toEqual({ commit_inside_window: false });
   });
 
   it('cancel in the custom editor keeps lines; a keys-only change preserves them', async () => {
@@ -606,7 +799,7 @@ describe('orcaops configure (mocked TTY + clack)', () => {
     // in the draft, the custom list stays untouched.
     prime(m.multiselect, [], ['capture-on-nontrivial'], CANCELLED);
     prime(m.text, '');
-    prime(m.confirm, false, true);
+    prime(m.confirm, false, true, true);
 
     const r = await agent.runRaw(['configure']);
     expect(r.exitCode).toBe(0);

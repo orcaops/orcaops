@@ -15,7 +15,10 @@ describe('current config gate', () => {
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
     agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DISABLE_DRAIN: '1' } });
-    await agent.init({ noLlm: true, scope: 'project' });
+    // No managed block in the fixture: a reset is a fresh init and therefore
+    // personal, and personal scope refuses to de-adopt a project block as a
+    // side effect (`orcaops update --scope personal` is that transition).
+    await agent.runRaw(['init', '--json', '--scope', 'project', '--no-llm', '--no-agents-md']);
   });
 
   afterEach(async () => {

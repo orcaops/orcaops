@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import { TrpcRequestError } from '@orcaops/sdk';
 
-import { mapPlanCloudReadError, pinRefOf } from './shared.js';
+import { cloudRetryFlags, mapPlanCloudReadError, pinRefOf, pulledRefMissError } from './shared.js';
+import {
+  createMemoryPlanReviewPersistence,
+  seedCandidate,
+} from '../../../../tests/support/plan-review-persistence.js';
 import { OrcaopsError } from '../../../io/errors.js';
 
 const OPTS = { notFoundMessage: 'Not found: the thing.', inputPath: 'plan-review-test' };
@@ -118,5 +122,202 @@ describe('pinRefOf', () => {
 
   it('is null when the plan has never been approved', () => {
     expect(pinRefOf('sp_01ABC', null)).toBeNull();
+  });
+});
+
+describe('cloudRetryFlags', () => {
+  it('echoes the cloud and output flags a pasted refusal needs', () => {
+    expect(
+      cloudRetryFlags({ input: 'c1.md', baseUrl: 'https://staging.example', json: true })
+    ).toEqual(['--input', 'c1.md', '--base-url', 'https://staging.example', '--json']);
+  });
+
+  it('echoes nothing for flags that were not passed', () => {
+    expect(cloudRetryFlags({})).toEqual([]);
+    expect(cloudRetryFlags({ json: false })).toEqual([]);
+  });
+});
+
+describe('pulledRefMissError', () => {
+  const CANONICAL = 'a'.repeat(64);
+
+  async function aliased() {
+    const persistence = createMemoryPlanReviewPersistence();
+    await seedCandidate(persistence, {
+      externalId: CANONICAL,
+      versionId: 'ver_4',
+      versionNumber: 4,
+    });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: CANONICAL,
+      pulledAt: '2026-06-09T00:00:00.000Z',
+    });
+    return persistence;
+  }
+
+  it('names the plan the ref was most recently pulled as', async () => {
+    const persistence = createMemoryPlanReviewPersistence();
+    const first = 'a'.repeat(64);
+    const later = 'b'.repeat(64);
+    await seedCandidate(persistence, { externalId: first, versionId: 'ver_1', versionNumber: 1 });
+    await seedCandidate(persistence, { externalId: later, versionId: 'ver_2', versionNumber: 2 });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: first,
+      pulledAt: '2026-06-09T00:00:00.000Z',
+    });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: later,
+      pulledAt: '2026-06-10T00:00:00.000Z',
+    });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: first,
+      pulledAt: '2026-06-11T00:00:00.000Z',
+    });
+
+    const err = await pulledRefMissError({
+      persistence,
+      ref: 'plan-slug',
+      command: 'push',
+      escape: 'pass --base-version-id <id>',
+    });
+    expect(err.code).toBe('INVALID_INPUT');
+    expect(err.message).toContain(first);
+    expect(err.message).not.toContain(later);
+  });
+
+  it('ignores a record refreshed under a plan the ref no longer names', async () => {
+    const persistence = createMemoryPlanReviewPersistence();
+    const stale = 'a'.repeat(64);
+    const current = 'b'.repeat(64);
+    await seedCandidate(persistence, {
+      externalId: stale,
+      versionId: 'ver_1',
+      versionNumber: 1,
+      pulledAt: '2026-07-01T00:00:00.000Z',
+    });
+    await seedCandidate(persistence, {
+      externalId: current,
+      versionId: 'ver_2',
+      versionNumber: 2,
+      pulledAt: '2026-06-10T00:00:00.000Z',
+    });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: stale,
+      pulledAt: '2026-06-09T00:00:00.000Z',
+    });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: current,
+      pulledAt: '2026-06-10T00:00:00.000Z',
+    });
+
+    const err = await pulledRefMissError({
+      persistence,
+      ref: 'plan-slug',
+      command: 'push',
+      escape: 'pass --base-version-id <id>',
+    });
+    expect(err.message).toContain(current);
+    expect(err.message).not.toContain(stale);
+  });
+
+  it('refuses an aliased ref by naming the canonical externalId in full', async () => {
+    const persistence = await aliased();
+    const err = await pulledRefMissError({
+      persistence,
+      ref: 'plan-slug',
+      command: 'comment',
+      escape: 'pass --proposal <id> to comment on a proposal',
+    });
+    expect(err).toBeInstanceOf(OrcaopsError);
+    expect(err.code).toBe('INVALID_INPUT');
+    expect(err.message).toContain(CANONICAL);
+    expect(err.message).toContain('orcaops plan review comment ' + CANONICAL);
+  });
+
+  it('echoes the typed flags so the printed command line runs as-is', async () => {
+    const persistence = await aliased();
+    const err = await pulledRefMissError({
+      persistence,
+      ref: 'plan-slug',
+      command: 'comment',
+      retryFlags: ['--input', 'c1.md'],
+      escape: 'pass --proposal <id> to comment on a proposal',
+    });
+    expect(err.message).toContain(`orcaops plan review comment ${CANONICAL} --input c1.md`);
+  });
+
+  it('quotes a flag value carrying a shell-significant character', async () => {
+    const persistence = await aliased();
+    const err = await pulledRefMissError({
+      persistence,
+      ref: 'plan-slug',
+      command: 'comment',
+      retryFlags: ['--input', "it's.md"],
+      escape: 'pass --proposal <id> to comment on a proposal',
+    });
+    expect(err.message).toContain(`--input 'it'\\''s.md'`);
+  });
+
+  it('quotes a flag value containing whitespace', async () => {
+    const persistence = await aliased();
+    const err = await pulledRefMissError({
+      persistence,
+      ref: 'plan-slug',
+      command: 'comment',
+      retryFlags: ['--input', 'my notes.md'],
+      escape: 'pass --proposal <id> to comment on a proposal',
+    });
+    expect(err.message).toContain(`--input 'my notes.md'`);
+  });
+
+  it('keeps NO_INPUT when nothing local maps the ref', async () => {
+    const persistence = createMemoryPlanReviewPersistence();
+    const err = await pulledRefMissError({
+      persistence,
+      ref: 'plan-slug',
+      command: 'push',
+      escape: 'pass --base-version-id <id>',
+    });
+    expect(err.code).toBe('NO_INPUT');
+    expect(err.message).toContain('orcaops plan review pull plan-slug');
+    expect(err.message).toContain('pass --base-version-id <id>');
+  });
+
+  it('keeps NO_INPUT when the alias points at a record that is gone', async () => {
+    const persistence = createMemoryPlanReviewPersistence();
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: CANONICAL,
+      pulledAt: '2026-06-09T00:00:00.000Z',
+    });
+    const err = await pulledRefMissError({
+      persistence,
+      ref: 'plan-slug',
+      command: 'propose',
+      escape: 'pass --base-version-id <id>',
+    });
+    expect(err.code).toBe('NO_INPUT');
+  });
+
+  it('keeps NO_INPUT when the alias read fails', async () => {
+    const persistence = createMemoryPlanReviewPersistence();
+    const err = await pulledRefMissError({
+      persistence: {
+        ...persistence,
+        readRefAliases: async () => {
+          throw new Error('damaged');
+        },
+      },
+      ref: 'plan-slug',
+      command: 'comment',
+      escape: 'pass --proposal <id> to comment on a proposal',
+    });
+    expect(err.code).toBe('NO_INPUT');
   });
 });

@@ -1,7 +1,17 @@
 import path from 'node:path';
 
+import {
+  ALWAYS_DROPPED_HINT_KEY,
+  resolveBootstrapContent,
+  SKILL_TEMPLATES,
+} from '@orcaops/adapters';
 import { configLocationForScope, Repo, resolveConfigSource } from '@orcaops/core';
-import { type HintKey, type SupportedAgentId } from '@orcaops/storage';
+import {
+  CONFIG_SCHEMA_VERSION,
+  type HintKey,
+  type SkillId,
+  type SupportedAgentId,
+} from '@orcaops/storage';
 
 import { updateAction } from './update.js';
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
@@ -31,17 +41,20 @@ import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { readUserHooksRecord } from '../lib/session-hooks-user.js';
 import {
   editBlockChoice,
+  editCommitInsideWindow,
   editGeneratedFiles,
   editGitHooksConfirm,
   editHints,
   editHintsCustom,
   editLink,
   editPrefix,
+  editRoutingSuppress,
   editScope,
   editSessionHookEntries,
   editSessionHooksChoice,
 } from '../lib/settings-edit.js';
-import { agentsPrompt } from '../lib/settings-prompts.js';
+import { agentsPrompt, type SettingsPromptOption } from '../lib/settings-prompts.js';
+import { enabledSkillTemplates } from '../lib/skill-set.js';
 
 export interface ConfigureOptions {
   cwd?: string;
@@ -67,6 +80,9 @@ interface SettingsDraft {
   generatedFiles: 'commit' | 'ignore';
   hintKeys: HintKey[];
   hintCustom: string[];
+  commitInsideWindow: boolean;
+  /** `workflow.routing.suppress` — skills whose read-intent line is hidden. */
+  routingSuppress: SkillId[];
   gitHooks: boolean;
 }
 
@@ -90,7 +106,8 @@ export async function configureAction(opts: ConfigureOptions = {}): Promise<void
     throw new CliExit(1);
   }
 
-  const { repoRoot, config } = await resolveInstallCommandContext({ cwd: opts.cwd });
+  const { repoRoot, config, gates } = await resolveInstallCommandContext({ cwd: opts.cwd });
+  const enabledSkills = enabledSkillTemplates(config, gates);
   const storedPayload = config.session_hooks.payload;
   const original: SettingsDraft = {
     agents: [...config.install.agents],
@@ -103,6 +120,8 @@ export async function configureAction(opts: ConfigureOptions = {}): Promise<void
     generatedFiles: config.generated_files,
     hintKeys: [...config.workflow.hints.keys],
     hintCustom: [...config.workflow.hints.custom],
+    commitInsideWindow: config.workflow.commit_inside_window,
+    routingSuppress: [...config.workflow.routing.suppress],
     gitHooks: await gitHooksInstalled(repoRoot),
   };
   const draft: SettingsDraft = structuredClone(original);
@@ -127,7 +146,9 @@ export async function configureAction(opts: ConfigureOptions = {}): Promise<void
       : `on (${v.sessionHooks}, ${v.sessionHookEntries === 'none' ? 'machine-level' : 'repo entries'})`;
   const showScope = (v: SettingsDraft): string => `${v.scope} / ${v.link}`;
   const showHints = (v: SettingsDraft): string =>
-    `${v.hintKeys.length + v.hintCustom.length} selected`;
+    `${v.hintKeys.length + v.hintCustom.length} selected · commit guidance ${
+      v.commitInsideWindow ? 'on' : 'off'
+    }${v.routingSuppress.length > 0 ? ` · ${v.routingSuppress.length} routing hidden` : ''}`;
   const showGitHooks = (v: SettingsDraft): string => (v.gitHooks ? 'installed' : 'not installed');
 
   // HYBRID menu: the frequently-revisited guidance settings stay one
@@ -147,9 +168,7 @@ export async function configureAction(opts: ConfigureOptions = {}): Promise<void
       prefix: original.prefix !== draft.prefix,
       scope: original.scope !== draft.scope || original.link !== draft.link,
       generated: original.generatedFiles !== draft.generatedFiles,
-      hints:
-        JSON.stringify(original.hintKeys) !== JSON.stringify(draft.hintKeys) ||
-        JSON.stringify(original.hintCustom) !== JSON.stringify(draft.hintCustom),
+      hints: workflowChanged(original, draft),
       gitHooks: original.gitHooks !== draft.gitHooks,
     };
     const installChanged = changed.scope || changed.prefix || changed.generated || changed.gitHooks;
@@ -258,12 +277,12 @@ export async function configureAction(opts: ConfigureOptions = {}): Promise<void
           ],
         });
         if (prompts.isCancel(item) || item === 'back') break;
-        await editItem(item as string, draft, storedPayload, prompts, out);
+        await editItem(item as string, draft, storedPayload, enabledSkills, prompts, out);
       }
       continue;
     }
 
-    await editItem(action as string, draft, storedPayload, prompts, out);
+    await editItem(action as string, draft, storedPayload, enabledSkills, prompts, out);
   }
 }
 
@@ -271,6 +290,7 @@ async function editItem(
   item: string,
   draft: SettingsDraft,
   storedPayload: 'static' | 'state-aware',
+  enabledSkills: ReturnType<typeof enabledSkillTemplates>,
   prompts: typeof import('@clack/prompts'),
   out: (line: string) => void
 ): Promise<void> {
@@ -349,7 +369,10 @@ async function editItem(
       return;
     }
     case 'hints': {
-      const picked = await editHints(draft.hintKeys);
+      const picked = await editHints(draft.hintKeys, {
+        enabledSkills,
+        commitInsideWindow: draft.commitInsideWindow,
+      });
       if (picked === null) return;
       draft.hintKeys = picked;
       // Custom lines: keep/remove the existing ones, then append new ones.
@@ -357,6 +380,20 @@ async function editItem(
       // (the curated selection above is already in the draft either way).
       const custom = await editHintsCustom(draft.hintCustom);
       if (custom !== null) draft.hintCustom = custom;
+
+      const commit = await editCommitInsideWindow(draft.commitInsideWindow);
+      if (commit === null) return;
+      draft.commitInsideWindow = commit;
+      // The legacy alias asks for exactly the guidance this boolean turns off.
+      // It renders nothing either way, so carrying it forward would only leave
+      // a contradiction in the file for doctor to report.
+      if (!commit) {
+        draft.hintKeys = draft.hintKeys.filter((k) => k !== ALWAYS_DROPPED_HINT_KEY);
+      }
+
+      const hidden = await editRoutingSuppress(draft.routingSuppress, routableSkills(draft.prefix));
+      if (hidden === null) return;
+      draft.routingSuppress = hidden as SkillId[];
       return;
     }
     case 'git-hooks': {
@@ -367,6 +404,39 @@ async function editItem(
     default:
       return;
   }
+}
+
+function hintsChanged(o: SettingsDraft, d: SettingsDraft): boolean {
+  return (
+    JSON.stringify(o.hintKeys) !== JSON.stringify(d.hintKeys) ||
+    JSON.stringify(o.hintCustom) !== JSON.stringify(d.hintCustom)
+  );
+}
+
+/** Every setting behind the "Workflow reminders" row. */
+function workflowChanged(o: SettingsDraft, d: SettingsDraft): boolean {
+  return (
+    hintsChanged(o, d) ||
+    o.commitInsideWindow !== d.commitInsideWindow ||
+    JSON.stringify(o.routingSuppress) !== JSON.stringify(d.routingSuppress)
+  );
+}
+
+/**
+ * The skills that HAVE a read-intent line, resolved from the full registry so
+ * an opt-in skill the user enabled later is still offered.
+ *
+ * Value type `string`, not `SkillId`: clack's `Option<Value>` distributes over
+ * a union, and no uniformly-typed option array satisfies the resulting union.
+ */
+function routableSkills(prefix: string): SettingsPromptOption<string>[] {
+  return resolveBootstrapContent({
+    prefix,
+    enabledSkills: SKILL_TEMPLATES,
+    hints: undefined,
+    commitInsideWindow: true,
+    suppressedRouting: [],
+  }).routing.map((e) => ({ value: e.id, label: e.ref }));
 }
 
 /** Human-readable old → new lines; empty when the draft matches the original. */
@@ -400,6 +470,16 @@ function pendingChanges(o: SettingsDraft, d: SettingsDraft): string[] {
         : `custom reminders: ${o.hintCustom.length} → ${d.hintCustom.length} line(s)`
     );
   }
+  if (o.commitInsideWindow !== d.commitInsideWindow) {
+    lines.push(
+      `commit inside the checkpoint window: ${o.commitInsideWindow ? 'on' : 'off'} → ${
+        d.commitInsideWindow ? 'on' : 'off'
+      }`
+    );
+  }
+  if (JSON.stringify(o.routingSuppress) !== JSON.stringify(d.routingSuppress)) {
+    lines.push(`routing hidden for: ${list(o.routingSuppress)} → ${list(d.routingSuppress)}`);
+  }
   if (o.gitHooks !== d.gitHooks) {
     lines.push(
       `git hooks: ${o.gitHooks ? 'installed' : 'not installed'} → ${d.gitHooks ? 'installed' : 'not installed'}`
@@ -429,8 +509,7 @@ async function applyDraft(
     original.sessionHooks !== draft.sessionHooks ||
     original.sessionHookEntries !== draft.sessionHookEntries ||
     original.generatedFiles !== draft.generatedFiles ||
-    JSON.stringify(original.hintKeys) !== JSON.stringify(draft.hintKeys) ||
-    JSON.stringify(original.hintCustom) !== JSON.stringify(draft.hintCustom);
+    workflowChanged(original, draft);
 
   if (configChanged) {
     const commonDir = await new Repo(repoRoot).getCommonDirAbsolute();
@@ -521,17 +600,27 @@ async function applyDraft(
             : {}),
         };
       }
-      if (
-        JSON.stringify(original.hintKeys) !== JSON.stringify(draft.hintKeys) ||
-        JSON.stringify(original.hintCustom) !== JSON.stringify(draft.hintCustom)
-      ) {
+      if (workflowChanged(original, draft)) {
         const workflow = (parsed.workflow ?? {}) as Record<string, unknown>;
         const hints = (workflow.hints ?? {}) as Record<string, unknown>;
+        const routing = (workflow.routing ?? {}) as Record<string, unknown>;
+        // Each key lands only if IT changed: writing an untouched sibling
+        // would materialize today's default in a config that omitted it.
         parsed.workflow = {
           ...workflow,
-          hints: { ...hints, keys: draft.hintKeys, custom: draft.hintCustom },
+          ...(hintsChanged(original, draft)
+            ? { hints: { ...hints, keys: draft.hintKeys, custom: draft.hintCustom } }
+            : {}),
+          ...(original.commitInsideWindow !== draft.commitInsideWindow
+            ? { commit_inside_window: draft.commitInsideWindow }
+            : {}),
+          ...(JSON.stringify(original.routingSuppress) !== JSON.stringify(draft.routingSuppress)
+            ? { routing: { ...routing, suppress: draft.routingSuppress } }
+            : {}),
         };
       }
+
+      parsed.schema_version = CONFIG_SCHEMA_VERSION;
 
       const desired = `${JSON.stringify(parsed, null, 2)}\n`;
       const writes = [

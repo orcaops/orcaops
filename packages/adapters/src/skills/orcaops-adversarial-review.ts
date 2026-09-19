@@ -21,7 +21,7 @@ export const orcaopsAdversarialReviewSkill: SkillTemplate = {
   group: 'review',
   defaultEnabled: true,
   blockTriggerLine: (prefix: string) =>
-    `adversarial review ("red-team this PR", "poke holes in what the agent did") → \`${skillRef('adversarial-review', prefix)}\``,
+    `"red-team this", "poke holes in what the agent did", "verify the done criteria" → \`${skillRef('adversarial-review', prefix)}\``,
   body: (prefix: string) => `# When to use
 
 Triggers (user phrasing):

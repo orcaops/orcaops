@@ -8,8 +8,11 @@ import { firstForbiddenControlChar, sha256Hex } from '@orcaops/storage';
 
 import type { PlanReviewPersistence } from './persistence.js';
 import {
+  cloudRetryFlags,
   createReviewMutation,
   mapReviewAuthzError,
+  pulledRefMissError,
+  refuseAliasedRef,
   requireRef,
   withReviewCloud,
 } from './shared.js';
@@ -50,6 +53,7 @@ export interface ReviewProposeResult {
   needs_rebase: boolean;
   /** The resolved cloud base — the hints carry it when it isn't the default. */
   base_url: string;
+  local_record_advanced?: false;
 }
 
 export interface RunReviewProposeArgs {
@@ -68,21 +72,25 @@ export interface RunReviewProposeArgs {
   /** Advisory authoring baseline (resolved by the action; optional so fakes skip it). */
   baseline?: OssSourcePlanBaseline | null;
   pulledAt: string;
+  retryFlags?: readonly string[];
 }
 
 /** Resolve the base candidate version id from project history, or hard-error. */
 async function resolveBaseVersionId(args: RunReviewProposeArgs): Promise<string> {
   if (args.baseVersionIdOverride !== undefined) return args.baseVersionIdOverride;
   const rec = await args.persistence.readCandidate(args.externalId);
-  if (!rec || rec.version_id === null) {
-    throw new OrcaopsError(
-      ErrorCodes.NO_INPUT,
-      `No pulled candidate for "${args.externalId}". Run \`orcaops plan review pull ${args.externalId}\` first ` +
-        `(refs are externalIds — \`pull\` prints the canonical one), or pass --base-version-id <id>.`,
-      'plan-review-propose'
-    );
-  }
+  if (!rec || rec.version_id === null) throw await pulledRefMissError(refusalRequest(args));
   return rec.version_id;
+}
+
+function refusalRequest(args: RunReviewProposeArgs) {
+  return {
+    persistence: args.persistence,
+    ref: args.externalId,
+    command: 'propose' as const,
+    ...(args.retryFlags ? { retryFlags: args.retryFlags } : {}),
+    escape: 'pass --base-version-id <id>',
+  };
 }
 
 /**
@@ -94,6 +102,8 @@ async function resolveBaseVersionId(args: RunReviewProposeArgs): Promise<string>
 export async function runReviewPropose(
   args: RunReviewProposeArgs
 ): Promise<WithSecretWarnings<ReviewProposeResult>> {
+  // Before any wire work, including when --base-version-id skips the cache read.
+  await refuseAliasedRef(refusalRequest(args));
   const secretWarnings = assertNoSecretsOutbound(
     'plan-review-propose',
     [
@@ -144,26 +154,31 @@ export async function runReviewPropose(
 
   // Persist the new proposal (version_id/version_number null — propose's response
   // has neither; proposal_id + the local body/hash are what `comment` needs).
-  await args.persistence.writeRecord(
-    {
-      schema_version: 1,
-      target: 'proposal',
-      external_id: res.externalId,
-      version_id: null,
-      version_number: null,
-      proposal_id: res.proposalId,
-      base_version_number: null,
-      content_hash: contentHash,
-      body: args.body,
-      base_url: args.baseUrl,
-      org_id: args.orgId,
-      pulled_at: args.pulledAt,
-    },
-    { preserveEquivalent: true }
-  );
+  // Retaining a record whose id differs from the admission's typed ref raises
+  // IDEMPOTENCY_CONFLICT — after the proposal has already been filed.
+  const refWasCanonical = res.externalId === args.externalId;
+  if (refWasCanonical)
+    await args.persistence.writeRecord(
+      {
+        schema_version: 1,
+        target: 'proposal',
+        external_id: res.externalId,
+        version_id: null,
+        version_number: null,
+        proposal_id: res.proposalId,
+        base_version_number: null,
+        content_hash: contentHash,
+        body: args.body,
+        base_url: args.baseUrl,
+        org_id: args.orgId,
+        pulled_at: args.pulledAt,
+      },
+      { preserveEquivalent: true }
+    );
 
   return withSecretWarnings(
     {
+      ...(refWasCanonical ? {} : { local_record_advanced: false as const }),
       external_id: res.externalId,
       proposal_id: res.proposalId,
       base_version_id: res.baseVersionId,
@@ -172,6 +187,16 @@ export async function runReviewPropose(
     },
     secretWarnings
   );
+}
+
+export function proposeRetryFlags(opts: ReviewProposeOptions): string[] {
+  return [
+    ...(opts.baseVersionId !== undefined ? ['--base-version-id', opts.baseVersionId] : []),
+    ...(opts.supersedes !== undefined ? ['--supersedes', opts.supersedes] : []),
+    ...(opts.summary !== undefined ? ['--summary', opts.summary] : []),
+    ...(opts.sourceRef !== undefined ? ['--source-ref', opts.sourceRef] : []),
+    ...cloudRetryFlags(opts),
+  ];
 }
 
 /**
@@ -257,6 +282,7 @@ export async function reviewProposeAction(
           baseline: await resolveReviewBaseline(ctx.repo),
           pulledAt,
           persistence: mutation.persistence,
+          retryFlags: proposeRetryFlags(opts),
         });
         if (mutation.didDispatch())
           await ctx.stampUsage(reviewUsageStamp('propose', result.external_id, result.proposal_id));
@@ -272,6 +298,9 @@ export async function reviewProposeAction(
     let out = `Filed proposal ${result.proposal_id} on ${result.external_id} (base ${result.base_version_id})\n`;
     if (result.needs_rebase) {
       out += `  ⚠ needs rebase — the candidate has advanced past this base; rebase before it can be integrated.\n`;
+    }
+    if (result.local_record_advanced === false) {
+      out += `  ⚠ local record not retained — re-pull under ${result.external_id} to work this proposal.\n`;
     }
     out += `  comment on it: orcaops plan review comment ${result.external_id} --proposal ${result.proposal_id} --input <file>\n`;
     writeTerminalSafeStdout(out);

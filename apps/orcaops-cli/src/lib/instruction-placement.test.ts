@@ -308,6 +308,48 @@ describe('resolveInstructionPlacement', () => {
     expect(res.warnings.join(' ')).not.toMatch(/remove it by hand/);
   });
 
+  it('strips a block written with non-default workflow options', async () => {
+    // Removal is byte-equality against a re-render, so the removal inputs must
+    // carry the same workflow options the write did; a default here would
+    // strand the block as `preserved-modified`.
+    const options = {
+      hints: { keys: ['checkpoint-cadence'] as const, custom: [] },
+      commitInsideWindow: false,
+      suppressedRouting: ['why'] as const,
+    };
+    const written = await resolve({ instructionFiles: ['AGENTS.md'], ...options });
+    await executeMutations(written.mutations, 'apply');
+    expect(await read('AGENTS.md')).toContain(MARKER);
+
+    const removal = await planRemoveInstructionBlocks({
+      repoRoot: root,
+      instructionFiles: ['AGENTS.md'],
+      generatedBy: '9.9.9',
+      ...options,
+    });
+    expect(removal.results).toEqual([{ path: 'AGENTS.md', action: 'removed' }]);
+    expect(removal.warnings).toEqual([]);
+    await executeMutations(removal.mutations, 'apply');
+    expect(await read('AGENTS.md').catch(() => '')).not.toContain(MARKER);
+  });
+
+  it('leaves a non-default block in place when the removal inputs use defaults', async () => {
+    const written = await resolve({
+      instructionFiles: ['AGENTS.md'],
+      commitInsideWindow: false,
+    });
+    await executeMutations(written.mutations, 'apply');
+
+    const removal = await planRemoveInstructionBlocks({
+      repoRoot: root,
+      instructionFiles: ['AGENTS.md'],
+      generatedBy: '9.9.9',
+    });
+    expect(removal.mutations).toEqual([]);
+    expect(removal.warnings.join(' ')).toMatch(/modified orcaops block remains in AGENTS.md/);
+    expect(await read('AGENTS.md')).toContain(MARKER);
+  });
+
   it('preserves non-regular entries while planning managed-block removal', async () => {
     await mkdir(path.join(root, 'AGENTS.md'));
 

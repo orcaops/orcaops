@@ -685,8 +685,9 @@ describe('deterministic floor route (no narrative)', () => {
       initialLoadedOverride: null,
     });
     expect(app.frame()).toContain('No deterministic review floor');
-    expect(app.frame()).toContain('Capture and close implementation checkpoints');
+    expect(app.frame()).toContain('Reopen Review to retry.');
     expect(app.frame()).not.toContain('Review unavailable');
+    expect(app.frame()).not.toContain('Capture and close');
     app.unmount();
   });
 

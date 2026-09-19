@@ -15,7 +15,7 @@ export const orcaopsEstimateSkill: SkillTemplate = {
   group: 'insight',
   defaultEnabled: false,
   blockTriggerLine: (prefix: string) =>
-    `estimate from history ("what did similar work cost?") → \`${skillRef('estimate', prefix)}\``,
+    `"how big is this task really?", "what did similar work cost?", "how did the estimate hold up?" → \`${skillRef('estimate', prefix)}\``,
   body: (prefix: string) => `# When to use
 
 Triggers (user phrasing):

@@ -11,7 +11,7 @@ export const orcaopsSeedDiscoverySkill: SkillTemplate = {
   group: 'insight',
   defaultEnabled: true,
   blockTriggerLine: (prefix: string) =>
-    `history gap during normal work (why miss, cold subsystem, empty old prior-art) → \`${skillRef('seed-discovery', prefix)}\``,
+    `"why does this file have no history?", "why did that provenance lookup find nothing?" → \`${skillRef('seed-discovery', prefix)}\`, and whenever normal work exposes a history gap`,
   body: (prefix, options) => `# Read-only discovery
 
 Use this only after normal work exposes a history gap. This workflow is

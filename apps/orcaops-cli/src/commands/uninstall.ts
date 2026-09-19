@@ -6,7 +6,6 @@ import {
   getToolAdapter,
   planGenerateForTool,
   type PlannedFile,
-  resolveHintLines,
   type ToolAdapter,
 } from '@orcaops/adapters';
 import { Repo, resolveConfigSource, worktreeConfigLocation } from '@orcaops/core';
@@ -283,8 +282,10 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
               instructionFiles,
               generatedBy: CLI_VERSION,
               prefix: config.naming.prefix,
-              hints: resolveHintLines(config.workflow.hints),
+              hints: config.workflow.hints,
               enabledSkills: enabledSkillTemplates(config, ctx.gates),
+              commitInsideWindow: config.workflow.commit_inside_window,
+              suppressedRouting: config.workflow.routing.suppress,
             });
             for (const m of removal.mutations) {
               const le = byKey.get(entryKey('injected-block', m.path));

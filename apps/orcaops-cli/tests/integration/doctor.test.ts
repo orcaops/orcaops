@@ -1,5 +1,15 @@
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -7,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { sanitizeDoctorChecks } from '../../src/commands/doctor.js';
+import { canonicalSessionHookCommand } from '../../src/lib/session-hooks.js';
 import { fixture as databaseFixture } from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
 import { effectiveConfigPath, TEST_PACK_ABS_PATH } from '../support/test-helpers.js';
@@ -993,6 +1004,244 @@ describe('orcaops doctor', () => {
     const check = findCheck(r, 'agents-md');
     expect(check.status).toBe('pass');
     expect(check.summary).toMatch(/bootstrap=manual/);
+    // The block being the user's is not the same as the repo having a routing
+    // surface: with no hook registered either, session-hooks names the gap.
+    const hooks = findCheck(r, 'session-hooks');
+    expect(hooks.status).toBe('warn');
+    expect(hooks.summary).toContain('no bootstrap surface carries skill routing for claude-code');
+  });
+
+  it('session-hooks names every agent with no bootstrap surface and no one-command fix', async () => {
+    await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--no-llm',
+      '--no-agents-md',
+      '--session-hooks',
+      '--session-hook-entries',
+      'none',
+      '--agents',
+      'claude-code,codex',
+    ]);
+
+    const r = JSON.parse((await agent.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+    const check = findCheck(r, 'session-hooks');
+    expect(check.status).toBe('warn');
+    const details = (check.details ?? []).join('\n');
+    expect(details).toContain('no bootstrap surface carries skill routing for claude-code, codex');
+    expect(details).toContain('orcaops configure');
+    expect(details).toContain('orcaops init --force --agents-md');
+    expect(details).toContain('orcaops session-hooks install --agents codex');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'session-hooks names only the agent whose instruction file holds no block',
+    async () => {
+      await writeFile(path.join(repo.path, 'CLAUDE.md'), '# Project\n', 'utf8');
+      await agent.runRaw([
+        'init',
+        '--scope',
+        'project',
+        '--no-llm',
+        '--agents-md',
+        '--session-hooks',
+        '--session-hook-entries',
+        'none',
+        '--agents',
+        'claude-code,codex',
+      ]);
+      await rm(path.join(repo.path, 'AGENTS.md'), { force: true });
+
+      const r = JSON.parse((await agent.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+      const check = findCheck(r, 'session-hooks');
+      const details = (check.details ?? []).join('\n');
+      expect(details).toContain('no bootstrap surface carries skill routing for codex');
+      expect(details).not.toContain('claude-code, codex');
+    }
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'session-hooks stays quiet when a symlinked instruction file reaches the block',
+    async () => {
+      await writeFile(path.join(repo.path, 'CLAUDE.md'), '# Project\n', 'utf8');
+      await agent.runRaw([
+        'init',
+        '--scope',
+        'project',
+        '--no-llm',
+        '--agents-md',
+        '--session-hooks',
+        '--session-hook-entries',
+        'none',
+        '--agents',
+        'claude-code,codex',
+      ]);
+      expect((await lstat(path.join(repo.path, 'AGENTS.md'))).isSymbolicLink()).toBe(true);
+
+      const r = JSON.parse((await agent.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+      const check = findCheck(r, 'session-hooks');
+      expect((check.details ?? []).join('\n')).not.toContain('no bootstrap surface');
+    }
+  );
+
+  it('session-hooks stops warning once a machine registration covers the install set', async () => {
+    const claudeDir = await mkdtemp(path.join(tmpdir(), 'orcaops-doctor-claude-'));
+    const covered = makeAgent({ cwd: repo.path, env: { CLAUDE_CONFIG_DIR: claudeDir } });
+    await covered.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--no-llm',
+      '--no-agents-md',
+      '--session-hooks',
+      '--session-hook-entries',
+      'none',
+    ]);
+
+    const before = JSON.parse((await covered.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+    expect(findCheck(before, 'session-hooks').status).toBe('warn');
+
+    await writeFile(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: {
+          SessionStart: [
+            {
+              matcher: 'startup|resume|clear',
+              hooks: [
+                {
+                  type: 'command',
+                  command: canonicalSessionHookCommand('claude-code', { user: true }),
+                  timeout: 10,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+      'utf8'
+    );
+
+    const after = JSON.parse((await covered.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+    const check = findCheck(after, 'session-hooks');
+    expect((check.details ?? []).join('\n')).not.toContain('no bootstrap surface');
+  });
+
+  it('session-hook-payload warns when custom hints blow the payload up', async () => {
+    await agent.runRaw(['init', '--scope', 'project', '--no-llm', '--session-hooks']);
+    const r = JSON.parse((await agent.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+    expect(findCheck(r, 'session-hook-payload').status).toBe('pass');
+
+    const cfgPath = await effectiveConfigPath(repo.path);
+    const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+    cfg.workflow = {
+      hints: {
+        custom: Array.from(
+          { length: 60 },
+          (_, i) => `Custom reminder ${i} at the length a real house rule runs to.`
+        ),
+      },
+    };
+    await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+
+    const bloated = JSON.parse((await agent.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+    const check = findCheck(bloated, 'session-hook-payload');
+    expect(check.status).toBe('warn');
+    expect(check.summary).toMatch(/over 6000/);
+    expect((check.details ?? []).join('\n')).toContain('workflow.hints.custom');
+  });
+
+  it('session-hook-payload warns on ONE enormous hint, which costs a single line', async () => {
+    await agent.runRaw(['init', '--scope', 'project', '--no-llm', '--session-hooks']);
+
+    const cfgPath = await effectiveConfigPath(repo.path);
+    const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+    cfg.workflow = { hints: { custom: [`Never do this: ${'x'.repeat(8000)}`] } };
+    await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+
+    const hook = await agent.runRaw(['hook', 'session-start', '--agent', 'claude-code']);
+    expect(hook.stdout.trimEnd().split('\n').length).toBeLessThan(60);
+
+    const r = JSON.parse((await agent.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+    const check = findCheck(r, 'session-hook-payload');
+    expect(check.status).toBe('warn');
+    expect(check.summary).toMatch(/over 6000/);
+  });
+
+  it('workflow-hints warns when a declared hint cannot render as declared', async () => {
+    await agent.runRaw(['init', '--scope', 'project', '--no-llm', '--session-hooks']);
+    const clean = JSON.parse((await agent.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+    expect(findCheck(clean, 'workflow-hints').status).toBe('pass');
+
+    const cfgPath = await effectiveConfigPath(repo.path);
+    const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+    cfg.workflow = {
+      commit_inside_window: false,
+      hints: { keys: ['commit-on-checkpoint-close'], custom: [] },
+    };
+    await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+
+    // The redundant pair must stay a report, not a load failure: doctor is the
+    // command that explains it, so it has to run at all.
+    const res = await agent.runRaw(['doctor', '--json']);
+    expect(res.exitCode).toBe(0);
+    const check = findCheck(JSON.parse(res.stdout) as DoctorReport, 'workflow-hints');
+    expect(check.status).toBe('warn');
+    expect(check.summary).toContain('1 reminder(s)');
+    const details = (check.details ?? []).join('\n');
+    expect(details).toContain('commit-on-checkpoint-close');
+    expect(details).toContain('workflow.commit_inside_window is off');
+    expect(details).toContain('Drop the key');
+  });
+
+  it('workflow-hints names every pinned reminder the lifecycle already states', async () => {
+    await agent.runRaw(['init', '--scope', 'project', '--no-llm', '--session-hooks']);
+
+    const cfgPath = await effectiveConfigPath(repo.path);
+    const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+    cfg.workflow = {
+      hints: {
+        keys: ['open-checkpoint-before-edits', 'capture-on-nontrivial', 'checkpoint-cadence'],
+        custom: [],
+      },
+    };
+    await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+
+    const res = await agent.runRaw(['doctor', '--json']);
+    expect(res.exitCode).toBe(0);
+    const check = findCheck(JSON.parse(res.stdout) as DoctorReport, 'workflow-hints');
+    expect(check.status).toBe('warn');
+    expect(check.summary).toContain('2 reminder(s)');
+    const details = (check.details ?? []).join('\n');
+    expect(details).toContain('"capture-on-nontrivial": the plan lifecycle step');
+    expect(details).toContain('"open-checkpoint-before-edits": the checkpoint lifecycle step');
+    expect(details).not.toContain('checkpoint-cadence');
+  });
+
+  it('session-hook-payload measures the characters the hook actually emits', async () => {
+    await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--no-llm',
+      '--session-hooks',
+      '--agents-md',
+    ]);
+    // The managed block is gone, so the hook carries routing again — the case a
+    // config-shaped answer reports as the short lifecycle-only payload.
+    await writeFile(
+      path.join(repo.path, 'AGENTS.md'),
+      '# Project\n\nHand-written house rules. No orcaops block here.\n',
+      'utf8'
+    );
+
+    const hook = await agent.runRaw(['hook', 'session-start', '--agent', 'claude-code']);
+    const emitted = hook.stdout.trimEnd().length;
+    expect(emitted).toBeGreaterThan(1000);
+
+    const r = JSON.parse((await agent.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+    expect(findCheck(r, 'session-hook-payload').summary).toContain(`${emitted} character(s)`);
   });
 
   it('agents-md warns when the version stamp in the marker is stale', async () => {
@@ -1050,6 +1299,29 @@ describe('orcaops doctor', () => {
     expect(check.summary).toMatch(/oo/);
   });
 
+  it('block-skill-refs accepts a suppressed routing entry as the desired state', async () => {
+    await agent.runRaw(['init', '--scope', 'project', '--no-llm', '--agents-md']);
+    expect(await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8')).toContain(
+      'orcaops-plan-critique'
+    );
+
+    const cfgPath = await effectiveConfigPath(repo.path);
+    const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+    // `digest` is suppressed too: it is routed AND named by the lifecycle, so
+    // its ref must still be expected in the block.
+    cfg.workflow = { routing: { suppress: ['plan-critique', 'digest'] } };
+    await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+    await agent.runRaw(['update', '--json']);
+
+    const agentsMd = await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8');
+    expect(agentsMd).not.toContain('orcaops-plan-critique');
+    expect(agentsMd).toContain('orcaops-digest');
+
+    const r = JSON.parse((await agent.runRaw(['doctor', '--json'])).stdout) as DoctorReport;
+    expect(findCheck(r, 'block-skill-refs')).toMatchObject({ status: 'pass' });
+    expect(findCheck(r, 'agents-md').status).toBe('pass');
+  });
+
   it('block-skill-refs warns on a dead ref to a NON-lifecycle skill', async () => {
     // Pins the LINGERING direction: the block renders read-intent routing for
     // enabled skills, so disabling one WITHOUT re-rendering leaves a dead ref
@@ -1070,8 +1342,8 @@ describe('orcaops doctor', () => {
     const r = JSON.parse(res.stdout) as DoctorReport;
     const check = findCheck(r, 'block-skill-refs');
     expect(check.status).toBe('warn');
-    expect(check.summary).toMatch(/disabled skill/);
-    expect(check.details?.join('\n')).toMatch(/orcaops-resume/);
+    expect(check.summary).toMatch(/should no longer name/);
+    expect(check.details?.join('\n')).toMatch(/orcaops-resume, which is disabled/);
   });
 
   // ── lineage-orphan check ───────────────────────────────────────────

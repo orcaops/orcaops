@@ -241,6 +241,27 @@ describe('root test policy', () => {
     expect(policy.vitestCoverageWorkers).toBeLessThan(policy.vitestWorkerCap);
   });
 
+  it('builds every workspace the serial gate exercises before it runs them', () => {
+    // The gate's legs run from source under Bun or vitest, but they import
+    // workspace packages that resolve to dist. A package-scoped
+    // `pnpm --filter <pkg> build` builds that package and nothing it depends on,
+    // so a cold clone dies on the first unbuilt dependency. Two separate legs
+    // had already drifted this way, which is why the guard rejects the whole
+    // shape rather than pinning one expected invocation.
+    const rootManifest = JSON.parse(readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+    const chain = (rootManifest.scripts?.['test:ci'] ?? '').split('&&').map((step) => step.trim());
+    const build = chain.indexOf('turbo run build');
+    expect(build).toBeGreaterThanOrEqual(0);
+    expect(chain.filter((step) => /^pnpm .*\bbuild$/.test(step))).toEqual([]);
+    for (const [index, step] of chain.entries()) {
+      if (/\b(test|test:render|test:pty|perf:review-cap|perf:review|test:coverage)$/.test(step)) {
+        expect(index, step).toBeGreaterThan(build);
+      }
+    }
+  });
+
   it('keeps the CI test job excluding the CLI from the shared leg', () => {
     // The CLI's coverage leg runs the same suite; without this exclusion the
     // job executes all of it twice. Nothing else asserts the workflow's shape.
@@ -256,7 +277,7 @@ describe('root test policy', () => {
     const workflow = readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
     const sharedJob = workflow.split('  test:\n')[1].split('  test-heavy:\n')[0];
     const cliJob = workflow.split('  test-cli:\n')[1].split('  coverage:\n')[0];
-    expect(sharedJob).toContain('pnpm --filter @orcaops/watch test:pty');
+    expect(sharedJob).toContain('pnpm exec turbo run test:pty --filter=@orcaops/watch');
     expect(sharedJob).not.toContain('--coverage');
     expect(cliJob).toContain('pnpm test --coverage --only=@orcaops/cli');
     expect(cliJob).not.toContain('needs:');

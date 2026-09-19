@@ -35,6 +35,17 @@ describe('buildConfigDelta', () => {
     expect(delta).not.toHaveProperty('archive');
   });
 
+  it('omits workflow entirely at its defaults, and carries only a changed leaf', () => {
+    const config = getDefaultConfig();
+    expect(buildConfigDelta(config)).not.toHaveProperty('workflow');
+    config.workflow.commit_inside_window = false;
+    config.workflow.routing.suppress = ['digest'];
+    expect(buildConfigDelta(config).workflow).toEqual({
+      commit_inside_window: false,
+      routing: { suppress: ['digest'] },
+    });
+  });
+
   it('round-trips: resolving the delta reproduces the resolved config', () => {
     const config = getDefaultConfig();
     config.install.scope = 'personal';

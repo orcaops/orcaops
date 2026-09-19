@@ -18,6 +18,7 @@ import {
 } from '@orcaops/storage/history/database';
 import type { RemoteTarget } from '@orcaops/storage/history/remote-target';
 
+import type { PlanReviewPersistence, RefAlias } from './persistence.js';
 import { ErrorCodes, OrcaopsError } from '../../../io/errors.js';
 import { writeTerminalSafeStderr } from '../../../io/output.js';
 import { CLI_VERSION } from '../../../lib/cli-version.js';
@@ -177,6 +178,92 @@ export function requireRef(ref: string, inputPath: string): void {
   if (!ref || ref.length === 0) {
     throw new OrcaopsError(ErrorCodes.NO_INPUT, 'a plan ref (externalId) is required.', inputPath);
   }
+}
+
+export interface PulledRefRequest {
+  persistence: PlanReviewPersistence;
+  ref: string;
+  command: 'comment' | 'push' | 'propose';
+  retryFlags?: readonly string[];
+  /** Closing clause of the unrecognized-ref arm, e.g. 'pass --base-version-id <id>'. */
+  escape: string;
+  proposalId?: string;
+}
+
+/** A refusal prints these to paste; dropping one aims the paste somewhere else. */
+export function cloudRetryFlags(opts: {
+  input?: string;
+  baseUrl?: string;
+  json?: boolean;
+}): string[] {
+  return [
+    ...(opts.input !== undefined ? ['--input', opts.input] : []),
+    ...(opts.baseUrl !== undefined ? ['--base-url', opts.baseUrl] : []),
+    ...(opts.json ? ['--json'] : []),
+  ];
+}
+
+function quoteFlag(flag: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(flag) ? flag : `'${flag.replace(/'/g, `'\\''`)}'`;
+}
+
+// Deliberately no id-shape test: the cloud mints ids for plans the CLI never
+// uploaded, so classifying by shape would refuse valid refs.
+export async function aliasedRefError(request: PulledRefRequest): Promise<OrcaopsError | null> {
+  const canonical = await resolveAlias(request);
+  if (canonical === null) return null;
+  const flags = (request.retryFlags ?? []).map(quoteFlag);
+  return new OrcaopsError(
+    ErrorCodes.INVALID_INPUT,
+    `"${request.ref}" is not a canonical plan ref.\n` +
+      `These verbs take the externalId that \`plan review pull\` echoed:\n` +
+      `  orcaops plan review ${request.command} ${canonical}` +
+      `${flags.length > 0 ? ' ' + flags.join(' ') : ''}`,
+    `plan-review-${request.command}`
+  );
+}
+
+// Recency is the alias's own instant, never the record's: push and propose
+// stamp `pulled_at` with their publication time, so a record can be newest
+// while the mapping naming it is stale.
+async function resolveAlias(request: PulledRefRequest): Promise<string | null> {
+  const aliases = await request.persistence.readRefAliases(request.ref).catch(() => []);
+  let best: RefAlias | null = null;
+  for (const alias of aliases) {
+    if (alias.externalId === request.ref) continue;
+    const candidate = await request.persistence.readCandidate(alias.externalId).catch(() => null);
+    const proof =
+      candidate && candidate.version_id !== null
+        ? candidate
+        : request.proposalId === undefined
+          ? null
+          : await request.persistence
+              .readProposal(alias.externalId, request.proposalId)
+              .catch(() => null);
+    if (!proof) continue;
+    if (best === null || alias.pulledAt > best.pulledAt) best = alias;
+  }
+  return best?.externalId ?? null;
+}
+
+export async function refuseAliasedRef(request: PulledRefRequest): Promise<void> {
+  const aliased = await aliasedRefError(request);
+  if (aliased) throw aliased;
+}
+
+/** Returned, not thrown — call sites `throw await pulledRefMissError(…)`. */
+export async function pulledRefMissError(request: PulledRefRequest): Promise<OrcaopsError> {
+  const aliased = await aliasedRefError(request);
+  return (
+    aliased ??
+    new OrcaopsError(
+      ErrorCodes.NO_INPUT,
+      `No pulled candidate for "${request.ref}". ` +
+        `Run \`orcaops plan review pull ${request.ref}\` first ` +
+        `(pull takes a slug and echoes the canonical externalId this verb needs), or ${request.escape}.`,
+      `plan-review-${request.command}`
+    )
+  );
 }
 
 /**

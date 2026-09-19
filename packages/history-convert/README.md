@@ -9,7 +9,9 @@ these decoders. Missing producer or account evidence stays unknown.
 ## Accepted mixed-era sources
 
 The supported local source boundary includes exact operational SQLite schemas
-20, 22, 23, 24 and 25, plus configuration versions 4, 5 and 6. This extends the
+20, 22, 23, 24 and 25, plus configuration version 4 and every version from 5
+onward — a repository whose config a newer orcaops rewrote still converts,
+because the three fields read here have been stable since the freeze. This extends the
 original rc.2-only conversion boundary; it does not restore the removed canonical
 SQLite development migrations. Unknown versions and altered SQLite schemas refuse.
 The destination records the actual source version, never relabels it as 25.

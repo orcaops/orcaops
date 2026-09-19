@@ -17,7 +17,7 @@
     "typecheck:tests": "turbo run typecheck:tests",
     "test": "node scripts/run-tests.mjs",
     "test:coverage": "node scripts/run-tests.mjs --coverage",
-    "test:ci": "pnpm run check:source-nul && pnpm --filter @orcaops/evaluator-pack build && pnpm --filter @orcaops/project-scope test && pnpm --filter @orcaops/watch build && pnpm --filter @orcaops/watch test && pnpm --filter @orcaops/watch test:render && pnpm --filter @orcaops/watch test:pty && pnpm --filter @orcaops/watch perf:review-cap && pnpm --filter @orcaops/watch perf:review && pnpm --filter @orcaops/cli test:coverage",
+    "test:ci": "pnpm run check:source-nul && turbo run build && pnpm --filter @orcaops/project-scope test && pnpm --filter @orcaops/watch test && pnpm --filter @orcaops/watch test:render && pnpm --filter @orcaops/watch test:pty && pnpm --filter @orcaops/watch perf:review-cap && pnpm --filter @orcaops/watch perf:review && pnpm --filter @orcaops/cli test:coverage",
     "format": "turbo run format",
     "format:check": "turbo run format:check",
     "prepare": "husky install",

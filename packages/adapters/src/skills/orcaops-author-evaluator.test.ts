@@ -22,6 +22,11 @@ const bodyOf = (prefix = 'orcaops'): string =>
 const RECOMMENDATION =
   'recommend the human run `/orcaops-author-evaluator` rather than invoking it yourself';
 
+const triggerLine = (prefix = 'orcaops'): string => {
+  const line = orcaopsAuthorEvaluatorSkill.blockTriggerLine;
+  return typeof line === 'function' ? line(prefix) : (line ?? '');
+};
+
 /** The real default-on ungated set, exactly as the renderer's fallback resolves it. */
 const defaultOn = SKILL_TEMPLATES.filter(
   (s) => s.defaultEnabled !== false && (s.requires ?? []).length === 0
@@ -77,14 +82,20 @@ describe('the managed block recommends rather than invokes', () => {
       enabledSkills: defaultOn.filter((s) => s.id !== 'author-evaluator'),
     });
     expect(without).not.toContain('orcaops-author-evaluator');
-    expect(without).not.toContain('authoring an evaluator');
+    expect(without).not.toContain('"write an evaluator"');
   });
 
   it('the line carries no semicolon, which the intent list uses as its separator', () => {
-    const line = orcaopsAuthorEvaluatorSkill.blockTriggerLine;
-    const rendered = typeof line === 'function' ? line('orcaops') : (line ?? '');
-    expect(rendered).not.toContain(';');
-    expect(rendered).toContain(RECOMMENDATION);
+    expect(triggerLine()).not.toContain(';');
+    expect(triggerLine()).toContain(RECOMMENDATION);
+  });
+
+  it('leads with the phrasing a user types, ahead of the recommendation', () => {
+    const rendered = triggerLine();
+    expect(rendered.startsWith('"write an evaluator", "add a check that blocks X"')).toBe(true);
+    expect(rendered.indexOf('"add a check that blocks X"')).toBeLessThan(
+      rendered.indexOf(RECOMMENDATION)
+    );
   });
 });
 

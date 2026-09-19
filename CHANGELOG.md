@@ -7,8 +7,8 @@ may change behaviour. Anything needing action on upgrade is called out.
 
 ## [0.2.2] - 2026-09-18
 
-This patch release contains a breaking change: a caret or tilde range on 0.2.1
-picks it up automatically. Run `orcaops update` after upgrading.
+This patch release contains breaking changes: `^0.2.1` and `~0.2.1` both pick
+them up without asking.
 
 ### Breaking changes
 
@@ -26,13 +26,17 @@ picks it up automatically. Run `orcaops update` after upgrading.
   rubric. Git imports are unaffected and continue to record absent criteria
   without manufacturing acceptance claims.
 
-  **On upgrade:** run `orcaops update` to regenerate your agent instructions.
-  Instructions generated before this release still describe
-  `acceptance_criteria` as optional, so an agent following them produces plans
-  the new CLI rejects. The rejection names the affected step and prints an
-  example of the shape to add. The message never claims your install is
+  **On upgrade:** a new CLI alongside installed skills generated before this
+  release will produce plans this contract rejects, because those instructions
+  still describe `acceptance_criteria` as optional. The rejection message names
+  the affected step, prints the required shape, and points at `orcaops update`
+  to regenerate the instructions. The message never claims your install is
   stale — malformed input alone does not establish that; `orcaops doctor`
   remains the check that does.
+
+- `plan review comment --reply-to` no longer accepts a plan slug. It takes the
+  canonical id that `plan review pull` echoed, like the other write verbs, and
+  there is no flag to opt out. Replies previously accepted a slug.
 
 ### Added
 
@@ -52,6 +56,10 @@ picks it up automatically. Run `orcaops update` after upgrading.
   "does not grade". Counts now describe what the plan records, and no surface
   presents an omission as an approved exemption. Rubric presence is not evidence
   of delivery, and is reported separately from it.
+- `orcaops doctor` is much faster on a repository with a lot of history. On one
+  with 166 captured artifacts and 113 branches it went from about 17 seconds to
+  about 2, by inspecting lineage in a fixed number of Git calls instead of one
+  per artifact and branch pair. What it reports is unchanged.
 
 ### Fixed
 
@@ -62,6 +70,23 @@ picks it up automatically. Run `orcaops update` after upgrading.
   names the repair that matches the failure. Both remain read-only: installing a
   hook still takes `orcaops session-hooks install`, with its consent prompt
   unchanged.
+- `plan review comment`, `push` and `propose` check your plan reference before
+  they send anything. Given a slug rather than the canonical id, `push` and
+  `propose` with `--base-version-id` used to publish to the cloud and only then
+  fail locally, leaving a change published with nothing recorded for it. That is
+  refused up front now, and if it ever happens the CLI says so in plain text
+  rather than only in `--json`. Without that flag the old failure was harmless
+  but told you to re-run the `plan review pull` that had just succeeded. The
+  refusal prints the id to use. `plan review pull` and the other read commands
+  still take a slug, because they resolve it against the cloud.
+- A fresh agent session finds the mapping from what you type to the skill that
+  handles it, even where the repository has no managed instruction block.
+  Repositories created by a non-interactive `orcaops init` had none by default,
+  so asking a session to critique a plan draft never reached the skill named for
+  exactly that. Upgrading is enough: the guidance is produced by the CLI each
+  session rather than written into your settings.
+- `orcaops doctor` reports the lineage it could check when one branch tip cannot
+  be read, instead of discarding the whole result.
 
 ## [0.2.1] - 2026-09-11
 

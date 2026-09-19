@@ -14,7 +14,7 @@ export const orcaopsLooseEndsSkill: SkillTemplate = {
   group: 'insight',
   defaultEnabled: false,
   blockTriggerLine: (prefix: string) =>
-    `loose ends ("what did I say I'd come back to?") → \`${skillRef('loose-ends', prefix)}\``,
+    `"what's still open?", "what did I say I'd come back to?", "what did we defer?" → \`${skillRef('loose-ends', prefix)}\``,
   body: (prefix: string) => `# When to use
 
 Triggers (user phrasing):

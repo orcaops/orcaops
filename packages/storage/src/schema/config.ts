@@ -29,20 +29,15 @@ const RepoRelativePathSchema = z.string().superRefine((value, ctx) => {
  * `assertConfigVersionCurrent` gates the load on that same set. A future shape
  * change must bump this constant and define its own version transition.
  */
-export const CONFIG_SCHEMA_VERSION = 6;
+export const CONFIG_SCHEMA_VERSION = 7;
 
 /**
  * Versions this build still loads besides the current one.
  *
- * v5 differs from v6 by the absence of the `capture` and `redact` blocks, both
- * fully defaulted — so a v5 file loads to exactly the v6 shape. Accepting it
- * avoids repeating the v4-to-v5 break, which had no migration path and sent
- * every existing checkout through `init --force --reset-config`, discarding
- * whatever else that config held. A predecessor belongs here only while the
- * delta is purely additive and defaulted; a removed or retyped field must
- * still break loudly.
+ * v6 and v5 differ from v7 only by fully-defaulted blocks. A predecessor
+ * belongs here only while the delta is purely additive and defaulted.
  */
-const ACCEPTED_PREDECESSOR_VERSIONS: readonly number[] = [5];
+const ACCEPTED_PREDECESSOR_VERSIONS: readonly number[] = [5, 6];
 
 /**
  * Whether `version` is a schema version this build loads — the current one or
@@ -443,14 +438,19 @@ export const ConfigSchema = z.strictObject({
    */
   bootstrap: z.enum(['managed', 'manual']).default('managed'),
   /**
-   * Agent session-start hooks — the top rung of the bootstrap preference
-   * ladder (session hooks > instruction block > manual), independently
-   * toggleable from `bootstrap`. Gates the settings-file hook entries
-   * (claude-code / codex / cursor) and the generated OpenCode plugin for the
-   * hook-capable subset of `install.agents` (capability lives in the adapters
-   * overlay). It is fully defaulted, so its absence and its default are the
-   * same config. Deliberately NOT a third `bootstrap` enum value, which a
-   * reader's z.enum would reject outright.
+   * Agent session-start hooks, independently toggleable from `bootstrap`.
+   * Gates the settings-file hook entries (claude-code / codex / cursor) and
+   * the generated OpenCode plugin for the hook-capable subset of
+   * `install.agents` (capability lives in the adapters overlay).
+   *
+   * It outranks the instruction block in the bootstrap preference ladder for
+   * one reason only: it carries skill routing when it is the SOLE surface. A
+   * `managed` repo's block already carries routing, so there the hook stays
+   * short and the two surfaces do not duplicate each other.
+   *
+   * Fully defaulted, so its absence and its default are the same config.
+   * Deliberately NOT a third `bootstrap` enum value, which a reader's z.enum
+   * would reject outright.
    */
   session_hooks: z
     .strictObject({
@@ -489,9 +489,14 @@ export const ConfigSchema = z.strictObject({
    */
   generated_files: z.enum(['commit', 'ignore']).default('commit'),
   /**
-   * Declared workflow preferences rendered INTO the managed block.
+   * Declared workflow preferences rendered into BOTH bootstrap surfaces — the
+   * managed block and the session-start hook payload.
    * `hints.keys` selects vetted entries from the curated catalog (CURATED_HINT_KEYS);
    * `hints.custom` is freeform prose rendered verbatim. Empty = no sub-section.
+   *
+   * A strictObject, so a CLI predating these two keys cannot parse a config
+   * carrying either. They arrived in v7 so such a build stops at the VERSION
+   * and says to upgrade instead.
    */
   workflow: z
     .strictObject({
@@ -501,8 +506,32 @@ export const ConfigSchema = z.strictObject({
           custom: z.array(z.string()).default([]),
         })
         .default({ keys: [], custom: [] }),
+      /**
+       * Whether the checkpoint lifecycle step carries "run tests and commit
+       * inside the window". True preserves the behavior both surfaces had
+       * before this key existed. It is the ONLY off-switch:
+       * `commit-on-checkpoint-close` survives in the append-only catalog as a
+       * legacy alias meaning "guidance on", and renders no bullet of its own.
+       *
+       * False alongside that pinned key is redundant, not invalid: the
+       * resolver drops the key and honors the boolean. Doctor reports the
+       * combination. Refusing to LOAD it made an ordinary, deterministic
+       * config brick every command in the repository — doctor, the one that
+       * would have explained it, included.
+       */
+      commit_inside_window: z.boolean().default(true),
+      routing: z
+        .strictObject({
+          /** Skills whose read-intent routing line is rendered on neither surface. */
+          suppress: z.array(z.enum(SKILL_IDS)).default([]),
+        })
+        .default({ suppress: [] }),
     })
-    .default({ hints: { keys: [], custom: [] } }),
+    .default({
+      hints: { keys: [], custom: [] },
+      commit_inside_window: true,
+      routing: { suppress: [] },
+    }),
 });
 
 const RetiredArchiveConfigSchema = z.strictObject({
@@ -594,6 +623,10 @@ export const DEFAULT_CONFIG: Config = {
     hints: {
       keys: [],
       custom: [],
+    },
+    commit_inside_window: true,
+    routing: {
+      suppress: [],
     },
   },
 };

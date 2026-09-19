@@ -21,7 +21,7 @@ export const orcaopsTaskReviewSkill: SkillTemplate = {
   group: 'review',
   defaultEnabled: true,
   blockTriggerLine: (prefix: string) =>
-    `Orcaops Task Review ("generate the Orcaops Task Review", "anchor the review reasoning to code", "address the open Task Review comments") → \`${skillRef('task-review', prefix)}\``,
+    `"generate the Orcaops Task Review", "anchor the review reasoning to code", "address the open Task Review comments" → \`${skillRef('task-review', prefix)}\``,
   body: (prefix: string) => `# When to use
 
 Use this skill to generate the routine two-lens Task Review for a branch,

@@ -8,14 +8,13 @@ import {
   getToolAdapter,
   hashOrcaopsSection,
   isVersionAhead,
+  nonRenderingHintKeys,
   opencodeSessionPluginPath,
-  ORCAOPS_AGENTS_MD_MARKER_END,
-  ORCAOPS_AGENTS_MD_MARKER_START_RE,
   readOrcaopsSectionIdentity,
   readOrcaopsSectionStampVersions,
   renderOpencodeSessionPlugin,
   renderOrcaopsAgentsMdSection,
-  resolveHintLines,
+  resolveBootstrapContent,
   SKILL_TEMPLATES,
   type SkillId,
   skillRef,
@@ -60,6 +59,7 @@ import {
   listPinsForRepo,
   type Pin,
   resolveShellKey,
+  type SupportedAgentId,
 } from '@orcaops/storage';
 import { normalizeHistoryRoot } from '@orcaops/storage/history/authority';
 import { openProjectDatabase, ProjectDatabaseError } from '@orcaops/storage/history/database';
@@ -95,6 +95,7 @@ import {
   planInstallMutations,
   publishInstallManifestsLast,
 } from '../lib/install-plan.js';
+import { readInstructionBlock } from '../lib/instruction-block.js';
 import {
   getInvocationCloudBaseUrl,
   getInvocationCwd,
@@ -105,7 +106,6 @@ import {
   executeMutations,
   gitHookBody,
   planManagedGitHookRefreshMutations,
-  readContainedRepositoryRegularFileOrNull,
   readRepositoryFileOrNull,
   readRepositoryRegularFileOrNull,
   resolveRepositoryPath,
@@ -135,6 +135,8 @@ import {
   type SettingsSpec,
   settingsSpecs,
 } from '../lib/session-hooks.js';
+import { renderSessionStartGuidance } from '../lib/session-start-guidance.js';
+import { resolveHooksOnly } from '../lib/session-start-state.js';
 import {
   CLOUD_GATED_SKILL_IDS,
   enabledSkillTemplates,
@@ -356,7 +358,9 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
     );
     checks.push(await checkGitHooks(repoRoot));
     checks.push(await checkSessionHooks(repoRoot, config));
+    if (config.session_hooks.enabled) checks.push(await checkSessionHookPayload(repoRoot, config));
     checks.push(await checkInfoExclude(repoRoot, config));
+    checks.push(checkWorkflowHints(config, gates));
     await appendDatabaseHistory(config.evaluators.disposition_ttl_days);
     checks.push(await guardRepositoryCheck('usage-source', () => checkUsageSourceHealth()));
     checks.push(await checkScratchCheckouts(repoRoot));
@@ -1372,8 +1376,7 @@ async function checkAgentsMd(
     };
   }
   // Union the instruction files across the install set — every agent targets
-  // AGENTS.md, so check the deduped union once (no double-count). Personal
-  // scope reads CLAUDE.local.md instead.
+  // AGENTS.md, so check the deduped union once (no double-count).
   const instructionFiles = resolveManagedInstructionFiles(config);
   if (instructionFiles.length === 0) {
     return {
@@ -1389,8 +1392,10 @@ async function checkAgentsMd(
     renderOrcaopsAgentsMdSection({
       generatedBy: CLI_VERSION,
       prefix: config.naming.prefix,
-      hints: resolveHintLines(config.workflow.hints),
+      hints: config.workflow.hints,
       enabledSkills: enabledSkillTemplates(config, gates),
+      commitInsideWindow: config.workflow.commit_inside_window,
+      suppressedRouting: config.workflow.routing.suppress,
     })
   );
   for (const rel of instructionFiles) {
@@ -1454,21 +1459,6 @@ async function checkAgentsMd(
   };
 }
 
-/** Read just the managed marker region (markers included), or null if absent. */
-async function readManagedBlock(absPath: string, repoRoot: string): Promise<string | null> {
-  const content = await readContainedRepositoryRegularFileOrNull(
-    absPath,
-    repoRoot,
-    'managed instruction block'
-  );
-  if (content === null) return null;
-  const start = content.match(ORCAOPS_AGENTS_MD_MARKER_START_RE);
-  if (!start || start.index === undefined) return null;
-  const endIdx = content.indexOf(ORCAOPS_AGENTS_MD_MARKER_END, start.index);
-  if (endIdx === -1) return null;
-  return content.slice(start.index, endIdx + ORCAOPS_AGENTS_MD_MARKER_END.length);
-}
-
 /**
  * Verify the managed block references the SAME skill names that the
  * configured naming prefix installs. Catches a prefix drift — `config.naming.prefix`
@@ -1490,7 +1480,7 @@ async function checkBlockSkillRefs(
   }
   let block: string | null = null;
   for (const rel of instructionFiles) {
-    block = await readManagedBlock(path.join(repoRoot, rel), repoRoot);
+    block = await readInstructionBlock(repoRoot, rel);
     if (block !== null) break;
   }
   if (block === null) {
@@ -1498,52 +1488,53 @@ async function checkBlockSkillRefs(
     return { name, status: 'pass', summary: 'no managed block present' };
   }
   const prefix = config.naming.prefix;
-  // Block-worthy skills: the block references a skill iff it is ENABLED
-  // — lifecycle steps, read-intent entries, the plan-approval section, and any
-  // skill shipping a blockTriggerLine. Validate BOTH ways: every enabled
-  // block-worthy skill must be referenced (stale block after enabling), and
-  // no DISABLED one may linger (dead ref after disabling).
-  const BLOCK_REF_IDS = new Set<SkillId>([
-    'capture',
-    'checkpoint',
-    'pre-pr',
-    'summary',
-    'digest',
-    'resume',
-    'why',
-    'search',
-    'doctor',
-  ]);
+  // Rendered TEXT, not ref fields: the finisher refs live only in the closing
+  // step's prose, so a set-based derivation reports them as stale.
+  const expectedBlock = renderOrcaopsAgentsMdSection({
+    generatedBy: CLI_VERSION,
+    prefix,
+    hints: config.workflow.hints,
+    enabledSkills: enabledSkillTemplates(config, gates),
+    commitInsideWindow: config.workflow.commit_inside_window,
+    suppressedRouting: config.workflow.routing.suppress,
+  });
   const enabledIds = new Set(enabledSkillTemplates(config, gates).map((s) => s.id));
-  const blockWorthy = (id: SkillId, hasTriggerLine: boolean): boolean =>
-    BLOCK_REF_IDS.has(id) || hasTriggerLine;
-  const refInBlock = (id: SkillId): boolean =>
+  const suppressed = new Set<SkillId>(config.workflow.routing.suppress);
+  const refIn = (text: string, id: SkillId): boolean =>
     // Word-boundary match (not substring) so a short/generic prefix can't
     // false-match a ref embedded in a longer token (the prefix-change case).
-    new RegExp(`\\b${skillRef(id, prefix)}\\b`).test(block);
+    new RegExp(`\\b${skillRef(id, prefix)}\\b`).test(text);
 
   const missingRefs: string[] = [];
-  const lingeringRefs: string[] = [];
+  const lingering: { ref: string; reason: string }[] = [];
   for (const t of SKILL_TEMPLATES) {
-    if (!blockWorthy(t.id, t.blockTriggerLine !== undefined)) continue;
-    const enabled = enabledIds.has(t.id);
-    const referenced = refInBlock(t.id);
-    if (enabled && !referenced) missingRefs.push(skillRef(t.id, prefix));
-    if (!enabled && referenced) lingeringRefs.push(skillRef(t.id, prefix));
+    const expected = refIn(expectedBlock, t.id);
+    const present = refIn(block, t.id);
+    if (expected && !present) missingRefs.push(skillRef(t.id, prefix));
+    if (!expected && present) {
+      lingering.push({
+        ref: skillRef(t.id, prefix),
+        reason: !enabledIds.has(t.id)
+          ? 'disabled'
+          : suppressed.has(t.id)
+            ? 'hidden from read-intent routing'
+            : 'no longer referenced by any section',
+      });
+    }
   }
-  if (missingRefs.length === 0 && lingeringRefs.length === 0) {
+  if (missingRefs.length === 0 && lingering.length === 0) {
     return { name, status: 'pass', summary: `managed block references the ${prefix}-* skills` };
   }
   const details: string[] = [];
   if (missingRefs.length > 0) {
     details.push(`Enabled skill(s) missing from the block: ${missingRefs.join(', ')}.`);
   }
-  if (lingeringRefs.length > 0) {
-    details.push(`Disabled skill(s) still referenced by the block: ${lingeringRefs.join(', ')}.`);
+  for (const { ref, reason } of lingering) {
+    details.push(`Block still references ${ref}, which is ${reason}.`);
   }
   details.push(
-    'The naming prefix or enabled skill set changed but the block was not re-rendered. ' +
-      'Run `orcaops update`.'
+    'The naming prefix, enabled skill set or routing suppression changed but the block was ' +
+      'not re-rendered. Run `orcaops update`.'
   );
   return {
     name,
@@ -1551,7 +1542,7 @@ async function checkBlockSkillRefs(
     summary:
       missingRefs.length > 0
         ? `managed block is stale for the enabled skill set (prefix "${prefix}")`
-        : `managed block references disabled skill(s)`,
+        : `managed block references skill(s) it should no longer name`,
     details,
   };
 }
@@ -1750,6 +1741,8 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
   let intentionallySkipped = 0;
   let installedEntry = false;
   let coverage: MachineCoverageResult[] = [];
+  const projectCovered = new Set<SupportedAgentId>();
+  let noSurface: { summary: string; remediation: string[] } | null = null;
   try {
     const plan = await planSessionHookSettings({
       repoRoot,
@@ -1762,6 +1755,7 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
       if (p.action === 'unchanged') {
         current++;
         installedEntry = true;
+        projectCovered.add(p.agent);
       } else if (p.action === 'created') {
         addProjectFinding(`  - ${p.path}: orcaops entry missing`);
       } else if (p.action === 'updated') {
@@ -1818,8 +1812,10 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
         CLI_VERSION,
         repoRoot
       );
-      if (cls.status === 'current') current++;
-      else if (cls.status === 'missing') addProjectFinding(`  - ${rel}: plugin missing`);
+      if (cls.status === 'current') {
+        current++;
+        projectCovered.add('opencode');
+      } else if (cls.status === 'missing') addProjectFinding(`  - ${rel}: plugin missing`);
       else addProjectFinding(`  - ${rel}: plugin ${cls.status}`);
     }
 
@@ -1880,6 +1876,18 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
       // of OURS reads as registered-but-broken above) — not doctor's to report.
     }
     coverage = assessMachineSessionHookCoverage({ config, surfaces: machineSurfaces, codexGate });
+    // A registration that WILL fire carries routing whether or not the
+    // requirement policy demanded it, so an agent the policy exempts still
+    // falls through to its rows rather than reading as uncovered.
+    const machineCarriesRouting = (agent: SupportedAgentId): boolean => {
+      const verdict = coverage.find((result) => result.agent === agent);
+      if (verdict !== undefined && verdict.state !== 'not-required') {
+        return verdict.state === 'covered';
+      }
+      return machineSurfaces.some(
+        (row) => row.agent === agent && row.current && row.coverage === 'covered'
+      );
+    };
     for (const result of coverage) {
       if (!result.required || result.state === 'covered') continue;
       // A row finding above already names this path and says what is wrong
@@ -1943,6 +1951,25 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
         );
       }
     }
+
+    // Raised here because this is where the registration state lives: with no
+    // managed block carrying routing, an agent is left with no bootstrap
+    // surface at all unless a hook actually fires for IT.
+    const uncovered: SupportedAgentId[] = [];
+    for (const agent of config.install.agents) {
+      if (!(await resolveHooksOnly(repoRoot, config, agent))) continue;
+      const hookFires =
+        config.session_hooks.enabled && (projectCovered.has(agent) || machineCarriesRouting(agent));
+      if (!hookFires) uncovered.push(agent);
+    }
+    if (uncovered.length > 0) {
+      noSurface = {
+        summary:
+          `no bootstrap surface carries skill routing for ${uncovered.join(', ')}: ` +
+          'no instruction block they load carries it and no session hook is registered for them',
+        remediation: bootstrapSurfaceRemediation(config.install.scope, uncovered),
+      };
+    }
   } catch (err) {
     return {
       name,
@@ -1950,7 +1977,7 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
       summary: `session-hook check failed: ${(err as Error).message}`,
     };
   }
-  if (findings.length === 0) {
+  if (findings.length === 0 && noSurface === null) {
     const requiredAgents = coverage.filter((r) => r.required);
     const verified =
       requiredAgents.length > 0 && requiredAgents.every((r) => r.state === 'covered')
@@ -1970,9 +1997,15 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
   return {
     name,
     status: 'warn',
-    summary: `${findings.length} session-hook surface(s) need attention`,
+    summary:
+      findings.length === 0 && noSurface !== null
+        ? noSurface.summary
+        : `${findings.length} session-hook surface(s) need attention`,
     details: [
       ...findings,
+      ...(noSurface === null
+        ? []
+        : [...(findings.length > 0 ? [`  - ${noSurface.summary}`] : []), ...noSurface.remediation]),
       ...info,
       ...(projectAttention
         ? [
@@ -1983,6 +2016,131 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
       ...(machineAttention && installIsTheRemedy
         ? ['Machine registration: run `orcaops session-hooks install`.']
         : []),
+    ],
+  };
+}
+
+/**
+ * Recovery for a repository whose agents have no bootstrap surface. Never one
+ * command: `orcaops init --agents-md` is refused once a configuration exists,
+ * personal scope refuses the block by construction, and the machine
+ * registration is a consent-gated TTY command that `orcaops update` — which
+ * only flips this repository's emission switch — cannot perform.
+ */
+function bootstrapSurfaceRemediation(
+  scope: Config['install']['scope'],
+  uncovered: readonly SupportedAgentId[]
+): string[] {
+  if (scope === 'personal') {
+    return [
+      'Personal scope manages no instruction file, so the session hook is the only surface. Two actions:',
+      '  1. `orcaops update --session-hooks` — enable emission for this repository.',
+      '  2. `orcaops session-hooks install` — register the hook on this machine (asks for consent, needs a terminal).',
+    ];
+  }
+  const lines = [
+    'Adopt the managed block: `orcaops configure` (the block row sets bootstrap to managed) then ' +
+      '`orcaops update`, or `orcaops init --force --agents-md`. A bare `orcaops init --agents-md` ' +
+      'is refused once a configuration exists.',
+  ];
+  if (uncovered.some((agent) => agent === 'codex')) {
+    lines.push(
+      'codex has no project hook surface, so covering it with hooks instead takes two actions: ' +
+        '`orcaops update --session-hooks`, then `orcaops session-hooks install --agents codex`.'
+    );
+  }
+  return lines;
+}
+
+/**
+ * `session-hook-payload`: how much text the session-start hook injects into
+ * every session. Nothing truncates it — carrying the guidance is the hook's
+ * whole job — so an oversized payload is the author's to shorten.
+ *
+ * Measured in CHARACTERS: `workflow.hints.custom` lines render verbatim and
+ * unbounded, so one 5000-character reminder is a single line and would pass
+ * any line budget.
+ */
+async function checkSessionHookPayload(repoRoot: string, config: Config): Promise<DoctorCheck> {
+  const name = 'session-hook-payload';
+  const prefix = config.naming.prefix;
+  // Cloud gates off, exactly as the hook resolves them: no cloud-gated
+  // template carries routing, and the hook never reads credentials.
+  const content = resolveBootstrapContent({
+    prefix,
+    enabledSkills: enabledSkillTemplates(config, { cloud: false }),
+    hints: config.workflow.hints,
+    commitInsideWindow: config.workflow.commit_inside_window,
+    suppressedRouting: config.workflow.routing.suppress,
+  });
+  // Measured the way the HOOK decides — per agent, against the files on disk.
+  // The config-shaped answer misses the two largest payloads: an agent no block
+  // covers, and a managed block that no longer carries routing. One number must
+  // stand for the repository, so it is the largest, and the summary says whose.
+  const agents: Array<SupportedAgentId | undefined> =
+    config.install.agents.length > 0 ? [...config.install.agents] : [undefined];
+  let chars = 0;
+  let widest: SupportedAgentId | undefined;
+  for (const agent of agents) {
+    const payload =
+      renderSessionStartGuidance({
+        kind: 'static',
+        prefix,
+        content,
+        hooksOnly: await resolveHooksOnly(repoRoot, config, agent),
+      }) ?? '';
+    if (payload.length > chars) {
+      chars = payload.length;
+      widest = agent;
+    }
+  }
+  const whose = agents.length > 1 && widest !== undefined ? ` (widest: ${widest})` : '';
+  if (chars <= MAX_SESSION_HOOK_PAYLOAD_CHARS) {
+    return {
+      name,
+      status: 'pass',
+      summary: `session-hook payload renders ${chars} character(s)${whose}`,
+    };
+  }
+  return {
+    name,
+    status: 'warn',
+    summary: `session-hook payload renders ${chars} characters${whose} (over ${MAX_SESSION_HOOK_PAYLOAD_CHARS})`,
+    details: [
+      'Every session start injects all of it. `workflow.hints.custom` is the usual cause — ' +
+        'trim it, or suppress routing entries with `workflow.routing.suppress`.',
+    ],
+  };
+}
+
+/** Above this the payload costs more context than the guidance is worth. */
+const MAX_SESSION_HOOK_PAYLOAD_CHARS = 6000;
+
+/**
+ */
+function checkWorkflowHints(config: Config, gates: SkillGates): DoctorCheck {
+  const name = 'workflow-hints';
+  const dropped = nonRenderingHintKeys({
+    enabledSkills: enabledSkillTemplates(config, gates),
+    commitInsideWindow: config.workflow.commit_inside_window,
+  });
+  const pinned = config.workflow.hints.keys;
+  const dead = pinned.filter((key) => dropped.has(key));
+  if (dead.length === 0) {
+    return {
+      name,
+      status: 'pass',
+      summary: `all ${pinned.length} declared workflow hint(s) render`,
+    };
+  }
+  return {
+    name,
+    status: 'warn',
+    summary: `workflow.hints.keys pins ${dead.length} reminder(s) that render on neither bootstrap surface`,
+    details: [
+      ...dead.map((key) => `"${key}": ${dropped.get(key) ?? ''}`),
+      'Drop the key(s) from workflow.hints.keys, or edit them under ' +
+        '`orcaops configure` → Workflow reminders.',
     ],
   };
 }
@@ -2497,7 +2655,9 @@ const DOCTOR_SECTIONS = [
       'global-install',
       'info-exclude',
       'session-hooks',
+      'session-hook-payload',
       'skill-drift',
+      'workflow-hints',
     ]),
   },
   {

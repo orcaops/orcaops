@@ -243,12 +243,12 @@ describe('orcaops update/doctor — personal scope', () => {
     expect(out2.pruned).toEqual([]);
     expect(gitStatus()).toBe('');
 
-    // Doctor: clean bill — no false missing/stale from project paths, no
-    // instruction file to check under personal, and drift stays quiet.
+    // Doctor: no false missing/stale from project paths, no instruction file
+    // to check under personal, and drift stays quiet.
     const doctor = await agent.runRaw(['doctor', '--json']);
     expect(doctor.exitCode).toBe(0);
     const report = JSON.parse(doctor.stdout) as {
-      checks: Array<{ name: string; status: string; summary: string }>;
+      checks: Array<{ name: string; status: string; summary: string; details?: string[] }>;
     };
     const byName = new Map(report.checks.map((c) => [c.name, c]));
     expect(byName.get('agent-skills')?.status).toBe('pass');
@@ -256,6 +256,12 @@ describe('orcaops update/doctor — personal scope', () => {
     expect(byName.get('agents-md')?.status).toBe('pass');
     expect(byName.get('agents-md')?.summary).toContain('bootstrap=manual');
     expect(byName.get('block-skill-refs')?.status).toBe('pass');
+    // Personal scope manages no instruction file and registered no hook, so
+    // nothing carries routing — and the recovery is two actions, never one.
+    const hooks = byName.get('session-hooks');
+    expect(hooks?.status).toBe('warn');
+    expect(hooks?.summary).toContain('no bootstrap surface carries skill routing');
+    expect(hooks?.details?.join('\n')).toContain('orcaops session-hooks install');
   });
 
   it('preserves the exclusion when stale ownership prevents a safe scope exit', async () => {

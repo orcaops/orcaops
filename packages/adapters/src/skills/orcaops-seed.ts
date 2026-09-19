@@ -14,7 +14,7 @@ export const orcaopsSeedSkill: SkillTemplate = {
   group: 'orchestration',
   defaultEnabled: true,
   blockTriggerLine: (prefix: string) =>
-    `git-history backfill ("seed orcaops", "import my git history", "why is search empty?") → \`${skillRef('seed', prefix)}\``,
+    `"seed orcaops from git history", "import my git history", "why is orcaops search empty?" → \`${skillRef('seed', prefix)}\``,
   body: (prefix, options) => `Only proceed on explicit user request.
 
 # Workflow

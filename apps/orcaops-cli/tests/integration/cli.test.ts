@@ -436,16 +436,85 @@ describe('orcaops CLI (in-process)', () => {
     expect(initRes.stdout).toMatch(/not a supported install target/);
   });
 
-  it('init defaults to no AGENTS.md / CLAUDE.md mutation', async () => {
-    const { access, readFile } = await import('node:fs/promises');
+  it('unattended init writes the block when no session hook covers the install set', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const initRes = await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
+    const init = JSON.parse(initRes.stdout) as {
+      agents_md: Array<{ path: string; action: string }>;
+    };
+    expect(init.agents_md).toEqual([
+      { path: 'AGENTS.md', action: 'created' },
+      { path: 'CLAUDE.md', action: 'symlinked' },
+    ]);
+    expect(await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8')).toContain('orcaops:start');
+    const config = JSON.parse(
+      await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')
+    ) as { bootstrap: string };
+    expect(config.bootstrap).toBe('managed');
+  });
+
+  it('unattended init leaves a hand-written AGENTS.md alone and stays manual', async () => {
+    const { access, readFile, writeFile } = await import('node:fs/promises');
+    const agentsMd = path.join(repo.path, 'AGENTS.md');
+    await writeFile(agentsMd, '# Team instructions\n', 'utf8');
+
     const initRes = await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
     const init = JSON.parse(initRes.stdout) as {
       agents_md: Array<{ path: string; action: string }>;
     };
     expect(init.agents_md).toEqual([]);
-    for (const f of ['AGENTS.md', 'CLAUDE.md']) {
-      await expect(access(path.join(repo.path, f))).rejects.toMatchObject({ code: 'ENOENT' });
-    }
+    expect(await readFile(agentsMd, 'utf8')).toBe('# Team instructions\n');
+    await expect(access(path.join(repo.path, 'CLAUDE.md'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    const config = JSON.parse(
+      await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')
+    ) as { bootstrap: string };
+    expect(config.bootstrap).toBe('manual');
+  });
+
+  it("unattended init treats a symlinked instruction file as the user's own", async () => {
+    const { readFile, symlink, writeFile } = await import('node:fs/promises');
+    await writeFile(path.join(repo.path, 'CLAUDE.md'), '# Team instructions\n', 'utf8');
+    await symlink('CLAUDE.md', path.join(repo.path, 'AGENTS.md'));
+
+    const initRes = await agent.runRaw([
+      'init',
+      '--yes',
+      '--scope',
+      'project',
+      '--json',
+      '--no-llm',
+      '--agents',
+      'codex',
+    ]);
+    expect(initRes.exitCode, initRes.stdout + initRes.stderr).toBe(0);
+    const init = JSON.parse(initRes.stdout) as {
+      agents_md: Array<{ path: string; action: string }>;
+    };
+    expect(init.agents_md).toEqual([]);
+    const config = JSON.parse(
+      await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')
+    ) as { bootstrap: string };
+    expect(config.bootstrap).toBe('manual');
+    expect(await readFile(path.join(repo.path, 'CLAUDE.md'), 'utf8')).toBe('# Team instructions\n');
+  });
+
+  it('unattended init survives a dangling instruction-file symlink', async () => {
+    const { readFile, symlink } = await import('node:fs/promises');
+    await symlink('nowhere.md', path.join(repo.path, 'AGENTS.md'));
+
+    const initRes = await agent.runRaw([
+      'init',
+      '--yes',
+      '--scope',
+      'project',
+      '--json',
+      '--no-llm',
+      '--agents',
+      'codex',
+    ]);
+    expect(initRes.exitCode, initRes.stdout + initRes.stderr).toBe(0);
     const config = JSON.parse(
       await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')
     ) as { bootstrap: string };

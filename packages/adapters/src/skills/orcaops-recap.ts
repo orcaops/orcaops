@@ -16,7 +16,7 @@ export const orcaopsRecapSkill: SkillTemplate = {
   group: 'insight',
   defaultEnabled: true,
   blockTriggerLine: (prefix: string) =>
-    `recap over a window or ref range ("what did I do yesterday / this week?", "changelog since v1.2", "journal today") → \`${skillRef('recap', prefix)}\``,
+    `"what did I do yesterday / this week?", "changelog since v1.2", "draft the release notes", "journal today" → \`${skillRef('recap', prefix)}\``,
   body: (prefix: string) => `# When to use
 
 Triggers (user phrasing), by format:

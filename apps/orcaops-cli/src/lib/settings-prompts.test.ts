@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
+import {
+  ALWAYS_DROPPED_HINT_KEY,
+  renderableHintKeys,
+  resolveBootstrapContent,
+} from '@orcaops/adapters';
+import type { HintKey } from '@orcaops/storage';
+
 import { blockPrompt, hintsPrompt, sessionHooksPrompt } from './settings-prompts.js';
 
 describe('settings prompt copy', () => {
@@ -38,5 +45,42 @@ describe('settings prompt copy', () => {
   it('sends users through the custom-reminder editor', () => {
     expect(hintsPrompt.message).toContain('add your own free-form lines next');
     expect(hintsPrompt.message).not.toContain('config.json');
+  });
+
+  it('offers no reminder the default skill set already states', () => {
+    // A bare set renders neither hint-stating phase, masking this entirely.
+    const renderability = { enabledSkills: undefined, commitInsideWindow: true };
+    const rendered = (key: HintKey): string[] =>
+      resolveBootstrapContent({
+        prefix: 'orcaops',
+        enabledSkills: renderability.enabledSkills,
+        hints: { keys: [key], custom: [] },
+        commitInsideWindow: renderability.commitInsideWindow,
+        suppressedRouting: [],
+      }).hints;
+
+    const offered = hintsPrompt.options(renderability).map((o) => o.value);
+    expect(offered).toEqual(renderableHintKeys(renderability));
+    for (const key of offered) expect(rendered(key), key).toHaveLength(1);
+    for (const key of [
+      ALWAYS_DROPPED_HINT_KEY,
+      'capture-on-nontrivial',
+      'open-checkpoint-before-edits',
+    ] as HintKey[]) {
+      expect(offered, key).not.toContain(key);
+      expect(rendered(key), key).toEqual([]);
+    }
+  });
+
+  it('keeps a reminder the config already pins, saying what renders it instead', () => {
+    const renderability = { enabledSkills: undefined, commitInsideWindow: true };
+    const offered = hintsPrompt.options(renderability, ['capture-on-nontrivial']);
+
+    const pinned = offered.find((o) => o.value === 'capture-on-nontrivial');
+    expect(pinned?.hint).toContain('plan lifecycle step');
+    expect(offered.map((o) => o.value)).toEqual([
+      'capture-on-nontrivial',
+      ...renderableHintKeys(renderability),
+    ]);
   });
 });

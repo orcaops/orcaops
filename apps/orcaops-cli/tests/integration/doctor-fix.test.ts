@@ -202,6 +202,10 @@ describe('orcaops doctor --fix', () => {
     expect(afterBlock === null || !afterBlock.includes('orcaops:start')).toBe(true);
     // And the agents-md check stays suppressed (manual).
     expect(findCheck(r, 'agents-md').summary).toMatch(/bootstrap=manual/);
+    // --fix never adopts the block, so the no-surface warning survives it.
+    const hooks = findCheck(r, 'session-hooks');
+    expect(hooks.status).toBe('warn');
+    expect(hooks.summary).toContain('no bootstrap surface carries skill routing');
   });
 
   it('preserves a current-stamp user-edited skill (force:false)', async () => {

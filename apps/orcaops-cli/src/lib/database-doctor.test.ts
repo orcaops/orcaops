@@ -1,8 +1,9 @@
 import Database from 'better-sqlite3';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { buildDiffFingerprintManifest } from '@orcaops/core';
 import type { DatabaseMaintenanceInspection } from '@orcaops/core/history/database-retention';
@@ -21,6 +22,55 @@ function check(result: Awaited<ReturnType<typeof inspectDatabaseDoctorHistory>>,
   const found = result.checks.find((entry) => entry.name === name);
   if (!found) throw new Error(`Missing doctor check ${name}`);
   return found;
+}
+
+async function inspectLineage(f: Awaited<ReturnType<typeof fixture>>) {
+  return check(
+    await inspectDatabaseDoctorHistory({
+      database: f.writer,
+      context: f.registeredContext,
+      pins: [],
+      shellKey: { kind: 'none' },
+      historyCommitCount: 1,
+      dispositionTtlDays: 30,
+    }),
+    'lineage-orphan'
+  );
+}
+
+async function recordLineage(
+  f: Awaited<ReturnType<typeof fixture>>,
+  artifactId: string,
+  headSha: string
+) {
+  return f.mutate(artifactId, { headSha }, (semantics) =>
+    semantics.appendBranchLineage(artifactId, {
+      branch: 'main',
+      head_sha: headSha,
+      ts: '2026-09-05T01:00:00.000Z',
+      event: 'rebased',
+    })
+  );
+}
+
+async function logGitProbes(f: Awaited<ReturnType<typeof fixture>>, failCommand = '') {
+  const bin = path.join(f.temporary, 'bin');
+  const log = path.join(f.temporary, 'git-probes');
+  await mkdir(bin);
+  await writeFile(log, '');
+  await writeFile(
+    path.join(bin, 'git'),
+    '#!/bin/sh\n' +
+      'printf "%s\\n" "$1" >> "$GIT_PROBE_LOG"\n' +
+      'if [ "$1" = "$GIT_FAIL_COMMAND" ]; then cat >/dev/null; exit 128; fi\n' +
+      'exec "$REAL_GIT" "$@"\n',
+    { mode: 0o700 }
+  );
+  vi.stubEnv('REAL_GIT', execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim());
+  vi.stubEnv('GIT_PROBE_LOG', log);
+  vi.stubEnv('GIT_FAIL_COMMAND', failCommand);
+  vi.stubEnv('PATH', `${bin}${path.delimiter}${process.env.PATH ?? ''}`);
+  return log;
 }
 
 async function recordCapturedCheckpoint(
@@ -737,4 +787,109 @@ describe('database doctor history', () => {
     expect(check(result, 'lineage-orphan').summary).toContain('no local branches');
     expect(check(result, 'lineage-orphan').summary).toContain('1 artifact');
   });
+
+  it('checks many retained artifacts and local branches with two Git subprocesses', async () => {
+    const f = await fixture();
+    for (let index = 0; index < 24; index++) await f.capture();
+    const head = f.registeredContext.git.headOid!;
+    for (let index = 0; index < 40; index++) {
+      await git(f.main, ['update-ref', `refs/heads/branch-${index}`, head]);
+    }
+    const log = await logGitProbes(f);
+
+    expect(await inspectLineage(f)).toMatchObject({
+      status: 'pass',
+      summary: '24 artifact(s); all latest lineage SHAs reach a local branch',
+    });
+    expect(await readFile(log, 'utf8')).toBe('for-each-ref\nrev-list\n-C\n');
+  });
+
+  it('reports duplicate unreachable lineage and missing commits without counting other refs as branches', async () => {
+    const f = await fixture();
+    const tree = (await git(f.main, ['rev-parse', 'HEAD^{tree}'])).stdout.trim();
+    const unreachable = (
+      await git(f.main, ['commit-tree', tree, '-m', 'Unreachable'])
+    ).stdout.trim();
+    for (const ref of ['refs/remotes/origin/feature', 'refs/tags/saved', 'refs/orcaops/saved']) {
+      await git(f.main, ['update-ref', ref, unreachable]);
+    }
+    await f.capture();
+    const orphaned = [await f.capture(), await f.capture()];
+    for (const artifact of orphaned) await recordLineage(f, artifact, unreachable);
+    const missing = await f.capture();
+    await recordLineage(f, missing, 'deadbeef'.repeat(5));
+    const log = await logGitProbes(f);
+
+    const result = await inspectLineage(f);
+
+    expect(result).toMatchObject({
+      status: 'warn',
+      summary: '2 unreachable and 1 uncertain latest lineage SHA(s)',
+    });
+    for (const artifact of orphaned) {
+      expect(
+        result.details?.some((line) => line.includes(artifact) && line.endsWith(': unreachable'))
+      ).toBe(true);
+    }
+    expect(
+      result.details?.some(
+        (line) => line.includes(missing) && line.endsWith(': reachability unknown')
+      )
+    ).toBe(true);
+    expect(await readFile(log, 'utf8')).toBe('for-each-ref\nrev-list\ncat-file\n-C\n');
+  });
+
+  it.each(['for-each-ref', 'rev-list', 'cat-file'])(
+    'warns when %s fails during lineage inspection',
+    async (command) => {
+      const f = await fixture();
+      const artifact = await f.capture();
+      await recordLineage(f, artifact, 'deadbeef'.repeat(5));
+      await logGitProbes(f, command);
+
+      expect(await inspectLineage(f)).toMatchObject({
+        status: 'warn',
+        summary:
+          command === 'for-each-ref'
+            ? 'could not enumerate local branch tips'
+            : '0 unreachable and 1 uncertain latest lineage SHA(s)',
+      });
+    }
+  );
+
+  it('keeps artifacts on readable branches reachable when a branch ref is dangling', async () => {
+    const f = await fixture();
+    await f.capture();
+    await f.capture();
+    // update-ref refuses a ref pointing at a missing object, so write it directly.
+    await writeFile(
+      path.join(f.main, '.git', 'refs', 'heads', 'dangling'),
+      `${'deadbeef'.repeat(5)}\n`
+    );
+
+    expect(await inspectLineage(f)).toMatchObject({
+      status: 'pass',
+      summary: '2 artifact(s); all latest lineage SHAs reach a local branch',
+    });
+  });
+
+  it.each([true, false])(
+    'skips the lineage traversal without artifacts when local branches exist: %s',
+    async (branches) => {
+      const f = await fixture();
+      if (!branches) {
+        await git(f.main, ['update-ref', '-d', 'refs/heads/main']);
+        await git(f.main, ['update-ref', '-d', 'refs/heads/linked']);
+      }
+      const log = await logGitProbes(f);
+
+      expect(await inspectLineage(f)).toMatchObject({
+        status: 'pass',
+        summary: branches
+          ? '0 artifact(s); all latest lineage SHAs reach a local branch'
+          : 'no retained lineage or local branches to compare',
+      });
+      expect(await readFile(log, 'utf8')).toBe('for-each-ref\n-C\n');
+    }
+  );
 });

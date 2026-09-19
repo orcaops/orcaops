@@ -23,11 +23,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import {
-  planInjectOrcaopsSection,
-  renderOrcaopsAgentsMdSection,
-  resolveHintLines,
-} from '@orcaops/adapters';
+import { planInjectOrcaopsSection, renderOrcaopsAgentsMdSection } from '@orcaops/adapters';
 import { loadConfig } from '@orcaops/core';
 
 import { resolveManagedInstructionFiles } from '../../src/lib/install-drift.js';
@@ -65,8 +61,10 @@ describe("this repo's committed instruction block matches the current template",
     const desiredBlock = renderOrcaopsAgentsMdSection({
       generatedBy: cliPkg.version,
       prefix: config.naming.prefix,
-      hints: resolveHintLines(config.workflow.hints),
+      hints: config.workflow.hints,
       enabledSkills: enabledSkillTemplates(config, { cloud: false }),
+      commitInsideWindow: config.workflow.commit_inside_window,
+      suppressedRouting: config.workflow.routing.suppress,
     });
 
     const files = resolveManagedInstructionFiles(config);

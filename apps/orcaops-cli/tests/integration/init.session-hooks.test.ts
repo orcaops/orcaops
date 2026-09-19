@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
+import { codexTomlSnippet } from '../../src/lib/session-hooks-user.js';
 import { canonicalSessionHookCommand } from '../../src/lib/session-hooks.js';
 import { makeAgent } from '../support/test-agent.js';
 
@@ -1196,7 +1197,9 @@ describe('session hooks under non-project scopes (strip is scope-agnostic)', () 
 
     // Enabled hooks still EMIT under global scope (the runtime gates on
     // `enabled` alone), so with the project entry gone the machine
-    // registration is what has to carry them — and it is absent here.
+    // registration is what has to carry them — and it is absent here. The
+    // project entry also covered the install set at init, so bootstrap stayed
+    // manual: nothing is left to carry routing either.
     const doc = await agent.runRaw(['doctor', '--json']);
     const check = (
       JSON.parse(doc.stdout) as {
@@ -1205,9 +1208,10 @@ describe('session hooks under non-project scopes (strip is scope-agnostic)', () 
     ).checks.find((c) => c.name === 'session-hooks');
     expect(check?.status).toBe('warn');
     expect(check?.summary).not.toContain('inactive under scope');
-    expect(
-      check?.details?.some((d) => d.includes('claude-code: no machine session-hook registration'))
-    ).toBe(true);
+    const details = check?.details?.join('\n') ?? '';
+    expect(details).toContain('claude-code: no machine session-hook registration');
+    expect(details).toContain('no bootstrap surface carries skill routing for claude-code');
+    expect(details).toContain('orcaops init --force --agents-md');
   });
 
   it('a lingering entry under global scope: drift nudges, doctor warns, doctor --fix strips', async () => {
@@ -1363,4 +1367,216 @@ describe('session hooks under non-project scopes (strip is scope-agnostic)', () 
     expect(upd.exitCode).toBe(0);
     await expect(access(path.join(repo.path, '.claude', 'settings.json'))).resolves.toBeUndefined();
   });
+});
+
+/**
+ * Unattended init picks the bootstrap default from the same per-agent hook
+ * coverage rule doctor warns on: a block only where no hook speaks for some
+ * agent in the install set.
+ */
+describe('unattended init bootstrap default', () => {
+  let repo: TempRepo;
+  let home: string;
+
+  beforeEach(async () => {
+    repo = await createTempRepo({ initialBranch: 'main' });
+    home = await mkdtemp(path.join(tmpdir(), 'orcaops-init-default-'));
+  });
+
+  afterEach(async () => {
+    await repo.cleanup();
+  });
+
+  const agentFor = (): ReturnType<typeof makeAgent> =>
+    makeAgent({
+      cwd: repo.path,
+      env: {
+        ORCAOPS_GLOBAL_ROOT: path.join(home, 'global'),
+        CLAUDE_CONFIG_DIR: path.join(home, 'claude'),
+        CODEX_HOME: path.join(home, 'codex'),
+      },
+    });
+
+  const bootstrapOf = async (): Promise<string> =>
+    (
+      JSON.parse(await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')) as {
+        bootstrap: string;
+      }
+    ).bootstrap;
+
+  const registerCodexMachineHook = async (): Promise<void> => {
+    await mkdir(path.join(home, 'codex'), { recursive: true });
+    await writeFile(path.join(home, 'codex', 'config.toml'), `${codexTomlSnippet()}\n`, 'utf8');
+  };
+
+  it('stays manual when a live project entry covers every installed agent', async () => {
+    await agentFor().runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--json',
+      '--no-llm',
+      '--session-hooks',
+      '--agents',
+      'claude-code',
+    ]);
+    expect(await bootstrapOf()).toBe('manual');
+    await expect(access(path.join(repo.path, 'AGENTS.md'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('writes the block when codex is installed with no machine registration', async () => {
+    await agentFor().runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--json',
+      '--no-llm',
+      '--session-hooks',
+      '--agents',
+      'claude-code,codex',
+    ]);
+    expect(await bootstrapOf()).toBe('managed');
+    expect(await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8')).toContain('orcaops:start');
+  });
+
+  it('counts an already-registered codex machine hook as coverage', async () => {
+    await registerCodexMachineHook();
+    await agentFor().runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--json',
+      '--no-llm',
+      '--session-hooks',
+      '--agents',
+      'claude-code,codex',
+    ]);
+    expect(await bootstrapOf()).toBe('manual');
+    await expect(access(path.join(repo.path, 'AGENTS.md'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+});
+
+/**
+ * A pre-existing instruction file only keeps the repository hands-off when it
+ * is someone else's: a file already carrying an orcaops block is orcaops's own
+ * to refresh, and reading it as a stranger's leaves manual bootstrap beside a
+ * live managed block.
+ */
+describe('unattended init and a pre-existing instruction file', () => {
+  let repo: TempRepo;
+  let home: string;
+
+  beforeEach(async () => {
+    repo = await createTempRepo({ initialBranch: 'main' });
+    home = await mkdtemp(path.join(tmpdir(), 'orcaops-init-existing-'));
+  });
+
+  afterEach(async () => {
+    await repo.cleanup();
+  });
+
+  const agentFor = (): ReturnType<typeof makeAgent> =>
+    makeAgent({
+      cwd: repo.path,
+      env: {
+        ORCAOPS_GLOBAL_ROOT: path.join(home, 'global'),
+        CLAUDE_CONFIG_DIR: path.join(home, 'claude'),
+        CODEX_HOME: path.join(home, 'codex'),
+      },
+    });
+
+  const bootstrapOf = async (): Promise<string> =>
+    (
+      JSON.parse(await readFile(path.join(repo.path, '.orcaops', 'config.json'), 'utf8')) as {
+        bootstrap: string;
+      }
+    ).bootstrap;
+
+  const initUncovered = async (): Promise<void> => {
+    await agentFor().runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--json',
+      '--no-llm',
+      '--session-hooks',
+      '--agents',
+      'claude-code,codex',
+    ]);
+  };
+
+  it('keeps the block managed when the existing file already carries one', async () => {
+    await writeFile(
+      path.join(repo.path, 'AGENTS.md'),
+      '# Project\n\nHouse rules.\n\n<!-- orcaops:start v=0.0.1 -->\n**Read intents → skills.** stale routing\n<!-- orcaops:end -->\n',
+      'utf8'
+    );
+
+    await initUncovered();
+
+    expect(await bootstrapOf()).toBe('managed');
+    const text = await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8');
+    expect(text).toContain('House rules.');
+    expect(text).not.toContain('orcaops:start v=0.0.1');
+  });
+
+  it('stays manual when the existing file carries no orcaops block', async () => {
+    await writeFile(path.join(repo.path, 'AGENTS.md'), '# Project\n\nHouse rules.\n', 'utf8');
+
+    await initUncovered();
+
+    expect(await bootstrapOf()).toBe('manual');
+    expect(await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8')).not.toContain(
+      'orcaops:start'
+    );
+  });
+
+  it("stays manual when only CLAUDE.md is someone else's and codex is the only agent", async () => {
+    await writeFile(path.join(repo.path, 'CLAUDE.md'), '# Project\n\nHouse rules.\n', 'utf8');
+
+    await agentFor().runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--json',
+      '--no-llm',
+      '--session-hooks',
+      '--agents',
+      'codex',
+    ]);
+
+    expect(await bootstrapOf()).toBe('manual');
+    await expect(readFile(path.join(repo.path, 'AGENTS.md'), 'utf8')).rejects.toThrow();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps the block managed when the instruction file is a link to a file carrying one',
+    async () => {
+      await writeFile(
+        path.join(repo.path, 'CLAUDE.md'),
+        '# Project\n\nHouse rules.\n\n<!-- orcaops:start v=0.0.1 -->\n**Read intents → skills.** stale routing\n<!-- orcaops:end -->\n',
+        'utf8'
+      );
+      await symlink('CLAUDE.md', path.join(repo.path, 'AGENTS.md'));
+
+      await initUncovered();
+
+      expect(await bootstrapOf()).toBe('managed');
+    }
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'stays manual when the instruction file is a dangling link',
+    async () => {
+      await symlink('CLAUDE.md', path.join(repo.path, 'AGENTS.md'));
+
+      await initUncovered();
+
+      expect(await bootstrapOf()).toBe('manual');
+    }
+  );
 });

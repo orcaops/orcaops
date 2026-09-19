@@ -6,7 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type SourcePlanReviewProposeResponse, TrpcRequestError } from '@orcaops/sdk';
 
-import { reviewProposeAction, type ReviewProposeClient, runReviewPropose } from './propose.js';
+import {
+  proposeRetryFlags,
+  reviewProposeAction,
+  type ReviewProposeClient,
+  runReviewPropose,
+} from './propose.js';
 import {
   createMemoryPlanReviewPersistence,
   seedCandidate,
@@ -133,6 +138,56 @@ describe('runReviewPropose', () => {
     );
   });
 
+  it('refuses an aliased slug without reaching the cloud, override included', async () => {
+    const canonical = 'a'.repeat(64);
+    await seedCandidate(persistence, {
+      externalId: canonical,
+      versionId: 'ver_4',
+      versionNumber: 4,
+    });
+    await persistence.writeRefAlias({
+      ref: 'plan-slug',
+      externalId: canonical,
+      pulledAt: '2026-06-09T00:00:00.000Z',
+    });
+    const reviewPropose = vi.fn(async () => proposeResp());
+
+    const refused = await runReviewPropose({
+      client: proposeClient(reviewPropose),
+      ...base(repoRoot),
+      externalId: 'plan-slug',
+    }).then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect(refused).toMatchObject({ code: 'INVALID_INPUT' });
+    expect((refused as Error).message).toContain(canonical);
+
+    const withOverride = await runReviewPropose({
+      client: proposeClient(reviewPropose),
+      baseVersionIdOverride: 'ver_manual',
+      ...base(repoRoot),
+      externalId: 'plan-slug',
+    }).then(
+      () => null,
+      (e: unknown) => e
+    );
+    expect(withOverride).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(reviewPropose).not.toHaveBeenCalled();
+  });
+
+  it('retains no proposal record when the cloud resolved the ref to another id', async () => {
+    const reviewPropose = vi.fn(async () => proposeResp());
+    const result = await runReviewPropose({
+      client: proposeClient(reviewPropose),
+      baseVersionIdOverride: 'ver_manual',
+      ...base(repoRoot),
+      externalId: 'never-pulled-slug',
+    });
+    expect(result.local_record_advanced).toBe(false);
+    expect(await persistence.readProposal('ext-1', 'prop_1')).toBeNull();
+  });
+
   it('hard-errors NO_INPUT with no cached candidate and no override', async () => {
     const err = await runReviewPropose({
       client: proposeClient(vi.fn(async () => proposeResp())),
@@ -159,5 +214,35 @@ describe('runReviewPropose', () => {
       (e: unknown) => e
     );
     expect((err as Error).message).toMatch(/supersede your own OPEN proposal/i);
+  });
+});
+
+describe('proposeRetryFlags', () => {
+  it('echoes every flag that changes what the command does', () => {
+    expect(
+      proposeRetryFlags({
+        baseVersionId: 'ver_4',
+        supersedes: 'prop_1',
+        summary: 'tighten the gate',
+        sourceRef: 'branch/edit',
+        input: 'edit.md',
+        baseUrl: 'https://staging.example',
+        json: true,
+      })
+    ).toEqual([
+      '--base-version-id',
+      'ver_4',
+      '--supersedes',
+      'prop_1',
+      '--summary',
+      'tighten the gate',
+      '--source-ref',
+      'branch/edit',
+      '--input',
+      'edit.md',
+      '--base-url',
+      'https://staging.example',
+      '--json',
+    ]);
   });
 });

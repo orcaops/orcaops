@@ -7,6 +7,7 @@ import { canonicalJson } from './legacy/storage/events/canonical-json.js';
 import { isUuidV7 } from './legacy/storage/ids/uuidv7.js';
 import {
   assertConfigVersionCurrent,
+  CONFIG_SCHEMA_VERSION,
   DEFAULT_CONFIG,
   resolveConfig,
 } from './legacy/storage/schema/config.js';
@@ -163,6 +164,54 @@ function normalizeSupportedConfig(raw: unknown): unknown {
   }
   const { watch: _watch, ...remainingConfig } = config;
   return { ...remainingConfig, schema_version: 5, llm: normalizedLlm };
+}
+
+/**
+ * Narrows a discovered config to the three fields discovery actually reads,
+ * so the frozen legacy schema never sees a key a newer orcaops can write.
+ * The legacy blocks are strict objects: parsing a whole live config here
+ * would fail conversion on any additive key added since the freeze.
+ */
+function projectDiscoveredConfig(raw: unknown): unknown {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const config = raw as Record<string, unknown>;
+  const section = (value: unknown, key: string): unknown => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+    const source = value as Record<string, unknown>;
+    return Object.prototype.hasOwnProperty.call(source, key) ? { [key]: source[key] } : {};
+  };
+  const projected: Record<string, unknown> = {};
+  if (Object.prototype.hasOwnProperty.call(config, 'schema_version'))
+    projected.schema_version = config.schema_version;
+  if (Object.prototype.hasOwnProperty.call(config, 'install'))
+    projected.install = section(config.install, 'scope');
+  if (Object.prototype.hasOwnProperty.call(config, 'artifacts'))
+    projected.artifacts = section(config.artifacts, 'path');
+  if (Object.prototype.hasOwnProperty.call(config, 'cache'))
+    projected.cache = section(config.cache, 'path');
+  return projected;
+}
+
+/**
+ * The frozen parse only sees the three fields `projectDiscoveredConfig` keeps,
+ * all stable since the freeze, so any version at or above it is readable.
+ */
+function assertDiscoverableConfigVersion(raw: unknown, configPath: string): void {
+  const version = (raw as { schema_version?: unknown } | null)?.schema_version;
+  if (typeof version === 'number' && version >= CONFIG_SCHEMA_VERSION) return;
+  try {
+    assertConfigVersionCurrent(raw);
+  } catch (cause) {
+    throw cause instanceof Error && 'code' in cause
+      ? cause
+      : new HistoryConversionError('SOURCE_INTEGRITY', String(cause), configPath);
+  }
+}
+
+function pinFrozenVersion(projected: unknown): unknown {
+  if (projected === null || typeof projected !== 'object' || Array.isArray(projected))
+    return projected;
+  return { ...(projected as Record<string, unknown>), schema_version: CONFIG_SCHEMA_VERSION };
 }
 
 async function inspectMember(root: string, relativePath: string) {
@@ -432,8 +481,8 @@ export async function discoverLegacyRepository(input: {
         const raw = normalizeSupportedConfig(
           JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(observed.bytes!))
         );
-        assertConfigVersionCurrent(raw);
-        const config = resolveConfig(raw);
+        assertDiscoverableConfigVersion(raw, configPath);
+        const config = resolveConfig(pinFrozenVersion(projectDiscoveredConfig(raw)));
         if ((config.install.scope === 'personal') !== (configRoot === context.commonDir))
           throw new HistoryConversionError(
             'SOURCE_INTEGRITY',

@@ -33,7 +33,7 @@ instruction-file changes, produces roughly:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "install": {
     "agents": ["claude-code"],
     "scope": "personal"
@@ -43,7 +43,38 @@ instruction-file changes, produces roughly:
 ```
 
 The schema number appears here because it is present in the generated file, not
-because it is a setting you choose or migrate manually.
+because it is a setting you choose or migrate manually. `bootstrap` is `manual`
+here because personal scope owns no instruction file. Under project or global
+scope, unattended initialization writes `"bootstrap": "managed"` unless enabled
+session hooks already cover every selected agent, or the repository already has
+an `AGENTS.md` or `CLAUDE.md` of its own — one that exists and carries no
+orcaops block; a file already carrying a block stays managed — see
+[Bootstrap](./agent-integrations.md#bootstrap).
+
+Two `workflow` keys shape what the bootstrap surfaces say, and both ride their
+defaults until you set them:
+
+```json
+{
+  "schema_version": 7,
+  "workflow": {
+    "commit_inside_window": false,
+    "routing": { "suppress": ["seed"] }
+  }
+}
+```
+
+`commit_inside_window` (default `true`) carries the "run tests and commit inside
+the window" clause in the checkpoint guidance; `routing.suppress` drops the
+read-intent line for the named skills. Both arrived in schema version 7, so a
+config this CLI writes is refused by any CLI older than that — on the version,
+with a message saying to upgrade, rather than on a key its author never typed.
+
+`orcaops doctor` reports on the result: `session-hooks` names any installed
+agent left with no bootstrap surface at all, `session-hook-payload` warns when
+the text injected at every session start passes 6000 characters, and
+`workflow-hints` names every declared reminder that renders on neither surface,
+and why.
 
 Interactive initialization records the choices you make—for example,
 `session_hooks.enabled: true` when you accept the recommended session reminder.

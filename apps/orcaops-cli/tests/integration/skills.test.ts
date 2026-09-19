@@ -195,6 +195,28 @@ describe('orcaops skills list|enable|disable', () => {
     });
   });
 
+  it('a suppressed skill stays installed but loses its routing line', async () => {
+    await agent.runRaw(['skills', 'enable', 'loose-ends', '--json']);
+    await agent.runRaw(['update', '--json']);
+    expect(await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8')).toContain(
+      'orcaops-loose-ends'
+    );
+
+    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+    cfg.workflow = {
+      ...((cfg.workflow ?? {}) as Record<string, unknown>),
+      routing: { suppress: ['loose-ends'] },
+    };
+    await writeFile(cfgPath, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+
+    await agent.runRaw(['update', '--json']);
+    expect(await exists('.claude/skills/orcaops-loose-ends/SKILL.md')).toBe(true);
+    expect(await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8')).not.toContain(
+      'orcaops-loose-ends'
+    );
+  });
+
   it('an insight skill (lessons) follows the same enable → update story', async () => {
     const LESSONS_FILE = '.claude/skills/orcaops-lessons/SKILL.md';
     expect(await exists(LESSONS_FILE)).toBe(false);

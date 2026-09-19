@@ -16,7 +16,7 @@ export const orcaopsLessonsSkill: SkillTemplate = {
   group: 'insight',
   defaultEnabled: false,
   blockTriggerLine: (prefix: string) =>
-    `lessons learned ("what should I do differently next time?") → \`${skillRef('lessons', prefix)}\``,
+    `"what should I do differently next time?", "what keeps going wrong?", "lessons learned from this work" → \`${skillRef('lessons', prefix)}\``,
   body: (prefix: string) => `# When to use
 
 Triggers (user phrasing):

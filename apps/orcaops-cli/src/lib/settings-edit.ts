@@ -1,16 +1,20 @@
+import type { HintRenderabilityInput } from '@orcaops/adapters';
 import { type HintKey, resolveConfig } from '@orcaops/storage';
 
 import {
   blockPrompt,
+  commitInsideWindowPrompt,
   generatedFilesPrompt,
   gitHooksPrompt,
   hintsCustomPrompt,
   hintsPrompt,
   linkPrompt,
   prefixPrompt,
+  routingSuppressPrompt,
   scopePrompt,
   sessionHookEntriesPrompt,
   sessionHooksPrompt,
+  type SettingsPromptOption,
 } from './settings-prompts.js';
 import { writeTerminalSafeStdout } from '../io/output.js';
 
@@ -87,11 +91,14 @@ export async function editGeneratedFiles(
   return value === 'ignore' ? 'ignore' : 'commit';
 }
 
-export async function editHints(current: readonly HintKey[]): Promise<HintKey[] | null> {
+export async function editHints(
+  current: readonly HintKey[],
+  renderability: HintRenderabilityInput
+): Promise<HintKey[] | null> {
   const { multiselect, isCancel } = await clack();
   const picked = await multiselect({
     message: hintsPrompt.message,
-    options: hintsPrompt.options(),
+    options: hintsPrompt.options(renderability, current),
     initialValues: [...current],
     required: false,
   });
@@ -126,6 +133,32 @@ export async function editHintsCustom(current: readonly string[]): Promise<strin
     if (trimmed.length === 0) return kept;
     kept.push(trimmed);
   }
+}
+
+export async function editCommitInsideWindow(current: boolean): Promise<boolean | null> {
+  const { confirm, isCancel } = await clack();
+  const value = await confirm({
+    message: commitInsideWindowPrompt.message,
+    initialValue: current,
+  });
+  if (isCancel(value)) return null;
+  return value === true;
+}
+
+/** `options` comes from the caller: it depends on the draft prefix. */
+export async function editRoutingSuppress(
+  current: readonly string[],
+  options: SettingsPromptOption<string>[]
+): Promise<string[] | null> {
+  const { multiselect, isCancel } = await clack();
+  const picked = await multiselect({
+    message: routingSuppressPrompt.message,
+    options,
+    initialValues: [...current],
+    required: false,
+  });
+  if (isCancel(picked)) return null;
+  return picked as string[];
 }
 
 /**

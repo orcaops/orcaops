@@ -31,9 +31,35 @@ describe('CI test distribution', () => {
     expect(save.if).toBe(`steps.${restore.id}.outputs.cache-hit != 'true'`);
     expect(saveIndex).toBeGreaterThan(steps.findIndex((step) => step.name === 'Test'));
     for (const command of ['test:pty', 'perf:review-cap']) {
-      const index = steps.findIndex((step) => step.run?.endsWith(command));
+      // Routing through Turbo is what builds each task's dependencies; a bare
+      // pnpm --filter invocation runs against whatever dist already exists.
+      const index = steps.findIndex(
+        (step) => step.run === `pnpm exec turbo run ${command} --filter=@orcaops/watch`
+      );
       expect(index).toBeGreaterThan(saveIndex);
       expect(steps[index].if).toBe('always()');
+    }
+  });
+
+  it('checks out full history wherever the pinned provenance tests run', () => {
+    // Those comparisons skip themselves when the pinned commit is unreachable,
+    // so a shallow checkout passes while verifying nothing.
+    const owners = Object.entries(jobs).filter(([, job]) =>
+      (job.strategy?.matrix?.package ?? []).includes('history-convert')
+    );
+    expect(owners).toHaveLength(1);
+    for (const [, job] of owners) {
+      const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
+      expect(checkout?.with?.['fetch-depth']).toBe(0);
+    }
+    // The converse, which is the direction the setting actually spread: a job
+    // split once copied full history into two jobs that run none of those
+    // comparisons, and the comment justifying it outlived the split.
+    const ownerNames = new Set(owners.map(([name]) => name));
+    for (const [name, job] of Object.entries(jobs)) {
+      if (ownerNames.has(name)) continue;
+      const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
+      expect(checkout?.with?.['fetch-depth'], name).not.toBe(0);
     }
   });
 

@@ -1,8 +1,16 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+  type BootstrapContent,
+  type BootstrapContentInput,
+  CLOUD_PIN_SCHEME,
+  CLOUD_SURFACE_COMMANDS,
+  resolveBootstrapContent,
+  SKILL_TEMPLATES,
+} from '@orcaops/adapters';
 import {
   createLinkedWorktree,
   createTempRepo,
@@ -13,8 +21,87 @@ import {
 
 import { canonicalSessionHookCommand, settingsSpecs } from '../../src/lib/session-hooks.js';
 import { renderSessionStartGuidance } from '../../src/lib/session-start-guidance.js';
-import type { SessionStartState } from '../../src/lib/session-start-state.js';
+import {
+  readSessionStartState,
+  type SessionStartState,
+} from '../../src/lib/session-start-state.js';
 import { makeAgent } from '../support/test-agent.js';
+
+/**
+ * `resolveSkillGates` reads a credentials file OUTSIDE the repo, and the state
+ * loader must never call it — the cloud gate is hardcoded off there. The gate is
+ * routing-equivalent (no cloud-gated template declares a trigger line), so the
+ * payload looks the same either way and only the call itself is observable.
+ * The wrapper delegates, so every other command in this file behaves normally.
+ */
+const skillGateCalls = { n: 0 };
+/** Flipped on to drive the state loader's degraded path; see its own test. */
+const skillSetFault = { fail: false };
+vi.mock('../../src/lib/skill-set.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/skill-set.js')>();
+  return {
+    ...actual,
+    resolveSkillGates: (env: NodeJS.ProcessEnv) => {
+      skillGateCalls.n += 1;
+      return actual.resolveSkillGates(env);
+    },
+    enabledSkillTemplates: (...args: Parameters<typeof actual.enabledSkillTemplates>) => {
+      if (skillSetFault.fail) throw new Error('skill set unavailable');
+      return actual.enabledSkillTemplates(...args);
+    },
+  };
+});
+
+type StaticState = Extract<SessionStartState, { kind: 'static' }>;
+type ReadyState = Extract<SessionStartState, { kind: 'ready' }>;
+
+function bootstrapContent(over: Partial<BootstrapContentInput> = {}): BootstrapContent {
+  return resolveBootstrapContent({
+    prefix: 'oo',
+    enabledSkills: undefined,
+    hints: undefined,
+    commitInsideWindow: true,
+    suppressedRouting: [],
+    ...over,
+  });
+}
+
+function mkStatic(over: Partial<StaticState> = {}): StaticState {
+  return { kind: 'static', prefix: 'oo', hooksOnly: true, content: bootstrapContent(), ...over };
+}
+
+function mkReady(over: Partial<ReadyState> = {}): ReadyState {
+  return {
+    kind: 'ready',
+    branch: 'main',
+    prefix: 'oo',
+    cacheStatus: 'available',
+    inFlight: [],
+    hooksOnly: true,
+    content: bootstrapContent(),
+    ...over,
+  };
+}
+
+/** One state per state-aware payload branch: no cache, no thread, one, many. */
+function everyPayloadBranch(over: Partial<ReadyState> = {}): ReadyState[] {
+  const artifact = {
+    id: '019f0000-0000-7000-8000-000000000001',
+    label: 'fixture',
+    state: 'in_progress',
+    checkpointCount: 1,
+    openCheckpoints: [],
+  };
+  return [
+    mkReady({ cacheStatus: 'missing', ...over }),
+    mkReady(over),
+    mkReady({ inFlight: [artifact], ...over }),
+    mkReady({
+      inFlight: [artifact, { ...artifact, id: '019f0000-0000-7000-8000-000000000002' }],
+      ...over,
+    }),
+  ];
+}
 
 async function projectDatabaseFile(repoRoot: string): Promise<string> {
   const registration = JSON.parse(
@@ -603,13 +690,389 @@ describe('orcaops hook session-start', () => {
   });
 });
 
+/**
+ * The routing gate: the hook renders routing unless a managed block is ACTUALLY
+ * carrying it. A marker alone does not prove that — the read-intent section was
+ * once trimmed while the marker stayed, so marker-bearing blocks with no routing
+ * exist in the wild, and treating them as covered is the failure being fixed.
+ */
+describe('orcaops hook session-start — routing gate', () => {
+  let repo: TempRepo;
+  let agent: ReturnType<typeof makeAgent>;
+  let dataRoot: string;
+
+  beforeEach(async () => {
+    repo = await createTempRepo({ initialBranch: 'main' });
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-hook-data-'));
+    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_DATA_DIR: dataRoot } });
+  });
+
+  afterEach(async () => {
+    await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
+  });
+
+  const initManaged = async (): Promise<void> => {
+    const r = await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--json',
+      '--no-llm',
+      '--prefix',
+      'oo',
+      '--session-hooks',
+      '--agents-md',
+    ]);
+    expect(r.exitCode, r.stdout + r.stderr).toBe(0);
+  };
+
+  const routingBullets = (stdout: string): string[] =>
+    stdout.split('\n').filter((line) => line.startsWith('- "'));
+
+  it('a managed block carrying routing keeps the hook short', async () => {
+    await initManaged();
+    const r = await agent.runRaw(['hook', 'session-start']);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('[orcaops] This repo captures AI coding sessions');
+    expect(routingBullets(r.stdout)).toEqual([]);
+    expect(r.stdout).not.toContain('oo-plan-critique');
+  });
+
+  it('a manual-bootstrap repo renders routing', async () => {
+    const r0 = await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--json',
+      '--no-llm',
+      '--prefix',
+      'oo',
+      '--session-hooks',
+    ]);
+    expect(r0.exitCode, r0.stdout + r0.stderr).toBe(0);
+    const r = await agent.runRaw(['hook', 'session-start']);
+    expect(routingBullets(r.stdout).length).toBeGreaterThan(0);
+    expect(r.stdout).toContain('→ oo-plan-critique');
+  });
+
+  it('a managed repo whose block file was deleted renders routing', async () => {
+    await initManaged();
+    await rm(path.join(repo.path, 'AGENTS.md'), { force: true });
+    await rm(path.join(repo.path, 'CLAUDE.md'), { force: true });
+
+    const r = await agent.runRaw(['hook', 'session-start']);
+    expect(r.exitCode).toBe(0);
+    expect(routingBullets(r.stdout).length).toBeGreaterThan(0);
+    expect(r.stdout).toContain('"review my plan draft"');
+  });
+
+  it('a managed repo whose instruction file has no marker renders routing', async () => {
+    await initManaged();
+    await rm(path.join(repo.path, 'CLAUDE.md'), { force: true });
+    await writeFile(
+      path.join(repo.path, 'AGENTS.md'),
+      '# Project\n\nHand-written house rules. No orcaops block here.\n',
+      'utf8'
+    );
+
+    const r = await agent.runRaw(['hook', 'session-start']);
+    expect(r.exitCode).toBe(0);
+    expect(routingBullets(r.stdout).length).toBeGreaterThan(0);
+  });
+
+  it('resolves the enabled skill set without reading the credentials file', async () => {
+    await initManaged();
+    // Positive control: init DOES resolve the gates, so a zero below means the
+    // state loader skipped them, not that the spy is inert.
+    expect(skillGateCalls.n).toBeGreaterThan(0);
+
+    skillGateCalls.n = 0;
+    const state = await readSessionStartState(repo.path);
+    expect(state.kind).toBe('static');
+    expect(skillGateCalls.n).toBe(0);
+    // The gate being off is what keeps the cloud skills out of the resolved set.
+    expect(renderSessionStartGuidance(state)).not.toContain('oo-plan-approval');
+  });
+
+  it('a resolver failure degrades to the lifecycle-only payload and still exits zero', async () => {
+    const r0 = await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--json',
+      '--no-llm',
+      '--prefix',
+      'oo',
+      '--session-hooks',
+    ]);
+    expect(r0.exitCode, r0.stdout + r0.stderr).toBe(0);
+    const configPath = path.join(repo.path, '.orcaops', 'config.json');
+    const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+    config.workflow = { hints: { keys: ['checkpoint-cadence'], custom: [] } };
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+
+    const healthy = await agent.runRaw(['hook', 'session-start']);
+    expect(routingBullets(healthy.stdout).length).toBeGreaterThan(0);
+    expect(healthy.stdout).toContain('- Use one checkpoint per coherent unit of work.');
+
+    skillSetFault.fail = true;
+    try {
+      const r = await agent.runRaw(['hook', 'session-start']);
+      expect(r.exitCode).toBe(0);
+      expect(r.stderr).toBe('');
+      expect(r.stdout).toContain('[orcaops] This repo captures AI coding sessions');
+      expect(r.stdout).toContain('`oo-capture`');
+      expect(r.stdout).toContain('run tests and commit inside the window');
+      expect(r.stdout).toContain('Skip capture for trivial changes');
+      expect(routingBullets(r.stdout)).toEqual([]);
+      expect(r.stdout).not.toContain('Use one checkpoint per coherent unit of work.');
+    } finally {
+      skillSetFault.fail = false;
+    }
+  });
+
+  it('a marker-bearing block with no routing section renders routing', async () => {
+    await initManaged();
+    await rm(path.join(repo.path, 'CLAUDE.md'), { force: true });
+    // A LITERAL fixture, not a render: this is the shape blocks took while the
+    // read-intent section was trimmed away, and a future template change must
+    // not be able to make the case unreachable by no longer producing it.
+    await writeFile(
+      path.join(repo.path, 'AGENTS.md'),
+      [
+        '# Project',
+        '',
+        '<!-- orcaops:start v=0.1.0 -->',
+        '## Orcaops',
+        '',
+        'This repo uses **orcaops** to capture and evaluate AI coding sessions.',
+        '',
+        '**Capture lifecycle: plan → checkpoint(s) → finish.**',
+        '',
+        '1. Run `orcaops status --json`.',
+        '',
+        '**Attribution.** Pass `--invoked-by-agent <your-agent-id>`.',
+        '',
+        '**Skip orcaops for:** typo fixes, cosmetic single-line edits.',
+        '<!-- orcaops:end -->',
+        '',
+      ].join('\n'),
+      'utf8'
+    );
+
+    const r = await agent.runRaw(['hook', 'session-start']);
+    expect(r.exitCode).toBe(0);
+    expect(routingBullets(r.stdout).length).toBeGreaterThan(0);
+    expect(r.stdout).toContain('→ oo-plan-critique');
+  });
+
+  it('prose naming the routing heading outside the block does not suppress routing', async () => {
+    await initManaged();
+    await rm(path.join(repo.path, 'CLAUDE.md'), { force: true });
+    await writeFile(
+      path.join(repo.path, 'AGENTS.md'),
+      [
+        '# Project',
+        '',
+        '<!-- orcaops:start v=0.1.0 -->',
+        '## Orcaops',
+        '',
+        'This repo uses **orcaops** to capture and evaluate AI coding sessions.',
+        '<!-- orcaops:end -->',
+        '',
+        '## House notes',
+        '',
+        'A managed block normally carries a **Read intents → skills.** list, but',
+        'ours is trimmed, so the session hook has to supply the routing itself.',
+        '',
+      ].join('\n'),
+      'utf8'
+    );
+
+    const r = await agent.runRaw(['hook', 'session-start']);
+    expect(r.exitCode).toBe(0);
+    expect(routingBullets(r.stdout).length).toBeGreaterThan(0);
+    expect(r.stdout).toContain('→ oo-plan-critique');
+  });
+
+  it('renders routing for an agent whose own instruction file carries no block', async () => {
+    const r0 = await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--json',
+      '--no-llm',
+      '--prefix',
+      'oo',
+      '--session-hooks',
+      '--agents-md',
+      '--agents',
+      'claude-code,codex',
+    ]);
+    expect(r0.exitCode, r0.stdout + r0.stderr).toBe(0);
+    // AGENTS.md is the only instruction file codex loads; CLAUDE.md keeps its
+    // block, so a repository-wide predicate would call codex covered.
+    const block = await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8');
+    expect(block).toContain('**Read intents → skills.**');
+    await rm(path.join(repo.path, 'CLAUDE.md'), { force: true });
+    await writeFile(path.join(repo.path, 'CLAUDE.md'), block, 'utf8');
+    await writeFile(
+      path.join(repo.path, 'AGENTS.md'),
+      '# Project\n\nHand-written house rules. No orcaops block here.\n',
+      'utf8'
+    );
+
+    const codex = await agent.runRaw(['hook', 'session-start', '--agent', 'codex']);
+    expect(codex.exitCode).toBe(0);
+    const envelope = JSON.parse(codex.stdout) as {
+      hookSpecificOutput: { additionalContext: string };
+    };
+    expect(routingBullets(envelope.hookSpecificOutput.additionalContext).length).toBeGreaterThan(0);
+
+    const claude = await agent.runRaw(['hook', 'session-start', '--agent', 'claude-code']);
+    expect(claude.exitCode).toBe(0);
+    expect(routingBullets(claude.stdout)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'a symlinked instruction file pointing at the block keeps the hook short',
+    async () => {
+      // The pre-existing CLAUDE.md is required: a fresh init produces the
+      // mirror image and masks this entirely.
+      await writeFile(path.join(repo.path, 'CLAUDE.md'), '# Project\n', 'utf8');
+      const r0 = await agent.runRaw([
+        'init',
+        '--scope',
+        'project',
+        '--json',
+        '--no-llm',
+        '--prefix',
+        'oo',
+        '--session-hooks',
+        '--agents-md',
+        '--agents',
+        'claude-code,codex',
+      ]);
+      expect(r0.exitCode, r0.stdout + r0.stderr).toBe(0);
+      expect((await lstat(path.join(repo.path, 'AGENTS.md'))).isSymbolicLink()).toBe(true);
+      expect(await readFile(path.join(repo.path, 'CLAUDE.md'), 'utf8')).toContain(
+        '**Read intents → skills.**'
+      );
+
+      const codex = await agent.runRaw(['hook', 'session-start', '--agent', 'codex']);
+      expect(codex.exitCode).toBe(0);
+      const envelope = JSON.parse(codex.stdout) as {
+        hookSpecificOutput: { additionalContext: string };
+      };
+      expect(routingBullets(envelope.hookSpecificOutput.additionalContext)).toEqual([]);
+    }
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a symlinked instruction file whose target carries no block renders routing',
+    async () => {
+      await writeFile(path.join(repo.path, 'CLAUDE.md'), '# Project\n', 'utf8');
+      const r0 = await agent.runRaw([
+        'init',
+        '--scope',
+        'project',
+        '--json',
+        '--no-llm',
+        '--prefix',
+        'oo',
+        '--session-hooks',
+        '--agents-md',
+        '--agents',
+        'claude-code,codex',
+      ]);
+      expect(r0.exitCode, r0.stdout + r0.stderr).toBe(0);
+      expect((await lstat(path.join(repo.path, 'AGENTS.md'))).isSymbolicLink()).toBe(true);
+      await writeFile(
+        path.join(repo.path, 'CLAUDE.md'),
+        '# Project\n\nHand-written house rules. No orcaops block here.\n',
+        'utf8'
+      );
+
+      const codex = await agent.runRaw(['hook', 'session-start', '--agent', 'codex']);
+      expect(codex.exitCode).toBe(0);
+      const envelope = JSON.parse(codex.stdout) as {
+        hookSpecificOutput: { additionalContext: string };
+      };
+      expect(routingBullets(envelope.hookSpecificOutput.additionalContext).length).toBeGreaterThan(
+        0
+      );
+    }
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a dangling instruction symlink renders routing',
+    async () => {
+      await writeFile(path.join(repo.path, 'CLAUDE.md'), '# Project\n', 'utf8');
+      const r0 = await agent.runRaw([
+        'init',
+        '--scope',
+        'project',
+        '--json',
+        '--no-llm',
+        '--prefix',
+        'oo',
+        '--session-hooks',
+        '--agents-md',
+        '--agents',
+        'claude-code,codex',
+      ]);
+      expect(r0.exitCode, r0.stdout + r0.stderr).toBe(0);
+      await rm(path.join(repo.path, 'CLAUDE.md'), { force: true });
+
+      const codex = await agent.runRaw(['hook', 'session-start', '--agent', 'codex']);
+      expect(codex.exitCode).toBe(0);
+      const envelope = JSON.parse(codex.stdout) as {
+        hookSpecificOutput: { additionalContext: string };
+      };
+      expect(routingBullets(envelope.hookSpecificOutput.additionalContext).length).toBeGreaterThan(
+        0
+      );
+    }
+  );
+
+  it('renders routing for an agent outside the install set that loads no block', async () => {
+    const r0 = await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--json',
+      '--no-llm',
+      '--prefix',
+      'oo',
+      '--session-hooks',
+      '--agents-md',
+      '--agents',
+      'claude-code,codex',
+    ]);
+    expect(r0.exitCode, r0.stdout + r0.stderr).toBe(0);
+    // Cursor loads AGENTS.md and never CLAUDE.md, install set or not.
+    const block = await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8');
+    await rm(path.join(repo.path, 'CLAUDE.md'), { force: true });
+    await writeFile(path.join(repo.path, 'CLAUDE.md'), block, 'utf8');
+    await rm(path.join(repo.path, 'AGENTS.md'), { force: true });
+
+    const cursor = await agent.runRaw(['hook', 'session-start', '--agent', 'cursor']);
+    expect(cursor.exitCode).toBe(0);
+    const payload = (JSON.parse(cursor.stdout) as { additional_context: string })
+      .additional_context;
+    expect(routingBullets(payload).length).toBeGreaterThan(0);
+    expect(payload).toContain('→ oo-plan-critique');
+  });
+});
+
 describe('renderSessionStartGuidance (pure)', () => {
   it('uninitialized → null (the hook emits nothing)', () => {
     expect(renderSessionStartGuidance({ kind: 'uninitialized' })).toBeNull();
   });
 
   it('static → fixed prefix-aware nudge pointing at status for thread state', () => {
-    const text = renderSessionStartGuidance({ kind: 'static', prefix: 'oo' });
+    const text = renderSessionStartGuidance(mkStatic());
     expect(text).toContain('[orcaops] This repo captures AI coding sessions');
     expect(text).toContain('orcaops status --json');
     expect(text).toContain('`oo-capture`');
@@ -621,56 +1084,117 @@ describe('renderSessionStartGuidance (pure)', () => {
   });
 
   it('every state-aware closing branch points directly at finish', () => {
-    const artifact = {
-      id: '019f0000-0000-7000-8000-000000000001',
-      label: 'fixture',
-      state: 'in_progress',
-      checkpointCount: 1,
-      openCheckpoints: [],
-    };
-    const states: SessionStartState[] = [
-      { kind: 'ready', branch: 'main', prefix: 'oo', cacheStatus: 'missing', inFlight: [] },
-      { kind: 'ready', branch: 'main', prefix: 'oo', cacheStatus: 'available', inFlight: [] },
-      {
-        kind: 'ready',
-        branch: 'main',
-        prefix: 'oo',
-        cacheStatus: 'available',
-        inFlight: [artifact],
-      },
-      {
-        kind: 'ready',
-        branch: 'main',
-        prefix: 'oo',
-        cacheStatus: 'available',
-        inFlight: [artifact, { ...artifact, id: '019f0000-0000-7000-8000-000000000002' }],
-      },
-    ];
-    for (const state of states) {
+    for (const state of everyPayloadBranch()) {
       const text = renderSessionStartGuidance(state);
       expect(text).toContain('oo-finish');
       expect(text).not.toContain('oo-pre-pr');
       expect(text).not.toContain('oo-summary');
-      expect(text).not.toContain('oo-digest');
     }
   });
 
+  it('renders routing on every branch when no managed block carries it', () => {
+    for (const state of everyPayloadBranch()) {
+      const text = renderSessionStartGuidance(state) as string;
+      // digest is one of the built-in read intents, so a hooks-only payload
+      // always carries it — the phrasing is the whole point of the surface.
+      expect(text).toContain('oo-digest');
+      expect(text).toContain('"review my plan draft"');
+      expect(text).toContain('→ oo-plan-critique');
+    }
+  });
+
+  it('renders no routing on any branch when a managed block carries it', () => {
+    for (const state of everyPayloadBranch({ hooksOnly: false })) {
+      const text = renderSessionStartGuidance(state) as string;
+      expect(text).not.toContain('oo-digest');
+      expect(text).not.toContain('oo-plan-critique');
+      expect(text).toContain('oo-finish');
+    }
+  });
+
+  it('routing bullets carry the resolver lead verbatim, unquoted by the formatter', () => {
+    const text = renderSessionStartGuidance(mkStatic()) as string;
+    expect(text).toContain(
+      '- "where was I?", "pick up where we left off", "continue artifact <id> here" → oo-resume'
+    );
+    expect(text).not.toContain('"\'');
+    expect(text).not.toMatch(/- ""/);
+  });
+
+  it('routing bullets keep the clause that follows the arrow', () => {
+    const text = renderSessionStartGuidance(mkStatic()) as string;
+    // Truncating at the ref would tell the agent to invoke this skill, the
+    // exact opposite of what the entry says.
+    expect(text).toContain(
+      'recommend the human run /oo-author-evaluator rather than invoking it yourself'
+    );
+    expect(text).toContain('→ oo-plan-critique, before work starts');
+    expect(text).toContain('oo-seed-discovery, and whenever normal work exposes a history gap');
+  });
+
+  it('the commit clause follows workflow.commit_inside_window', () => {
+    const on = renderSessionStartGuidance(mkStatic()) as string;
+    expect(on).toContain('run tests and commit inside the window');
+
+    const off = renderSessionStartGuidance(
+      mkStatic({ content: bootstrapContent({ commitInsideWindow: false }) })
+    ) as string;
+    expect(off).toContain('open before edits; close with what finished');
+    expect(off).not.toContain('commit inside the window');
+  });
+
+  it('carries the attribution rule on every branch, on one line', () => {
+    for (const state of [mkStatic(), ...everyPayloadBranch()]) {
+      const text = renderSessionStartGuidance(state) as string;
+      const carrying = text.split('\n').filter((l) => l.includes('--invoked-by-agent'));
+      expect(carrying).toHaveLength(1);
+      expect(carrying[0]).toContain('`--invoked-by-agent <your-agent-id>` on every');
+      expect(carrying[0]).toContain('falls back to `ORCAOPS_INVOKED_BY_AGENT`');
+      expect(text.indexOf('--invoked-by-agent')).toBeLessThan(
+        text.indexOf('Skip capture for trivial changes')
+      );
+    }
+  });
+
+  it('resolved hints render as bullets after the skip rule', () => {
+    const text = renderSessionStartGuidance(
+      mkStatic({
+        content: bootstrapContent({
+          hints: { keys: ['checkpoint-cadence'], custom: ['Ask first.'] },
+        }),
+      })
+    ) as string;
+    expect(text).toContain('- Use one checkpoint per coherent unit of work.');
+    expect(text).toContain('- Ask first.');
+    expect(text.indexOf('Skip capture for trivial changes')).toBeLessThan(
+      text.indexOf('- Ask first.')
+    );
+  });
+
+  it('suppressed routing drops exactly the named skill', () => {
+    const text = renderSessionStartGuidance(
+      mkStatic({ content: bootstrapContent({ suppressedRouting: ['plan-critique'] }) })
+    ) as string;
+    expect(text).not.toContain('oo-plan-critique');
+    expect(text).toContain('oo-digest');
+  });
+
   it('stale open checkpoint (>24h idle) gets the left-over wording', () => {
-    const text = renderSessionStartGuidance({
-      kind: 'ready',
-      branch: 'main',
-      prefix: 'orcaops',
-      cacheStatus: 'available',
-      inFlight: [
-        {
-          id: '019f0000-0000-7000-8000-000000000001',
-          label: 'stale fixture',
-          state: 'in_progress',
-          checkpointCount: 2,
-          openCheckpoints: [{ n: 3, openedAt: '2026-01-01T00:00:00.000Z', idleHours: 30 }],
-        },
-      ],
-    });
+    const text = renderSessionStartGuidance(
+      mkReady({
+        prefix: 'orcaops',
+        content: bootstrapContent({ prefix: 'orcaops' }),
+        inFlight: [
+          {
+            id: '019f0000-0000-7000-8000-000000000001',
+            label: 'stale fixture',
+            state: 'in_progress',
+            checkpointCount: 2,
+            openCheckpoints: [{ n: 3, openedAt: '2026-01-01T00:00:00.000Z', idleHours: 30 }],
+          },
+        ],
+      })
+    );
     expect(text).toContain('Checkpoint 3 is OPEN (opened 30h ago)');
     expect(text).toContain('likely left over from a previous session');
   });
@@ -683,13 +1207,9 @@ describe('renderSessionStartGuidance (pure)', () => {
       checkpointCount: 0,
       openCheckpoints: [],
     });
-    const text = renderSessionStartGuidance({
-      kind: 'ready',
-      branch: 'main',
-      prefix: 'oo',
-      cacheStatus: 'available',
-      inFlight: [mk('a-1', 'first'), mk('b-2', 'second')],
-    });
+    const text = renderSessionStartGuidance(
+      mkReady({ inFlight: [mk('a-1', 'first'), mk('b-2', 'second')] })
+    );
     expect(text).toContain('2 capture threads are in flight');
     expect(text).toContain('a-1');
     expect(text).toContain('b-2');
@@ -698,24 +1218,68 @@ describe('renderSessionStartGuidance (pure)', () => {
   });
 
   it('invalid checkpoint timestamps omit age wording', () => {
-    const text = renderSessionStartGuidance({
-      kind: 'ready',
-      branch: 'main',
-      prefix: 'orcaops',
-      cacheStatus: 'available',
-      inFlight: [
-        {
-          id: '019f0000-0000-7000-8000-000000000001',
-          label: 'invalid timestamp fixture',
-          state: 'in_progress',
-          checkpointCount: 1,
-          openCheckpoints: [{ n: 1, openedAt: 'not-a-date', idleHours: null }],
-        },
-      ],
-    });
+    const text = renderSessionStartGuidance(
+      mkReady({
+        prefix: 'orcaops',
+        content: bootstrapContent({ prefix: 'orcaops' }),
+        inFlight: [
+          {
+            id: '019f0000-0000-7000-8000-000000000001',
+            label: 'invalid timestamp fixture',
+            state: 'in_progress',
+            checkpointCount: 1,
+            openCheckpoints: [{ n: 1, openedAt: 'not-a-date', idleHours: null }],
+          },
+        ],
+      })
+    );
     expect(text).toContain('Checkpoint 1 is OPEN.');
     expect(text).not.toContain('NaN');
     expect(text).not.toContain('opened ');
+  });
+});
+
+/**
+ * Cloud content must stay out of the hook payload for the same reason it stays
+ * out of the committed block: it steers an agent on a credential-less machine
+ * toward a product it cannot reach. The hook only grew a reason to be scanned
+ * when it started carrying routing.
+ */
+describe('the hook payload carries no cloud steering', () => {
+  const esc = (v: string): string => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const CLOUD_REFERENCE = new RegExp(
+    [
+      `orcaops (?:${CLOUD_SURFACE_COMMANDS.map(esc).join('|')})\\b`,
+      ...SKILL_TEMPLATES.filter((t) => (t.requires ?? []).includes('cloud')).map(
+        (t) => `\\borcaops-${esc(t.id)}\\b`
+      ),
+      esc(CLOUD_PIN_SCHEME),
+    ].join('|'),
+    'i'
+  );
+
+  it('flags a cloud reference, so the scan below is not vacuous', () => {
+    expect('run `orcaops login`').toMatch(CLOUD_REFERENCE);
+    expect('the orcaops-plan-approval skill').toMatch(CLOUD_REFERENCE);
+  });
+
+  it('every payload branch is clean under the default prefix', () => {
+    const content = bootstrapContent({ prefix: 'orcaops', enabledSkills: SKILL_TEMPLATES });
+    for (const state of [
+      mkStatic({ prefix: 'orcaops', content }),
+      ...everyPayloadBranch({ prefix: 'orcaops', content }),
+    ]) {
+      expect(renderSessionStartGuidance(state)).not.toMatch(CLOUD_REFERENCE);
+    }
+  });
+
+  it('is clean even with the cloud-gated skills forced into the enabled set', () => {
+    // The hook resolves its set with the cloud gate hardcoded off; forcing the
+    // gated templates in proves the containment does not depend on that.
+    const content = bootstrapContent({ prefix: 'orcaops', enabledSkills: SKILL_TEMPLATES });
+    expect(renderSessionStartGuidance(mkStatic({ prefix: 'orcaops', content }))).not.toMatch(
+      CLOUD_REFERENCE
+    );
   });
 });
 

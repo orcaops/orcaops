@@ -18,7 +18,7 @@ export const orcaopsPlanCritiqueSkill: SkillTemplate = {
   group: 'insight',
   defaultEnabled: true,
   blockTriggerLine: (prefix: string) =>
-    `prior-art check before drafting or capturing a non-trivial plan, or critique of an existing plan ("critique this plan", "review this plan against earlier decisions", "poke holes in this plan before I start") → \`${skillRef('plan-critique', prefix)}\``,
+    `"critique this plan", "review my plan draft", "poke holes in this plan", "have we solved something like this before?" → \`${skillRef('plan-critique', prefix)}\`, before work starts`,
   body: (prefix: string) => `# When to use
 
 Triggers:

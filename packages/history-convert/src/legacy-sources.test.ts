@@ -5,6 +5,10 @@ import { describe, expect, it } from 'vitest';
 
 import * as eventFormat from './legacy/storage/events/event-log.js';
 import * as identity from './legacy/storage/ids/uuidv7.js';
+import {
+  legacySourceCommitAvailable,
+  legacySourceGitOptions,
+} from './legacy-source-history.test-support.js';
 import { LEGACY_SOURCE_REVISION } from './profile.js';
 
 const manifest = JSON.parse(
@@ -21,16 +25,22 @@ const manifest = JSON.parse(
 const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 
 describe('frozen source provenance', () => {
-  it('binds every copied schema and replay dependency to the pinned original source', () => {
+  it('binds every copied schema and replay dependency to the manifest', () => {
     expect(manifest.source_revision).toBe(LEGACY_SOURCE_REVISION);
     for (const entry of manifest.entries) {
-      const original = execFileSync('git', [
-        'show',
-        `${LEGACY_SOURCE_REVISION}:${entry.source_path}`,
-      ]);
       const output = readFileSync(new URL('../' + entry.output_path, import.meta.url));
-      expect(hash(original), entry.source_path).toBe(entry.source_sha256);
       expect(hash(output), entry.output_path).toBe(entry.output_sha256);
+    }
+  });
+
+  it.skipIf(!legacySourceCommitAvailable)('matches the pinned original source', () => {
+    for (const entry of manifest.entries) {
+      const original = execFileSync(
+        'git',
+        ['show', `${LEGACY_SOURCE_REVISION}:${entry.source_path}`],
+        legacySourceGitOptions
+      );
+      expect(hash(original), entry.source_path).toBe(entry.source_sha256);
     }
   });
 

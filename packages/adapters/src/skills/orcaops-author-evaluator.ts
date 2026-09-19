@@ -37,7 +37,7 @@ export const orcaopsAuthorEvaluatorSkill: SkillTemplate = {
   // that split is the whole point of shipping a discoverable skill the model
   // may not fire itself.
   blockTriggerLine: (prefix: string) =>
-    `authoring an evaluator ("write an evaluator", "add a check that blocks X") → recommend ` +
+    `"write an evaluator", "add a check that blocks X" → recommend ` +
     `the human run \`/${skillRef('author-evaluator', prefix)}\` rather than invoking it yourself`,
   body: (prefix: string) => `# When to use
 

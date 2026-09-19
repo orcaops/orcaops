@@ -75,8 +75,11 @@ describe('orcaops doctor (smoke)', () => {
     // proves emitOk's synchronous write reached the OS pipe.
     expect(res.stdout).toMatch(/✓ repository/);
     // The final summary line is the load-bearing assertion — it's what
-    // would be lost if process.exit raced the stdout flush.
-    expect(res.stdout).toMatch(/^Overall: WARN \(1 warning\(s\)\)$/m);
+    // would be lost if process.exit raced the stdout flush. A fresh personal
+    // install warns twice: nothing carries skill routing yet, and the repo's
+    // git history has no seed state.
+    expect(res.stdout).toMatch(/^Overall: WARN \(2 warning\(s\)\)$/m);
+    expect(res.stdout).toMatch(/no bootstrap surface carries skill routing/);
     // Warnings write nothing to stderr (doctor.ts emitError only fires on
     // the CliExit path).
     expect(res.stderr).toBe('');

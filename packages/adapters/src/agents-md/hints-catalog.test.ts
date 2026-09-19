@@ -36,6 +36,17 @@ describe('curated hint catalog', () => {
     ]);
   });
 
+  it('collapses whitespace inside a custom line', () => {
+    // Both surfaces render one bullet per hint, so an interior newline in a
+    // user-supplied line would break the list wherever it is rendered.
+    expect(
+      resolveHintLines({
+        keys: [],
+        custom: ['Run the tests.\nThen commit.', 'Keep\tcolumns\u00a0tidy.'],
+      })
+    ).toEqual(['Run the tests. Then commit.', 'Keep columns tidy.']);
+  });
+
   it('returns [] for empty or undefined hints', () => {
     expect(resolveHintLines({ keys: [], custom: [] })).toEqual([]);
     expect(resolveHintLines(undefined)).toEqual([]);

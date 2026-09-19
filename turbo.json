@@ -63,6 +63,14 @@
       "outputs": [".vitest-reports/**"],
       "dependsOn": ["^build", "build"]
     },
+    "test:pty": {
+      "dependsOn": ["^build", "build"],
+      "cache": false
+    },
+    "perf:review-cap": {
+      "dependsOn": ["^build", "build"],
+      "cache": false
+    },
     "clean": {
       "cache": false
     }
