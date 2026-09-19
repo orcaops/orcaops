@@ -20,7 +20,17 @@ describe('checkpoint completion scope validation', () => {
   it("completed_step_ids referencing a step_id not in the open's declared scope → INVALID_INPUT", async () => {
     await agent.init({ noLlm: true });
     const plan = await agent.capturePlan(
-      { task: 't', plan_steps: [{ text: 'only step', label: 's1' }], touched_scope: [] },
+      {
+        task: 't',
+        plan_steps: [
+          {
+            text: 'only step',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
+        touched_scope: [],
+      },
       { noLlm: true }
     );
     const stepId = plan.plan_steps[0].step_id;
@@ -59,9 +69,9 @@ describe('checkpoint completion scope validation', () => {
       {
         task: 't',
         plan_steps: [
-          { text: 's1', label: 's1' },
-          { text: 's2', label: 's2' },
-          { text: 's3', label: 's3' },
+          { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          { text: 's2', label: 's2', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          { text: 's3', label: 's3', acceptance_criteria: [{ text: 'the step is delivered' }] },
         ],
         touched_scope: [],
       },
@@ -100,7 +110,13 @@ describe('checkpoint completion scope validation', () => {
   it('completed_step_ids must be non-empty strings (Zod rejects empty)', async () => {
     await agent.init({ noLlm: true });
     const plan = await agent.capturePlan(
-      { task: 't', plan_steps: [{ text: 's1', label: 's1' }], touched_scope: [] },
+      {
+        task: 't',
+        plan_steps: [
+          { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+        ],
+        touched_scope: [],
+      },
       { noLlm: true }
     );
     const stepId = plan.plan_steps[0].step_id;

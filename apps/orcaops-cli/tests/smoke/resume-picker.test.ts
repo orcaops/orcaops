@@ -89,7 +89,13 @@ describe('orcaops resume picker (smoke)', () => {
               idempotency_key: `plan-smoke-amb-${i}`,
               task: `t${i}`,
               label: `picker-amb-${i}`,
-              plan_steps: [{ text: 's', label: 's1' }],
+              plan_steps: [
+                {
+                  text: 's',
+                  label: 's1',
+                  acceptance_criteria: [{ text: 'the step is delivered' }],
+                },
+              ],
             })
           ),
         ],

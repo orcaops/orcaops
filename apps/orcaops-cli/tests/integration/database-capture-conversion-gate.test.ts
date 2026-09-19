@@ -61,7 +61,9 @@ function planPayload() {
     idempotency_key: `plan-${randomUUID()}`,
     task: 'capture after the gate decides',
     label: 'Gate capture',
-    plan_steps: [{ text: 'do it', label: 'Do it' }],
+    plan_steps: [
+      { text: 'do it', label: 'Do it', acceptance_criteria: [{ text: 'the step is delivered' }] },
+    ],
     touched_scope: [],
     non_goals: [],
   });

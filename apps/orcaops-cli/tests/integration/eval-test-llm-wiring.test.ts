@@ -219,7 +219,7 @@ describe('eval test — LLM evaluator through the CLI boundary', () => {
 
     // Declared sections reach the provider under a ref that names no
     // first-party evaluator — the case the old ref gate silently starved.
-    expect(prompt).toContain('## Acceptance criteria (the rubric to verify per step)');
+    expect(prompt).toContain('## Acceptance criteria (recorded per step)');
     expect(prompt).toContain(`[${CRITERION_ONE}] suite has >= 42 tests`);
     expect(prompt).toContain("## Diff boundary (THIS artifact's delta)");
     expect(prompt).not.toContain('## Delivered checkpoints');

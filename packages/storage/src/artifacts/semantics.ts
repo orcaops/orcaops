@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
+import {
+  hasRecordedCriteria,
+  missingCriteriaOnNewStepMessage,
+  rewrittenHistoricalStepMessage,
+  rubricRemovedMessage,
+} from './acceptance-criteria.js';
 import { type ArtifactPaths } from './artifact-paths.js';
 import {
   ArtifactFinalizedError,
@@ -13,6 +19,7 @@ import {
   DoneCriteriaInvalidError,
   OpenCheckpointOverlapError,
   OpenCheckpointsPendingError,
+  PlanAcceptanceCriteriaRequiredError,
   PlanRevisionInputInvalidError,
   PlanRevisionOpenCpConflictError,
   RecoveryRefusedError,
@@ -1104,6 +1111,62 @@ export abstract class ArtifactSemantics {
             input.artifact_id
           )
         );
+      }
+
+      // GATE 6c: a newly authored step needs a rubric, and a covered step must
+      // not be left rubric-free. This runs BEFORE the acknowledgement gate on
+      // purpose: `acknowledge_criteria_changes` audits a narrowing, and telling
+      // a caller to acknowledge a removal it cannot unlock would be a dead end.
+      const rubricViolations: Array<{
+        stepId: string;
+        label: string;
+        position: number;
+        kind: 'added' | 'rubric-removed' | 'historical-step-rewritten';
+      }> = [];
+      const rewrittenStepIds = new Set(rewritten.map((entry) => entry.step_id));
+      for (let i = 0; i < newSteps.length; i++) {
+        const step = newSteps[i]!;
+        if (hasRecordedCriteria(step)) continue;
+        const prior = priorById.get(step.step_id);
+        if (prior === undefined) {
+          rubricViolations.push({
+            stepId: step.step_id,
+            label: step.label,
+            position: i + 1,
+            kind: 'added',
+          });
+        } else if (hasRecordedCriteria(prior)) {
+          rubricViolations.push({
+            stepId: step.step_id,
+            label: step.label,
+            position: i + 1,
+            kind: 'rubric-removed',
+          });
+        } else if (rewrittenStepIds.has(step.step_id)) {
+          rubricViolations.push({
+            stepId: step.step_id,
+            label: step.label,
+            position: i + 1,
+            kind: 'historical-step-rewritten',
+          });
+        }
+      }
+      if (rubricViolations.length > 0) {
+        const addedViolations = rubricViolations.filter((v) => v.kind === 'added');
+        const removedViolations = rubricViolations.filter((v) => v.kind === 'rubric-removed');
+        const rewrittenHistoricalViolations = rubricViolations.filter(
+          (v) => v.kind === 'historical-step-rewritten'
+        );
+        const message = [
+          addedViolations.length > 0 ? missingCriteriaOnNewStepMessage(addedViolations) : null,
+          removedViolations.length > 0 ? rubricRemovedMessage(removedViolations) : null,
+          rewrittenHistoricalViolations.length > 0
+            ? rewrittenHistoricalStepMessage(rewrittenHistoricalViolations)
+            : null,
+        ]
+          .filter((m): m is string => m !== null)
+          .join('\n\n');
+        await recordAndThrow(new PlanAcceptanceCriteriaRequiredError(message, rubricViolations));
       }
 
       const ackedCriteria = new Set(input.acknowledge_criteria_changes ?? []);

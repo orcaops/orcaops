@@ -182,7 +182,9 @@ describe('orcaops hook session-start', () => {
         JSON.stringify({
           task: 'hook fixture task',
           label: 'hook fixture',
-          plan_steps: [{ text: 's1', label: 's1' }],
+          plan_steps: [
+            { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
           touched_scope: [],
         })
       ),
@@ -222,7 +224,9 @@ describe('orcaops hook session-start', () => {
         JSON.stringify({
           task: 'hook open-cp fixture',
           label: 'hook open-cp',
-          plan_steps: [{ text: 's1', label: 's1' }],
+          plan_steps: [
+            { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
           touched_scope: [],
         })
       ),
@@ -274,7 +278,9 @@ describe('orcaops hook session-start', () => {
         JSON.stringify({
           task: 'root override hook fixture',
           label: 'root override hook',
-          plan_steps: [{ text: 's1', label: 's1' }],
+          plan_steps: [
+            { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
           touched_scope: [],
         })
       ),
@@ -443,6 +449,48 @@ describe('orcaops hook session-start', () => {
     const r = await agent.runRaw(['hook', 'session-start']);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toBe('');
+  });
+
+  // Scope decides WHERE integrations are installed, never whether the hook
+  // fires: emission is gated on `session_hooks.enabled` alone. Doctor's
+  // wording has long claimed the opposite ("inactive under scope global"), so
+  // pin the runtime before anything is refactored against that claim.
+  it('global scope with hooks enabled emits, carried by the machine registration alone', async () => {
+    await agent.runRaw(['init', '--scope', 'global', '--json', '--no-llm', '--session-hooks']);
+
+    const r = await agent.runRaw(['hook', 'session-start']);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('[orcaops] This repo captures AI coding sessions');
+
+    // No project entry exists to arbitrate against, so the machine-level
+    // invocation carries the session instead of yielding.
+    const user = await agent.runRaw(['hook', 'session-start', '--agent', 'claude-code', '--user']);
+    expect(user.exitCode).toBe(0);
+    expect(user.stdout).toContain('[orcaops] This repo captures AI coding sessions');
+
+    await expect(access(path.join(repo.path, '.claude', 'settings.json'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('global scope without hooks enabled stays silent', async () => {
+    await agent.runRaw(['init', '--scope', 'global', '--json', '--no-llm']);
+    const r = await agent.runRaw(['hook', 'session-start']);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+
+  it('an unconfigured repository beside a global install stays silent', async () => {
+    await agent.runRaw(['init', '--scope', 'global', '--json', '--no-llm', '--session-hooks']);
+    const stray = await createTempRepo({ initialBranch: 'main' });
+    try {
+      const outsider = makeAgent({ cwd: stray.path, env: { ORCAOPS_DATA_DIR: dataRoot } });
+      const r = await outsider.runRaw(['hook', 'session-start']);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe('');
+    } finally {
+      await stray.cleanup();
+    }
   });
 
   it('--user yields when the repo carries a PROJECT entry (no double injection)', async () => {

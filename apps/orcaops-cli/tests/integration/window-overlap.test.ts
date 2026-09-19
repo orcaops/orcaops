@@ -9,7 +9,7 @@ import { readProjectArtifact } from '@orcaops/storage/history/database';
 import { createRepoTemplate, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
-import { commitFile } from '../support/test-helpers.js';
+import { commitFile, doneCriteriaFor } from '../support/test-helpers.js';
 
 /**
  * End-to-end: the segment-refined claims partition on REAL
@@ -87,8 +87,16 @@ describe('window overlap — CLI end-to-end', { timeout: 20_000 }, () => {
           task: 'overlap fixture',
           label: `overlap-${randomUUID().slice(0, 8)}`,
           plan_steps: [
-            { text: 'step 1', label: 's1' },
-            { text: 'step 2', label: 's2' },
+            {
+              text: 'step 1',
+              label: 's1',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+            {
+              text: 'step 2',
+              label: 's2',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
           ],
           touched_scope: [],
         })
@@ -97,10 +105,15 @@ describe('window overlap — CLI end-to-end', { timeout: 20_000 }, () => {
     expect(pr.exitCode).toBe(0);
     const plan = JSON.parse(pr.stdout) as {
       artifact_id: string;
-      plan_steps: Array<{ step_id: string }>;
+      plan_steps: Array<{ step_id: string; acceptance_criteria: Array<{ criterion_id: string }> }>;
     };
+    planSteps = plan.plan_steps;
     return { artifactId: plan.artifact_id, stepIds: plan.plan_steps.map((s) => s.step_id) };
   }
+
+  /** Captured rubric, so a close can cite evidence for the step it claims. */
+  let planSteps: Array<{ step_id: string; acceptance_criteria: Array<{ criterion_id: string }> }> =
+    [];
 
   async function openCp(artifactId: string, stepId: string): Promise<void> {
     const r = await agent.runRaw([
@@ -140,6 +153,7 @@ describe('window overlap — CLI end-to-end', { timeout: 20_000 }, () => {
           summary: `cp${n}`,
           files_changed: filesChanged,
           verification: [{ command: 'test fixture', exit_code: 0 }],
+          done_criteria: doneCriteriaFor(planSteps, [stepId]),
           completed_step_ids: [stepId],
         })
       ),

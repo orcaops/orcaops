@@ -203,7 +203,9 @@ describe('orcaops in a linked worktree', () => {
         JSON.stringify({
           task: 'work in the linked worktree',
           label: 'linked worktree work',
-          plan_steps: [{ text: 's1', label: 's1' }],
+          plan_steps: [
+            { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
           touched_scope: [],
         })
       ),

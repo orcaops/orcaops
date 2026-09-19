@@ -4,11 +4,20 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { type Config, getDefaultConfig, type SupportedAgentId } from '@orcaops/storage';
+
 import {
   canonicalSessionHookCommand,
+  configSelectsProjectHook,
+  documentCoversSessionHook,
+  documentHasManagedSessionHook,
+  hasMachineSessionHookSurface,
   isSemanticallyEmpty,
   type JsonObject,
+  machineSessionHookRequired,
+  machineSessionHookRequiredAgents,
   reconcileDocument,
+  sessionHookMatcherCoverage,
   type SettingsSpec,
   settingsSpecs,
   userJsonSpecs,
@@ -40,6 +49,272 @@ function runShell(command: string, env: NodeJS.ProcessEnv): Promise<CommandResul
     child.on('close', (code) => resolve({ exitCode: code ?? 0, stdout, stderr }));
   });
 }
+
+function configWith(overrides: {
+  scope?: Config['install']['scope'];
+  agents?: SupportedAgentId[];
+  enabled?: boolean;
+  entries?: Config['session_hooks']['entries'];
+}): Config {
+  const config = getDefaultConfig();
+  config.install.scope = overrides.scope ?? 'project';
+  config.install.agents = overrides.agents ?? ['claude-code'];
+  config.session_hooks.enabled = overrides.enabled ?? true;
+  config.session_hooks.entries = overrides.entries ?? 'project';
+  return config;
+}
+
+describe('machine session-hook requirement policy', () => {
+  it('selects a project hook only under project scope with entries enabled', () => {
+    expect(configSelectsProjectHook(configWith({}), 'claude-code')).toBe(true);
+    expect(configSelectsProjectHook(configWith({ entries: 'none' }), 'claude-code')).toBe(false);
+    expect(configSelectsProjectHook(configWith({ scope: 'global' }), 'claude-code')).toBe(false);
+    expect(configSelectsProjectHook(configWith({ scope: 'personal' }), 'claude-code')).toBe(false);
+    expect(configSelectsProjectHook(configWith({ enabled: false }), 'claude-code')).toBe(false);
+  });
+
+  it('never selects a project hook for a machine-config agent', () => {
+    expect(configSelectsProjectHook(configWith({ agents: ['codex'] }), 'codex')).toBe(false);
+  });
+
+  it('knows which agents carry a machine surface', () => {
+    expect(hasMachineSessionHookSurface('claude-code')).toBe(true);
+    expect(hasMachineSessionHookSurface('codex')).toBe(true);
+    // Cursor's hooks.json is a project file; it declares no machine surface.
+    expect(hasMachineSessionHookSurface('cursor')).toBe(false);
+  });
+
+  it('requires machine coverage for codex under project scope while claude-code uses its project hook', () => {
+    const config = configWith({ agents: ['claude-code', 'codex'] });
+    expect(machineSessionHookRequired(config, 'claude-code')).toBe(false);
+    expect(machineSessionHookRequired(config, 'codex')).toBe(true);
+    expect(machineSessionHookRequiredAgents(config)).toEqual(['codex']);
+  });
+
+  it('requires machine coverage for every machine-capable agent when project entries are disabled', () => {
+    const config = configWith({ agents: ['claude-code', 'codex'], entries: 'none' });
+    expect(machineSessionHookRequiredAgents(config)).toEqual(['claude-code', 'codex']);
+  });
+
+  it('requires machine coverage under personal and global scope', () => {
+    for (const scope of ['personal', 'global'] as const) {
+      const config = configWith({ agents: ['claude-code', 'codex'], scope });
+      expect(machineSessionHookRequiredAgents(config)).toEqual(['claude-code', 'codex']);
+    }
+  });
+
+  it('requires nothing when hooks are disabled, the install set is empty, or the agent has no machine surface', () => {
+    expect(machineSessionHookRequiredAgents(configWith({ enabled: false }))).toEqual([]);
+    expect(machineSessionHookRequiredAgents(configWith({ agents: [] }))).toEqual([]);
+    expect(
+      machineSessionHookRequiredAgents(configWith({ agents: ['cursor'], entries: 'none' }))
+    ).toEqual([]);
+  });
+
+  it('does not require machine coverage for an agent outside the install set', () => {
+    const config = configWith({ agents: ['claude-code'], entries: 'none' });
+    expect(machineSessionHookRequired(config, 'codex')).toBe(false);
+  });
+});
+
+describe('session-hook coverage validation', () => {
+  const claudeSpec = (): SettingsSpec => {
+    const spec = userJsonSpecs().find((s) => s.agent === 'claude-code');
+    if (!spec) throw new Error('claude-code user spec missing');
+    return spec;
+  };
+
+  const groupedDocument = (group: JsonObject): JsonObject => ({
+    hooks: { SessionStart: [group] },
+  });
+
+  const canonicalGroup = (overrides: { matcher?: unknown; type?: unknown } = {}): JsonObject => {
+    const spec = claudeSpec();
+    const hook: JsonObject = {
+      type: 'type' in overrides ? overrides.type : 'command',
+      command: specCommand(spec),
+    };
+    if (hook.type === undefined) delete hook.type;
+    const group: JsonObject = { hooks: [hook] };
+    const matcher = 'matcher' in overrides ? overrides.matcher : spec.desired.matcher;
+    if (matcher !== undefined) group.matcher = matcher;
+    return group;
+  };
+
+  it('verifies the canonical registration each spec installs', () => {
+    for (const spec of [...settingsSpecs(), ...userJsonSpecs()]) {
+      const document =
+        spec.schema === 'flat'
+          ? { hooks: { [spec.eventKey]: [spec.desired] } }
+          : { hooks: { [spec.eventKey]: [spec.desired] } };
+      expect(
+        documentCoversSessionHook(document as JsonObject, spec),
+        `${spec.agent} must pass its own validator`
+      ).toBe('covered');
+    }
+  });
+
+  it('rejects a canonical command carrying a non-command hook type', () => {
+    expect(
+      documentCoversSessionHook(groupedDocument(canonicalGroup({ type: 'prompt' })), claudeSpec())
+    ).toBe('uncovered');
+  });
+
+  it('rejects a canonical command with no hook type at all', () => {
+    // `type` is required by the schema, so an entry without one does not run.
+    // Ownership still claims it, which is what keeps uninstall able to strip it.
+    const document = groupedDocument(canonicalGroup({ type: undefined }));
+    expect(documentCoversSessionHook(document, claudeSpec())).toBe('uncovered');
+    expect(documentHasManagedSessionHook(document, claudeSpec())).toBe(true);
+  });
+
+  it('rejects a matcher that cannot fire for the canonical alternatives', () => {
+    expect(
+      documentCoversSessionHook(
+        groupedDocument(canonicalGroup({ matcher: 'never-match-a-session' })),
+        claudeSpec()
+      )
+    ).toBe('uncovered');
+  });
+
+  it('rejects a literal alternation missing one canonical alternative', () => {
+    // claude-code's canonical matcher is startup|resume|clear.
+    expect(
+      documentCoversSessionHook(
+        groupedDocument(canonicalGroup({ matcher: 'startup|resume' })),
+        claudeSpec()
+      )
+    ).toBe('uncovered');
+  });
+
+  it('accepts a literal alternation broader than the canonical matcher', () => {
+    expect(
+      documentCoversSessionHook(
+        groupedDocument(canonicalGroup({ matcher: 'startup|resume|clear|compact' })),
+        claudeSpec()
+      )
+    ).toBe('covered');
+  });
+
+  it('leaves an unsupported matcher form unverifiable rather than covered', () => {
+    for (const matcher of ['start.*', '(startup|resume)', 'startup|resume|', 42]) {
+      expect(
+        documentCoversSessionHook(groupedDocument(canonicalGroup({ matcher })), claudeSpec()),
+        `matcher ${JSON.stringify(matcher)}`
+      ).toBe('unverifiable');
+    }
+  });
+
+  it('treats an omitted matcher as covering only where the agent declares that default', () => {
+    const claude = claudeSpec();
+    expect(claude.matcherDefaultCoversAll).toBe(true);
+    expect(
+      documentCoversSessionHook(groupedDocument(canonicalGroup({ matcher: undefined })), claude)
+    ).toBe('covered');
+
+    const codex = userJsonSpecs().find((s) => s.agent === 'codex');
+    if (!codex) throw new Error('codex user spec missing');
+    expect(codex.matcherDefaultCoversAll).toBeUndefined();
+    const codexHook = { type: 'command', command: specCommand(codex) };
+    expect(
+      documentCoversSessionHook({ hooks: { SessionStart: [{ hooks: [codexHook] }] } }, codex)
+    ).toBe('unverifiable');
+  });
+
+  it('does not count command text outside the expected event or structure', () => {
+    const spec = claudeSpec();
+    const command = specCommand(spec);
+    const cases: JsonObject[] = [
+      // Wrong event.
+      { hooks: { SessionEnd: [canonicalGroup()] } },
+      // Unrelated field carrying the command text.
+      { description: command, hooks: { SessionStart: [] } },
+      // Group without a hooks array.
+      { hooks: { SessionStart: [{ matcher: spec.desired.matcher, command }] } },
+      // Event value that is not an array.
+      { hooks: { SessionStart: { matcher: spec.desired.matcher } } },
+      // No hooks object at all.
+      { version: 1 },
+    ];
+    for (const document of cases) {
+      expect(documentCoversSessionHook(document, spec), JSON.stringify(document)).toBe('uncovered');
+    }
+  });
+
+  it('is covered when one valid entry sits beside an invalid one', () => {
+    const spec = claudeSpec();
+    const document = {
+      hooks: {
+        SessionStart: [canonicalGroup({ type: 'prompt' }), canonicalGroup()],
+      },
+    };
+    expect(documentCoversSessionHook(document as JsonObject, spec)).toBe('covered');
+  });
+
+  it('keeps ownership broader than coverage', () => {
+    const spec = claudeSpec();
+    // The same entry the coverage validator rejects is still ours to reconcile
+    // and remove — tightening isOrcaopsHook would orphan it on uninstall.
+    const document = groupedDocument(canonicalGroup({ type: 'prompt' }));
+    expect(documentCoversSessionHook(document, spec)).toBe('uncovered');
+    expect(documentHasManagedSessionHook(document, spec)).toBe(true);
+  });
+
+  // The same matrix against every JSON surface we register into, rather than
+  // claude-code standing in for all of them: codex's hooks.json carries a
+  // different canonical matcher and its own command.
+  it('applies one matcher and type rule to every JSON surface', () => {
+    for (const spec of userJsonSpecs()) {
+      const canonical = spec.desired.matcher as string | undefined;
+      if (canonical === undefined) continue;
+      const command = specCommand(spec);
+      const build = (matcher: unknown, type: unknown): JsonObject => {
+        const hook: JsonObject = { command };
+        if (type !== undefined) hook.type = type;
+        const group: JsonObject = { hooks: [hook] };
+        if (matcher !== undefined) group.matcher = matcher;
+        return { hooks: { [spec.eventKey]: [group] } };
+      };
+      const label = `${spec.agent} (${canonical})`;
+
+      expect(
+        documentCoversSessionHook(build(canonical, 'command'), spec),
+        `${label} canonical`
+      ).toBe('covered');
+      expect(
+        documentCoversSessionHook(build(`${canonical}|extra-source`, 'command'), spec),
+        `${label} superset`
+      ).toBe('covered');
+      expect(
+        documentCoversSessionHook(build(canonical.split('|')[0], 'command'), spec),
+        `${label} missing an alternative`
+      ).toBe('uncovered');
+      expect(
+        documentCoversSessionHook(build(canonical, 'prompt'), spec),
+        `${label} wrong type`
+      ).toBe('uncovered');
+      expect(documentCoversSessionHook(build(canonical, undefined), spec), `${label} no type`).toBe(
+        'uncovered'
+      );
+      expect(
+        documentCoversSessionHook(build('start.*', 'command'), spec),
+        `${label} unsupported matcher`
+      ).toBe('unverifiable');
+    }
+  });
+
+  it('matches matcher breadth independently of any document', () => {
+    expect(sessionHookMatcherCoverage('startup|resume', 'startup|resume')).toBe('covered');
+    expect(sessionHookMatcherCoverage('resume|startup', 'startup|resume')).toBe('covered');
+    expect(sessionHookMatcherCoverage('startup', 'startup|resume')).toBe('uncovered');
+    expect(sessionHookMatcherCoverage('startup|*', 'startup|resume')).toBe('unverifiable');
+    expect(sessionHookMatcherCoverage(undefined, undefined)).toBe('covered');
+    expect(sessionHookMatcherCoverage(undefined, 'startup')).toBe('unverifiable');
+    expect(sessionHookMatcherCoverage(undefined, 'startup', { defaultCoversAll: true })).toBe(
+      'covered'
+    );
+  });
+});
 
 describe('canonical session-hook commands', () => {
   const tempDirs: string[] = [];

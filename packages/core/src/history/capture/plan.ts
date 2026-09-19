@@ -1,7 +1,15 @@
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 
-import { CAPTURE_AGENT_IDS, PlanInputSchema, prepareArtifactDraft, uuidv7 } from '@orcaops/storage';
+import {
+  CAPTURE_AGENT_IDS,
+  hasRecordedCriteria,
+  missingCriteriaOnCaptureMessage,
+  PlanAcceptanceCriteriaRequiredError,
+  PlanInputSchema,
+  prepareArtifactDraft,
+  uuidv7,
+} from '@orcaops/storage';
 import {
   appendProjectPlanCapture,
   beginProjectPlanCaptureRetention,
@@ -139,6 +147,26 @@ export async function captureDatabasePlan(
   };
   const previous = await replay();
   if (previous) return previous;
+
+  // New-request admission starts HERE, after the replay lookup missed. The rule
+  // cannot move any earlier: `prepared` doubles as the idempotency lookup key,
+  // so validating during preparation — or injecting a placeholder criterion
+  // into it — would change the canonical bytes and orphan an already-admitted
+  // pending command captured before this contract.
+  const uncovered = original.authored.plan_steps
+    .map((step, index) => ({ step, position: index + 1 }))
+    .filter(({ step }) => !hasRecordedCriteria(step))
+    .map(({ step, position }) => ({
+      stepId: null,
+      label: step.label,
+      position,
+      kind: 'authored' as const,
+    }));
+  if (uncovered.length > 0)
+    throw new PlanAcceptanceCriteriaRequiredError(
+      missingCriteriaOnCaptureMessage(uncovered),
+      uncovered
+    );
   const current = await revalidateDatabaseExecutionContext(context, { signal: runtime.signal });
   if (!current.binding)
     throw new ProjectDatabaseError(

@@ -52,16 +52,27 @@ export async function resolveDatabaseGitContext(input: {
   const signal = input.signal;
   try {
     const cwd = await realpath(requested);
-    const resolve = async (argument: string) =>
-      realpath(
-        line(
-          (await runDatabaseGit(cwd, ['rev-parse', '--path-format=absolute', argument], signal))
-            .stdout
-        )
-      );
-    const worktreeRoot = await resolve('--show-toplevel');
-    const gitDir = await resolve('--absolute-git-dir');
-    const commonDir = await resolve('--git-common-dir');
+    const pathArguments = ['--show-toplevel', '--absolute-git-dir', '--git-common-dir'];
+    const output = await runDatabaseGit(
+      cwd,
+      ['rev-parse', '--path-format=absolute', ...pathArguments],
+      signal
+    );
+    const paths = line(output.stdout).split('\n');
+    // Git separates these paths with newlines, which are also legal in a path.
+    if (paths.length !== pathArguments.length) {
+      paths.length = 0;
+      for (const argument of pathArguments)
+        paths.push(
+          line(
+            (await runDatabaseGit(cwd, ['rev-parse', '--path-format=absolute', argument], signal))
+              .stdout
+          )
+        );
+    }
+    const worktreeRoot = await realpath(paths[0]!);
+    const gitDir = await realpath(paths[1]!);
+    const commonDir = await realpath(paths[2]!);
     const repositoryCreation = await observeDirectory(commonDir);
     const administrativeIdentity = await observeDirectory(gitDir);
     const pointer = path.join(worktreeRoot, '.git');

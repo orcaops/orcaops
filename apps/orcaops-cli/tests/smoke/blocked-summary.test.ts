@@ -38,7 +38,13 @@ it('returns BLOCKED and exit one from the executable without changing history', 
         idempotency_key: 'blocked-plan',
         task: 'Retain blocked work',
         label: 'Blocked work',
-        plan_steps: [{ text: 'Verify the change', label: 'Verify' }],
+        plan_steps: [
+          {
+            text: 'Verify the change',
+            label: 'Verify',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
       })
     ),
   ]);

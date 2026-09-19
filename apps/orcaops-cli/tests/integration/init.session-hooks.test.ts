@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -23,17 +23,56 @@ interface SessionHookJson {
 
 const SETTINGS_PATHS = ['.claude/settings.json', '.cursor/hooks.json'];
 
+async function cleanupFixture(repo: TempRepo, scratch: string[]): Promise<void> {
+  const results = await Promise.allSettled([
+    repo.cleanup(),
+    ...scratch.map((dir) => rm(dir, { recursive: true, force: true })),
+  ]);
+  const failures = results.flatMap((result) =>
+    result.status === 'rejected' ? [result.reason] : []
+  );
+  if (failures.length > 0) throw new AggregateError(failures, 'Fixture cleanup failed');
+}
+
+it('attempts every external cleanup when repository cleanup fails', async () => {
+  const scratch = await Promise.all([
+    mkdtemp(path.join(tmpdir(), 'orcaops-cleanup-a-')),
+    mkdtemp(path.join(tmpdir(), 'orcaops-cleanup-b-')),
+  ]);
+  const repo = {
+    cleanup: async (): Promise<void> => {
+      throw new Error('repository cleanup failed');
+    },
+  } as TempRepo;
+  try {
+    await expect(cleanupFixture(repo, scratch)).rejects.toThrow('Fixture cleanup failed');
+    for (const dir of scratch) await expect(access(dir)).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    await Promise.all(scratch.map((dir) => rm(dir, { recursive: true, force: true })));
+  }
+});
+
 describe('init --session-hooks settings installation', () => {
   let repo: TempRepo;
   let agent: ReturnType<typeof makeAgent>;
+  let agentHomes: { CLAUDE_CONFIG_DIR: string; CODEX_HOME: string };
+  let scratch: string[] = [];
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
-    agent = makeAgent({ cwd: repo.path });
+    // Doctor's session-hook check reads MACHINE-level agent config. Without
+    // its own homes this suite reports on whatever the developer running it
+    // has registered, so the same commit passes here and fails there.
+    agentHomes = {
+      CLAUDE_CONFIG_DIR: await mkdtemp(path.join(tmpdir(), 'orcaops-claude-')),
+      CODEX_HOME: await mkdtemp(path.join(tmpdir(), 'orcaops-codex-')),
+    };
+    scratch = [agentHomes.CLAUDE_CONFIG_DIR, agentHomes.CODEX_HOME];
+    agent = makeAgent({ cwd: repo.path, env: { ...agentHomes } });
   });
 
   afterEach(async () => {
-    await repo.cleanup();
+    await cleanupFixture(repo, scratch);
   });
 
   async function readJson(rel: string): Promise<unknown> {
@@ -748,9 +787,10 @@ describe('init --session-hooks settings installation', () => {
       'claude-code',
     ]);
     const binDir = await mkdtemp(path.join(tmpdir(), 'orcaops-doctor-path-'));
+    scratch.push(binDir);
     await symlink('/usr/bin/git', path.join(binDir, 'git'));
 
-    const missing = makeAgent({ cwd: repo.path, env: { PATH: binDir } });
+    const missing = makeAgent({ cwd: repo.path, env: { ...agentHomes, PATH: binDir } });
     let result = await missing.runRaw(['doctor', '--json']);
     let report = JSON.parse(result.stdout) as {
       checks: Array<{ name: string; status: string; details?: string[] }>;
@@ -784,6 +824,7 @@ describe('init --session-hooks settings installation', () => {
       'claude-code',
     ]);
     const binDir = await mkdtemp(path.join(tmpdir(), 'orcaops-doctor-hang-'));
+    scratch.push(binDir);
     await symlink('/usr/bin/git', path.join(binDir, 'git'));
     const hangingBin = path.join(binDir, 'orcaops');
     // Absolute path: the stub's PATH holds only this dir, so a bare `sleep`
@@ -791,7 +832,7 @@ describe('init --session-hooks settings installation', () => {
     await writeFile(hangingBin, '#!/bin/sh\n/bin/sleep 60\n', 'utf8');
     await chmod(hangingBin, 0o755);
 
-    const slow = makeAgent({ cwd: repo.path, env: { PATH: binDir } });
+    const slow = makeAgent({ cwd: repo.path, env: { ...agentHomes, PATH: binDir } });
     const result = await slow.runRaw(['doctor', '--json']);
     const report = JSON.parse(result.stdout) as {
       checks: Array<{ name: string; status: string; summary: string; details?: string[] }>;
@@ -1061,9 +1102,10 @@ describe('init --session-hooks settings installation', () => {
 
   it('non-project scope skips settings writes with skipped-scope', async () => {
     const globalRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-global-'));
+    scratch.push(globalRoot);
     const scoped = makeAgent({
       cwd: repo.path,
-      env: { ORCAOPS_GLOBAL_ROOT: globalRoot },
+      env: { ...agentHomes, ORCAOPS_GLOBAL_ROOT: globalRoot },
     });
     const res = await scoped.runRaw([
       'init',
@@ -1091,18 +1133,33 @@ describe('init --session-hooks settings installation', () => {
 describe('session hooks under non-project scopes (strip is scope-agnostic)', () => {
   let repo: TempRepo;
   let agent: ReturnType<typeof makeAgent>;
+  let scratch: string[] = [];
 
   beforeEach(async () => {
     repo = await createTempRepo({ initialBranch: 'main' });
-    const globalRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-global-'));
-    agent = makeAgent({ cwd: repo.path, env: { ORCAOPS_GLOBAL_ROOT: globalRoot } });
+    // Machine coverage is part of the doctor verdict here, so the agent homes
+    // must be this test's own — otherwise the result tracks whatever the
+    // developer happens to have registered.
+    scratch = [
+      await mkdtemp(path.join(tmpdir(), 'orcaops-global-')),
+      await mkdtemp(path.join(tmpdir(), 'orcaops-claude-')),
+      await mkdtemp(path.join(tmpdir(), 'orcaops-codex-')),
+    ];
+    agent = makeAgent({
+      cwd: repo.path,
+      env: {
+        ORCAOPS_GLOBAL_ROOT: scratch[0],
+        CLAUDE_CONFIG_DIR: scratch[1],
+        CODEX_HOME: scratch[2],
+      },
+    });
   });
 
   afterEach(async () => {
-    await repo.cleanup();
+    await cleanupFixture(repo, scratch);
   });
 
-  it('a project→global scope switch strips the installed entries; doctor reports inactive', async () => {
+  it('a project→global scope switch strips the installed entries and leaves machine coverage required', async () => {
     await agent.runRaw([
       'init',
       '--scope',
@@ -1137,12 +1194,20 @@ describe('session hooks under non-project scopes (strip is scope-agnostic)', () 
     ]);
     expect(againOut.warnings.some((w) => w.includes('project-scope only'))).toBe(true);
 
+    // Enabled hooks still EMIT under global scope (the runtime gates on
+    // `enabled` alone), so with the project entry gone the machine
+    // registration is what has to carry them — and it is absent here.
     const doc = await agent.runRaw(['doctor', '--json']);
     const check = (
-      JSON.parse(doc.stdout) as { checks: Array<{ name: string; status: string; summary: string }> }
+      JSON.parse(doc.stdout) as {
+        checks: Array<{ name: string; status: string; summary: string; details?: string[] }>;
+      }
     ).checks.find((c) => c.name === 'session-hooks');
-    expect(check?.status).toBe('pass');
-    expect(check?.summary).toContain('inactive under scope "global"');
+    expect(check?.status).toBe('warn');
+    expect(check?.summary).not.toContain('inactive under scope');
+    expect(
+      check?.details?.some((d) => d.includes('claude-code: no machine session-hook registration'))
+    ).toBe(true);
   });
 
   it('a lingering entry under global scope: drift nudges, doctor warns, doctor --fix strips', async () => {
@@ -1201,14 +1266,22 @@ describe('session hooks under non-project scopes (strip is scope-agnostic)', () 
     // real scope) strips the entry and the re-run check is green.
     const fix = await agent.runRaw(['doctor', '--fix', '--json']);
     const fixed = (
-      JSON.parse(fix.stdout) as { checks: Array<{ name: string; status: string; summary: string }> }
+      JSON.parse(fix.stdout) as {
+        checks: Array<{ name: string; status: string; summary: string; details?: string[] }>;
+      }
     ).checks.find((c) => c.name === 'session-hooks');
-    expect(fixed?.status).toBe('pass');
-    expect(fixed?.summary).toContain('inactive under scope "global"');
+    // The lingering entry is gone — that remedy worked. What remains is a
+    // DIFFERENT finding: nothing registered at machine level to carry the
+    // hooks this repository still has enabled.
+    expect(fixed?.details?.some((d) => d.includes('lingering'))).toBe(false);
+    expect(fixed?.status).toBe('warn');
+    expect(
+      fixed?.details?.some((d) => d.includes('claude-code: no machine session-hook registration'))
+    ).toBe(true);
     await expect(access(path.join(repo.path, rel))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('--session-hook-entries none: enabled persists, NO settings files, skipped-entries rows, no warning', async () => {
+  it('--session-hook-entries none: enabled persists, NO settings files, skipped-entries rows, machine coverage required', async () => {
     const res = await agent.runRaw([
       'init',
       '--scope',
@@ -1246,11 +1319,13 @@ describe('session hooks under non-project scopes (strip is scope-agnostic)', () 
     expect(cfg.session_hooks).toEqual({ enabled: true, entries: 'none' });
 
     const doctor = JSON.parse((await agent.runRaw(['doctor', '--json'])).stdout) as {
-      checks: Array<{ name: string; status: string; summary: string }>;
+      checks: Array<{ name: string; status: string; summary: string; details?: string[] }>;
     };
     const hookCheck = doctor.checks.find((check) => check.name === 'session-hooks');
-    expect(hookCheck).toMatchObject({ status: 'pass' });
-    expect(hookCheck?.summary).toContain('project session-hook entries intentionally disabled');
+    // Turning project entries off does not turn hooks off; it moves the
+    // dependency onto the machine registration, which is absent here.
+    expect(hookCheck).toMatchObject({ status: 'warn' });
+    expect(hookCheck?.summary).not.toContain('machine registration expected');
 
     const status = JSON.parse((await agent.runRaw(['status', '--json'])).stdout) as {
       drift?: { staleSessionHooks: string[] };
@@ -1265,7 +1340,13 @@ describe('session hooks under non-project scopes (strip is scope-agnostic)', () 
         JSON.stringify({
           task: 'verify entries none',
           label: 'Verify entries none',
-          plan_steps: [{ text: 'keep machine-only hooks healthy', label: 'Keep hooks healthy' }],
+          plan_steps: [
+            {
+              text: 'keep machine-only hooks healthy',
+              label: 'Keep hooks healthy',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
         })
       ),
     ]);

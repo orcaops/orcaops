@@ -217,3 +217,28 @@ export async function patchEffectiveConfig(
   await writeFile(configPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
   return configPath;
 }
+
+/**
+ * Evidence for every acceptance criterion on the given steps, in the shape a
+ * checkpoint close requires. Claiming a step obliges evidence for each of its
+ * criteria, so fixtures that close a claimed step read the server-minted
+ * criterion ids back off the capture response and map them through here.
+ */
+export function doneCriteriaFor(
+  planSteps: ReadonlyArray<{
+    step_id: string;
+    acceptance_criteria?: ReadonlyArray<{ criterion_id: string }>;
+  }>,
+  stepIds: ReadonlyArray<string>,
+  evidence = 'fixture evidence'
+): Array<{ criterion_id: string; evidence: string }> {
+  const claimed = new Set(stepIds);
+  return planSteps
+    .filter((step) => claimed.has(step.step_id))
+    .flatMap((step) =>
+      (step.acceptance_criteria ?? []).map((criterion) => ({
+        criterion_id: criterion.criterion_id,
+        evidence,
+      }))
+    );
+}

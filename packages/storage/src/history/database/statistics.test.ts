@@ -330,7 +330,11 @@ async function populated() {
         label: 'Retain step 2',
         acceptance_criteria: [],
       },
-      { text: 'Added step', label: 'Added step', acceptance_criteria: [] },
+      {
+        text: 'Added step',
+        label: 'Added step',
+        acceptance_criteria: [{ text: 'the added step is observable' }],
+      },
     ],
     touched_scope: [],
     non_goals: [],

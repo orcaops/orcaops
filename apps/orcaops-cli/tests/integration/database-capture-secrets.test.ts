@@ -79,7 +79,13 @@ describe('registered database capture secret refusal', { timeout: 180_000 }, () 
           idempotency_key: `plan-${randomUUID()}`,
           task: `deploy with ${FAKE_TOKEN}`,
           label: 'Secret in the task',
-          plan_steps: [{ text: 'wire the deploy', label: 'Wire' }],
+          plan_steps: [
+            {
+              text: 'wire the deploy',
+              label: 'Wire',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         },
@@ -152,7 +158,13 @@ describe('registered database capture secret refusal', { timeout: 180_000 }, () 
       idempotency_key: `plan-${randomUUID()}`,
       task: 'assert the response shape',
       label: 'Warn-tier quoted code',
-      plan_steps: [{ text: `refactor ${QUOTED_CODE}`, label: 'Refactor' }],
+      plan_steps: [
+        {
+          text: `refactor ${QUOTED_CODE}`,
+          label: 'Refactor',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: [],
       non_goals: [],
     });
@@ -166,7 +178,13 @@ describe('registered database capture secret refusal', { timeout: 180_000 }, () 
       idempotency_key: `plan-${randomUUID()}`,
       task: `deploy with ${FAKE_TOKEN}`,
       label: 'Allowlisted credential',
-      plan_steps: [{ text: 'wire the deploy', label: 'Wire' }],
+      plan_steps: [
+        {
+          text: 'wire the deploy',
+          label: 'Wire',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: [],
       non_goals: [],
     });
@@ -181,7 +199,13 @@ describe('registered database capture secret refusal', { timeout: 180_000 }, () 
       idempotency_key: `plan-${randomUUID()}`,
       task: `deploy with ${FAKE_TOKEN}`,
       label: 'Unreadable allowlist',
-      plan_steps: [{ text: 'wire the deploy', label: 'Wire' }],
+      plan_steps: [
+        {
+          text: 'wire the deploy',
+          label: 'Wire',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: [],
       non_goals: [],
     });

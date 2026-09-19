@@ -38,7 +38,13 @@ it(
         idempotency_key: `plan-${randomUUID()}`,
         task: 'Start history through the packaged executable',
         label: 'Packaged first capture',
-        plan_steps: [{ text: 'do the thing', label: 'Do it' }],
+        plan_steps: [
+          {
+            text: 'do the thing',
+            label: 'Do it',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: [],
         non_goals: [],
       }),

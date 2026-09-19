@@ -84,7 +84,11 @@ async function twoStepPlan(f: Fixture, id: string) {
             text: 'Read retained evidence',
             label: 'Retained evidence',
           },
-          { text: 'Verify the port', label: 'Verify' },
+          {
+            text: 'Verify the port',
+            label: 'Verify',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
         ],
         touched_scope: [],
         non_goals: [],

@@ -1,8 +1,12 @@
 import {
   type ArtifactThread,
+  NO_CRITERIA_RECORDED,
   type NonGoal,
   redactSecretsInObject,
   redactSecretsInString,
+  rubricCoverage,
+  type RubricCoverage,
+  rubricCoverageSentence,
 } from '@orcaops/storage';
 
 import { computeCoverage } from '../lifecycle/coverage.js';
@@ -121,6 +125,8 @@ export interface ResumeData {
   uncovered_step_ids: string[];
   /** A prompt block the developer can paste back to the agent. */
   agent_prompt: string;
+  acceptance_criteria_coverage: RubricCoverage;
+  acceptance_criteria_status: string;
 }
 
 export interface ResumeOutput {
@@ -152,6 +158,7 @@ export function buildResumeFromSnapshot(input: {
       claimedBy.set(stepId, cp.n);
     }
   }
+  const resumeCoverage = rubricCoverage(plan);
   const planStepIdSet = new Set(plan.plan_steps.map((s) => s.step_id));
   const steps: ResumeStep[] = plan.plan_steps.map((step, idx) => {
     const evidence = claimedBy.get(step.step_id);
@@ -270,6 +277,8 @@ export function buildResumeFromSnapshot(input: {
     open_checkpoints,
     uncovered_step_ids,
     agent_prompt: '', // filled below
+    acceptance_criteria_coverage: resumeCoverage,
+    acceptance_criteria_status: rubricCoverageSentence(resumeCoverage),
   };
   // Redact at the data layer so the agent_prompt + markdown
   // renderers see scrubbed input — secrets in plan_steps,
@@ -315,6 +324,16 @@ function renderAgentPrompt(d: ResumeData): string {
   if (remaining.length > 0) {
     lines.push('Remaining:');
     for (const s of remaining) lines.push(`- ${labelText(s.label, s.text)}`);
+    lines.push('');
+  }
+  if (d.acceptance_criteria_coverage.missing > 0) {
+    // Without this the resumed agent keys evidence to criteria that do not
+    // exist and only discovers the gap when its close is graded.
+    lines.push(d.acceptance_criteria_status);
+    const missing = new Set(d.acceptance_criteria_coverage.missing_step_ids);
+    for (const s of d.steps.filter((step) => missing.has(step.step_id))) {
+      lines.push(`- ${labelText(s.label, s.text)} (no recorded criteria)`);
+    }
     lines.push('');
   }
   if (d.non_goals.length > 0) {
@@ -429,6 +448,19 @@ function renderResumeMarkdown(d: ResumeData): string {
     lines.push('_Coverage: every plan step is claimed by a closed checkpoint._');
     lines.push('');
   }
+
+  // Step claims and rubric presence are different facts: a step can be claimed
+  // complete and still have nothing to key criterion evidence to.
+  lines.push(`_${d.acceptance_criteria_status}_`);
+  if (d.acceptance_criteria_coverage.missing > 0) {
+    const missing = new Set(d.acceptance_criteria_coverage.missing_step_ids);
+    for (const s of d.steps.filter((step) => missing.has(step.step_id))) {
+      lines.push(`- ${labelText(s.label, s.text)} (no recorded criteria)`);
+    }
+    lines.push('');
+    lines.push(`_${NO_CRITERIA_RECORDED}_`);
+  }
+  lines.push('');
 
   if (d.non_goals.length > 0) {
     lines.push('## non-goals');

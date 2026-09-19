@@ -36,7 +36,33 @@ Work through every meaningful obligation in the source plan and classify it:
   plan says "a couple of tests").
 
 Neither a silent gap nor a declared exclusion is auto-approved — both are
-surfaced for the human. Only silent gaps and shrinkage are violations.
+surfaced for the human. Silent gaps, shrinkage, and unrepresented obligations
+are the findings that make the verdict a VIOLATION; a declared exclusion on its
+own does not.
+
+**Then, separately: is each obligation represented in the rubric?** The
+**Acceptance criteria (recorded per step)** section lists what each step
+records. A step covering an obligation whose acceptance condition never
+became a criterion is _scoped_ but not _gradable_ — nothing at close will
+check it. Judge this per obligation, not per step:
+
+- **Represented** — a criterion on the covering step states the source's
+  acceptance condition, in whatever wording.
+- **Unrepresented** — the source states a checkable condition ("rejects an
+  expired pin", "p95 under 200ms") and no criterion on the covering step
+  states it. Report it. A step marked `NO ACCEPTANCE CRITERIA RECORDED`
+  represents nothing, so every obligation it covers is unrepresented.
+- **Not applicable** — the source states no checkable condition for it.
+
+Keep the two judgments apart. Scope coverage asks whether the plan _plans_
+the obligation; rubric representation asks whether it wrote down how anyone
+would know it was met. An obligation can be covered and unrepresented, and
+that is worth reporting. A declared exclusion needs no criterion — it was
+deliberately not planned.
+
+Rubric representation is about the PLAN's text, not delivery. You are not
+judging whether the work was done, whether evidence exists, or whether any
+criterion was met.
 
 **Phase awareness** — read the `Phase:` line in the Context block:
 
@@ -55,23 +81,29 @@ own and make it the last thing you write; when several appear, the last one is
 read as the verdict. Never write a bare `PASS` / `VIOLATION` / `INFO` line in
 your prose.
 
-If every source obligation is covered or a declared exclusion:
+If every source obligation is covered or a declared exclusion, and every
+checkable obligation is represented in the rubric:
 
 Plan covers <covered>/<total> source obligations (<n> declared exclusion(s));
-no silent gaps. <one short sentence>
+no silent gaps. Rubric represents <r>/<c> checkable obligation(s).
+<one short sentence>
 
 ```orcaops-verdict
 PASS
 ```
 
-If at least one source obligation is a silent gap or materially shrunk:
+If at least one source obligation is a silent gap, materially shrunk, or
+unrepresented in the rubric — all three are findings this check exists to
+surface, and this evaluator warns rather than blocks:
 
 ## plan conformance
 
 Covered: <covered>/<total>. Declared exclusions: <n>. Silent gaps / shrunk: <n>.
+Rubric represents <r>/<c> checkable obligation(s).
 
 - **silent gap:** "<source obligation>" — not planned and not declared as a non-goal.
 - **shrunk:** "<source obligation>" — step "<step label>" plans materially less (<how>).
+- **unrepresented:** "<source obligation>" — planned by step "<step label>", but no acceptance criterion states its condition.
 - **declared exclusion (ok):** "<source obligation>" — excluded by non-goal "<text>" (<rationale>).
 
 ```orcaops-verdict

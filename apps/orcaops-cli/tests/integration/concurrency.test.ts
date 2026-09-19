@@ -87,7 +87,13 @@ describe('InProcessAgent concurrency (stress test)', () => {
             {
               task: `task-${i}`,
               label: `repo-${i}`,
-              plan_steps: [{ text: 'step', label: 'step' }],
+              plan_steps: [
+                {
+                  text: 'step',
+                  label: 'step',
+                  acceptance_criteria: [{ text: 'the step is delivered' }],
+                },
+              ],
               touched_scope: [],
             },
             { noLlm: true }
@@ -136,7 +142,13 @@ describe('InProcessAgent concurrency (stress test)', () => {
             {
               task: `parallel-task-${i}`,
               label: `parallel-${i}`,
-              plan_steps: [{ text: `s${i}`, label: `s${i}` }],
+              plan_steps: [
+                {
+                  text: `s${i}`,
+                  label: `s${i}`,
+                  acceptance_criteria: [{ text: 'the step is delivered' }],
+                },
+              ],
               touched_scope: [],
             },
             { noLlm: true }
@@ -260,7 +272,9 @@ describe('InProcessAgent concurrency (stress test)', () => {
             {
               task: `unwind-${i}`,
               label: `unwind-${i}`,
-              plan_steps: [{ text: 's', label: 's' }],
+              plan_steps: [
+                { text: 's', label: 's', acceptance_criteria: [{ text: 'the step is delivered' }] },
+              ],
               touched_scope: [],
             },
             { noLlm: true }

@@ -16,6 +16,7 @@ import {
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { doneCriteriaFor, installTestPack } from '../support/test-helpers.js';
 
 /**
  * Append-only plan revision e2e — full-supersede payloads, six
@@ -82,6 +83,16 @@ interface CapturePlanResponse extends OkEnvelope {
   revision_n: number;
   plan_event_id: string;
   plan_steps: PlanStepResponse[];
+  acceptance_criteria_coverage: RubricCoverageResponse;
+  acceptance_criteria_status: string;
+}
+
+interface RubricCoverageResponse {
+  revision_n: number;
+  total: number;
+  covered: number;
+  missing: number;
+  missing_step_ids: string[];
 }
 
 interface CapturePlanReviseResponse extends OkEnvelope {
@@ -89,6 +100,8 @@ interface CapturePlanReviseResponse extends OkEnvelope {
   revision_n: number;
   plan_event_id: string;
   plan_steps: PlanStepResponse[];
+  acceptance_criteria_coverage: RubricCoverageResponse;
+  acceptance_criteria_status: string;
   step_lineage: {
     added: string[];
     dropped: string[];
@@ -103,7 +116,11 @@ async function capturePlan(
   opts: { non_goals?: string[]; touched_scope?: string[] } = {}
 ): Promise<CapturePlanResponse> {
   await agent.runRaw(['init', '--json', '--no-llm']);
-  const plan_steps = plan_step_texts.map((text, idx) => ({ text, label: `s${idx + 1}` }));
+  const plan_steps = plan_step_texts.map((text, idx) => ({
+    text,
+    label: `s${idx + 1}`,
+    acceptance_criteria: [{ text: 'the step is delivered' }],
+  }));
   const r = await agent.runRaw([
     'capture',
     'plan',
@@ -304,9 +321,23 @@ describe('plan revision e2e', () => {
         rationale: 'discovered we also need a third step',
         prior_plan_event_id: null,
         plan_steps: [
-          { step_id: aId, text: 'step a', label: 's1' },
-          { step_id: bId, text: 'step b', label: 's2' },
-          { text: 'step c added', label: 's3' },
+          {
+            step_id: aId,
+            text: 'step a',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          {
+            step_id: bId,
+            text: 'step b',
+            label: 's2',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          {
+            text: 'step c added',
+            label: 's3',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
         ],
         touched_scope: [],
         non_goals: [],
@@ -329,6 +360,7 @@ describe('plan revision e2e', () => {
         artifact_id: cap.artifact_id,
         n: o.n,
         summary: 'did c',
+        done_criteria: doneCriteriaFor(rv.plan_steps, [cId]),
         completed_step_ids: [cId],
       })
     );
@@ -345,9 +377,19 @@ describe('plan revision e2e', () => {
         rationale: 'add c',
         prior_plan_event_id: null,
         plan_steps: [
-          { step_id: aId, text: 'a', label: 's1' },
-          { step_id: bId, text: 'b', label: 's2' },
-          { text: 'c', label: 's3' },
+          {
+            step_id: aId,
+            text: 'a',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          {
+            step_id: bId,
+            text: 'b',
+            label: 's2',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          { text: 'c', label: 's3', acceptance_criteria: [{ text: 'the step is delivered' }] },
         ],
         touched_scope: [],
         non_goals: [],
@@ -362,9 +404,19 @@ describe('plan revision e2e', () => {
         rationale: 'add c',
         prior_plan_event_id: null,
         plan_steps: [
-          { step_id: aId, text: 'a', label: 's1' },
-          { step_id: bId, text: 'b', label: 's2' },
-          { text: 'c', label: 's3' },
+          {
+            step_id: aId,
+            text: 'a',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          {
+            step_id: bId,
+            text: 'b',
+            label: 's2',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          { text: 'c', label: 's3', acceptance_criteria: [{ text: 'the step is delivered' }] },
         ],
         touched_scope: [],
         non_goals: [],
@@ -380,9 +432,23 @@ describe('plan revision e2e', () => {
         rationale: 'add c',
         prior_plan_event_id: null,
         plan_steps: [
-          { step_id: aId, text: 'a', label: 's1' },
-          { step_id: bId, text: 'b', label: 's2' },
-          { text: 'c REWRITTEN', label: 's3' },
+          {
+            step_id: aId,
+            text: 'a',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          {
+            step_id: bId,
+            text: 'b',
+            label: 's2',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          {
+            text: 'c REWRITTEN',
+            label: 's3',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
         ],
         touched_scope: [],
         non_goals: [],
@@ -401,7 +467,14 @@ describe('plan revision e2e', () => {
       agent_session_id: 'session-one',
       rationale: 'first revision rationale',
       prior_plan_event_id: null,
-      plan_steps: [{ step_id: aId, text: 'a', label: 's1' }],
+      plan_steps: [
+        {
+          step_id: aId,
+          text: 'a',
+          label: 's1',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: ['first-scope'],
       non_goals: [],
       acknowledge_criteria_changes: [],
@@ -445,7 +518,14 @@ describe('plan revision e2e', () => {
       artifact_id: cap.artifact_id,
       rationale: 'first revision',
       prior_plan_event_id: null,
-      plan_steps: [{ step_id: aId, text: 'a', label: 's1' }],
+      plan_steps: [
+        {
+          step_id: aId,
+          text: 'a',
+          label: 's1',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: ['first'],
       non_goals: [],
     };
@@ -459,7 +539,14 @@ describe('plan revision e2e', () => {
       artifact_id: cap.artifact_id,
       rationale: 'second revision',
       prior_plan_event_id: null,
-      plan_steps: [{ step_id: aId, text: 'a', label: 's1' }],
+      plan_steps: [
+        {
+          step_id: aId,
+          text: 'a',
+          label: 's1',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: ['second'],
       non_goals: [],
     };
@@ -495,7 +582,14 @@ describe('plan revision e2e', () => {
         agent_session_id: 'session-one',
         rationale: 'set the session',
         prior_plan_event_id: null,
-        plan_steps: [{ step_id: aId, text: 'a', label: 's1' }],
+        plan_steps: [
+          {
+            step_id: aId,
+            text: 'a',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: [],
         non_goals: [],
       })
@@ -505,7 +599,14 @@ describe('plan revision e2e', () => {
       artifact_id: cap.artifact_id,
       rationale: 'inherit the session',
       prior_plan_event_id: null,
-      plan_steps: [{ step_id: aId, text: 'a', label: 's1' }],
+      plan_steps: [
+        {
+          step_id: aId,
+          text: 'a',
+          label: 's1',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: ['inherited'],
       non_goals: [],
     };
@@ -526,7 +627,14 @@ describe('plan revision e2e', () => {
         agent_session_id: 'session-one',
         rationale: 'set the session',
         prior_plan_event_id: null,
-        plan_steps: [{ step_id: aId, text: 'a', label: 's1' }],
+        plan_steps: [
+          {
+            step_id: aId,
+            text: 'a',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: [],
         non_goals: [],
       })
@@ -537,7 +645,14 @@ describe('plan revision e2e', () => {
       agent_session_id: null,
       rationale: 'clear the session',
       prior_plan_event_id: null,
-      plan_steps: [{ step_id: aId, text: 'a', label: 's1' }],
+      plan_steps: [
+        {
+          step_id: aId,
+          text: 'a',
+          label: 's1',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: [],
       non_goals: [],
     };
@@ -575,7 +690,14 @@ describe('plan revision e2e', () => {
       artifact_id: cap.artifact_id,
       rationale: 'drop the open step',
       prior_plan_event_id: null,
-      plan_steps: [{ step_id: aId, text: 'a', label: 's1' }],
+      plan_steps: [
+        {
+          step_id: aId,
+          text: 'a',
+          label: 's1',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: [],
       non_goals: [],
     };
@@ -590,8 +712,18 @@ describe('plan revision e2e', () => {
         rationale: 'change only the session',
         prior_plan_event_id: null,
         plan_steps: [
-          { step_id: aId, text: 'a', label: 's1' },
-          { step_id: bId, text: 'b', label: 's2' },
+          {
+            step_id: aId,
+            text: 'a',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          {
+            step_id: bId,
+            text: 'b',
+            label: 's2',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
         ],
         touched_scope: [],
         non_goals: [],
@@ -616,8 +748,18 @@ describe('plan revision e2e', () => {
         rationale: 'try to drop b',
         prior_plan_event_id: null,
         plan_steps: [
-          { step_id: aId, text: 'a', label: 's1' },
-          { step_id: cId, text: 'c', label: 's2' },
+          {
+            step_id: aId,
+            text: 'a',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          {
+            step_id: cId,
+            text: 'c',
+            label: 's2',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
         ],
         touched_scope: [],
         non_goals: [],
@@ -641,8 +783,18 @@ describe('plan revision e2e', () => {
         rationale: 'now we can drop b',
         prior_plan_event_id: null,
         plan_steps: [
-          { step_id: aId, text: 'a', label: 's1' },
-          { step_id: cId, text: 'c', label: 's2' },
+          {
+            step_id: aId,
+            text: 'a',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          {
+            step_id: cId,
+            text: 'c',
+            label: 's2',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
         ],
         touched_scope: [],
         non_goals: [],
@@ -663,6 +815,7 @@ describe('plan revision e2e', () => {
         artifact_id: cap.artifact_id,
         n: o.n,
         summary: 'finished a',
+        done_criteria: doneCriteriaFor(cap.plan_steps, [aId]),
         completed_step_ids: [aId],
       })
     );
@@ -673,7 +826,14 @@ describe('plan revision e2e', () => {
         artifact_id: cap.artifact_id,
         rationale: 'a is no longer needed',
         prior_plan_event_id: null,
-        plan_steps: [{ step_id: bId, text: 'b', label: 's1' }],
+        plan_steps: [
+          {
+            step_id: bId,
+            text: 'b',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: [],
         non_goals: [],
       })
@@ -686,7 +846,14 @@ describe('plan revision e2e', () => {
         artifact_id: cap.artifact_id,
         rationale: 'a is no longer needed; archiving completion record',
         prior_plan_event_id: null,
-        plan_steps: [{ step_id: bId, text: 'b', label: 's1' }],
+        plan_steps: [
+          {
+            step_id: bId,
+            text: 'b',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: [],
         non_goals: [],
         acknowledge_drops_completed_steps: [aId],
@@ -731,9 +898,19 @@ describe('plan revision e2e', () => {
         rationale: 'add c',
         prior_plan_event_id: staleToken,
         plan_steps: [
-          { step_id: aId, text: 'a', label: 's1' },
-          { step_id: bId, text: 'b', label: 's2' },
-          { text: 'c', label: 's3' },
+          {
+            step_id: aId,
+            text: 'a',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          {
+            step_id: bId,
+            text: 'b',
+            label: 's2',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          { text: 'c', label: 's3', acceptance_criteria: [{ text: 'the step is delivered' }] },
         ],
         touched_scope: [],
         non_goals: [],
@@ -761,9 +938,24 @@ describe('plan revision e2e', () => {
         rationale: 'reorder: c first, then a, then b',
         prior_plan_event_id: null,
         plan_steps: [
-          { step_id: cId, text: 'c', label: 's1' },
-          { step_id: aId, text: 'a', label: 's2' },
-          { step_id: bId, text: 'b', label: 's3' },
+          {
+            step_id: cId,
+            text: 'c',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          {
+            step_id: aId,
+            text: 'a',
+            label: 's2',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+          {
+            step_id: bId,
+            text: 'b',
+            label: 's3',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
         ],
         touched_scope: [],
         non_goals: [],
@@ -786,7 +978,14 @@ describe('plan revision e2e', () => {
         artifact_id: cap.artifact_id,
         rationale: 'clarified a',
         prior_plan_event_id: null,
-        plan_steps: [{ step_id: aId, text: 'original a — refined', label: 's1' }],
+        plan_steps: [
+          {
+            step_id: aId,
+            text: 'original a — refined',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: [],
         non_goals: [],
       })
@@ -796,5 +995,78 @@ describe('plan revision e2e', () => {
     expect(ok.step_lineage.rewritten[0].prior_text_hash).toMatch(/^[0-9a-f]{64}$/);
     expect(ok.step_lineage.added).toEqual([]);
     expect(ok.step_lineage.dropped).toEqual([]);
+  });
+});
+
+describe('plan revision e2e — rubric coverage travels with its revision', () => {
+  let agent: ReturnType<typeof makeAgent>;
+  let repo: TempRepo;
+  let dataRoot: string;
+
+  beforeEach(async () => {
+    repo = await createTempRepo({ initialBranch: 'main' });
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-rubric-coverage-'));
+    agent = makeAgent({
+      cwd: repo.path,
+      env: { ORCAOPS_DATA_DIR: dataRoot, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
+  });
+  afterEach(async () => {
+    await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
+  });
+
+  it('reports the same counts with no LLM and an enabled evaluator', async () => {
+    const withNoLlm = await capturePlan(agent, ['a', 'b']);
+    await installTestPack(agent);
+    const second = makeAgent({
+      cwd: repo.path,
+      env: { ORCAOPS_DATA_DIR: dataRoot, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
+    const r = await second.runRaw([
+      'capture',
+      'plan',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          idempotency_key: `plan-${randomUUID()}`,
+          task: 'evaluators enabled',
+          label: 'evaluators-enabled',
+          plan_steps: [
+            { text: 'a', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+            { text: 'b', label: 's2', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+          touched_scope: [],
+        })
+      ),
+    ]);
+    const withEvaluators = parseOk<
+      CapturePlanResponse & {
+        evaluator_results: Array<{ evaluator_ref: string; run_status: string; verdict: string }>;
+      }
+    >(r);
+    expect(withEvaluators.evaluator_results).toContainEqual(
+      expect.objectContaining({
+        evaluator_ref: 'test-pack/pass-fixture',
+        run_status: 'completed',
+        verdict: 'pass',
+      })
+    );
+    expect(withEvaluators.acceptance_criteria_coverage).toMatchObject({
+      total: withNoLlm.acceptance_criteria_coverage.total,
+      covered: withNoLlm.acceptance_criteria_coverage.covered,
+      missing: withNoLlm.acceptance_criteria_coverage.missing,
+    });
+  });
+
+  it('reports rubric presence on the initial capture response', async () => {
+    const cap = await capturePlan(agent, ['a', 'b']);
+    expect(cap.acceptance_criteria_coverage).toMatchObject({
+      revision_n: 0,
+      total: 2,
+      covered: 2,
+      missing: 0,
+    });
+    expect(cap.acceptance_criteria_status).toContain('2 of 2 steps');
   });
 });

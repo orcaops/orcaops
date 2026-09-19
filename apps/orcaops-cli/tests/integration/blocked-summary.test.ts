@@ -34,7 +34,14 @@ describe('blocked summary refusal', { timeout: 60_000 }, () => {
       'plan',
       '--no-llm',
       '--input',
-      inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
+      inputFile(
+        JSON.stringify({
+          task: 't',
+          plan_steps: [
+            { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+        })
+      ),
     ]);
     expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     return JSON.parse(planRes.stdout) as {

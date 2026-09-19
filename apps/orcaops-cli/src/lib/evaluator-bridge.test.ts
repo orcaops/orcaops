@@ -60,7 +60,11 @@ describe('buildEvaluatorContext — prior_plan population', () => {
           plan_steps: [
             { step_id: STEP_A, text: 'step a text', label: 'step-a', acceptance_criteria: [] },
             { step_id: STEP_B, text: 'step b text', label: 'step-b', acceptance_criteria: [] },
-            { text: 'step c text', label: 'step-c', acceptance_criteria: [] },
+            {
+              text: 'step c text',
+              label: 'step-c',
+              acceptance_criteria: [{ text: 'step c is observable' }],
+            },
           ],
           touched_scope: ['initial-scope', 'new-scope'],
           non_goals: [

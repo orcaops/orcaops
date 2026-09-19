@@ -66,7 +66,13 @@ describe('capture command eager sync', { timeout: 120_000 }, () => {
       idempotency_key: randomUUID(),
       task: 'Capture a task',
       label: 'Task',
-      plan_steps: [{ text: 'Implement the task', label: 'Implement' }],
+      plan_steps: [
+        {
+          text: 'Implement the task',
+          label: 'Implement',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: [],
     };
     const plan = await run(['plan'], planBody);

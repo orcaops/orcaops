@@ -113,7 +113,13 @@ async function fixture() {
         idempotency_key: uuidv7(),
         task: 'Assemble a grouped push from the retained thread',
         label: 'Push input fixture',
-        plan_steps: [{ text: 'Assemble', label: 'Assemble' }],
+        plan_steps: [
+          {
+            text: 'Assemble',
+            label: 'Assemble',
+            acceptance_criteria: [{ text: 'The artifact assembles from retained events' }],
+          },
+        ],
       }),
       sourcePlan,
       agent: 'codex',
@@ -262,7 +268,10 @@ it('refuses a mismatched retained fingerprint before sending and preserves its p
           files_changed: ['value.ts'],
           decisions: [],
           uncertainty: [],
-          done_criteria: [],
+          done_criteria: plan.plan_steps[0]!.acceptance_criteria.map((criterion) => ({
+            criterion_id: criterion.criterion_id,
+            evidence: 'fixture evidence',
+          })),
           verification: [{ command: 'fixture verification', exit_code: 0 }],
           completed_step_ids: [plan.plan_steps[0]!.step_id],
           head_sha: plan.base_sha,
@@ -780,7 +789,12 @@ it('preserves original revision, checkpoint, summary and pin wire ordering', asy
         },
         start,
         null,
-        async () => new Map()
+        async () =>
+          new Map(
+            plan.plan_steps.flatMap((step) =>
+              step.acceptance_criteria.map((criterion) => [criterion.criterion_id, criterion.text])
+            )
+          )
       );
       expect(opened.map((call) => call.method)).toEqual([
         'captureThread.start',
@@ -800,7 +814,10 @@ it('preserves original revision, checkpoint, summary and pin wire ordering', asy
           files_changed: [],
           decisions: [],
           uncertainty: [],
-          done_criteria: [],
+          done_criteria: plan.plan_steps[0]!.acceptance_criteria.map((criterion) => ({
+            criterion_id: criterion.criterion_id,
+            evidence: 'fixture evidence',
+          })),
           verification: [{ command: 'fixture verification', exit_code: 0 }],
           completed_step_ids: [plan.plan_steps[0]!.step_id],
           head_sha: plan.base_sha,
@@ -846,7 +863,12 @@ it('preserves original revision, checkpoint, summary and pin wire ordering', asy
         },
         start,
         { retained: 'original pin payload' },
-        async () => new Map()
+        async () =>
+          new Map(
+            plan.plan_steps.flatMap((step) =>
+              step.acceptance_criteria.map((criterion) => [criterion.criterion_id, criterion.text])
+            )
+          )
       );
     }
   );

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { doneCriteriaFor } from '../support/test-helpers.js';
 import { commitFile } from '../support/test-helpers.js';
 
 function headlessEnv(): Record<string, string> {
@@ -80,7 +81,14 @@ describe('repo_state in resume + show', () => {
       'plan',
       '--no-llm',
       '--input',
-      inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
+      inputFile(
+        JSON.stringify({
+          task: 't',
+          plan_steps: [
+            { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+        })
+      ),
     ]);
     expect(res.exitCode).toBe(0);
     return (JSON.parse(res.stdout) as { artifact_id: string }).artifact_id;
@@ -116,6 +124,9 @@ describe('repo_state in resume + show', () => {
           n,
           summary: `cp ${n}`,
           verification: [{ command: 'test fixture', exit_code: 0 }],
+          done_criteria: doneCriteriaFor(showJson.artifact?.plan?.plan_steps ?? [], [
+            stepIds[n - 1],
+          ]),
           completed_step_ids: [stepIds[n - 1]],
           files_changed: files,
         })

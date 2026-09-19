@@ -6,6 +6,7 @@ import {
   CheckpointValidationError,
   ConfigValidationError,
   OpenCheckpointOverlapError,
+  PlanAcceptanceCriteriaRequiredError,
   PlanIdempotencyPendingError,
   PlanRevisionInputInvalidError,
   PlanRevisionOpenCpConflictError,
@@ -87,6 +88,7 @@ export async function loadSecretAllowlist(): Promise<readonly string[]> {
  *   - `UnacknowledgedDroppedCompletionsError` → `PLAN_REVISION_UNACKNOWLEDGED_DROPS`
  *   - `UnacknowledgedCriteriaChangesError`    → `PLAN_REVISION_UNACKNOWLEDGED_CRITERIA_CHANGES`
  *   - `PlanRevisionInputInvalidError`         → `PLAN_REVISION_INPUT_INVALID`
+ *   - `PlanAcceptanceCriteriaRequiredError`   → `PLAN_ACCEPTANCE_CRITERIA_REQUIRED`
  *   - `PlanIdempotencyPendingError`           → `IDEMPOTENCY_PENDING`
  *   - `SecretInPayloadError`                  → `SECRET_IN_PAYLOAD`
  *   - `CheckpointValidationError` (any)       → `INVALID_INPUT`
@@ -157,6 +159,10 @@ export async function runCapture<T extends Record<string, unknown>>(
           err.path
         )
       );
+      return;
+    }
+    if (err instanceof PlanAcceptanceCriteriaRequiredError) {
+      emit(new OrcaopsError(ErrorCodes.PLAN_ACCEPTANCE_CRITERIA_REQUIRED, err.message, err.path));
       return;
     }
     if (err instanceof PlanRevisionInputInvalidError) {

@@ -43,6 +43,17 @@ describe('skill-body ergonomics', () => {
     }
   });
 
+  it('plan revision example keeps a rubric on every step', () => {
+    const body = bodyText(orcaopsCaptureSkill);
+    const example = body.match(
+      /orcaops capture plan revise --input -[\s\S]+?\nplan_steps:\n([\s\S]+?)\ntouched_scope:/
+    )?.[1];
+    expect(example).toBeDefined();
+    const steps = `\n${example}`.split('\n  - ').slice(1);
+    expect(steps).toHaveLength(4);
+    for (const step of steps) expect(step).toContain('\n    acceptance_criteria:');
+  });
+
   it('pre-pr presents artifact_id as optional, not the entire input', () => {
     expect(bodyText(orcaopsPrePrSkill)).not.toContain('the entire input');
     expect(bodyText(orcaopsPrePrSkill)).toMatch(/artifact_id[^\n]*optional/i);

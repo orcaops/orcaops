@@ -122,11 +122,20 @@ export async function inventory(root: string) {
     )
       continue;
     const writer = writers.get(file);
-    const content = writer
-      ? JSON.stringify(databaseInventory(writer))
-      : entry.isFile()
-        ? await readFile(file)
-        : null;
+    let content: string | Buffer | null;
+    if (writer) content = JSON.stringify(databaseInventory(writer));
+    else if (entry.isFile()) {
+      try {
+        content = await readFile(file);
+      } catch (error) {
+        // Git's background maintenance creates and removes locks under .git
+        // while this walk runs, so an entry can exist at readdir and be gone
+        // by the read. Something that transient is not part of the tree's
+        // inventory; any other read failure still is.
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        continue;
+      }
+    } else content = null;
     result[path.relative(root, file)] =
       content === null
         ? entry.isDirectory()

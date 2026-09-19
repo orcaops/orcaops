@@ -60,7 +60,13 @@ describe('registered database capture concurrency', { timeout: 180_000 }, () => 
               idempotency_key: `plan-${randomUUID()}`,
               task: `Parallel capture ${index}`,
               label: `Parallel ${index}`,
-              plan_steps: [{ text: `step ${index}`, label: `Step ${index}` }],
+              plan_steps: [
+                {
+                  text: `step ${index}`,
+                  label: `Step ${index}`,
+                  acceptance_criteria: [{ text: 'the step is delivered' }],
+                },
+              ],
               touched_scope: [],
               non_goals: [],
             })
@@ -92,8 +98,16 @@ describe('registered database capture concurrency', { timeout: 180_000 }, () => 
           task: 'Race two checkpoint opens',
           label: 'Racing opens',
           plan_steps: [
-            { text: 'first', label: 'First' },
-            { text: 'second', label: 'Second' },
+            {
+              text: 'first',
+              label: 'First',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+            {
+              text: 'second',
+              label: 'Second',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
           ],
           touched_scope: [],
           non_goals: [],

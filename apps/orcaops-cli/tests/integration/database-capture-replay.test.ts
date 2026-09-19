@@ -73,12 +73,33 @@ describe('registered database capture replay', { timeout: 240_000 }, () => {
       idempotency_key: `plan-${randomUUID()}`,
       task: 'replay writes nothing',
       label: 'Replay subject',
-      plan_steps: [{ text: 'do it', label: 'Do it' }],
+      plan_steps: [
+        { text: 'do it', label: 'Do it', acceptance_criteria: [{ text: 'the step is delivered' }] },
+      ],
       touched_scope: [],
       non_goals: [],
     };
     const first = await run(f, ['plan'], body);
     expect(first.raw.exitCode, first.raw.stdout + first.raw.stderr).toBe(0);
+    const originalPlan = readProjectArtifact(f.writer, first.result.artifact_id)!.thread.plan!;
+    const revised = await run(f, ['plan', 'revise'], {
+      idempotency_key: `revise-${randomUUID()}`,
+      artifact_id: first.result.artifact_id,
+      label: 'Replay subject revised',
+      rationale: 'add a second obligation before replaying the original capture',
+      prior_plan_event_id: originalPlan.source_event_id,
+      plan_steps: [
+        originalPlan.plan_steps[0],
+        {
+          text: 'do another thing',
+          label: 'Do another thing',
+          acceptance_criteria: [{ text: 'the second step is delivered' }],
+        },
+      ],
+      touched_scope: [],
+      non_goals: [],
+    });
+    expect(revised.raw.exitCode, revised.raw.stdout + revised.raw.stderr).toBe(0);
     const before = inventory(f);
     const replay = await run(f, ['plan'], body);
     expect(replay.raw.exitCode, replay.raw.stdout + replay.raw.stderr).toBe(0);
@@ -87,13 +108,155 @@ describe('registered database capture replay', { timeout: 240_000 }, () => {
       idempotency_status: 'replay',
       focus: { state: 'skipped', reason: 'replay' },
       usage: { state: 'skipped', reason: 'replay' },
+      revision_n: 1,
+      acceptance_criteria_coverage: { revision_n: 1, total: 2, covered: 2, missing: 0 },
     });
+    expect(replay.result.plan_steps).toHaveLength(2);
     expect(replay.result.plan_event_id).toBe(first.result.plan_event_id);
     expect(inventory(f)).toEqual(before);
 
     const conflict = await run(f, ['plan'], { ...body, label: 'A different label' });
     expect(conflict.raw.exitCode).toBe(1);
     expect(conflict.result.error.code).toBe('IDEMPOTENCY_CONFLICT');
+    expect(inventory(f)).toEqual(before);
+  });
+
+  it('replays revision coverage from its historical plan without writing', async () => {
+    const f = await fixture();
+    const id = await f.capture();
+    const plan = readProjectArtifact(f.writer, id)!.thread.plan!;
+    const step = plan.plan_steps[0];
+    const firstKey = `revise-${randomUUID()}`;
+    const firstBody = {
+      idempotency_key: firstKey,
+      artifact_id: id,
+      label: 'Historical missing rubric',
+      rationale: 'retain the historical obligation before adding its rubric',
+      prior_plan_event_id: plan.source_event_id,
+      plan_steps: [step],
+      touched_scope: [],
+      non_goals: [],
+    };
+    const first = await run(f, ['plan', 'revise'], firstBody);
+    expect(first.raw.exitCode, first.raw.stdout + first.raw.stderr).toBe(0);
+    expect(first.result.acceptance_criteria_coverage).toEqual({
+      revision_n: 1,
+      total: 1,
+      covered: 0,
+      missing: 1,
+      missing_step_ids: [step.step_id],
+    });
+
+    const second = await run(f, ['plan', 'revise'], {
+      idempotency_key: `revise-${randomUUID()}`,
+      artifact_id: id,
+      label: 'Historical rubric added',
+      rationale: 'record a criterion for the still-unprotected obligation',
+      prior_plan_event_id: first.result.plan_event_id,
+      plan_steps: [
+        {
+          ...step,
+          acceptance_criteria: [{ text: 'the retained obligation is delivered' }],
+        },
+      ],
+      touched_scope: [],
+      non_goals: [],
+    });
+    expect(second.raw.exitCode, second.raw.stdout + second.raw.stderr).toBe(0);
+    expect(second.result.acceptance_criteria_coverage).toMatchObject({
+      revision_n: 2,
+      covered: 1,
+      missing: 0,
+    });
+
+    const before = inventory(f);
+    const replay = await run(f, ['plan', 'revise'], firstBody);
+    expect(replay.raw.exitCode, replay.raw.stdout + replay.raw.stderr).toBe(0);
+    expect(replay.result).toMatchObject({
+      idempotency_status: 'replay',
+      revision_n: 1,
+      acceptance_criteria_coverage: {
+        revision_n: 1,
+        total: 1,
+        covered: 0,
+        missing: 1,
+        missing_step_ids: [step.step_id],
+      },
+      evaluator_results: [],
+    });
+    expect(replay.result.plan_steps).toEqual(first.result.plan_steps);
+    expect(inventory(f)).toEqual(before);
+  });
+
+  it('replays close coverage from the opening revision without writing', async () => {
+    const f = await fixture();
+    const coveredStepId = uuidv7();
+    const bareStepId = uuidv7();
+    const criterionId = uuidv7();
+    const coveredStep = {
+      step_id: coveredStepId,
+      text: 'Deliver covered history',
+      label: 'Covered history',
+      acceptance_criteria: [{ criterion_id: criterionId, text: 'covered history is delivered' }],
+    };
+    const bareStep = {
+      step_id: bareStepId,
+      text: 'Retain rubric-free history',
+      label: 'Rubric-free history',
+      acceptance_criteria: [],
+    };
+    const id = await f.capture(undefined, { steps: [coveredStep, bareStep] });
+    const opened = await run(f, ['checkpoint', 'open'], {
+      idempotency_key: `open-${randomUUID()}`,
+      artifact_id: id,
+      declared_step_ids: [coveredStepId, bareStepId],
+    });
+    expect(opened.raw.exitCode, opened.raw.stdout + opened.raw.stderr).toBe(0);
+
+    const closeBody = {
+      idempotency_key: `close-${randomUUID()}`,
+      artifact_id: id,
+      n: opened.result.n,
+      summary: 'Claim covered and historical rubric-free work',
+      files_changed: [],
+      completed_step_ids: [coveredStepId, bareStepId],
+      decisions: [],
+      uncertainty: [],
+      done_criteria: [{ criterion_id: criterionId, evidence: 'fixture evidence' }],
+      verification: [{ command: 'test fixture', exit_code: 0 }],
+    };
+    const closed = await run(f, ['checkpoint', 'close'], closeBody);
+    expect(closed.raw.exitCode, closed.raw.stdout + closed.raw.stderr).toBe(0);
+    expect(closed.result.acceptance_criteria_coverage).toEqual({
+      revision_n: 0,
+      total: 2,
+      covered: 1,
+      missing: 1,
+      missing_step_ids: [bareStepId],
+    });
+
+    const current = readProjectArtifact(f.writer, id)!.thread.plan!;
+    const revised = await run(f, ['plan', 'revise'], {
+      idempotency_key: `revise-${randomUUID()}`,
+      artifact_id: id,
+      label: 'Drop completed rubric-free history',
+      rationale: 'make the current plan differ from the checkpoint opening revision',
+      prior_plan_event_id: current.source_event_id,
+      plan_steps: [coveredStep],
+      touched_scope: [],
+      non_goals: [],
+      acknowledge_drops_completed_steps: [bareStepId],
+    });
+    expect(revised.raw.exitCode, revised.raw.stdout + revised.raw.stderr).toBe(0);
+
+    const before = inventory(f);
+    const replay = await run(f, ['checkpoint', 'close'], closeBody);
+    expect(replay.raw.exitCode, replay.raw.stdout + replay.raw.stderr).toBe(0);
+    expect(replay.result).toMatchObject({
+      idempotency_status: 'replay',
+      acceptance_criteria_coverage: closed.result.acceptance_criteria_coverage,
+      evaluator_results: [],
+    });
     expect(inventory(f)).toEqual(before);
   });
 
@@ -118,7 +281,12 @@ describe('registered database capture replay', { timeout: 240_000 }, () => {
           rationale: 'exercise the replay',
           prior_plan_event_id: null,
           plan_steps: [
-            { step_id: step, text: 'Read retained evidence', label: 'Retained evidence' },
+            {
+              step_id: step,
+              text: 'Read retained evidence',
+              label: 'Retained evidence',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
           ],
           touched_scope: [],
           non_goals: [],

@@ -177,9 +177,16 @@ describe('capture plan revise: criterion_lineage + reword warnings', () => {
             {
               text: 'step a',
               label: 'step-a',
-              acceptance_criteria: [{ text: 'moved criterion text' }],
+              acceptance_criteria: [
+                { text: 'moved criterion text' },
+                { text: 'step a keeps this one' },
+              ],
             },
-            { text: 'step b', label: 'step-b' },
+            {
+              text: 'step b',
+              label: 'step-b',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
           ],
         })
       ),
@@ -201,7 +208,12 @@ describe('capture plan revise: criterion_lineage + reword warnings', () => {
           rationale: 'moving the rubric item to the step that owns it',
           prior_plan_event_id: null,
           plan_steps: [
-            { step_id: stepA.step_id, text: 'step a', label: 'step-a' },
+            {
+              step_id: stepA.step_id,
+              text: 'step a',
+              label: 'step-a',
+              acceptance_criteria: [{ text: 'step a keeps this one' }],
+            },
             {
               step_id: stepB.step_id,
               text: 'step b',
@@ -246,9 +258,16 @@ describe('capture plan revise: criterion_lineage + reword warnings', () => {
             {
               text: 'step a',
               label: 'step-a',
-              acceptance_criteria: [{ text: 'shared boilerplate' }],
+              acceptance_criteria: [
+                { text: 'shared boilerplate' },
+                { text: 'step a keeps this one' },
+              ],
             },
-            { text: 'step b', label: 'step-b' },
+            {
+              text: 'step b',
+              label: 'step-b',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
             {
               text: 'step c',
               label: 'step-c',
@@ -276,7 +295,12 @@ describe('capture plan revise: criterion_lineage + reword warnings', () => {
           rationale: 'move the rubric item while c keeps its own copy explicitly',
           prior_plan_event_id: null,
           plan_steps: [
-            { step_id: stepA.step_id, text: 'step a', label: 'step-a' },
+            {
+              step_id: stepA.step_id,
+              text: 'step a',
+              label: 'step-a',
+              acceptance_criteria: [{ text: 'step a keeps this one' }],
+            },
             {
               step_id: stepB.step_id,
               text: 'step b',

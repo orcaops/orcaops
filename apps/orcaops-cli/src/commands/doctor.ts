@@ -119,12 +119,17 @@ import { resolveRepoKey } from '../lib/repo-key.js';
 import { withRepositoryInstallLock } from '../lib/repository-install-lock.js';
 import { discoverGitRoot, resolveExplicitOverride } from '../lib/resolve-root.js';
 import {
-  codexDualRepresentationNote,
-  evaluateUserSessionHookSurfaces,
+  assessMachineSessionHookCoverage,
+  type MachineCoverageResult,
+} from '../lib/session-hooks-coverage.js';
+import {
+  inspectUserSessionHooks,
   readUserHooksRecord,
+  type SessionHookRepairAction,
   userSettingsSpec,
 } from '../lib/session-hooks-user.js';
 import {
+  configSelectsProjectHook,
   documentHasCustomizedSessionHook,
   planSessionHookSettings,
   type SettingsSpec,
@@ -1697,24 +1702,54 @@ async function checkGitHooks(repoRoot: string): Promise<DoctorCheck> {
  * inactive-by-scope: only LINGERING orcaops entries warn (a user's broken
  * settings file with nothing of ours in it is not our finding).
  */
+/**
+ * One line per agent whose required machine coverage is not verified. The
+ * three states read differently on purpose: `missing` is an absence, `broken`
+ * is something present that will not run, and `unknown` is a question we could
+ * not answer — calling that last one missing would assert a removal we cannot
+ * evidence.
+ */
+function machineCoverageFinding(result: MachineCoverageResult): string {
+  const remedy = result.remedy ? ` — ${result.remedy}` : '';
+  if (result.state === 'broken') {
+    return `${result.agent}: machine session-hook registration will not run${remedy}`;
+  }
+  if (result.state === 'unknown') {
+    return `${result.agent}: machine session-hook registration could not be verified${remedy}`;
+  }
+  return `${result.agent}: no machine session-hook registration (${result.reason})${remedy}`;
+}
+
 async function checkSessionHooks(repoRoot: string, config: Config): Promise<DoctorCheck> {
   const name = 'session-hooks';
-  const active = config.session_hooks.enabled && config.install.scope === 'project';
+  // Project ENTRIES are scope-gated; hook EMISSION is not (see
+  // `readSessionStartState`, which gates on `session_hooks.enabled` alone).
+  // Conflating the two is what produced the old "inactive under scope" claim
+  // about a repository whose hooks were emitting the whole time.
+  const projectEntriesActive = config.session_hooks.enabled && config.install.scope === 'project';
   const findings: string[] = [];
   const info: string[] = [];
   let projectAttention = false;
   let machineAttention = false;
+  // The shared footer is an INSTALL instruction, so it may only appear when
+  // installing is actually the remedy. A disabled Codex gate wants the
+  // setting enabled — install deliberately leaves it alone — and a customized
+  // command wants manual review, because installing beside it adds a second
+  // entry. Printing the footer there contradicts the specific remedy.
+  let installIsTheRemedy = false;
   const addProjectFinding = (finding: string): void => {
     projectAttention = true;
     findings.push(finding);
   };
-  const addMachineFinding = (finding: string): void => {
+  const addMachineFinding = (finding: string, primaryAction: SessionHookRepairAction): void => {
     machineAttention = true;
+    if (primaryAction === 'install') installIsTheRemedy = true;
     findings.push(finding);
   };
   let current = 0;
   let intentionallySkipped = 0;
   let installedEntry = false;
+  let coverage: MachineCoverageResult[] = [];
   try {
     const plan = await planSessionHookSettings({
       repoRoot,
@@ -1772,7 +1807,10 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
         await readRepositoryRegularFileOrNull(settingsPath, repoRoot, 'session-hook settings')
       );
     }
-    if (active && config.install.agents.includes('opencode')) {
+    if (
+      config.install.agents.includes('opencode') &&
+      configSelectsProjectHook(config, 'opencode')
+    ) {
       const rel = opencodeSessionPluginPath(config.naming.prefix);
       const cls = await classifyGeneratedFile(
         path.join(repoRoot, rel),
@@ -1789,13 +1827,20 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
     // state). Never repaired by --fix — user files are written only by the
     // consent command. `preview` never writes.
     const record = await readUserHooksRecord();
-    const machineSurfaces = await evaluateUserSessionHookSurfaces(record);
+    // One pass yields the rows AND codex's agent-level switch, so the finding
+    // below and the coverage verdict cannot describe different reads.
+    const {
+      surfaces: machineSurfaces,
+      codexGate,
+      codexDualRepresentation,
+    } = await inspectUserSessionHooks(record);
     for (const surface of machineSurfaces) {
       if (surface.state === 'installed') {
         if (!surface.recorded && surface.agent !== 'codex') {
           addMachineFinding(
             `  - ${surface.path}: orcaops entry in a user config with NO registration record — ` +
-              'remove with `orcaops session-hooks uninstall` (or re-register)'
+              'remove with `orcaops session-hooks uninstall` (or re-register)',
+            surface.primaryAction
           );
         } else {
           current++;
@@ -1804,17 +1849,20 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
       } else if (surface.state === 'registered-but-broken') {
         if (surface.recorded || surface.owned) {
           addMachineFinding(
-            `  - ${surface.path}: registered user-level entry is broken — ${surface.remedy}`
+            `  - ${surface.path}: registered user-level entry is broken — ${surface.remedy}`,
+            surface.primaryAction
           );
         }
       } else if (surface.state === 'registered-but-missing') {
         addMachineFinding(
-          `  - ${surface.path}: registered user-level entry is missing — ${surface.remedy}`
+          `  - ${surface.path}: registered user-level entry is missing — ${surface.remedy}`,
+          surface.primaryAction
         );
       } else if (surface.state === 'registered-unverified') {
         if (surface.recorded) {
           addMachineFinding(
-            `  - ${surface.path}: registered user-level entry could not be verified — ${surface.remedy}`
+            `  - ${surface.path}: registered user-level entry could not be verified — ${surface.remedy}`,
+            surface.primaryAction
           );
         }
       } else if (surface.state === 'superseded') {
@@ -1822,16 +1870,35 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
         // representation moved it to. What is left here is a duplicate
         // registration to clean up, so this warns rather than reads as broken.
         addMachineFinding(
-          `  - ${surface.path}: leftover duplicate registration — ${surface.remedy}`
+          `  - ${surface.path}: leftover duplicate registration — ${surface.remedy}`,
+          surface.primaryAction
         );
       } else if (surface.state === 'registered-unsupported') {
-        addMachineFinding(`  - ${surface.path}: ${surface.remedy}`);
+        addMachineFinding(`  - ${surface.path}: ${surface.remedy}`, surface.primaryAction);
       }
       // `invalid-json` is another tool's unparseable file (an unparseable one
       // of OURS reads as registered-but-broken above) — not doctor's to report.
     }
-    const dualRepresentation = await codexDualRepresentationNote();
-    if (dualRepresentation !== null) info.push(`  - ${dualRepresentation}`);
+    coverage = assessMachineSessionHookCoverage({ config, surfaces: machineSurfaces, codexGate });
+    for (const result of coverage) {
+      if (!result.required || result.state === 'covered') continue;
+      // A row finding above already names this path and says what is wrong
+      // with it; a second generic line about the same dependency would read
+      // as two problems.
+      if (result.contributing.some((p) => findings.some((f) => f.includes(p)))) continue;
+      addMachineFinding(`  - ${machineCoverageFinding(result)}`, result.primaryAction);
+    }
+    if (coverage.some((r) => r.required && r.state !== 'covered')) {
+      info.push(
+        config.bootstrap === 'manual'
+          ? '  - Automatic session-start guidance is unavailable; Orcaops does not manage ' +
+              'an instruction-block fallback in manual mode.'
+          : '  - The instruction block is the configured fallback; see the agents-md check ' +
+              'for its health.'
+      );
+    }
+
+    if (codexDualRepresentation !== null) info.push(`  - ${codexDualRepresentation}`);
     for (const entry of record?.entries ?? []) {
       const userSpec = userSettingsSpec(entry.agent, entry.path);
       if (!userSpec) continue;
@@ -1884,17 +1951,19 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
     };
   }
   if (findings.length === 0) {
+    const requiredAgents = coverage.filter((r) => r.required);
+    const verified =
+      requiredAgents.length > 0 && requiredAgents.every((r) => r.state === 'covered')
+        ? '; required machine registrations verified'
+        : '';
     return {
       name,
       status: 'pass',
-      summary: active
-        ? intentionallySkipped > 0
-          ? `project session-hook entries intentionally disabled for ${intentionallySkipped} agent(s); machine registration expected`
-          : `${current} session-hook surface(s) current`
-        : config.session_hooks.enabled
-          ? `session hooks enabled but inactive under scope "${config.install.scope}" ` +
-            '(project-scope only in v1); no lingering entries'
-          : 'session hooks disabled; no lingering entries',
+      summary: !config.session_hooks.enabled
+        ? 'session hooks disabled; no lingering entries'
+        : projectEntriesActive && intentionallySkipped > 0
+          ? `project session-hook entries disabled for ${intentionallySkipped} agent(s)${verified || '; machine registration carries them'}`
+          : `${current} session-hook surface(s) current${verified}`,
       ...(info.length > 0 ? { details: info } : {}),
     };
   }
@@ -1911,7 +1980,9 @@ async function checkSessionHooks(repoRoot: string, config: Config): Promise<Doct
               '(or `orcaops update --no-session-hooks` to strip).',
           ]
         : []),
-      ...(machineAttention ? ['Machine registration: run `orcaops session-hooks install`.'] : []),
+      ...(machineAttention && installIsTheRemedy
+        ? ['Machine registration: run `orcaops session-hooks install`.']
+        : []),
     ],
   };
 }

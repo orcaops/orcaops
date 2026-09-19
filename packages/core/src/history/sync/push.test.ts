@@ -108,7 +108,13 @@ async function fixture(sourcePlan: Parameters<typeof captureDatabasePlan>[2]['so
       idempotency_key: uuidv7(),
       task: 'Push the retained thread',
       label: 'Push fixture',
-      plan_steps: [{ text: 'Push', label: 'Push' }],
+      plan_steps: [
+        {
+          text: 'Push',
+          label: 'Push',
+          acceptance_criteria: [{ text: 'The retained thread reaches the target' }],
+        },
+      ],
     }),
     sourcePlan,
     agent: 'codex',

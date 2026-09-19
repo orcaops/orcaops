@@ -30,6 +30,7 @@ import {
 import { resolveDatabaseSeedCommandContext } from '../../src/lib/database-seed-context.js';
 import { readDatabaseSeedState } from '../../src/lib/database-seed-state.js';
 import { makeAgent } from '../support/test-agent.js';
+import { doneCriteriaFor } from '../support/test-helpers.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -195,7 +196,13 @@ describe('orcaops seed', () => {
       {
         task: 'Continue live checkout work',
         label: 'Live checkout work',
-        plan_steps: [{ text: 'Finish the active change', label: 'active change' }],
+        plan_steps: [
+          {
+            text: 'Finish the active change',
+            label: 'active change',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: ['src/**'],
       },
       { noLlm: true }
@@ -335,7 +342,13 @@ describe('orcaops seed', () => {
       {
         task: 'Capture a multi-session live change',
         label: 'Multi-session live change',
-        plan_steps: [{ text: 'Land both sessions', label: 'land sessions' }],
+        plan_steps: [
+          {
+            text: 'Land both sessions',
+            label: 'land sessions',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: ['src/**'],
       },
       { noLlm: true }
@@ -373,10 +386,10 @@ describe('orcaops seed', () => {
         summary: 'Landed both sessions',
         files_changed: ['src/first.ts', 'src/second.ts'],
         verification: [{ command: 'test fixture', exit_code: 0 }],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [stepId]),
         completed_step_ids: [stepId],
         decisions: [],
         uncertainty: [],
-        done_criteria: [],
       },
       { noLlm: true }
     );
@@ -434,7 +447,13 @@ describe('orcaops seed', () => {
       {
         task: 'Rebase a live change mid-checkpoint',
         label: 'Rebased live change',
-        plan_steps: [{ text: 'Land the session', label: 'land session' }],
+        plan_steps: [
+          {
+            text: 'Land the session',
+            label: 'land session',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: ['src/**'],
       },
       { noLlm: true }
@@ -456,10 +475,10 @@ describe('orcaops seed', () => {
         summary: 'Landed the session on top of main',
         files_changed: ['src/session.ts'],
         verification: [{ command: 'test fixture', exit_code: 0 }],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [stepId]),
         completed_step_ids: [stepId],
         decisions: [],
         uncertainty: [],
-        done_criteria: [],
       },
       { noLlm: true }
     );
@@ -519,7 +538,13 @@ describe('orcaops seed', () => {
       {
         task: 'Abandon a stray attempt for main',
         label: 'Stray attempt moved to main',
-        plan_steps: [{ text: 'Land the work on main', label: 'land on main' }],
+        plan_steps: [
+          {
+            text: 'Land the work on main',
+            label: 'land on main',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: ['src/**'],
       },
       { noLlm: true }
@@ -558,10 +583,10 @@ describe('orcaops seed', () => {
             head_sha: mainHead,
             files_changed: ['src/work.ts'],
             verification: [{ command: 'test fixture', exit_code: 0 }],
+            done_criteria: doneCriteriaFor(plan.plan_steps, [stepId]),
             completed_step_ids: [stepId],
             decisions: [],
             uncertainty: [],
-            done_criteria: [],
           },
           { idempotencyKey: uuidv7() }
         )
@@ -701,7 +726,13 @@ describe('orcaops seed', () => {
       {
         task: 'Continue normal captured work',
         label: 'Normal captured work',
-        plan_steps: [{ text: 'Finish the live change', label: 'live change' }],
+        plan_steps: [
+          {
+            text: 'Finish the live change',
+            label: 'live change',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: ['src/**'],
       },
       { noLlm: true }

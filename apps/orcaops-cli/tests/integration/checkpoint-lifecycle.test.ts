@@ -93,8 +93,25 @@ describe('two-phase checkpoint lifecycle', () => {
     }
   }
 
+  /** step_id → its criterion ids, read back from the capture response. */
+  const criterionIdsByStep = new Map<string, string[]>();
+
+  /** Evidence for every criterion on the claimed steps, as a close requires. */
+  function evidenceFor(stepIds: string[]) {
+    return stepIds.flatMap((stepId) =>
+      (criterionIdsByStep.get(stepId) ?? []).map((criterion_id) => ({
+        criterion_id,
+        evidence: 'fixture evidence',
+      }))
+    );
+  }
+
   async function capturePlan(plan_step_texts: string[]): Promise<CapturedPlan> {
-    const plan_steps = plan_step_texts.map((text, idx) => ({ text, label: `s${idx + 1}` }));
+    const plan_steps = plan_step_texts.map((text, idx) => ({
+      text,
+      label: `s${idx + 1}`,
+      acceptance_criteria: [{ text: 'the step is delivered' }],
+    }));
     const r = await agent.runRaw([
       'capture',
       'plan',
@@ -113,9 +130,21 @@ describe('two-phase checkpoint lifecycle', () => {
     const ok = parseOk<
       OkEnvelope & {
         artifact_id: string;
-        plan_steps: Array<{ step_id: string; idx: number; label: string; text: string }>;
+        plan_steps: Array<{
+          step_id: string;
+          idx: number;
+          label: string;
+          text: string;
+          acceptance_criteria: Array<{ criterion_id: string; text: string }>;
+        }>;
       }
     >(r);
+    for (const step of ok.plan_steps) {
+      criterionIdsByStep.set(
+        step.step_id,
+        step.acceptance_criteria.map((c) => c.criterion_id)
+      );
+    }
     return { artifact_id: ok.artifact_id, step_ids: ok.plan_steps.map((s) => s.step_id) };
   }
 
@@ -135,7 +164,19 @@ describe('two-phase checkpoint lifecycle', () => {
     ]);
   }
 
+  /**
+   * Claiming a step obliges evidence for every criterion on it, so the helper
+   * fills `done_criteria` from the captured rubric. A payload that names its
+   * own `done_criteria` still wins — that is how the evidence tests vary it.
+   */
   async function close(payload: Record<string, unknown>): Promise<CliResult> {
+    const claimed = (payload.completed_step_ids as string[] | undefined) ?? [];
+    const done_criteria = claimed.flatMap((stepId) =>
+      (criterionIdsByStep.get(stepId) ?? []).map((criterion_id) => ({
+        criterion_id,
+        evidence: 'fixture evidence',
+      }))
+    );
     return agent.runRaw([
       'capture',
       'checkpoint',
@@ -146,6 +187,7 @@ describe('two-phase checkpoint lifecycle', () => {
         JSON.stringify({
           idempotency_key: `close-${randomUUID()}`,
           verification: [{ command: 'test fixture', exit_code: 0 }],
+          done_criteria,
           ...payload,
         })
       ),
@@ -510,6 +552,7 @@ describe('two-phase checkpoint lifecycle', () => {
       summary: 'cp1',
       files_changed: [],
       verification: [{ command: 'test fixture', exit_code: 0 }],
+      done_criteria: evidenceFor([plan.step_ids[0]]),
       completed_step_ids: [plan.step_ids[0]],
     };
 
@@ -1098,6 +1141,7 @@ describe('two-phase checkpoint lifecycle', () => {
             n: 1,
             summary: 'cp1',
             verification: [{ command: 'test fixture', exit_code: 0 }],
+            done_criteria: evidenceFor([plan.step_ids[0]]),
             completed_step_ids: [plan.step_ids[0]],
           })
         ),
@@ -1155,6 +1199,7 @@ describe('two-phase checkpoint lifecycle', () => {
       artifact_id: plan.artifact_id,
       summary: 'cp1',
       verification: [{ command: 'test fixture', exit_code: 0 }],
+      done_criteria: evidenceFor([plan.step_ids[0]]),
       completed_step_ids: [plan.step_ids[0]],
     };
     const first = parseOk<OkEnvelope & { n: number }>(
@@ -1211,5 +1256,146 @@ describe('two-phase checkpoint lifecycle', () => {
     const err = parseErr(r);
     expect(err.error.code).toBe('INVALID_INPUT');
     expect(err.error.path).toBe('n');
+  });
+});
+
+describe('checkpoint close — rubric coverage for the claimed steps', () => {
+  let agent: ReturnType<typeof makeAgent>;
+  let repo: TempRepo;
+  let dataRoot: string;
+
+  beforeEach(async () => {
+    repo = await createTempRepo({ initialBranch: 'main' });
+    dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-close-coverage-'));
+    agent = makeAgent({
+      cwd: repo.path,
+      env: { ORCAOPS_DATA_DIR: dataRoot, ORCAOPS_DISABLE_DRAIN: '1' },
+    });
+  });
+  afterEach(async () => {
+    await repo.cleanup();
+    await rm(dataRoot, { recursive: true, force: true });
+  });
+
+  type Coverage = {
+    revision_n: number;
+    total: number;
+    covered: number;
+    missing: number;
+    missing_step_ids: string[];
+  };
+  type CloseOk = OkEnvelope & {
+    acceptance_criteria_coverage?: Coverage;
+    acceptance_criteria_status?: string;
+  };
+
+  type PlanStepOut = {
+    step_id: string;
+    acceptance_criteria: Array<{ criterion_id: string }>;
+  };
+
+  async function openCp(payload: Record<string, unknown>) {
+    return agent.runRaw([
+      'capture',
+      'checkpoint',
+      'open',
+      '--no-llm',
+      '--input',
+      inputFile(JSON.stringify({ idempotency_key: `open-${randomUUID()}`, ...payload })),
+    ]);
+  }
+
+  async function closeCp(payload: Record<string, unknown>) {
+    return agent.runRaw([
+      'capture',
+      'checkpoint',
+      'close',
+      '--no-llm',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          idempotency_key: `close-${randomUUID()}`,
+          verification: [{ command: 'test fixture', exit_code: 0 }],
+          files_changed: [],
+          decisions: [],
+          uncertainty: [],
+          ...payload,
+        })
+      ),
+    ]);
+  }
+
+  async function planWith(
+    steps: Array<{ label: string; criteria: string[] }>
+  ): Promise<{ artifact_id: string; step_ids: string[]; plan_steps: PlanStepOut[] }> {
+    await agent.runRaw(['init', '--json', '--no-llm']);
+    const r = await agent.runRaw([
+      'capture',
+      'plan',
+      '--no-llm',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          idempotency_key: `plan-${randomUUID()}`,
+          task: 'close coverage e2e',
+          label: 'close-coverage-e2e',
+          plan_steps: steps.map((s) => ({
+            text: `Deliver ${s.label}`,
+            label: s.label,
+            acceptance_criteria: s.criteria.map((text) => ({ text })),
+          })),
+          touched_scope: [],
+        })
+      ),
+    ]);
+    const ok = parseOk<OkEnvelope & { artifact_id: string; plan_steps: PlanStepOut[] }>(r);
+    return {
+      artifact_id: ok.artifact_id,
+      step_ids: ok.plan_steps.map((s) => s.step_id),
+      plan_steps: ok.plan_steps,
+    };
+  }
+
+  it('reports no completion claim rather than implying full coverage', async () => {
+    const p = await planWith([{ label: 'a', criteria: ['a is delivered'] }]);
+    parseOk(await openCp({ artifact_id: p.artifact_id, declared_step_ids: [p.step_ids[0]] }));
+    const closed = parseOk<CloseOk>(
+      await closeCp({
+        artifact_id: p.artifact_id,
+        n: 1,
+        summary: 'nothing claimed',
+        completed_step_ids: [],
+        done_criteria: [],
+      })
+    );
+    expect(closed.acceptance_criteria_coverage).toMatchObject({ total: 0, covered: 0, missing: 0 });
+    expect(closed.acceptance_criteria_status).toMatch(/No step was claimed complete/);
+    expect(closed.acceptance_criteria_status).not.toMatch(/of 1 steps/);
+  });
+
+  it('counts only the claimed steps, not the whole plan', async () => {
+    const p = await planWith([
+      { label: 'a', criteria: ['a is delivered'] },
+      { label: 'b', criteria: ['b is delivered'] },
+    ]);
+    parseOk(await openCp({ artifact_id: p.artifact_id, declared_step_ids: [p.step_ids[0]] }));
+    const closed = parseOk<CloseOk>(
+      await closeCp({
+        artifact_id: p.artifact_id,
+        n: 1,
+        summary: 'claimed a only',
+        completed_step_ids: [p.step_ids[0]],
+        done_criteria: p.plan_steps[0].acceptance_criteria.map((c) => ({
+          criterion_id: c.criterion_id,
+          evidence: 'fixture evidence',
+        })),
+      })
+    );
+    expect(closed.acceptance_criteria_coverage).toMatchObject({
+      revision_n: 0,
+      total: 1,
+      covered: 1,
+      missing: 0,
+    });
   });
 });

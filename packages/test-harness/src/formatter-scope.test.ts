@@ -252,16 +252,13 @@ describe('root test policy', () => {
     expect(workflow).not.toContain('pnpm --filter @orcaops/cli test:coverage');
   });
 
-  it('keeps the coverage gate ahead of the watch legs', () => {
-    // Behind them the gate never ran at all: the watch legs fail on ubuntu for
-    // reasons of their own, and a step that cannot execute cannot gate
-    // anything. A plain string match would not notice a reordering, so assert
-    // the positions rather than the presence.
+  it('runs CLI coverage independently of the watch legs', () => {
     const workflow = readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
-    const coverage = workflow.indexOf('pnpm test --coverage --only=@orcaops/cli');
-    const pty = workflow.indexOf('pnpm --filter @orcaops/watch test:pty');
-    expect(coverage).toBeGreaterThan(-1);
-    expect(pty).toBeGreaterThan(-1);
-    expect(coverage).toBeLessThan(pty);
+    const sharedJob = workflow.split('  test:\n')[1].split('  test-heavy:\n')[0];
+    const cliJob = workflow.split('  test-cli:\n')[1].split('  coverage:\n')[0];
+    expect(sharedJob).toContain('pnpm --filter @orcaops/watch test:pty');
+    expect(sharedJob).not.toContain('--coverage');
+    expect(cliJob).toContain('pnpm test --coverage --only=@orcaops/cli');
+    expect(cliJob).not.toContain('needs:');
   });
 });

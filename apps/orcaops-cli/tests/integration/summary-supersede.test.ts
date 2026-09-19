@@ -32,7 +32,9 @@ describe('capture summary supersession', { timeout: 60_000 }, () => {
           idempotency_key: `plan-${randomUUID()}`,
           task: 'Amend retained summary',
           label: `summary-${randomUUID().slice(0, 8)}`,
-          plan_steps: [{ text: 's1', label: 's1' }],
+          plan_steps: [
+            { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
           touched_scope: [],
         })
       ),
@@ -110,7 +112,9 @@ describe('capture summary supersession', { timeout: 60_000 }, () => {
           idempotency_key: `plan-${randomUUID()}`,
           task: 'replay fixture',
           label: `replay-${randomUUID().slice(0, 8)}`,
-          plan_steps: [{ text: 's1', label: 's1' }],
+          plan_steps: [
+            { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
           touched_scope: [],
         })
       ),
@@ -144,7 +148,9 @@ describe('capture summary supersession', { timeout: 60_000 }, () => {
           idempotency_key: `plan-${randomUUID()}`,
           task: 'accepted warning amendment fixture',
           label: `accepted-${randomUUID().slice(0, 8)}`,
-          plan_steps: [{ text: 's1', label: 's1' }],
+          plan_steps: [
+            { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
           touched_scope: [],
         })
       ),

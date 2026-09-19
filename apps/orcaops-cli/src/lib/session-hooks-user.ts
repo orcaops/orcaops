@@ -14,6 +14,9 @@ import { resolveGlobalRoot } from './global-install.js';
 import { getInvocationCwd, getInvocationEnv } from './invocation-context.js';
 import {
   canonicalSessionHookCommand,
+  documentCoversSessionHook,
+  documentHasCustomizedSessionHook,
+  documentHasManagedSessionHook,
   isOrcaopsHook,
   isSemanticallyEmpty,
   type JsonObject,
@@ -21,6 +24,8 @@ import {
   serializeSettings,
   SESSION_HOOK_COMMAND,
   type SessionHookAction,
+  type SessionHookCoverage,
+  sessionHookMatcherCoverage,
   type SettingsSpec,
   userJsonSpecs,
 } from './session-hooks.js';
@@ -662,11 +667,6 @@ export function codexConfigTomlPath(): string {
 export const CODEX_HOOKS_JSON_NOTE =
   'Codex will report loading hooks from both hooks.json and config.toml at startup; that is informational — both sets run.';
 
-/**
- * Does `<codex home>/hooks.json` hold hooks Codex loads? Read-only: an absent
- * file, a directory, one that does not parse, and one with no hook entries all
- * answer no — existence alone is not a second representation.
- */
 export async function codexHooksJsonCarriesHooks(): Promise<boolean> {
   try {
     const hooksJsonPath = codexHooksJsonPath();
@@ -676,20 +676,6 @@ export async function codexHooksJsonCarriesHooks(): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/**
- * The note for a layer that really carries two representations: hooks in
- * hooks.json AND hooks in config.toml. Codex prints its "loading hooks from
- * both" line whoever owns the entries, so another tool's hooks.json beside our
- * config.toml block still earns it — while a machine whose registration has
- * moved into hooks.json alone runs one representation and gets none.
- */
-export async function codexDualRepresentationNote(): Promise<string | null> {
-  if (!(await codexHooksJsonCarriesHooks())) return null;
-  const toml = await readCodexTomlState();
-  if (toml.raw === null) return null;
-  return countCodexHookEntries(parseCodexToml(toml.raw)) > 0 ? CODEX_HOOKS_JSON_NOTE : null;
 }
 
 function codexHookCommand(): string {
@@ -731,6 +717,24 @@ export interface CodexTomlState {
   parseFailure: 'outside' | 'fence' | null;
   /** The canonical `--user` command is registered under hooks.SessionStart, inside or outside the block. */
   installed: boolean;
+  /**
+   * Whether a registration here will actually fire — the element's matcher
+   * and the hook's type judged too, not just its command.
+   */
+  coverage: SessionHookCoverage;
+  /** An edited variant of our command sits under hooks.SessionStart. */
+  customized: boolean;
+  /** Every hook entry this file declares, ours and anyone else's. */
+  hookEntries: number;
+  /** Hook entries that are not the canonical Orcaops registration. */
+  foreignHookEntries: number;
+  /** The canonical command is registered under hooks.SessionStart. */
+  present: boolean;
+  /**
+   * `features.hooks` as this file sets it, or null when the file could not be
+   * read or parsed. Null is inconclusive, never a confirmed disable.
+   */
+  gateDisabled: boolean | null;
   /** A marker-delimited orcaops block exists (managed mode owns it). */
   markerBlock: boolean;
   /** The block exists but registers nothing (stale command or gutted). */
@@ -852,6 +856,60 @@ function isOrcaopsSessionStartElement(value: unknown): boolean {
   );
 }
 
+/**
+ * TOML COVERAGE — will a registration in this table actually fire?
+ *
+ * Deliberately NOT `countCodexRegistrations`, which matches on command alone
+ * and is what the install planner and the superseded/duplicate arithmetic
+ * count with. Tightening that counter would change install and repair
+ * behavior; this predicate only ever answers the coverage question, and only
+ * an element whose matcher covers the canonical alternatives and whose hook
+ * is a command hook counts.
+ */
+function codexTomlCoverage(table: TomlTable | null): SessionHookCoverage {
+  if (table === null) return 'unverifiable';
+  const command = codexHookCommand();
+  let verdict: SessionHookCoverage = 'uncovered';
+  for (const entry of codexSessionStartEntries(table)) {
+    const element = tomlTable(entry);
+    if (element === null || !Array.isArray(element.hooks)) continue;
+    const runs = element.hooks.some((hook) => {
+      const candidate = tomlTable(hook);
+      // Explicit type required, as on the JSON side: the ownership reader's
+      // tolerance of an absent type is for repair, not for proving execution.
+      return candidate !== null && candidate.command === command && candidate.type === 'command';
+    });
+    if (!runs) continue;
+    const coverage = sessionHookMatcherCoverage(element.matcher, CODEX_TOML_MATCHER);
+    if (coverage === 'covered') return 'covered';
+    if (coverage === 'unverifiable') verdict = 'unverifiable';
+  }
+  return verdict;
+}
+
+/**
+ * The TOML counterpart of `documentHasCustomizedSessionHook`: an edited
+ * variant of our command in the event we register under. Bounded to the same
+ * region as coverage — a mention anywhere else in the file is not evidence.
+ */
+function codexTomlCustomized(table: TomlTable | null): boolean {
+  if (table === null) return false;
+  const command = codexHookCommand();
+  return codexSessionStartEntries(table).some((entry) => {
+    const element = tomlTable(entry);
+    if (element === null || !Array.isArray(element.hooks)) return false;
+    return element.hooks.some((hook) => {
+      const candidate = tomlTable(hook);
+      return (
+        candidate !== null &&
+        typeof candidate.command === 'string' &&
+        candidate.command.includes(SESSION_HOOK_COMMAND) &&
+        candidate.command !== command
+      );
+    });
+  });
+}
+
 function countCodexRegistrations(table: TomlTable | null): number {
   const command = codexHookCommand();
   return codexSessionStartEntries(table).reduce<number>((count, entry) => {
@@ -863,6 +921,32 @@ function countCodexRegistrations(table: TomlTable | null): number {
         : 0)
     );
   }, 0);
+}
+
+/**
+ * Codex's `features.hooks` switch, read as an AGENT-level fact.
+ *
+ * It disables every Codex hook, in hooks.json as much as in config.toml — so
+ * it cannot live on the config.toml row, where it was only ever consulted
+ * when that same file held a registration. A canonical hooks.json entry under
+ * a disabled gate looked covered while Codex ran nothing.
+ *
+ * `disabled: null` means config.toml could not be inspected conclusively.
+ * That is NOT a confirmed disable and callers must keep the two apart.
+ */
+export interface CodexHookGate {
+  path: string;
+  disabled: boolean | null;
+}
+
+export async function readCodexHookGate(): Promise<CodexHookGate> {
+  const configPath = codexConfigTomlPath();
+  return codexHookGateOf(await readCodexTomlState(configPath), configPath);
+}
+
+/** The gate as one already-inspected config.toml reports it. No second read. */
+function codexHookGateOf(state: CodexTomlState, configPath: string): CodexHookGate {
+  return { path: configPath, disabled: state.gateDisabled };
 }
 
 // `hooks` wins over its retired alias `codex_hooks` when both are set.
@@ -1066,7 +1150,13 @@ export function planCodexTomlInstall(raw: string | null): CodexTomlInstallPlan {
   const markers = codexTomlMarkerState(raw);
   if (markers.problemLines.length > 0) return { outcome: 'refused-markers' };
   const parsed = parseCodexToml(raw);
-  if (parsed !== null && countCodexRegistrations(parsed) > 0) return { outcome: 'unchanged' };
+  // COVERAGE, not the command-only count: an entry that cannot fire — wrong
+  // hook type, or a matcher that misses the canonical alternatives — must not
+  // report `unchanged` while doctor and status call the agent uncovered, or
+  // the remedy they print does nothing and the warning never clears. An owned
+  // marker block falls through to the repair path below; an out-of-marker
+  // entry is preserved and refused into manual review rather than rewritten.
+  if (parsed !== null && codexTomlCoverage(parsed) === 'covered') return { outcome: 'unchanged' };
   const outside = markers.block === null ? raw : textOutsideCodexFence(raw, markers.block);
   if (parseCodexToml(outside) === null) return { outcome: 'refused-invalid' };
   let base = raw;
@@ -1111,6 +1201,16 @@ export async function readCodexTomlState(
       raw,
       parseFailure: null,
       installed: false,
+      // Absent reads as a confirmed lack of registration; unreadable cannot be
+      // judged either way and must not collapse into one.
+      coverage: readStatus === 'absent' ? 'uncovered' : 'unverifiable',
+      customized: false,
+      hookEntries: 0,
+      foreignHookEntries: 0,
+      present: false,
+      // An absent config.toml sets nothing, so its gate is open by default;
+      // one we could not read tells us nothing either way.
+      gateDisabled: readStatus === 'absent' ? false : null,
       markerBlock: false,
       markerBlockBroken: false,
       markerProblemLines: [],
@@ -1137,6 +1237,12 @@ export async function readCodexTomlState(
     raw,
     parseFailure,
     installed,
+    coverage: parseFailure !== null ? 'unverifiable' : codexTomlCoverage(parsed),
+    customized: codexTomlCustomized(parsed),
+    hookEntries: countCodexHookEntries(parsed),
+    foreignHookEntries: countForeignCodexHookEntries(parsed),
+    present: installed,
+    gateDisabled: parsed === null ? null : codexHooksDisabled(parsed),
     markerBlock: block !== null,
     markerBlockBroken: block !== null && parseFailure === null && !blockRegisters,
     markerProblemLines: markerState.problemLines,
@@ -1268,6 +1374,11 @@ function countForeignCodexHookEntries(table: TomlTable | null): number {
 
 type CodexTomlHooksOwnership = 'foreign' | 'ours-or-none' | 'unreadable';
 
+export interface CodexRepresentationInspection {
+  hooksJsonHoldsObject: boolean;
+  tomlHooksOwnership: CodexTomlHooksOwnership;
+}
+
 async function inspectCodexTomlHooks(tomlPath: string): Promise<CodexTomlHooksOwnership> {
   let raw: string;
   try {
@@ -1299,7 +1410,8 @@ async function inspectCodexTomlHooks(tomlPath: string): Promise<CodexTomlHooksOw
  */
 export async function resolveCodexRepresentation(
   override?: CodexRepresentationSurface,
-  probeVersion: CodexVersionProbe = probeCodexVersionOutput
+  probeVersion: CodexVersionProbe = probeCodexVersionOutput,
+  inspected?: CodexRepresentationInspection
 ): Promise<CodexRepresentation> {
   const paths = { hooksJsonPath: codexHooksJsonPath(), tomlPath: codexConfigTomlPath() };
   const output = await probeVersion().catch(() => null);
@@ -1316,10 +1428,12 @@ export async function resolveCodexRepresentation(
       reason: versionGate === 'unsupported' ? 'version-unsupported' : 'version-unknown',
     };
   }
-  if (await codexHooksJsonHoldsObject(paths.hooksJsonPath)) {
+  const hooksJsonHoldsObject =
+    inspected?.hooksJsonHoldsObject ?? (await codexHooksJsonHoldsObject(paths.hooksJsonPath));
+  if (hooksJsonHoldsObject) {
     return { ...base, surface: 'hooks-json', reason: 'existing-hooks-json' };
   }
-  const toml = await inspectCodexTomlHooks(paths.tomlPath);
+  const toml = inspected?.tomlHooksOwnership ?? (await inspectCodexTomlHooks(paths.tomlPath));
   if (toml !== 'ours-or-none') {
     return {
       ...base,
@@ -2036,13 +2150,64 @@ export type UserSessionHookSurfaceState =
   | 'registered-unverified'
   | 'registered-unsupported';
 
+export type SessionHookRepairAction =
+  | 'none'
+  | 'install'
+  | 'enable-setting'
+  | 'repair-file'
+  | 'restore-access'
+  | 'manual-review';
+
 export interface UserSessionHookSurfaceHealth {
   agent: SupportedAgentId;
   path: string;
   state: UserSessionHookSurfaceState;
   remedy?: string;
+  primaryAction: SessionHookRepairAction;
   recorded: boolean;
+  /**
+   * Substring-wide, deliberately: ownership stays broader than coverage so a
+   * stale or hand-edited variant of our line is still repairable and
+   * removable. Never read this as proof the hook runs — that is `coverage`.
+   */
   owned: boolean;
+  /**
+   * Whether a registration here will actually FIRE. Added beside `state`
+   * rather than folded into it so the existing surface-state names and their
+   * consumers keep their meaning.
+   */
+  coverage: SessionHookCoverage;
+  /**
+   * Is this one of the paths that can satisfy coverage TODAY? A row recorded
+   * under a former `CODEX_HOME` or `CLAUDE_CONFIG_DIR` stays visible for
+   * diagnosis and uninstall, but cannot cover the agent.
+   */
+  current: boolean;
+  /**
+   * The canonical command IS in the expected region, whatever else is wrong
+   * with it. Separates a registration that cannot fire (broken) from a file
+   * that merely mentions the command somewhere (not a registration at all).
+   */
+  present: boolean;
+  /**
+   * An Orcaops-like command the user has edited, in the expected event.
+   * Preserved untouched; it makes coverage unverifiable rather than missing,
+   * because we cannot tell whether their command still invokes the hook.
+   */
+  customized: boolean;
+}
+
+/**
+ * The paths that can satisfy coverage for `agent` right now, resolved through
+ * the same environment-aware resolution the installer writes through. Codex is
+ * the one agent with two: it loads both files and either can carry the hook.
+ */
+export function currentUserHookCandidates(agent: SupportedAgentId): string[] {
+  if (agent === ('codex' as SupportedAgentId)) {
+    return [codexConfigTomlPath(), codexHooksJsonPath()];
+  }
+  const resolved = resolveUserHookPath(agent);
+  return resolved === null ? [] : [resolved];
 }
 
 /** The chooser is offered for config.toml only, so only that surface names it. */
@@ -2063,31 +2228,176 @@ function userSessionHookInvalidJsonRemedy(agent: SupportedAgentId, targetPath: s
   return `${targetPath} is not valid JSON — fix it, then re-run \`orcaops session-hooks install --agents ${agent}\`.`;
 }
 
-export async function evaluateUserSessionHookSurfaces(
+/**
+ * Coverage for one user JSON surface. `userSettingsSpec` is the right spec —
+ * it carries the `--user` command these files register, which the project
+ * spec does not — and `targetPath` overrides the resolved path so a row
+ * recorded under a former agent home is still inspected against its own file.
+ */
+function jsonSurfaceCoverage(
+  parsed: unknown,
+  agent: SupportedAgentId,
+  targetPath: string
+): SessionHookCoverage {
+  const spec = userSettingsSpec(agent, targetPath);
+  // No spec means this CLI has no user surface for the agent; the recorded
+  // row is reported as unsupported elsewhere rather than judged here.
+  if (spec === null || parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return 'uncovered';
+  }
+  return documentCoversSessionHook(parsed as JsonObject, spec);
+}
+
+/** Is the canonical command registered in the expected region at all? */
+function jsonSurfacePresent(parsed: unknown, agent: SupportedAgentId, targetPath: string): boolean {
+  const spec = userSettingsSpec(agent, targetPath);
+  if (spec === null || parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return false;
+  }
+  return documentHasManagedSessionHook(parsed as JsonObject, spec);
+}
+
+/** An edited Orcaops-like command sitting in the event we register under. */
+function jsonSurfaceCustomized(
+  parsed: unknown,
+  agent: SupportedAgentId,
+  targetPath: string
+): boolean {
+  const spec = userSettingsSpec(agent, targetPath);
+  if (spec === null || parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return false;
+  }
+  return documentHasCustomizedSessionHook(parsed as JsonObject, spec);
+}
+
+export interface UserSessionHookInspection {
+  surfaces: UserSessionHookSurfaceHealth[];
+  /** Null when this run inspected no current Codex config.toml. */
+  codexGate: CodexHookGate | null;
+  /**
+   * Codex's "loading hooks from both" note, or null. Served from THIS pass:
+   * deriving it separately re-read and re-parsed config.toml, which both
+   * broke the single-inspection guarantee and let the note describe a
+   * different version of the file than the coverage verdict did.
+   */
+  codexDualRepresentation: string | null;
+}
+
+export interface UserSessionHookEvaluationObservers {
+  onCodexToml?: (state: CodexTomlState, configPath: string) => void;
+  onCurrentCodexHooksJson?: (hookEntries: number) => void;
+}
+
+/**
+ * One pass over every user surface, returning the agent-level Codex gate from
+ * the SAME config.toml inspection the rows come from. Callers that need both
+ * (doctor, status) must use this rather than pairing the surfaces with a
+ * separate `readCodexHookGate`, which would read and parse the file twice.
+ */
+export async function inspectUserSessionHooks(
   record: UserHooksRecord | null,
   representation?: CodexRepresentation
+): Promise<UserSessionHookInspection> {
+  let codexGate: CodexHookGate | null = null;
+  let tomlHookEntries = 0;
+  let hooksJsonHookEntries = 0;
+  const surfaces = await evaluateUserSessionHookSurfaces(record, representation, {
+    onCodexToml: (state, p) => {
+      if (p !== codexConfigTomlPath()) return;
+      codexGate = codexHookGateOf(state, p);
+      tomlHookEntries = state.hookEntries;
+    },
+    onCurrentCodexHooksJson: (hookEntries) => {
+      hooksJsonHookEntries = hookEntries;
+    },
+  });
+  const codexDualRepresentation =
+    tomlHookEntries > 0 && hooksJsonHookEntries > 0 ? CODEX_HOOKS_JSON_NOTE : null;
+  return { surfaces, codexGate, codexDualRepresentation };
+}
+
+export async function evaluateUserSessionHookSurfaces(
+  record: UserHooksRecord | null,
+  representation?: CodexRepresentation,
+  observers: UserSessionHookEvaluationObservers = {}
 ): Promise<UserSessionHookSurfaceHealth[]> {
   const rows: UserSessionHookSurfaceHealth[] = [];
   const recordedEntries = record?.entries ?? [];
   const isRecorded = (agent: SupportedAgentId, targetPath: string): boolean =>
     recordedEntries.some((entry) => entry.agent === agent && entry.path === targetPath);
+  type UserFileRead = Awaited<ReturnType<typeof readUserFile>>;
+  type JsonInspection = {
+    file: UserFileRead;
+    parsed: boolean;
+    document?: unknown;
+  };
+  const fileReads = new Map<string, Promise<UserFileRead>>();
+  const jsonInspections = new Map<string, Promise<JsonInspection>>();
+  const readUserFileOnce = (targetPath: string): Promise<UserFileRead> => {
+    let pending = fileReads.get(targetPath);
+    if (pending === undefined) {
+      pending = readUserFile(targetPath);
+      fileReads.set(targetPath, pending);
+    }
+    return pending;
+  };
+  const inspectJsonOnce = (targetPath: string): Promise<JsonInspection> => {
+    let pending = jsonInspections.get(targetPath);
+    if (pending === undefined) {
+      pending = readUserFileOnce(targetPath).then((file) => {
+        if (file.status !== 'ok') return { file, parsed: false };
+        try {
+          return { file, parsed: true, document: JSON.parse(file.raw) };
+        } catch {
+          return { file, parsed: false };
+        }
+      });
+      jsonInspections.set(targetPath, pending);
+    }
+    return pending;
+  };
 
   // Both codex files are reported, but the representation is resolved (and
   // codex probed for its version) only where the answer can change a row:
   // when the registration is live in BOTH files at once.
   let resolved = representation ?? null;
-  const codexRepresentation = async (): Promise<CodexRepresentation> =>
-    (resolved ??= await resolveCodexRepresentation());
+  const codexAgent = 'codex' as SupportedAgentId;
+  let currentCodexToml: CodexTomlState | null = null;
+  const codexRepresentation = async (): Promise<CodexRepresentation> => {
+    if (resolved !== null) return resolved;
+    const json = await inspectJsonOnce(codexHooksJsonPath());
+    const document = json.parsed ? json.document : null;
+    const hooksJsonHoldsObject =
+      typeof document === 'object' && document !== null && !Array.isArray(document);
+    const tomlHooksOwnership: CodexTomlHooksOwnership =
+      currentCodexToml === null ||
+      currentCodexToml.readStatus === 'unreadable' ||
+      currentCodexToml.parseFailure !== null
+        ? 'unreadable'
+        : currentCodexToml.foreignHookEntries > 0
+          ? 'foreign'
+          : 'ours-or-none';
+    resolved = await resolveCodexRepresentation(undefined, probeCodexVersionOutput, {
+      hooksJsonHoldsObject,
+      tomlHooksOwnership,
+    });
+    return resolved;
+  };
   let hooksJsonRegisters: boolean | null = null;
+  // Same validator the hooks.json ROW is judged by, so "config.toml is
+  // superseded" can never rest on evidence weaker than coverage itself — a
+  // bare command substring in hooks.json used to be enough.
   const codexHooksJsonRegisters = async (): Promise<boolean> => {
     if (hooksJsonRegisters === null) {
-      const file = await readUserFile(codexHooksJsonPath());
-      hooksJsonRegisters = file.status === 'ok' && file.raw.includes(SESSION_HOOK_COMMAND);
+      const hooksJsonPath = codexHooksJsonPath();
+      const inspected = await inspectJsonOnce(hooksJsonPath);
+      hooksJsonRegisters =
+        inspected.parsed &&
+        jsonSurfaceCoverage(inspected.document, codexAgent, hooksJsonPath) === 'covered';
     }
     return hooksJsonRegisters;
   };
 
-  const codexAgent = 'codex' as SupportedAgentId;
   // A recorded codex path may name either representation; only the TOML ones
   // belong to the reader below (the sidecar is evaluated as JSON with the
   // other user files).
@@ -2099,6 +2409,8 @@ export async function evaluateUserSessionHookSurfaces(
   ].filter((candidate, index, all) => all.indexOf(candidate) === index);
   for (const configPath of codexPaths) {
     const codex = await readCodexTomlState(configPath);
+    if (configPath === codexConfigTomlPath()) currentCodexToml = codex;
+    observers.onCodexToml?.(codex, configPath);
     const recorded = isRecorded(codexAgent, configPath);
     // A file that no longer parses cannot be read for a registration, so a
     // pasted command that broke later is only recognisable by its text.
@@ -2108,29 +2420,43 @@ export async function evaluateUserSessionHookSurfaces(
       codex.installed || codex.markerBlock || codex.markerProblemLines.length > 0 || brokenPaste;
     let state: UserSessionHookSurfaceState;
     let remedy: string | undefined;
+    let primaryAction: SessionHookRepairAction = 'none';
     if (codex.readStatus === 'unreadable') {
       state = 'registered-unverified';
       remedy = `${codex.readError ?? `${configPath} could not be verified`} — retry after restoring access`;
+      primaryAction = 'restore-access';
     } else if (codex.markerProblemLines.length > 0) {
       state = 'registered-but-broken';
       remedy = codexMarkerLineGuidance(codex.path, codex.markerProblemLines);
+      primaryAction = 'repair-file';
     } else if (codex.parseFailure !== null) {
       state = 'registered-but-broken';
       remedy =
         codex.parseFailure === 'fence'
           ? codexFenceGuidance(codex.path)
           : codexInvalidTomlGuidance(codex.path);
+      primaryAction = 'repair-file';
     } else if (codex.markerBlockBroken) {
       state = 'registered-but-broken';
       remedy = userSessionHookInstallRemedy(codexAgent);
+      primaryAction = 'install';
     } else if (codex.installed && codex.hooksDisabled) {
       state = 'registered-but-broken';
       remedy = codexHooksDisabledGuidance(codex.path);
-    } else if (codex.installed) {
+      primaryAction = 'enable-setting';
+    } else if (codex.coverage === 'covered') {
       state = 'installed';
+    } else if (codex.present) {
+      // Our command IS registered here; it just cannot fire — a wrong hook
+      // type, or a matcher that misses the canonical alternatives. Broken, not
+      // missing: something is there and it is wrong.
+      state = 'registered-but-broken';
+      remedy = userSessionHookInstallRemedy(codexAgent);
+      primaryAction = 'install';
     } else if (recorded) {
       state = 'registered-but-missing';
       remedy = userSessionHookInstallRemedy(codexAgent);
+      primaryAction = 'install';
     } else {
       state = 'absent';
     }
@@ -2147,9 +2473,22 @@ export async function evaluateUserSessionHookSurfaces(
       if (codexSurface.surface === 'hooks-json') {
         state = 'superseded';
         remedy = codexSupersededRemedy(codexSurface.hooksJsonPath);
+        primaryAction = 'install';
       }
     }
-    rows.push({ agent: codexAgent, path: codex.path, state, remedy, recorded, owned });
+    rows.push({
+      agent: codexAgent,
+      path: codex.path,
+      state,
+      remedy,
+      primaryAction,
+      recorded,
+      owned,
+      coverage: codex.coverage,
+      current: currentUserHookCandidates(codexAgent).includes(codex.path),
+      customized: codex.customized,
+      present: codex.present,
+    });
   }
 
   const jsonTargets = [
@@ -2169,35 +2508,79 @@ export async function evaluateUserSessionHookSurfaces(
   );
   for (const target of jsonTargets) {
     const recorded = isRecorded(target.agent, target.path);
-    const file = await readUserFile(target.path);
+    const inspected = await inspectJsonOnce(target.path);
+    const { file } = inspected;
+    if (target.agent === codexAgent && target.path === codexHooksJsonPath()) {
+      observers.onCurrentCodexHooksJson?.(
+        inspected.parsed ? countCodexHookEntries(tomlTable(inspected.document)) : 0
+      );
+    }
     let state: UserSessionHookSurfaceState;
     let remedy: string | undefined;
+    let primaryAction: SessionHookRepairAction = 'none';
     let owned = false;
+    let customized = false;
+    let present = false;
+    let coverage: SessionHookCoverage = 'uncovered';
     if (file.status === 'unreadable') {
       state = 'registered-unverified';
+      coverage = 'unverifiable';
       remedy = `${file.message} — retry after restoring access`;
+      primaryAction = 'restore-access';
     } else if (file.status === 'absent') {
       state = recorded ? 'registered-but-missing' : 'absent';
-      if (recorded) remedy = userSessionHookInstallRemedy(target.agent, target.path);
+      if (recorded) {
+        remedy = userSessionHookInstallRemedy(target.agent, target.path);
+        primaryAction = 'install';
+      }
     } else {
       owned = file.raw.includes(SESSION_HOOK_COMMAND);
-      try {
-        JSON.parse(file.raw);
-        state = owned ? 'installed' : recorded ? 'registered-but-missing' : 'absent';
-        if (state === 'registered-but-missing') {
+      if (inspected.parsed) {
+        const document = inspected.document;
+        customized = jsonSurfaceCustomized(document, target.agent, target.path);
+        coverage = jsonSurfaceCoverage(document, target.agent, target.path);
+        present = jsonSurfacePresent(document, target.agent, target.path);
+        // Three different situations that all used to read as one. Our command
+        // in the expected region but unable to fire is a BROKEN registration;
+        // a record with nothing behind it is a missing one; and command text
+        // sitting in some unrelated field was never a registration at all, so
+        // it must not be reported as one that went missing.
+        if (coverage === 'covered') {
+          state = 'installed';
+          primaryAction = !recorded && target.agent !== codexAgent ? 'install' : 'none';
+        } else if (present) {
+          state = 'registered-but-broken';
           remedy = userSessionHookInstallRemedy(target.agent, target.path);
-        }
-      } catch {
+          primaryAction = 'install';
+        } else if (recorded) {
+          state = 'registered-but-missing';
+          remedy = userSessionHookInstallRemedy(target.agent, target.path);
+          primaryAction = 'install';
+        } else state = 'absent';
+      } else {
         // A file that no longer parses registers nothing, however it reads:
         // when it is ours (recorded, or still carrying the command text) that
         // is a broken registration with a repair, not someone else's mess.
+        coverage = 'unverifiable';
         state = recorded || owned ? 'registered-but-broken' : 'invalid-json';
         if (state === 'registered-but-broken') {
           remedy = userSessionHookInvalidJsonRemedy(target.agent, target.path);
+          primaryAction = 'repair-file';
         }
       }
     }
-    rows.push({ ...target, state, remedy, recorded, owned });
+    rows.push({
+      ...target,
+      state,
+      remedy,
+      primaryAction,
+      recorded,
+      owned,
+      coverage,
+      current: currentUserHookCandidates(target.agent).includes(target.path),
+      customized,
+      present,
+    });
   }
 
   for (const entry of recordedEntries) {
@@ -2209,8 +2592,14 @@ export async function evaluateUserSessionHookSurfaces(
       remedy:
         `Registered for ${entry.agent}, but this CLI version has no user-level surface for it — ` +
         'run `orcaops session-hooks install` to re-register or `orcaops session-hooks uninstall` to clear the record.',
+      primaryAction: 'install',
       recorded: true,
       owned: false,
+      // No surface to inspect, so coverage here is unknown rather than denied.
+      coverage: 'unverifiable',
+      current: false,
+      customized: false,
+      present: false,
     });
   }
 

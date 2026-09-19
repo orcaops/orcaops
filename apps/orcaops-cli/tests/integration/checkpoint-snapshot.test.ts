@@ -14,7 +14,12 @@ import {
 import { createRepoTemplate, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
-import { clearCloudLogin, commitFile, seedCloudLogin } from '../support/test-helpers.js';
+import {
+  clearCloudLogin,
+  commitFile,
+  doneCriteriaFor,
+  seedCloudLogin,
+} from '../support/test-helpers.js';
 
 /**
  * CLI snapshot + fingerprint capture wiring.
@@ -51,6 +56,7 @@ function parseOk<T = OkEnvelope>(r: CliResult): T {
 interface CapturedPlan {
   artifact_id: string;
   step_ids: string[];
+  plan_steps: Array<{ step_id: string; acceptance_criteria: Array<{ criterion_id: string }> }>;
 }
 
 interface CheckpointSnapshotBoundaryRaw {
@@ -326,7 +332,11 @@ describe('checkpoint snapshot + fingerprint capture', () => {
   });
 
   async function capturePlan(stepTexts: string[]): Promise<CapturedPlan> {
-    const plan_steps = stepTexts.map((text, idx) => ({ text, label: `s${idx + 1}` }));
+    const plan_steps = stepTexts.map((text, idx) => ({
+      text,
+      label: `s${idx + 1}`,
+      acceptance_criteria: [{ text: 'the step is delivered' }],
+    }));
     const r = await agent.runRaw([
       'capture',
       'plan',
@@ -345,10 +355,20 @@ describe('checkpoint snapshot + fingerprint capture', () => {
     const ok = parseOk<
       OkEnvelope & {
         artifact_id: string;
-        plan_steps: Array<{ step_id: string; idx: number; label: string; text: string }>;
+        plan_steps: Array<{
+          step_id: string;
+          idx: number;
+          label: string;
+          text: string;
+          acceptance_criteria: Array<{ criterion_id: string }>;
+        }>;
       }
     >(r);
-    return { artifact_id: ok.artifact_id, step_ids: ok.plan_steps.map((s) => s.step_id) };
+    return {
+      artifact_id: ok.artifact_id,
+      step_ids: ok.plan_steps.map((s) => s.step_id),
+      plan_steps: ok.plan_steps,
+    };
   }
 
   async function openCp(payload: Record<string, unknown>): Promise<CliResult> {
@@ -430,6 +450,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 1,
           summary: 'cp1 added foo',
           files_changed: ['src/foo.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
           completed_step_ids: [plan.step_ids[0]],
         })
       );
@@ -520,6 +541,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         n: 1,
         summary: 'cp1 added foo',
         files_changed: ['src/foo.ts'],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
         completed_step_ids: [plan.step_ids[0]],
       })
     );
@@ -572,6 +594,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         n: 1,
         summary: 'cp1 no work',
         files_changed: [],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
         completed_step_ids: [plan.step_ids[0]],
       })
     );
@@ -609,6 +632,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
       n: 1,
       summary: 'cp1',
       files_changed: ['src/foo.ts'],
+      done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
       completed_step_ids: [plan.step_ids[0]],
     };
     parseOk(await closeCp(closePayload, closeKey));
@@ -811,6 +835,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         n: 1,
         summary: 'work under a resolved conflict',
         files_changed: ['other.ts'],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
         completed_step_ids: [plan.step_ids[0]],
       })
     );
@@ -870,6 +895,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         n: 1,
         summary: 'conflict appeared mid-window',
         files_changed: ['other.ts'],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
         completed_step_ids: [plan.step_ids[0]],
       })
     );
@@ -904,6 +930,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         n: 1,
         summary: 'two conflicts across the window',
         files_changed: [],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
         completed_step_ids: [plan.step_ids[0]],
       })
     );
@@ -964,6 +991,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
       n: 1,
       summary: 'close under conflict',
       files_changed: [],
+      done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
       completed_step_ids: [plan.step_ids[0]],
     };
     const c1 = parseOk<OkEnvelope & { warnings?: WarningEntry[] }>(
@@ -1016,6 +1044,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         n: 1,
         summary: 'work landed before open, seed was conflicted',
         files_changed: ['pre.ts'],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
         completed_step_ids: [plan.step_ids[0]],
       })
     );
@@ -1048,6 +1077,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         n: 1,
         summary: 'work landed before open',
         files_changed: ['pre.ts', 'conflict.txt'],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
         completed_step_ids: [plan.step_ids[0]],
       })
     );
@@ -1104,6 +1134,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         n: 1,
         summary: 'cp1 large change',
         files_changed: ['src/large.ts'],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
         completed_step_ids: [plan.step_ids[0]],
       })
     );
@@ -1139,6 +1170,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
       n: 1,
       summary: 'cp1',
       files_changed: ['src/foo.ts'],
+      done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
       completed_step_ids: [plan.step_ids[0]],
     });
     expect(closeResult.exitCode).toBe(0);
@@ -1256,7 +1288,13 @@ describe('checkpoint snapshot + fingerprint capture', () => {
               idempotency_key: `planB-${randomUUID()}`,
               task: 'superseding re-capture',
               label: 'supersede-test',
-              plan_steps: [{ text: 'step b', label: 'sb' }],
+              plan_steps: [
+                {
+                  text: 'step b',
+                  label: 'sb',
+                  acceptance_criteria: [{ text: 'the step is delivered' }],
+                },
+              ],
               touched_scope: [],
             })
           ),
@@ -1294,6 +1332,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 1,
           summary: 'cp1 claims step a (work landed before open)',
           files_changed: ['src/a.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
           completed_step_ids: [plan.step_ids[0]],
         })
       );
@@ -1340,6 +1379,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 2,
           summary: 'cp2 claims step b (work landed before open)',
           files_changed: ['src/b.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[1]]),
           completed_step_ids: [plan.step_ids[1]],
         })
       );
@@ -1368,6 +1408,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 1,
           summary: 'cp1 verification only',
           files_changed: [],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
           completed_step_ids: [plan.step_ids[0]],
         })
       );
@@ -1396,6 +1437,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 1,
           summary: 'cp1 normal cadence',
           files_changed: ['src/c.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
           completed_step_ids: [plan.step_ids[0]],
         })
       );
@@ -1441,6 +1483,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 1,
           summary: 'cp1 closes while cp2 is open',
           files_changed: ['src/x.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
           completed_step_ids: [plan.step_ids[0]],
         })
       );
@@ -1484,6 +1527,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 1,
           summary: 'cp1 closes first',
           files_changed: ['src/x.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
           completed_step_ids: [plan.step_ids[0]],
         })
       );
@@ -1496,6 +1540,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 2,
           summary: 'cp2 closes over an empty fence',
           files_changed: ['src/x.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[1]]),
           completed_step_ids: [plan.step_ids[1]],
         })
       );
@@ -1527,6 +1572,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 1,
           summary: 'cp1 claims a file that predates the plan baseline',
           files_changed: ['src/pre.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
           completed_step_ids: [plan.step_ids[0]],
         })
       );
@@ -1553,6 +1599,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
         n: 1,
         summary: 'cp1 claims step a (recovered)',
         files_changed: ['src/a.ts'],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
         completed_step_ids: [plan.step_ids[0]],
       };
 
@@ -1617,6 +1664,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 1,
           summary: 'cp1 large change (after open)',
           files_changed: ['src/big.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
           completed_step_ids: [plan.step_ids[0]],
         })
       );
@@ -1675,6 +1723,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 1,
           summary: 'cp1 large pre-open change; recovery diff truncates',
           files_changed: ['src/big.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
           completed_step_ids: [plan.step_ids[0]],
         })
       );
@@ -1845,6 +1894,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 1,
           summary: 'cp1 added foo',
           files_changed: ['src/foo.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
           completed_step_ids: [plan.step_ids[0]],
         })
       );
@@ -1910,6 +1960,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 1,
           summary: 'cp1 clean capture',
           files_changed: ['src/ok.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
           completed_step_ids: [plan.step_ids[0]],
         })
       );
@@ -1946,6 +1997,7 @@ describe('checkpoint snapshot + fingerprint capture', () => {
           n: 1,
           summary: 'cp1 added foo',
           files_changed: ['src/foo.ts'],
+          done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
           completed_step_ids: [plan.step_ids[0]],
         })
       );
@@ -2046,7 +2098,13 @@ describe('checkpoint snapshot + fingerprint capture', () => {
             idempotency_key: `plan-${randomUUID()}`,
             task: 'baseline gating — fingerprint disabled',
             label: 'baseline-gate-disabled',
-            plan_steps: [{ text: 'step a', label: 's1' }],
+            plan_steps: [
+              {
+                text: 'step a',
+                label: 's1',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+            ],
             touched_scope: [],
           })
         ),

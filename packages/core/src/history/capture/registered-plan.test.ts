@@ -66,7 +66,13 @@ function input(enabled = false): DatabasePlanCaptureInput {
       idempotency_key: 'registered:original-plan',
       task: 'Retain the original registered capture',
       label: 'Registered capture',
-      plan_steps: [{ text: 'Preserve original input', label: 'Preserve input' }],
+      plan_steps: [
+        {
+          text: 'Preserve original input',
+          label: 'Preserve input',
+          acceptance_criteria: [{ text: 'The original request bytes survive a retry' }],
+        },
+      ],
     }),
     sourcePlan: null,
     agent: 'codex',

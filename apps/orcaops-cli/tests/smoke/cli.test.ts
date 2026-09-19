@@ -108,9 +108,21 @@ describe('orcaops CLI (smoke: real spawn)', () => {
           JSON.stringify({
             task: 'add rate limiting to /api/charge',
             plan_steps: [
-              { text: 'Redis middleware', label: 's1' },
-              { text: 'mount on /api/charge', label: 's2' },
-              { text: 'tests', label: 's3' },
+              {
+                text: 'Redis middleware',
+                label: 's1',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+              {
+                text: 'mount on /api/charge',
+                label: 's2',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+              {
+                text: 'tests',
+                label: 's3',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
             ],
             touched_scope: ['payments'],
           })
@@ -123,7 +135,12 @@ describe('orcaops CLI (smoke: real spawn)', () => {
       ok: boolean;
       artifact_id: string;
       evaluator_results: unknown[];
-      plan_steps: Array<{ step_id: string; idx: number; text: string }>;
+      plan_steps: Array<{
+        step_id: string;
+        idx: number;
+        text: string;
+        acceptance_criteria: Array<{ criterion_id: string; text: string }>;
+      }>;
     };
     expect(plan.ok).toBe(true);
     expect(plan.artifact_id).toMatch(
@@ -342,14 +359,26 @@ describe('orcaops CLI (smoke: real spawn)', () => {
               JSON.stringify({
                 task: 'finish smoke',
                 label: 'finish-smoke',
-                plan_steps: [{ text: 'ship it', label: 'ship-it' }],
+                plan_steps: [
+                  {
+                    text: 'ship it',
+                    label: 'ship-it',
+                    acceptance_criteria: [{ text: 'the step is delivered' }],
+                  },
+                ],
               })
             ),
           ],
           { cwd: repo.path }
         )
       ).stdout
-    ) as { artifact_id: string; plan_steps: Array<{ step_id: string }> };
+    ) as {
+      artifact_id: string;
+      plan_steps: Array<{
+        step_id: string;
+        acceptance_criteria: Array<{ criterion_id: string; text: string }>;
+      }>;
+    };
     await runCli(
       [
         'capture',
@@ -390,6 +419,10 @@ describe('orcaops CLI (smoke: real spawn)', () => {
             n: 1,
             summary: 'shipped',
             completed_step_ids: [plan.plan_steps[0]!.step_id],
+            done_criteria: plan.plan_steps[0]!.acceptance_criteria.map((c) => ({
+              criterion_id: c.criterion_id,
+              evidence: 'smoke evidence',
+            })),
             verification: [{ command: 'smoke', exit_code: 0 }],
           })
         ),
@@ -462,7 +495,9 @@ describe('orcaops CLI (smoke: real spawn)', () => {
           JSON.stringify({
             idempotency_key: '',
             task: 't',
-            plan_steps: [{ text: 's', label: 's1' }],
+            plan_steps: [
+              { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+            ],
           })
         ),
       ],
@@ -476,6 +511,38 @@ describe('orcaops CLI (smoke: real spawn)', () => {
     expect(err.ok).toBe(false);
     expect(err.error.code).toBe('INVALID_INPUT');
     expect(err.error.path).toBe('idempotency_key');
+  });
+
+  it('capture plan refuses a rubric-free step even with evaluators off', async () => {
+    // The rubric rule is a structural gate in core, ahead of every evaluator,
+    // so --no-llm cannot buy a pass the way it can for an LLM evaluator.
+    await runCli(['init', '--scope', 'project', '--json', '--no-llm'], { cwd: repo.path });
+    const result = await runCli(
+      [
+        'capture',
+        'plan',
+        '--no-llm',
+        '--input',
+        inputFile(
+          JSON.stringify({
+            idempotency_key: 'rubric-free-smoke',
+            task: 'ship the thing',
+            label: 'Ship the thing',
+            plan_steps: [{ text: 'do the work', label: 'Do the work' }],
+          })
+        ),
+      ],
+      { cwd: repo.path }
+    );
+    expect(result.exitCode).toBe(1);
+    const err = JSON.parse(result.stdout) as {
+      ok: boolean;
+      error: { code: string; path?: string; message: string };
+    };
+    expect(err.ok).toBe(false);
+    expect(err.error.code).toBe('PLAN_ACCEPTANCE_CRITERIA_REQUIRED');
+    expect(err.error.path).toBe('plan_steps');
+    expect(err.error.message).toContain('acceptance_criteria:');
   });
 
   it('the retired --json payload alias is rejected as an unknown option', async () => {

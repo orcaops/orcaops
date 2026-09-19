@@ -67,7 +67,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         JSON.stringify({
           task: 'wire the deploy credentials',
           label: 'deploy creds',
-          plan_steps: [{ text: `use ${FAKE_GH_TOKEN} for the push`, label: 'push step' }],
+          plan_steps: [
+            {
+              text: `use ${FAKE_GH_TOKEN} for the push`,
+              label: 'push step',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -99,7 +105,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
           idempotency_key: key,
           task: 'rotate the deploy credentials',
           label: 'rotate creds',
-          plan_steps: [{ text: stepText, label: 'rotate step' }],
+          plan_steps: [
+            {
+              text: stepText,
+              label: 'rotate step',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -138,7 +150,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         idempotency_key: key,
         task: 'capture a local source baseline',
         label: 'capture source baseline',
-        plan_steps: [{ text: 'persist the clean pin', label: 'persist pin' }],
+        plan_steps: [
+          {
+            text: 'persist the clean pin',
+            label: 'persist pin',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: [],
         non_goals: [],
       })
@@ -188,7 +206,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         JSON.stringify({
           task: 'harden the lock helper',
           label: 'harden lock helper',
-          plan_steps: [{ text: `refactor ${QUOTED_CODE}`, label: 'refactor step' }],
+          plan_steps: [
+            {
+              text: `refactor ${QUOTED_CODE}`,
+              label: 'refactor step',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -220,7 +244,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         JSON.stringify({
           task: 'harden the source-plan path',
           label: 'harden source plan',
-          plan_steps: [{ text: 'scan the resolved pin', label: 'scan pin' }],
+          plan_steps: [
+            {
+              text: 'scan the resolved pin',
+              label: 'scan pin',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -256,7 +286,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         JSON.stringify({
           task: 'capture derived metadata safely',
           label: 'scan branch metadata',
-          plan_steps: [{ text: 'capture the plan', label: 'capture plan' }],
+          plan_steps: [
+            {
+              text: 'capture the plan',
+              label: 'capture plan',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -294,7 +330,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         JSON.stringify({
           task: 'ship the deploy slice',
           label: 'ship deploy slice',
-          plan_steps: [{ text: 'wire the deploy', label: 'wire deploy' }],
+          plan_steps: [
+            {
+              text: 'wire the deploy',
+              label: 'wire deploy',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -324,7 +366,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         JSON.stringify({
           task: 'follow the approved plan',
           label: 'follow approved plan',
-          plan_steps: [{ text: 'deliver the approved work', label: 'deliver work' }],
+          plan_steps: [
+            {
+              text: 'deliver the approved work',
+              label: 'deliver work',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -354,7 +402,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         JSON.stringify({
           task: 'follow the approved plan',
           label: 'follow approved plan',
-          plan_steps: [{ text: 'deliver the approved work', label: 'deliver work' }],
+          plan_steps: [
+            {
+              text: 'deliver the approved work',
+              label: 'deliver work',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -388,7 +442,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         JSON.stringify({
           task: 'follow the approved plan',
           label: 'follow approved plan',
-          plan_steps: [{ text: 'deliver the approved work', label: 'deliver work' }],
+          plan_steps: [
+            {
+              text: 'deliver the approved work',
+              label: 'deliver work',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -420,7 +480,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         JSON.stringify({
           task: 'follow the approved plan',
           label: 'follow approved plan',
-          plan_steps: [{ text: 'deliver the approved work', label: 'deliver work' }],
+          plan_steps: [
+            {
+              text: 'deliver the approved work',
+              label: 'deliver work',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -458,7 +524,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         JSON.stringify({
           task: 'follow the approved plan',
           label: 'follow approved plan',
-          plan_steps: [{ text: 'deliver the approved work', label: 'deliver work' }],
+          plan_steps: [
+            {
+              text: 'deliver the approved work',
+              label: 'deliver work',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -500,7 +572,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         JSON.stringify({
           task: 'follow the approved plan',
           label: 'follow approved plan',
-          plan_steps: [{ text: 'deliver the approved work', label: 'deliver work' }],
+          plan_steps: [
+            {
+              text: 'deliver the approved work',
+              label: 'deliver work',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -538,7 +616,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
         JSON.stringify({
           task: 'ship the deploy slice',
           label: 'ship deploy slice',
-          plan_steps: [{ text: 'wire the deploy', label: 'wire deploy' }],
+          plan_steps: [
+            {
+              text: 'wire the deploy',
+              label: 'wire deploy',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })
@@ -608,7 +692,13 @@ describe('capture refuses refuse-tier secrets and leaves no state', { timeout: 6
           JSON.stringify({
             artifact_id: '01a03014-0000-7000-8000-000000000003',
             label: 'revised plan',
-            plan_steps: [{ text: 'keep the plan current', label: 'keep current' }],
+            plan_steps: [
+              {
+                text: 'keep the plan current',
+                label: 'keep current',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+            ],
             rationale: `superseded by ${FAKE_GH_TOKEN}`,
             prior_plan_event_id: null,
           })
@@ -687,7 +777,13 @@ describe(
         JSON.stringify({
           task: 'ship the deploy slice',
           label: 'ship deploy slice',
-          plan_steps: [{ text: stepText, label: 'wire deploy' }],
+          plan_steps: [
+            {
+              text: stepText,
+              label: 'wire deploy',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })

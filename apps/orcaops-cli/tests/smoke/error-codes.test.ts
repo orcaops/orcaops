@@ -73,7 +73,13 @@ it('reports an unsupported database version without replacing or changing histor
           JSON.stringify({
             idempotency_key: 'unsupported-history-plan',
             task: 'Preserve existing history',
-            plan_steps: [{ text: 'Inspect the history', label: 'Inspect' }],
+            plan_steps: [
+              {
+                text: 'Inspect the history',
+                label: 'Inspect',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+            ],
           })
         ),
       ],

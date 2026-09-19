@@ -795,7 +795,9 @@ try {
       JSON.stringify({
         task: 'sibling capture',
         label: 'sibling capture',
-        plan_steps: [{ text: 's1', label: 's1' }],
+        plan_steps: [
+          { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the sibling capture lands' }] },
+        ],
         touched_scope: [],
       })
     );

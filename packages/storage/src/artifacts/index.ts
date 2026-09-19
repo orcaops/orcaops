@@ -1,3 +1,4 @@
+export * from './acceptance-criteria.js';
 export type { ArtifactPaths } from './artifact-paths.js';
 export * from './atomic-write.js';
 export * from './errors.js';

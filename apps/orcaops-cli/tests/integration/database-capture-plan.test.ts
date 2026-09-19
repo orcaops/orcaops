@@ -41,7 +41,11 @@ function payload(extra: Record<string, unknown> = {}) {
     task: 'Port the plan command onto project history',
     label: 'Plan command port',
     plan_steps: [
-      { text: 'write the adapter', label: 'Adapter' },
+      {
+        text: 'write the adapter',
+        label: 'Adapter',
+        acceptance_criteria: [{ text: 'the step is delivered' }],
+      },
       {
         text: 'prove it with tests',
         label: 'Tests',

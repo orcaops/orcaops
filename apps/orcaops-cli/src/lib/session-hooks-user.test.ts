@@ -7,9 +7,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runInInvocationContext } from './invocation-context.js';
 import {
   CODEX_HOOKS_JSON_MIN_VERSION,
+  CODEX_HOOKS_JSON_NOTE,
   CODEX_TOML_MARKER_END,
   CODEX_TOML_MARKER_START,
   type CodexRepresentation,
+  type CodexRepresentationInspection,
   type CodexRepresentationSurface,
   codexTomlSnippet,
   type CodexTrustEditKeys,
@@ -17,13 +19,19 @@ import {
   codexTrustShiftFor,
   type CodexVersionProbe,
   evaluateUserSessionHookSurfaces,
+  inspectUserSessionHooks,
   planCodexTomlInstall,
   planCodexTomlRemoval,
   planCodexTrustEdit,
+  readCodexHookGate,
   resolveCodexRepresentation,
   userSettingsSpec,
 } from './session-hooks-user.js';
-import { canonicalSessionHookCommand, reconcileDocument } from './session-hooks.js';
+import {
+  canonicalSessionHookCommand,
+  reconcileDocument,
+  SESSION_HOOK_COMMAND,
+} from './session-hooks.js';
 
 const command = canonicalSessionHookCommand('codex', { user: true });
 const fence = (inner: string): string =>
@@ -286,10 +294,11 @@ describe('codex representation resolver', () => {
 
   const resolve = (
     probe: CodexVersionProbe,
-    override?: CodexRepresentationSurface
+    override?: CodexRepresentationSurface,
+    inspected?: CodexRepresentationInspection
   ): Promise<CodexRepresentation> =>
     runInInvocationContext({ env: { ...process.env, CODEX_HOME: codexHome } }, () =>
-      resolveCodexRepresentation(override, probe)
+      resolveCodexRepresentation(override, probe, inspected)
     );
 
   const writeHooksJson = (content: string): Promise<void> =>
@@ -318,6 +327,21 @@ describe('codex representation resolver', () => {
       surface: 'hooks-json',
       reason: 'existing-hooks-json',
     });
+  });
+
+  it('uses an existing inspection instead of reopening the representation files', async () => {
+    expect(
+      await resolve(supported, undefined, {
+        hooksJsonHoldsObject: true,
+        tomlHooksOwnership: 'foreign',
+      })
+    ).toMatchObject({ surface: 'hooks-json', reason: 'existing-hooks-json' });
+    expect(
+      await resolve(supported, undefined, {
+        hooksJsonHoldsObject: false,
+        tomlHooksOwnership: 'foreign',
+      })
+    ).toMatchObject({ surface: 'config-toml', reason: 'existing-toml-hooks' });
   });
 
   it('does not join a hooks.json that is a directory, invalid, or not an object', async () => {
@@ -863,6 +887,167 @@ describe('codex user-level JSON surface', () => {
 
   const hooksJsonRegistration = JSON.stringify({
     hooks: { SessionStart: [{ matcher: 'startup|resume', hooks: [{ type: 'command', command }] }] },
+  });
+
+  const tomlElement = (body: string): string =>
+    `[[hooks.SessionStart]]\n${body}\n\n[[hooks.SessionStart.hooks]]\n`;
+
+  const codexRowsFor = async (
+    files: { toml?: string; json?: string },
+    representation?: CodexRepresentation
+  ) => {
+    if (files.toml !== undefined) {
+      await writeFile(path.join(codexHome, 'config.toml'), files.toml, 'utf8');
+    }
+    if (files.json !== undefined) {
+      await writeFile(path.join(codexHome, 'hooks.json'), files.json, 'utf8');
+    }
+    const rows = await inCodexHome(() => evaluateUserSessionHookSurfaces(null, representation));
+    return {
+      toml: rows.find((row) => row.path === path.join(codexHome, 'config.toml')),
+      json: rows.find((row) => row.path === path.join(codexHome, 'hooks.json')),
+    };
+  };
+
+  it('does not verify a TOML registration whose hook is not a command hook', async () => {
+    const toml =
+      `${tomlElement('matcher = "startup|resume"')}` +
+      `type = "prompt"\ncommand = ${JSON.stringify(command)}\n`;
+    const { toml: row } = await codexRowsFor({ toml });
+    expect(row).toMatchObject({ coverage: 'uncovered', state: 'registered-but-broken' });
+  });
+
+  it('does not verify a TOML registration whose matcher cannot fire', async () => {
+    const toml =
+      `${tomlElement('matcher = "never-match-a-session"')}` +
+      `type = "command"\ncommand = ${JSON.stringify(command)}\n`;
+    const { toml: row } = await codexRowsFor({ toml });
+    expect(row).toMatchObject({ coverage: 'uncovered', state: 'registered-but-broken' });
+  });
+
+  it('verifies the canonical TOML registration', async () => {
+    const { toml: row } = await codexRowsFor({ toml: `${codexTomlSnippet()}\n` });
+    expect(row).toMatchObject({ coverage: 'covered', state: 'installed' });
+  });
+
+  it('does not verify a TOML registration with no hook type', async () => {
+    const toml = `${tomlElement('matcher = "startup|resume"')}command = ${JSON.stringify(command)}\n`;
+    const { toml: row } = await codexRowsFor({ toml });
+    expect(row).toMatchObject({ coverage: 'uncovered', state: 'registered-but-broken' });
+  });
+
+  it('reports a present-but-unfirable registration as broken, not as one that went missing', async () => {
+    const toml =
+      `${tomlElement('matcher = "never-match-a-session"')}` +
+      `type = "command"\ncommand = ${JSON.stringify(command)}\n`;
+    const { toml: row } = await codexRowsFor({ toml });
+    expect(row).toMatchObject({ state: 'registered-but-broken', present: true });
+  });
+
+  it('does not call an unrelated command substring a registration that went missing', async () => {
+    // Valid JSON, our command text, no record, nothing in the expected event.
+    const json = JSON.stringify({ description: command, hooks: {} });
+    const { json: row } = await codexRowsFor({ json });
+    expect(row).toMatchObject({ state: 'absent', present: false, owned: true });
+    expect(row?.remedy).toBeUndefined();
+  });
+
+  it('does not supersede config.toml on a bare command substring in hooks.json', async () => {
+    // Valid JSON, our command text, but parked in a field Codex never reads.
+    const json = JSON.stringify({ description: command, hooks: {} });
+    const { toml, json: jsonRow } = await codexRowsFor(
+      { toml: `${codexTomlSnippet()}\n`, json },
+      {
+        surface: 'hooks-json',
+        reason: 'existing-hooks-json',
+        hooksJsonPath: path.join(codexHome, 'hooks.json'),
+        tomlPath: path.join(codexHome, 'config.toml'),
+        versionGate: 'supported',
+      }
+    );
+    expect(jsonRow).toMatchObject({ coverage: 'uncovered' });
+    expect(jsonRow?.state).not.toBe('installed');
+    // The substring is still ownership evidence; it is never coverage.
+    expect(jsonRow?.owned).toBe(true);
+    expect(toml).toMatchObject({ state: 'installed', coverage: 'covered' });
+  });
+
+  it('reads the codex hook gate independently of any TOML registration', async () => {
+    for (const [body, expected] of [
+      ['[features]\nhooks = false\n', true],
+      ['[features]\ncodex_hooks = false\n', true],
+      ['[features]\nhooks = true\ncodex_hooks = false\n', false],
+      ['[features]\nhooks = true\n', false],
+      ['', false],
+    ] as const) {
+      await writeFile(path.join(codexHome, 'config.toml'), body, 'utf8');
+      const gate = await inCodexHome(() => readCodexHookGate());
+      expect(gate.disabled, `config.toml body ${JSON.stringify(body)}`).toBe(expected);
+    }
+  });
+
+  it('serves the gate from the same inspection the surface rows come from', async () => {
+    await writeFile(
+      path.join(codexHome, 'config.toml'),
+      `${codexTomlSnippet()}\n\n[features]\nhooks = false\n`,
+      'utf8'
+    );
+    await writeFile(path.join(codexHome, 'hooks.json'), hooksJsonRegistration, 'utf8');
+    const result = await inCodexHome(() => inspectUserSessionHooks(null));
+    expect(result.codexGate).toMatchObject({
+      path: path.join(codexHome, 'config.toml'),
+      disabled: true,
+    });
+    // Both come out of the one call, so the two can never describe different
+    // reads of the file.
+    expect(result.surfaces.some((r) => r.path === path.join(codexHome, 'config.toml'))).toBe(true);
+    expect(result.surfaces).toContainEqual(
+      expect.objectContaining({
+        path: path.join(codexHome, 'hooks.json'),
+        state: 'installed',
+        primaryAction: 'none',
+      })
+    );
+    expect(result.codexDualRepresentation).toBe(CODEX_HOOKS_JSON_NOTE);
+  });
+
+  it('reports an open gate when config.toml is absent and an unknown one when it does not parse', async () => {
+    const absent = await inCodexHome(() => readCodexHookGate());
+    expect(absent.disabled).toBe(false);
+
+    await writeFile(path.join(codexHome, 'config.toml'), 'not = = toml\n', 'utf8');
+    const broken = await inCodexHome(() => readCodexHookGate());
+    expect(broken.disabled).toBeNull();
+  });
+
+  it('does not report unchanged for a TOML entry that cannot fire', () => {
+    const wrongType =
+      `${tomlElement('matcher = "startup|resume"')}` +
+      `type = "prompt"\ncommand = ${JSON.stringify(command)}\n`;
+    // Outside the markers the entry is the user's: refuse into manual review
+    // rather than rewrite it, but never claim there was nothing to do.
+    expect(planCodexTomlInstall(wrongType).outcome).not.toBe('unchanged');
+
+    expect(planCodexTomlInstall(`${codexTomlSnippet()}\n`).outcome).toBe('unchanged');
+  });
+
+  it('refuses a marker block it cannot prove it owns instead of rewriting or claiming unchanged', () => {
+    // A foreign matcher puts the element outside the marker-bounded ownership
+    // rules, so the removal proof cannot clear it. Refusing routes the user to
+    // manual review; the one outcome that would strand them is `unchanged`.
+    const inner =
+      '[[hooks.SessionStart]]\nmatcher = "never-match-a-session"\n\n' +
+      `[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = ${JSON.stringify(command)}`;
+    expect(planCodexTomlInstall(fence(inner)).outcome).toBe('refused-fence');
+  });
+
+  it('reinstalls over a marker block whose command went stale', () => {
+    const stale = codexTomlSnippet().replace(command, `${SESSION_HOOK_COMMAND} --agent codex-old`);
+    const plan = planCodexTomlInstall(fence(stale));
+    expect(plan.outcome).toBe('written');
+    if (plan.outcome !== 'written') throw new Error('expected a rewrite');
+    expect(plan.next).toContain(command);
+    expect(plan.next).not.toContain('codex-old');
   });
 
   it('gives codex a hooks.json spec that prepends the canonical user command', async () => {

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { doneCriteriaFor } from '../support/test-helpers.js';
 
 // Integration coverage for git-root-anchored execution: every
 // command must work from a nested subdirectory of the worktree, --root /
@@ -51,7 +52,13 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
 
   it('status from a nested subdir finds the artifact captured at the root', async () => {
     const plan = await rootAgent.capturePlan(
-      { task: 't', plan_steps: [{ text: 's1', label: 's1' }], touched_scope: [] },
+      {
+        task: 't',
+        plan_steps: [
+          { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+        ],
+        touched_scope: [],
+      },
       { noLlm: true }
     );
     const res = await sub().runRaw(['status', '--json']);
@@ -61,7 +68,13 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
 
   it('checkpoint open+close works from a subdir', async () => {
     const plan = await rootAgent.capturePlan(
-      { task: 't', plan_steps: [{ text: 's1', label: 's1' }], touched_scope: [] },
+      {
+        task: 't',
+        plan_steps: [
+          { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+        ],
+        touched_scope: [],
+      },
       { noLlm: true }
     );
     const cp = await sub().captureCheckpoint(
@@ -69,6 +82,7 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
         artifact_id: plan.artifact_id,
         summary: 'closed from a subdir',
         files_changed: ['apps/cli/src/x.ts'],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.plan_steps[0].step_id]),
         completed_step_ids: [plan.plan_steps[0].step_id],
       },
       { noLlm: true }
@@ -78,7 +92,13 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
 
   it('digest renders from a subdir (resolves the same artifact)', async () => {
     const plan = await rootAgent.capturePlan(
-      { task: 't', plan_steps: [{ text: 's1', label: 's1' }], touched_scope: [] },
+      {
+        task: 't',
+        plan_steps: [
+          { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+        ],
+        touched_scope: [],
+      },
       { noLlm: true }
     );
     await rootAgent.captureSummary({ artifact_id: plan.artifact_id, outcome: 'shipped' });
@@ -95,7 +115,13 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
     await git.commit('add a', { '--allow-empty': null });
 
     const plan = await rootAgent.capturePlan(
-      { task: 't', plan_steps: [{ text: 's1', label: 's1' }], touched_scope: [] },
+      {
+        task: 't',
+        plan_steps: [
+          { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+        ],
+        touched_scope: [],
+      },
       { noLlm: true }
     );
     await rootAgent.captureCheckpoint(
@@ -103,6 +129,7 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
         artifact_id: plan.artifact_id,
         summary: 'touched a.ts',
         files_changed: ['apps/cli/src/a.ts'],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.plan_steps[0].step_id]),
         completed_step_ids: [plan.plan_steps[0].step_id],
       },
       { noLlm: true }
@@ -144,7 +171,13 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
     await git.commit('add real + symlink', { '--allow-empty': null });
 
     const plan = await rootAgent.capturePlan(
-      { task: 't', plan_steps: [{ text: 's1', label: 's1' }], touched_scope: [] },
+      {
+        task: 't',
+        plan_steps: [
+          { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+        ],
+        touched_scope: [],
+      },
       { noLlm: true }
     );
     // the checkpoint records the SYMLINK path, not its destination
@@ -153,6 +186,7 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
         artifact_id: plan.artifact_id,
         summary: 'touched the symlink',
         files_changed: ['link.ts'],
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.plan_steps[0].step_id]),
         completed_step_ids: [plan.plan_steps[0].step_id],
       },
       { noLlm: true }
@@ -169,7 +203,13 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
 
   it('--root (appended) and ORCAOPS_ROOT resolve from outside the repo', async () => {
     const plan = await rootAgent.capturePlan(
-      { task: 't', plan_steps: [{ text: 's1', label: 's1' }], touched_scope: [] },
+      {
+        task: 't',
+        plan_steps: [
+          { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+        ],
+        touched_scope: [],
+      },
       { noLlm: true }
     );
     const outside = await outsideDir();
@@ -325,7 +365,13 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
 
   it('resolves through a test-created symlinked path (realpath canonicalization)', async () => {
     const plan = await rootAgent.capturePlan(
-      { task: 't', plan_steps: [{ text: 's1', label: 's1' }], touched_scope: [] },
+      {
+        task: 't',
+        plan_steps: [
+          { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+        ],
+        touched_scope: [],
+      },
       { noLlm: true }
     );
     const linkParent = await mkdtemp(path.join(tmpdir(), 'orcaops-link-'));

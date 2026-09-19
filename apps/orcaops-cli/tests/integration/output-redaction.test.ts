@@ -7,6 +7,7 @@ import { gitClient, inputFile } from '@orcaops/test-harness';
 
 import { fixture, inventory } from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
+import { doneCriteriaFor } from '../support/test-helpers.js';
 import { effectiveConfigPath } from '../support/test-helpers.js';
 
 // A real-shape but semantically dead JWT. Warn tier is load-bearing, not
@@ -48,6 +49,7 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
             {
               text: 'unique-terminal-boundary-marker\rspoofed step',
               label: 's1',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
             },
           ],
           decisions: [
@@ -61,7 +63,7 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
     ]);
     const plan = JSON.parse(planRes.stdout) as {
       artifact_id: string;
-      plan_steps: Array<{ step_id: string }>;
+      plan_steps: Array<{ step_id: string; acceptance_criteria: Array<{ criterion_id: string }> }>;
     };
     const stepId = plan.plan_steps[0]!.step_id;
     expect(
@@ -98,6 +100,7 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
               summary: 'terminal boundary fixture',
               files_changed: [],
               verification: [{ command: 'test fixture', exit_code: 0 }],
+              done_criteria: doneCriteriaFor(plan.plan_steps, [stepId]),
               completed_step_ids: [stepId],
               uncertainty: ['trusted uncertainty\rspoofed uncertainty'],
             })
@@ -145,7 +148,13 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
       inputFile(
         JSON.stringify({
           task: `before ${split} after`,
-          plan_steps: [{ text: 'render safely', label: 's1' }],
+          plan_steps: [
+            {
+              text: 'render safely',
+              label: 's1',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
         })
       ),
     ]);
@@ -182,7 +191,13 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
         JSON.stringify({
           task: `previously permitted artifact containing ${token}`,
           label: 'permitted-secret-artifact',
-          plan_steps: [{ text: 'render safely', label: 'render-safely' }],
+          plan_steps: [
+            {
+              text: 'render safely',
+              label: 'render-safely',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
         })
       ),
     ]);
@@ -210,7 +225,13 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
         inputFile(
           JSON.stringify({
             task: `wire ${FAKE_JWT} into env`,
-            plan_steps: [{ text: `pass ${FAKE_JWT} to deploy`, label: 's1' }],
+            plan_steps: [
+              {
+                text: `pass ${FAKE_JWT} to deploy`,
+                label: 's1',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+            ],
           })
         ),
       ]);
@@ -233,7 +254,9 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
         inputFile(
           JSON.stringify({
             task: `quote ${FAKE_JWT}`,
-            plan_steps: [{ text: 's', label: 's1' }],
+            plan_steps: [
+              { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+            ],
           })
         ),
       ]);
@@ -255,7 +278,9 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
         inputFile(
           JSON.stringify({
             task: `wire ${FAKE_JWT}`,
-            plan_steps: [{ text: 's', label: 's1' }],
+            plan_steps: [
+              { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+            ],
           })
         ),
       ]);
@@ -281,7 +306,9 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
         inputFile(
           JSON.stringify({
             task: `quote ${FAKE_JWT}`,
-            plan_steps: [{ text: 's', label: 's1' }],
+            plan_steps: [
+              { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+            ],
           })
         ),
       ]);
@@ -303,7 +330,13 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
           JSON.stringify({
             task: `ship the change quoting ${FAKE_JWT}`,
             label: 'ship the quoted change',
-            plan_steps: [{ text: `deploy with ${FAKE_JWT}`, label: 's1' }],
+            plan_steps: [
+              {
+                text: `deploy with ${FAKE_JWT}`,
+                label: 's1',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+            ],
           })
         ),
       ]);
@@ -359,7 +392,13 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
         inputFile(
           JSON.stringify({
             task: `pass ${FAKE_JWT} to ci`,
-            plan_steps: [{ text: `fetch with ${FAKE_JWT}`, label: 's1' }],
+            plan_steps: [
+              {
+                text: `fetch with ${FAKE_JWT}`,
+                label: 's1',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+            ],
           })
         ),
       ]);
@@ -385,7 +424,9 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
         inputFile(
           JSON.stringify({
             task: `embed ${FAKE_JWT}`,
-            plan_steps: [{ text: 's', label: 's1' }],
+            plan_steps: [
+              { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+            ],
           })
         ),
       ]);
@@ -409,7 +450,9 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
         inputFile(
           JSON.stringify({
             task: `unique-search-marker work with ${FAKE_JWT}`,
-            plan_steps: [{ text: 's', label: 's1' }],
+            plan_steps: [
+              { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+            ],
           })
         ),
       ]);
@@ -435,13 +478,18 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
         inputFile(
           JSON.stringify({
             task: `task with ${FAKE_JWT}\rspoofed why heading`,
-            plan_steps: [{ text: 's1', label: 's1' }],
+            plan_steps: [
+              { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+            ],
           })
         ),
       ]);
       const plan = JSON.parse(planRes.stdout) as {
         artifact_id: string;
-        plan_steps: Array<{ step_id: string }>;
+        plan_steps: Array<{
+          step_id: string;
+          acceptance_criteria: Array<{ criterion_id: string }>;
+        }>;
       };
       await writeFile(path.join(f.main, 'targeted.ts'), 'export const x = 1;\n', 'utf8');
       const git = gitClient(f.main);

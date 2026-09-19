@@ -85,7 +85,9 @@ describe('orcaops cross-process database focus (smoke)', () => {
             idempotency_key: 'plan-smoke-pins',
             task: 't',
             label: 'pin-smoke',
-            plan_steps: [{ text: 's', label: 's1' }],
+            plan_steps: [
+              { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+            ],
           })
         ),
       ],

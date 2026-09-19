@@ -1,0 +1,16 @@
+{
+  "name": "@orcaops/dev-cli",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Run the workspace CLI from the repository root.",
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "bin": {
+    "orcaops": "./orcaops.mjs"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  }
+}

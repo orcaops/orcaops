@@ -31,7 +31,7 @@ git -c user.email=t@t.co -c user.name=t commit --allow-empty -qm init
 orcaops init --json >/dev/null && echo "init: OK"
 orcaops eval add-pack @orcaops/evaluator-pack core --json >/dev/null && echo "add-pack core (no --yes, manifest-trusted): OK"
 
-printf 'task: |-\n  linux smoke\nlabel: |-\n  linux bundled runtime smoke\nplan_steps:\n  - text: |-\n      verify the bundled minified evaluator runtime executes on linux\n    label: |-\n      verify runtime on linux\ntouched_scope: []\nnon_goals: []\n' > plan.yaml
+printf 'task: |-\n  linux smoke\nlabel: |-\n  linux bundled runtime smoke\nplan_steps:\n  - text: |-\n      verify the bundled minified evaluator runtime executes on linux\n    label: |-\n      verify runtime on linux\n    acceptance_criteria:\n      - text: |-\n          the bundled runtime executes and a command-engine evaluator run completes\ntouched_scope: []\nnon_goals: []\n' > plan.yaml
 orcaops capture plan --input plan.yaml > out.json 2>err.txt || { echo "CAPTURE FAILED"; cat err.txt; exit 1; }
 completed=$(grep -o '"run_status":"completed"' out.json | wc -l | tr -d ' ')
 echo "command-engine evaluators completed: $completed"

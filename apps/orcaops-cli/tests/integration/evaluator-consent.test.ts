@@ -33,7 +33,13 @@ interface CapturePlanEnvelope {
 const PLAN_INPUT = {
   task: 'consent gate exercise',
   label: 'consent gate exercise',
-  plan_steps: [{ text: 'one step', label: 'one step' }],
+  plan_steps: [
+    {
+      text: 'one step',
+      label: 'one step',
+      acceptance_criteria: [{ text: 'the step is delivered' }],
+    },
+  ],
   touched_scope: [],
   non_goals: [],
 };

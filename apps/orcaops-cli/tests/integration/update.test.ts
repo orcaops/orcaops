@@ -2,7 +2,12 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { createRepoTemplate, createTempRepo, type TempRepo } from '@orcaops/test-harness';
+import {
+  createRepoTemplate,
+  createTempRepo,
+  inputFile,
+  type TempRepo,
+} from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
 
@@ -89,6 +94,66 @@ describe('orcaops update --force byte-stability', () => {
     const r = await agent.runRaw(['update']);
     expect(r.exitCode).toBe(0);
     expect(await readFile(skillPath, 'utf8')).toBe(pristine);
+  });
+
+  it('guides an old capture skill through rejection, drift detection, and update', async () => {
+    const rel = '.claude/skills/orcaops-capture/SKILL.md';
+    const skillPath = path.join(repo.path, rel);
+    const currentSkill = await readFile(skillPath, 'utf8');
+    const oldSkill = currentSkill
+      .replace(/contentHash: "[0-9a-f]+"/, 'contentHash: "000000000000"')
+      .replace('is **required on every step you author**', 'is optional');
+    expect(oldSkill).toContain('acceptance_criteria`** is optional');
+    await writeFile(skillPath, oldSkill, 'utf8');
+
+    const status = JSON.parse((await agent.runRaw(['status', '--json'])).stdout) as {
+      drift?: { staleSkills: string[] };
+    };
+    expect(status.drift?.staleSkills).toContain(rel);
+
+    const rejectedPlan = (key: string) =>
+      agent.runRaw([
+        'capture',
+        'plan',
+        '--no-llm',
+        '--input',
+        inputFile(
+          JSON.stringify({
+            idempotency_key: key,
+            task: 'follow the installed capture instructions',
+            label: 'Follow capture instructions',
+            plan_steps: [{ text: 'write the implementation', label: 'Write implementation' }],
+          })
+        ),
+      ]);
+
+    const oldSkillResult = await rejectedPlan('old-skill-rubric-free');
+    expect(oldSkillResult.exitCode).toBe(1);
+    const oldSkillError = JSON.parse(oldSkillResult.stdout) as {
+      error: { code: string; message: string; path?: string };
+    };
+    expect(oldSkillError.error).toMatchObject({
+      code: 'PLAN_ACCEPTANCE_CRITERIA_REQUIRED',
+      path: 'plan_steps',
+    });
+    expect(oldSkillError.error.message).toContain('plan_steps:');
+    expect(oldSkillError.error.message).toContain('acceptance_criteria:');
+    expect(oldSkillError.error.message).toContain('orcaops update');
+
+    const update = await agent.runRaw(['update', '--json']);
+    expect(update.exitCode).toBe(0);
+    expect(await readFile(skillPath, 'utf8')).toBe(currentSkill);
+
+    const currentSkillResult = await rejectedPlan('current-skill-rubric-free');
+    expect(currentSkillResult.exitCode).toBe(1);
+    const currentSkillError = JSON.parse(currentSkillResult.stdout) as {
+      error: { message: string };
+    };
+    expect(currentSkillError.error.message).toBe(oldSkillError.error.message);
+    expect(currentSkillError.error.message).toContain('If your installed capture instructions');
+    expect(currentSkillError.error.message).not.toMatch(
+      /your skills are stale|outdated skill detected/i
+    );
   });
 
   it('plain update leaves a user-edited file alone when the template is unchanged', async () => {

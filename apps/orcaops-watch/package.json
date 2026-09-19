@@ -16,7 +16,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.scripts.json && tsc --noEmit -p tsconfig.probes.json",
-    "test": "vitest run",
+    "test": "node ../../scripts/run-vitest.mjs",
     "test:watch": "vitest",
     "test:render": "bun test src/tui/**/*.render.test.tsx --timeout 30000",
     "test:pty": "bash scripts/review-experience-pty.sh",

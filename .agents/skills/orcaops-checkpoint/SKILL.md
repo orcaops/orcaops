@@ -3,7 +3,7 @@ name: "Orcaops: capture checkpoint"
 description: "Open, close, or abandon a work checkpoint with scope, evidence, and verification."
 metadata:
   generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "6478874058c2"
+  contentHash: "abc24eafe715"
 ---
 
 # Cadence rule
@@ -264,8 +264,18 @@ accepts non-zero exits so failure is never punished into silence.
 
 For a partial close that claims no completed steps, omit both
 `done_criteria` and `verification`. For a completed step with no acceptance
-criteria, omit `done_criteria` but still include `verification`. Only a
-`git-import` artifact may claim a completed step without fresh verification.
+criteria — only possible for a step retained from before criteria were required,
+or a Git import — omit `done_criteria` but still include `verification`; the
+close reports that step as having no recorded criteria, which is a statement
+about the plan, not an approval. Only a `git-import` artifact may claim a
+completed step without fresh verification.
+
+Evidence, verification, and a semantic judgment are three different things.
+`done_criteria` evidence names what satisfied a criterion and need not be a
+command — a summary, a file, or an observed behavior all count. `verification`
+is a command you ran fresh, with its exit code. Neither one is an evaluator's
+opinion about whether the delivery matches the plan; that is a separate,
+optional check.
 
 # 3. `abandon` — cancel without claiming work
 

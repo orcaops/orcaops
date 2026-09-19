@@ -3,6 +3,8 @@ import {
   criterionMoveWarnings,
   criterionRewordWarnings,
   type Plan,
+  rubricCoverage,
+  rubricCoverageSentence,
 } from '@orcaops/storage';
 
 import { ErrorCodes, InfoCodes, OrcaopsError } from '../../io/errors.js';
@@ -146,6 +148,9 @@ async function capturePlanRevision(opts: CapturePlanReviseOptions, signal: Abort
         offerPlanApproval: true,
       });
       const warnings = toSecretWarningReports(prepared.secretWarnings);
+      // From result.plan, not the latest retained plan: a replayed key returns
+      // its own older revision, and the counts must describe that same revision.
+      const reviseCoverage = rubricCoverage(result.plan);
       return {
         artifact_id: artifactId,
         revision_n: result.plan.revision_n,
@@ -191,6 +196,8 @@ async function capturePlanRevision(opts: CapturePlanReviseOptions, signal: Abort
           replayed: replayed,
         }),
         next_actions: nextActions,
+        acceptance_criteria_coverage: reviseCoverage,
+        acceptance_criteria_status: rubricCoverageSentence(reviseCoverage),
         ...(warnings.length ? { secret_warnings: warnings } : {}),
       };
     } catch (cause) {

@@ -11,6 +11,7 @@ import { openProjectDatabase, readProjectArtifact } from '@orcaops/storage/histo
 import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { doneCriteriaFor } from '../support/test-helpers.js';
 import { clearCloudLogin, commitFile } from '../support/test-helpers.js';
 
 /**
@@ -147,6 +148,10 @@ describe('checkpoint snapshot — drain×gate composition (command path)', () =>
   // init + capture plan with NO seeded login. The plan command also runs the pre-body
   // drain, so seeding stale creds AFTER this is what guarantees the refresh is done by
   // the later CHECKPOINT command's drain, not the plan's — that's the ordering under test.
+  /** Captured rubric, so closeCp can cite evidence for the step it claims. */
+  let planSteps: Array<{ step_id: string; acceptance_criteria: Array<{ criterion_id: string }> }> =
+    [];
+
   async function planNoLogin(): Promise<{ artifactId: string; stepId: string }> {
     await agent.runRaw(['init', '--json', '--no-llm']);
     const r = await agent.runRaw([
@@ -159,7 +164,13 @@ describe('checkpoint snapshot — drain×gate composition (command path)', () =>
           idempotency_key: `plan-${randomUUID()}`,
           task: 'drain composition test',
           label: 'drain-composition',
-          plan_steps: [{ text: 'step a', label: 's1' }],
+          plan_steps: [
+            {
+              text: 'step a',
+              label: 's1',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
         })
       ),
@@ -167,9 +178,13 @@ describe('checkpoint snapshot — drain×gate composition (command path)', () =>
     expect(r.exitCode).toBe(0);
     const ok = JSON.parse(r.stdout) as {
       artifact_id: string;
-      plan_steps: Array<{ step_id: string }>;
+      plan_steps: Array<{ step_id: string; acceptance_criteria: Array<{ criterion_id: string }> }>;
     };
-    return { artifactId: ok.artifact_id, stepId: ok.plan_steps[0].step_id };
+    planSteps = ok.plan_steps;
+    return {
+      artifactId: ok.artifact_id,
+      stepId: ok.plan_steps[0].step_id,
+    };
   }
 
   // Bare new FileStore() resolves the cli-setup's per-file ORCAOPS_CONFIG_HOME — the SAME
@@ -224,6 +239,7 @@ describe('checkpoint snapshot — drain×gate composition (command path)', () =>
           summary: 'cp1',
           files_changed: ['src/foo.ts'],
           verification: [{ command: 'test fixture', exit_code: 0 }],
+          done_criteria: doneCriteriaFor(planSteps, [stepId]),
           completed_step_ids: [stepId],
         })
       ),

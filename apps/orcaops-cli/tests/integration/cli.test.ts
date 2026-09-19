@@ -92,8 +92,16 @@ describe('orcaops CLI (in-process)', () => {
         JSON.stringify({
           task: 'remove unused beta() export',
           plan_steps: [
-            { text: 'remove beta from src/api.ts', label: 's1' },
-            { text: 'add tests', label: 's2' },
+            {
+              text: 'remove beta from src/api.ts',
+              label: 's1',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+            {
+              text: 'add tests',
+              label: 's2',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
           ],
           touched_scope: ['api'],
         })
@@ -248,7 +256,13 @@ describe('orcaops CLI (in-process)', () => {
       inputFile(
         JSON.stringify({
           task: 'do work',
-          plan_steps: [{ text: 'step a', label: 's1' }],
+          plan_steps: [
+            {
+              text: 'step a',
+              label: 's1',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
         })
       ),
@@ -797,8 +811,12 @@ describe('orcaops CLI (in-process)', () => {
       idempotency_key: 'plan-replay-test',
       task: 'add rate limit',
       plan_steps: [
-        { text: 'middleware', label: 's1' },
-        { text: 'tests', label: 's2' },
+        {
+          text: 'middleware',
+          label: 's1',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+        { text: 'tests', label: 's2', acceptance_criteria: [{ text: 'the step is delivered' }] },
       ],
     };
     const first = await agent.runRaw([
@@ -843,7 +861,9 @@ describe('orcaops CLI (in-process)', () => {
       idempotency_key: 'plan-resume-missing-lifecycle',
       task: 'resume missing evaluator lifecycle',
       label: 'resume-missing-lifecycle',
-      plan_steps: [{ text: 'one', label: 's1' }],
+      plan_steps: [
+        { text: 'one', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+      ],
       touched_scope: [],
     };
     const retained = await captureDatabasePlan(f.writer, f.registeredContext, {

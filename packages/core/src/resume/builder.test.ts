@@ -19,7 +19,13 @@ type SeedContext = {
 
 async function prepareThread(
   seed?: (context: SeedContext) => Promise<void>,
-  options: { task?: string; secretAllow?: string[]; agent?: 'codex' | 'other' } = {}
+  options: {
+    task?: string;
+    secretAllow?: string[];
+    agent?: 'codex' | 'other';
+    /** Step indexes to leave rubric-free, as retained history may have them. */
+    bareStepIndexes?: number[];
+  } = {}
 ): Promise<ArtifactThread> {
   const artifactId = uuidv7();
   const stepIds = [uuidv7(), uuidv7(), uuidv7()];
@@ -47,9 +53,9 @@ async function prepareThread(
             step_id: stepId,
             label: `Step ${index + 1}`,
             text: index === 0 ? 'Implement the durable reader' : `Complete work ${index + 1}`,
-            acceptance_criteria: [
-              { criterion_id: criterionIds[index]!, text: `Verify behavior ${index + 1}` },
-            ],
+            acceptance_criteria: (options.bareStepIndexes ?? []).includes(index)
+              ? []
+              : [{ criterion_id: criterionIds[index]!, text: `Verify behavior ${index + 1}` }],
           })),
           touched_scope: ['src/history'],
           non_goals: [
@@ -321,5 +327,58 @@ describe('labelText', () => {
   it('collapses identical text and separates distinct labels', () => {
     expect(labelText('Build reader', 'Build reader')).toBe('Build reader');
     expect(labelText('Build reader', 'Use retained rows')).toBe('Build reader — Use retained rows');
+  });
+});
+
+describe('buildResumeFromSnapshot — missing rubrics reach the resumed agent', () => {
+  it('reports coverage over the current retained plan in structured data', async () => {
+    const thread = await prepareThread(undefined, { bareStepIndexes: [1, 2] });
+    const { data: resume } = render(thread);
+    expect(resume.acceptance_criteria_coverage).toMatchObject({
+      revision_n: 0,
+      total: 3,
+      covered: 1,
+      missing: 2,
+    });
+    expect(resume.acceptance_criteria_coverage.missing_step_ids).toHaveLength(2);
+  });
+
+  it('names the rubric-free steps in the paste-ready prompt', async () => {
+    const thread = await prepareThread(undefined, { bareStepIndexes: [1] });
+    const { data: resume } = render(thread);
+    expect(resume.agent_prompt).toContain('1 step has no recorded criteria');
+    expect(resume.agent_prompt).toContain('Step 2 — Complete work 2 (no recorded criteria)');
+    expect(resume.agent_prompt).not.toContain(
+      'Step 1 — Implement the durable reader (no recorded criteria)'
+    );
+  });
+
+  it('stays quiet in the prompt when every step carries a rubric', async () => {
+    const thread = await prepareThread();
+    const { data: resume } = render(thread);
+    expect(resume.acceptance_criteria_coverage.missing).toBe(0);
+    expect(resume.agent_prompt).not.toContain('no recorded criteria');
+  });
+
+  it('names the rubric-free steps in the rendered markdown too', async () => {
+    const thread = await prepareThread(undefined, { bareStepIndexes: [1] });
+    const { markdown } = render(thread);
+    expect(markdown).toContain('1 step has no recorded criteria');
+    expect(markdown).toContain('Step 2 — Complete work 2 (no recorded criteria)');
+    expect(markdown).toContain('criterion-level completion is unverified');
+  });
+
+  it('keeps step-claim coverage and rubric presence as separate statements', async () => {
+    const thread = await prepareThread(undefined, { bareStepIndexes: [0, 1, 2] });
+    const { markdown } = render(thread);
+    expect(markdown).toContain('Recorded acceptance criteria: 0 of 3 steps');
+    expect(markdown).not.toMatch(/exempt|approved|does not grade/i);
+  });
+
+  it('never tells the resumed agent an omission was graded or approved', async () => {
+    const thread = await prepareThread(undefined, { bareStepIndexes: [0, 1, 2] });
+    const { data: resume } = render(thread);
+    expect(resume.acceptance_criteria_status).toContain('0 of 3 steps');
+    expect(resume.agent_prompt).not.toMatch(/exempt|approved|does not grade/i);
   });
 });

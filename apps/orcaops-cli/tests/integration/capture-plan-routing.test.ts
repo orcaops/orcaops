@@ -37,7 +37,13 @@ describe('capture plan command routing (in-process command tree)', () => {
       JSON.stringify({
         task: 'routing regression task',
         label: 'routing regression',
-        plan_steps: [{ text: 'step one', label: 's1' }],
+        plan_steps: [
+          {
+            text: 'step one',
+            label: 's1',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: [],
         ...over,
       })
@@ -89,8 +95,17 @@ describe('capture plan command routing (in-process command tree)', () => {
           rationale: 'routing regression: prove revise routes independently',
           prior_plan_event_id: plan.plan_event_id,
           plan_steps: [
-            { step_id: plan.plan_steps[0].step_id, text: 'step one', label: 's1' },
-            { text: 'step two', label: 's2' },
+            {
+              step_id: plan.plan_steps[0].step_id,
+              text: 'step one',
+              label: 's1',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+            {
+              text: 'step two',
+              label: 's2',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
           ],
           touched_scope: [],
           non_goals: [],
@@ -293,7 +308,13 @@ describe('capture plan — the baseline snapshot honours capture.exclude', () =>
         JSON.stringify({
           task: 'ordinary task',
           label: 'ordinary task',
-          plan_steps: [{ text: 'do the work', label: 'do work' }],
+          plan_steps: [
+            {
+              text: 'do the work',
+              label: 'do work',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
         })
       ),
     ]);

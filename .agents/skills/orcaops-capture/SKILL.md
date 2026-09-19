@@ -3,7 +3,7 @@ name: "Orcaops: capture plan"
 description: "Capture or revise a coding-task plan, minting stable step IDs and running plan checks."
 metadata:
   generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "0086d885cda4"
+  contentHash: "dcab23971f9c"
 ---
 
 # When to use
@@ -80,10 +80,16 @@ or when the skill is not installed.
          mount the new middleware on /api/charge
        label: |-
          Mount on /api/charge
+       acceptance_criteria:
+         - text: |-
+             /api/charge rejects a request over the limit; no other route changes behavior
      - text: |-
          add tests for the limit-exceeded path
        label: |-
          Tests for limit-exceeded path
+       acceptance_criteria:
+         - text: |-
+             a test asserts HTTP 429 on the request after the limit, and one asserts 200 below it
    touched_scope: ["payments", "infra"]
    non_goals:
      - text: |-
@@ -112,6 +118,13 @@ The `--source-plan <path>` flag: **if a plan document exists anywhere, pass
 it.** It reads and hashes the file at capture time and pins it immutably on
 the artifact, so the plan-conformance evaluators can grade the captured plan
 against what the slice actually asked for.
+
+**Pinning the file is not a substitute for the rubric.** Where the source plan
+states acceptance obligations — "must reject an expired pin", "p95 under
+200ms" — transcribe them into the structured `acceptance_criteria` of the step
+that owns them. The pin records what was asked; the rubric is what a close
+keys evidence to. A plan that pins a detailed document and declares vague
+criteria reads as covered while nothing concrete is gradable.
 
 - **Out-of-repo paths are fully supported.** A plan in your agent's planning
   directory (e.g. `~/.claude/plans/my-plan.md`) or any absolute path works.
@@ -145,13 +158,31 @@ as the `plan_revision_id` optimistic-concurrency token on cp-open.
 | `idempotency_key` | **Optional — auto-minted (UUIDv7) when omitted**, so you normally don't pass it. Supply one explicitly only for replay-safe retries: reusing the same key makes a retried call dedup as a replay instead of minting a new artifact. **On initial capture the match is key-only**: a reused key replays the FIRST artifact and silently ignores the plan you just sent, even if it is completely different. It never raises `IDEMPOTENCY_CONFLICT`. If you are retrying with an EDITED plan, mint a fresh key, or capture once and use `plan revise`. |
 | `task` | One-sentence description of the work |
 | `label` | **Plan-level short headline** — 1-line human-readable name for the whole capture thread (1–70 chars, no newlines/tabs, trimmed). Distinct from the longer `task`. Surfaces in lists, digests, and downstream PR titles. The `plan-label-quality` evaluator (severity: warn) flags labels that are too short, generic ("fix", "wip", "cleanup", etc.), or just the leading slice of `task`. |
-| `plan_steps` | Ordered list of step objects (~3-7 entries), each `{ text, label, acceptance_criteria? }`. The runtime mints stable UUIDv7 step_ids per entry. `label` is a short-form description (1-line TL;DR per step); see the `label` notes below. **`acceptance_criteria`** (optional) is a list of `{ text }` rubric items whose evidence the store requires when the step is claimed complete; the runtime mints a stable `criterion_id` per entry and returns them in the response (key `done_criteria` to them at checkpoint-close). A step with no criteria has no criterion-evidence requirement. |
+| `plan_steps` | Ordered list of step objects (~3-7 entries), each `{ text, label, acceptance_criteria }`. The runtime mints stable UUIDv7 step_ids per entry. `label` is a short-form description (1-line TL;DR per step); see the `label` notes below. **`acceptance_criteria`** is **required on every step you author** — a list of `{ text }` rubric items, each naming an observable condition that proves the step is done. Capture is rejected with `PLAN_ACCEPTANCE_CRITERIA_REQUIRED` when a step declares none, and the error prints the nested YAML shape to add. The runtime mints a stable `criterion_id` per entry and returns them in the response; key `done_criteria` to those ids at checkpoint-close. Only steps already retained from before this contract (and Git imports) may carry an empty rubric, and their absent criteria are reported, never treated as approved. |
 | `touched_scope` | Tags like `auth`, `payments`, `pii`, `refactor`, `docs`. Used to filter evaluators. Empty array is fine. |
 | `non_goals` | Things this plan is intentionally **not** going to do — **structured** `{ text, rationale, source_refs? }`. `text` (the exclusion) and `rationale` (the *why*) are both required and non-blank; `source_refs` is optional (free-form strings naming the source-plan item(s) you're excluding, e.g. `"section 2.3"`). Surfaces in plan / resume / digest; checked at checkpoint-close by `non-goals-violated`. |
 | `decisions` | **Optional** plan-time decisions — the load-bearing architectural choices made up front, **structured** `{ decision, reason, alternatives_considered? }` (where `alternatives_considered` is a list of `{ option, rejected_because }`). Capture **a choice where you rejected a viable alternative**, **a divergence from the source plan**, or **adopting an existing pattern over building new** (that still counts). The runtime stamps each with the plan `revision_n`; surfaces in plan.md / digest / resume / `why`. Append-only across revisions — a `revise` supplies only the NEW decisions. |
 
 Optional: `branch` (defaults to current git branch), `agent_session_id`,
 and the `--source-plan <path>` **flag** (not a JSON field) — see above.
+
+### Three different things, deliberately kept apart
+
+- **An acceptance criterion** is a condition that must hold when the step is
+  done. It lives in the plan and is graded by evidence at close.
+- **`done_criteria` evidence** is what you cite AT close for each criterion —
+  free text naming the delivered thing (a test, a file, a behavior). Evidence
+  is not limited to commands: a summary, a file, or an observed behavior all
+  count.
+- **`verification`** is a command you ran fresh at close with its exit code.
+  It proves you exercised something; it does not, by itself, satisfy a
+  criterion. A non-imported close that claims completion still requires fresh
+  command verification, even when the evidence for a particular criterion is
+  not itself a command.
+
+A full rubric means every step declares what "done" means. It does **not**
+mean the work was delivered, that any evaluator ran, or that the plan matches
+its source document. Those are separate facts, reported separately.
 
 ### About `label`
 
@@ -201,20 +232,35 @@ plan_steps:
       implement Redis sliding-window middleware in Express
     label: |-
       Redis sliding-window middleware
+    acceptance_criteria:
+      - criterion_id: <middleware criterion_id>
+        text: |-
+          the middleware returns HTTP 429 when the configured limit is exceeded
   - text: |-
       load rate-limit config from env
     label: |-
       Load rate-limit config
+    acceptance_criteria:
+      - text: |-
+          the configured limit is available before the middleware is constructed
   - step_id: <existing step_id>
     text: |-
       mount the new middleware on /api/charge
     label: |-
       Mount on /api/charge
+    acceptance_criteria:
+      - criterion_id: <mount criterion_id>
+        text: |-
+          /api/charge rejects a request over the limit; no other route changes behavior
   - step_id: <existing step_id>
     text: |-
       add tests for the limit-exceeded path
     label: |-
       Tests for limit-exceeded path
+    acceptance_criteria:
+      - criterion_id: <tests criterion_id>
+        text: |-
+          a test asserts HTTP 429 on the request after the limit, and one asserts 200 below it
 touched_scope: ["payments", "infra"]
 non_goals:
   - text: |-
@@ -244,7 +290,7 @@ initial capture and immutable thereafter.)
 | `idempotency_key` | **Optional — auto-minted when omitted.** If you do pass one: same key + same payload replays; same key + different payload is `IDEMPOTENCY_CONFLICT`. |
 | `artifact_id` | From the prior `capture plan` response. |
 | `label` | **Plan-level short headline for the new revision.** Required on every revise (no implicit carryover from the prior revision) — relabeling is the supported way to update the thread headline as scope evolves. Same constraints as the initial-capture `label`. The `plan-label-quality` evaluator re-runs on revise. |
-| `plan_steps` | Full new plan in display order. Each entry: `{ step_id?, text, label, acceptance_criteria? }`. **Include `step_id`** for steps you're carrying forward (with the original or rewritten text); **omit `step_id`** to mint a new one for steps being added. `label` (per-step short-form description, 1-line TL;DR) is always required (caller supplies it on every entry, including carryovers — relabeling is a normal revise action). Order is the new display order — reordering is just a position change. **`acceptance_criteria`** is full-supersede like the steps: each entry `{ criterion_id?, text }` — carry a `criterion_id` to preserve a criterion explicitly (it must have existed on the **same** step in the prior revision, else `INVALID_INPUT`), or **omit it** — an omitted criterion whose `text` is byte-identical to an unchanged prior criterion on the same step auto-carries that prior id (so restating unchanged criteria never churns their identity, and recorded `done_criteria` evidence stays bound), and only an omitted criterion whose text has no prior match mints a new id. Omitting the array drops that step's criteria. |
+| `plan_steps` | Full new plan in display order. Each entry: `{ step_id?, text, label, acceptance_criteria? }`. **Include `step_id`** for steps you're carrying forward (with the original or rewritten text); **omit `step_id`** to mint a new one for steps being added. `label` (per-step short-form description, 1-line TL;DR) is always required (caller supplies it on every entry, including carryovers — relabeling is a normal revise action). Order is the new display order — reordering is just a position change. **`acceptance_criteria`** is full-supersede like the steps: each entry `{ criterion_id?, text }` — carry a `criterion_id` to preserve a criterion explicitly (it must have existed on the **same** step in the prior revision, else `INVALID_INPUT`), or **omit it** — an omitted criterion whose `text` is byte-identical to an unchanged prior criterion on the same step auto-carries that prior id (so restating unchanged criteria never churns their identity, and recorded `done_criteria` evidence stays bound), and only an omitted criterion whose text has no prior match mints a new id. Omitting the array drops that step's criteria — but a step that HAS criteria may not be left with none: removal of the last criterion is rejected (`PLAN_ACCEPTANCE_CRITERIA_REQUIRED`) even with `acknowledge_criteria_changes`. Replace them with valid new criteria in the same revision instead. A newly added step needs criteria just like one authored at capture, and a retained rubric-free step may carry forward only with byte-identical text (label-only edits stay allowed). |
 | `rationale` | Required, non-empty. Why the plan changed. The `revision-rationale-required` evaluator (severity: block) rejects empty / near-empty rationales. |
 | `prior_plan_event_id` | Optimistic-concurrency token: the latest `plan_event_id` you observed. Read it from the **top-level** `plan_event_id` field on `orcaops resume --json` (also returned at the top level of the previous capture / revise response). Pass `null` to skip the freshness check. |
 | `touched_scope` | New touched_scope set. Adding a sensitive tag triggers `revision-touched-scope-stable` warn. |

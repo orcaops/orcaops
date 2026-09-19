@@ -8,6 +8,7 @@ import { inputFile } from '@orcaops/test-harness';
 
 import { fixture } from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
+import { doneCriteriaFor } from '../support/test-helpers.js';
 
 /**
  * Ported by meaning from the surface half of tests/integration/checkpoint-lifecycle.test.ts,
@@ -64,16 +65,25 @@ async function plan(f: Fixture, labels: string[], session: string | null = SESSI
       idempotency_key: `plan-${randomUUID()}`,
       task: 'Exercise the capture read surfaces',
       label: `Surfaces ${randomUUID().slice(0, 8)}`,
-      plan_steps: labels.map((label) => ({ text: label, label })),
+      plan_steps: labels.map((label) => ({
+        text: label,
+        label,
+        acceptance_criteria: [{ text: 'the step is delivered' }],
+      })),
       touched_scope: [],
       non_goals: [],
     },
     session
   );
   expect(raw.exitCode, raw.stdout + raw.stderr).toBe(0);
+  const planSteps = result.plan_steps as Array<{
+    step_id: string;
+    acceptance_criteria: Array<{ criterion_id: string }>;
+  }>;
   return {
     artifactId: result.artifact_id as string,
-    steps: (result.plan_steps as { step_id: string }[]).map((step) => step.step_id),
+    steps: planSteps.map((step) => step.step_id),
+    planSteps,
   };
 }
 async function status(f: Fixture) {
@@ -153,7 +163,7 @@ describe('registered database capture surfaces', { timeout: 180_000 }, () => {
 
   it('carries step identity through a reorder and a rewrite and refuses an unacknowledged drop', async () => {
     const f = await fixture();
-    const { artifactId, steps } = await plan(f, ['a', 'b', 'c']);
+    const { artifactId, steps, planSteps } = await plan(f, ['a', 'b', 'c']);
     const revise = (body: Record<string, unknown>) =>
       run(f, ['plan', 'revise'], {
         idempotency_key: `revise-${randomUUID()}`,
@@ -167,9 +177,24 @@ describe('registered database capture surfaces', { timeout: 180_000 }, () => {
     const reordered = await revise({
       label: 'Reordered',
       plan_steps: [
-        { step_id: steps[2], text: 'c', label: 'c' },
-        { step_id: steps[0], text: 'a', label: 'a' },
-        { step_id: steps[1], text: 'b', label: 'b' },
+        {
+          step_id: steps[2],
+          text: 'c',
+          label: 'c',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+        {
+          step_id: steps[0],
+          text: 'a',
+          label: 'a',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+        {
+          step_id: steps[1],
+          text: 'b',
+          label: 'b',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
       ],
     });
     expect(reordered.raw.exitCode, reordered.raw.stdout + reordered.raw.stderr).toBe(0);
@@ -184,9 +209,24 @@ describe('registered database capture surfaces', { timeout: 180_000 }, () => {
     const rewritten = await revise({
       label: 'Rewritten',
       plan_steps: [
-        { step_id: steps[2], text: 'c', label: 'c' },
-        { step_id: steps[0], text: 'a, rewritten', label: 'a' },
-        { step_id: steps[1], text: 'b', label: 'b' },
+        {
+          step_id: steps[2],
+          text: 'c',
+          label: 'c',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+        {
+          step_id: steps[0],
+          text: 'a, rewritten',
+          label: 'a',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+        {
+          step_id: steps[1],
+          text: 'b',
+          label: 'b',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
       ],
     });
     expect(rewritten.raw.exitCode, rewritten.raw.stdout + rewritten.raw.stderr).toBe(0);
@@ -208,23 +248,43 @@ describe('registered database capture surfaces', { timeout: 180_000 }, () => {
       completed_step_ids: [steps[0]],
       decisions: [],
       uncertainty: [],
-      done_criteria: [],
+      done_criteria: doneCriteriaFor(planSteps, [steps[0]]),
       verification: [{ command: 'pnpm exec vitest run', exit_code: 0 }],
     });
     expect(closed.raw.exitCode, closed.raw.stdout + closed.raw.stderr).toBe(0);
     const dropped = await revise({
       label: 'Dropping a claimed step',
       plan_steps: [
-        { step_id: steps[2], text: 'c', label: 'c' },
-        { step_id: steps[1], text: 'b', label: 'b' },
+        {
+          step_id: steps[2],
+          text: 'c',
+          label: 'c',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+        {
+          step_id: steps[1],
+          text: 'b',
+          label: 'b',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
       ],
     });
     expect(dropped.result.error.code).toBe('PLAN_REVISION_UNACKNOWLEDGED_DROPS');
     const acknowledged = await revise({
       label: 'Dropping a claimed step with acknowledgement',
       plan_steps: [
-        { step_id: steps[2], text: 'c', label: 'c' },
-        { step_id: steps[1], text: 'b', label: 'b' },
+        {
+          step_id: steps[2],
+          text: 'c',
+          label: 'c',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+        {
+          step_id: steps[1],
+          text: 'b',
+          label: 'b',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
       ],
       acknowledge_drops_completed_steps: [steps[0]],
     });
@@ -238,7 +298,9 @@ describe('registered database capture surfaces', { timeout: 180_000 }, () => {
       idempotency_key: `plan-${randomUUID()}`,
       task: 'Hand the plan event id to the checkpoint',
       label: 'Plan revision token',
-      plan_steps: [{ text: 'a', label: 'a' }],
+      plan_steps: [
+        { text: 'a', label: 'a', acceptance_criteria: [{ text: 'the step is delivered' }] },
+      ],
       touched_scope: [],
       non_goals: [],
     });
@@ -268,7 +330,14 @@ describe('registered database capture surfaces', { timeout: 180_000 }, () => {
       label: 'Moves the plan event id on',
       rationale: 'Make the captured token stale',
       prior_plan_event_id: captureEventId,
-      plan_steps: [{ step_id: stepId, text: 'a', label: 'a' }],
+      plan_steps: [
+        {
+          step_id: stepId,
+          text: 'a',
+          label: 'a',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: [],
       non_goals: [],
     });
@@ -299,7 +368,14 @@ describe('registered database capture surfaces', { timeout: 180_000 }, () => {
         artifact_id: artifactId,
         rationale: 'Exercise session inheritance',
         prior_plan_event_id: null,
-        plan_steps: [{ step_id: steps[0], text: 'a', label: 'a' }],
+        plan_steps: [
+          {
+            step_id: steps[0],
+            text: 'a',
+            label: 'a',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: [],
         non_goals: [],
         ...body,
@@ -378,7 +454,9 @@ describe('registered database capture surfaces', { timeout: 180_000 }, () => {
       idempotency_key: `plan-${randomUUID()}`,
       task: 'Capture with no readable agent transcript',
       label: 'Usage discovery honesty',
-      plan_steps: [{ text: 'a', label: 'a' }],
+      plan_steps: [
+        { text: 'a', label: 'a', acceptance_criteria: [{ text: 'the step is delivered' }] },
+      ],
       touched_scope: [],
       non_goals: [],
     });

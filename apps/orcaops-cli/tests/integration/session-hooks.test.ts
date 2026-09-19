@@ -1313,7 +1313,10 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     const details = (check?.details ?? []).join('\n');
     expect(details).toContain('features.hooks (or codex_hooks) = false');
     expect(details).toContain('set it to true');
-    expect(details).not.toContain('session-hooks install --agents codex');
+    // Not merely the agent-specific spelling — the shared footer is an install
+    // instruction too, and install deliberately leaves the gate alone (proved
+    // immediately below), so ANY install instruction here contradicts itself.
+    expect(details).not.toContain('session-hooks install');
 
     (await confirmMock()).mockResolvedValueOnce(true);
     (await selectMock()).mockResolvedValueOnce('managed');
@@ -1632,6 +1635,7 @@ describe('orcaops session-hooks (machine-level registration)', () => {
       `${configToml}: registered user-level entry is broken — ${invalidRemedy}`
     );
     expect(details).not.toContain('session-hooks install --agents codex');
+    expect(details).not.toContain('Machine registration: run');
   });
 
   it('doctor reports an unrecorded paste inside an unparseable config.toml as broken', async () => {
@@ -1655,6 +1659,7 @@ describe('orcaops session-hooks (machine-level registration)', () => {
       `${configToml}: registered user-level entry is broken — ${invalidRemedy}`
     );
     expect(broken.details).not.toContain('session-hooks install --agents codex');
+    expect(broken.details).not.toContain('Machine registration: run');
     expect(await exists(recordPath())).toBe(false);
 
     // The same unparseable file without any trace of the command is not ours to report.
@@ -2412,6 +2417,7 @@ describe('orcaops session-hooks (machine-level registration)', () => {
       `${codexHooks()}: registered user-level entry is broken — ${codexHooks()} is not valid JSON`
     );
     expect(invalid.details).toContain('session-hooks install --agents codex');
+    expect(invalid.details).not.toContain('Machine registration: run');
     // The managed/manual chooser belongs to config.toml, not the sidecar.
     expect(invalid.details).not.toContain('choose managed mode');
 
@@ -2425,6 +2431,7 @@ describe('orcaops session-hooks (machine-level registration)', () => {
         `${codexHooks()}: registered user-level entry could not be verified`
       );
       expect(unreadable.details).toContain('retry after restoring access');
+      expect(unreadable.details).not.toContain('Machine registration: run');
       const status = await agent.runRaw(['session-hooks', 'status', '--json']);
       const row = (
         JSON.parse(status.stdout) as {
@@ -2512,5 +2519,367 @@ describe('orcaops session-hooks (machine-level registration)', () => {
     const check = report.checks.find((c) => c.name === 'session-hooks');
     expect(check?.status).toBe('warn');
     expect((check?.details ?? []).join('\n')).toContain('no user-level surface');
+  });
+
+  describe('repository coverage in doctor and status', () => {
+    const sessionHooksCheck = async (): Promise<{
+      status: string;
+      summary: string;
+      details?: string[];
+    }> => {
+      const res = await agent.runRaw(['doctor', '--json']);
+      const parsed = JSON.parse(res.stdout) as {
+        checks: Array<{ name: string; status: string; summary: string; details?: string[] }>;
+      };
+      const check = parsed.checks.find((c) => c.name === 'session-hooks');
+      if (!check) throw new Error('no session-hooks check');
+      return check;
+    };
+
+    const initWith = async (scope: string, extra: string[] = []): Promise<void> => {
+      await agent.runRaw([
+        'init',
+        '--scope',
+        scope,
+        '--json',
+        '--no-llm',
+        '--force',
+        '--session-hooks',
+        '--agents',
+        'claude-code,codex',
+        ...extra,
+      ]);
+    };
+
+    it('warns for every required recordless missing registration under each scope', async () => {
+      for (const [scope, extra] of [
+        ['project', ['--session-hook-entries', 'none']],
+        ['personal', []],
+        ['global', []],
+      ] as const) {
+        await initWith(scope, [...extra]);
+        const check = await sessionHooksCheck();
+        expect(check.status, scope).toBe('warn');
+        const details = (check.details ?? []).join('\n');
+        // One line per AGENT — codex has two candidate files and neither is
+        // individually required.
+        expect(details, scope).toContain('claude-code: no machine session-hook registration');
+        expect(details, scope).toContain('codex: no machine session-hook registration');
+        expect(details, scope).not.toContain('inactive under scope');
+      }
+    });
+
+    it('drops the claim that enabled hooks are inactive outside project scope', async () => {
+      await initWith('global');
+      const check = await sessionHooksCheck();
+      expect(check.summary).not.toContain('inactive under scope');
+      expect(check.summary).not.toContain('machine registration expected');
+    });
+
+    it('says registrations are verified only once every required agent is covered', async () => {
+      await initWith('project', ['--session-hook-entries', 'none']);
+      expect((await sessionHooksCheck()).summary).not.toContain(
+        'required machine registrations verified'
+      );
+
+      (await confirmMock()).mockResolvedValueOnce(true);
+      await agent.runRaw(['session-hooks', 'install', '--agents', 'claude-code']);
+      (await confirmMock()).mockResolvedValueOnce(true);
+      (await selectMock()).mockResolvedValueOnce('managed');
+      await agent.runRaw(['session-hooks', 'install', '--agents', 'codex']);
+
+      const after = await sessionHooksCheck();
+      expect(after.status).toBe('pass');
+      expect(after.summary).toContain('required machine registrations verified');
+    });
+
+    it('reports repository coverage per agent, separate from machine inventory', async () => {
+      await initWith('project', ['--session-hook-entries', 'none']);
+      const res = await agent.runRaw(['session-hooks', 'status', '--json']);
+      const parsed = JSON.parse(res.stdout) as {
+        surfaces: Array<{ path: string; state: string }>;
+        repository: {
+          state: string;
+          scope?: string;
+          agents?: Array<{
+            agent: string;
+            required: boolean;
+            coverage: string;
+            contributing: string[];
+          }>;
+        };
+      };
+      // Existing surface rows and their state vocabulary are untouched.
+      expect(parsed.surfaces.length).toBeGreaterThan(0);
+      expect(parsed.surfaces.every((s) => typeof s.state === 'string')).toBe(true);
+
+      expect(parsed.repository.state).toBe('available');
+      expect(parsed.repository.scope).toBe('project');
+      const codex = parsed.repository.agents?.find((a) => a.agent === 'codex');
+      expect(codex).toMatchObject({ required: true, coverage: 'missing' });
+      // Both candidate files inform ONE requirement.
+      expect(codex?.contributing).toHaveLength(2);
+    });
+
+    it('keeps machine inventory available when the repository cannot be assessed', async () => {
+      const outside = await mkdtemp(path.join(tmpdir(), 'orcaops-uh-outside-'));
+      try {
+        const stray = makeAgent({
+          cwd: outside,
+          env: {
+            ORCAOPS_DISABLE_DRAIN: '1',
+            ORCAOPS_GLOBAL_ROOT: globalRoot,
+            CLAUDE_CONFIG_DIR: claudeHome,
+            CODEX_HOME: codexHome,
+          },
+        });
+        const res = await stray.runRaw(['session-hooks', 'status', '--json']);
+        const parsed = JSON.parse(res.stdout) as {
+          surfaces: Array<{ path: string }>;
+          repository: { state: string; agents?: unknown };
+        };
+        expect(parsed.surfaces.length).toBeGreaterThan(0);
+        expect(parsed.repository.state).toBe('unconfigured');
+        // Neutral, not an empty agent list that would read as "nothing required".
+        expect(parsed.repository.agents).toBeUndefined();
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('leaves user files and the registration record untouched under doctor --fix', async () => {
+      await initWith('project', ['--session-hook-entries', 'none']);
+      const before = await agent.runRaw(['session-hooks', 'status', '--json']);
+      const res = await agent.runRaw(['doctor', '--fix', '--json']);
+      const parsed = JSON.parse(res.stdout) as {
+        checks: Array<{ name: string; status: string }>;
+      };
+      expect(parsed.checks.find((c) => c.name === 'session-hooks')?.status).toBe('warn');
+      const after = await agent.runRaw(['session-hooks', 'status', '--json']);
+      expect(JSON.parse(after.stdout).surfaces).toEqual(JSON.parse(before.stdout).surfaces);
+      await expect(access(path.join(claudeHome, 'settings.json'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+  });
+
+  describe('shared-file lifecycle and recovery', () => {
+    const claudeSettings = (): string => path.join(claudeHome, 'settings.json');
+
+    const doctorCheck = async (): Promise<{ status: string; details?: string[] }> => {
+      const res = await agent.runRaw(['doctor', '--json']);
+      const parsed = JSON.parse(res.stdout) as {
+        checks: Array<{ name: string; status: string; details?: string[] }>;
+      };
+      const check = parsed.checks.find((c) => c.name === 'session-hooks');
+      if (!check) throw new Error('no session-hooks check');
+      return check;
+    };
+
+    const repositoryCoverage = async (): Promise<string> => {
+      const res = await agent.runRaw(['session-hooks', 'status', '--json']);
+      const parsed = JSON.parse(res.stdout) as {
+        repository: { state: string; agents?: Array<{ agent: string; coverage: string }> };
+      };
+      const claude = parsed.repository.agents?.find((a) => a.agent === 'claude-code');
+      return claude?.coverage ?? parsed.repository.state;
+    };
+
+    const FOREIGN = {
+      matcher: 'startup',
+      hooks: [{ type: 'command', command: 'echo their-tool' }],
+    };
+
+    beforeEach(async () => {
+      await agent.runRaw([
+        'init',
+        '--scope',
+        'project',
+        '--json',
+        '--no-llm',
+        '--force',
+        '--session-hooks',
+        '--session-hook-entries',
+        'none',
+        '--agents',
+        'claude-code',
+      ]);
+    });
+
+    it('recovers coverage across a recordless rewrite, preserving a foreign hook throughout', async () => {
+      // A foreign tool already owns an entry in the shared file.
+      await writeFile(
+        claudeSettings(),
+        `${JSON.stringify({ hooks: { SessionStart: [FOREIGN] } }, null, 2)}\n`,
+        'utf8'
+      );
+
+      (await confirmMock()).mockResolvedValueOnce(true);
+      await agent.runRaw(['session-hooks', 'install', '--agents', 'claude-code']);
+      expect((await doctorCheck()).status).toBe('pass');
+      expect(await repositoryCoverage()).toBe('covered');
+
+      // The shared-file rewrite: their writer keeps its own entry and drops ours.
+      await writeFile(
+        claudeSettings(),
+        `${JSON.stringify({ hooks: { SessionStart: [FOREIGN] } }, null, 2)}\n`,
+        'utf8'
+      );
+      const withRecord = await doctorCheck();
+      expect(withRecord.status).toBe('warn');
+      expect(await repositoryCoverage()).toBe('missing');
+
+      // Now the record disappears too — the case the hook cannot report itself.
+      await rm(recordPath(), { force: true });
+      const recordless = await doctorCheck();
+      expect(recordless.status).toBe('warn');
+      expect(
+        recordless.details?.some((d) =>
+          d.includes('claude-code: no machine session-hook registration')
+        )
+      ).toBe(true);
+      expect(await repositoryCoverage()).toBe('missing');
+
+      // Consented reinstall restores coverage and leaves their entry alone.
+      (await confirmMock()).mockResolvedValueOnce(true);
+      await agent.runRaw(['session-hooks', 'install', '--agents', 'claude-code']);
+      expect((await doctorCheck()).status).toBe('pass');
+      expect(await repositoryCoverage()).toBe('covered');
+
+      const finalDoc = JSON.parse(await readFile(claudeSettings(), 'utf8')) as {
+        hooks: { SessionStart: Array<{ matcher?: string; hooks: Array<{ command: string }> }> };
+      };
+      expect(
+        finalDoc.hooks.SessionStart.some((g) =>
+          g.hooks.some((h) => h.command === 'echo their-tool')
+        ),
+        'the foreign hook must survive every step'
+      ).toBe(true);
+    });
+
+    it('offers no install instruction when the remedy is to review a customized command', async () => {
+      await agent.runRaw([
+        'init',
+        '--scope',
+        'project',
+        '--json',
+        '--no-llm',
+        '--force',
+        '--session-hooks',
+        '--session-hook-entries',
+        'none',
+        '--agents',
+        'claude-code',
+      ]);
+      // A wrapped variant of our command: theirs to keep, and we cannot verify
+      // that it still reaches the hook.
+      await writeFile(
+        claudeSettings(),
+        `${JSON.stringify(
+          {
+            hooks: {
+              SessionStart: [
+                {
+                  matcher: 'startup|resume|clear',
+                  hooks: [
+                    {
+                      type: 'command',
+                      command: `notify-my-tool && ${canonicalSessionHookCommand('claude-code', { user: true })}`,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+          null,
+          2
+        )}\n`,
+        'utf8'
+      );
+
+      const check = await doctorCheck();
+      const details = (check.details ?? []).join('\n');
+      expect(check.status).toBe('warn');
+      expect(details).toContain('could not be verified');
+      // The remedy DOES name install — to warn what installing beside their
+      // entry would do. What must not appear is the blanket footer telling
+      // them to run it, which would read as a recommendation.
+      expect(details).toContain('may duplicate guidance');
+      expect(details).not.toContain('Machine registration: run');
+    });
+
+    it('reports codex broken when the shared disable setting silences a json-only registration', async () => {
+      await agent.runRaw([
+        'init',
+        '--scope',
+        'project',
+        '--json',
+        '--no-llm',
+        '--force',
+        '--session-hooks',
+        '--session-hook-entries',
+        'none',
+        '--agents',
+        'codex',
+      ]);
+      const codexCommand = canonicalSessionHookCommand('codex', { user: true });
+      const registration = {
+        hooks: {
+          SessionStart: [
+            { matcher: 'startup|resume', hooks: [{ type: 'command', command: codexCommand }] },
+          ],
+        },
+      };
+
+      // No record anywhere: hooks.json alone carries a canonical registration.
+      for (const [body, expected] of [
+        ['[features]\nhooks = false\n', 'broken'],
+        ['[features]\ncodex_hooks = false\n', 'broken'],
+        // `hooks` wins over the retired alias, so this one is genuinely on.
+        ['[features]\nhooks = true\ncodex_hooks = false\n', 'covered'],
+      ] as const) {
+        await writeFile(
+          path.join(codexHome, 'hooks.json'),
+          `${JSON.stringify(registration, null, 2)}\n`,
+          'utf8'
+        );
+        await writeFile(path.join(codexHome, 'config.toml'), body, 'utf8');
+        await rm(recordPath(), { force: true });
+
+        const res = await agent.runRaw(['session-hooks', 'status', '--json']);
+        const parsed = JSON.parse(res.stdout) as {
+          repository: { agents?: Array<{ agent: string; coverage: string; remedy?: string }> };
+        };
+        const codex = parsed.repository.agents?.find((a) => a.agent === 'codex');
+        expect(codex?.coverage, body).toBe(expected);
+        if (expected === 'broken') {
+          // The remedy has to name the setting, not tell them to reinstall a
+          // registration that is already there.
+          expect(codex?.remedy, body).toContain('features.hooks');
+          expect(codex?.remedy, body).not.toContain('session-hooks install');
+        }
+      }
+    });
+
+    it('reports an entry that cannot fire as broken, and recovers on reinstall', async () => {
+      (await confirmMock()).mockResolvedValueOnce(true);
+      await agent.runRaw(['session-hooks', 'install', '--agents', 'claude-code']);
+      const installed = JSON.parse(await readFile(claudeSettings(), 'utf8')) as {
+        hooks: { SessionStart: Array<{ matcher?: string; hooks: Array<{ type: string }> }> };
+      };
+
+      // Same command, same place — but a type that does not run.
+      for (const group of installed.hooks.SessionStart) {
+        for (const hook of group.hooks) hook.type = 'prompt';
+      }
+      await writeFile(claudeSettings(), `${JSON.stringify(installed, null, 2)}\n`, 'utf8');
+
+      const broken = await doctorCheck();
+      expect(broken.status).toBe('warn');
+      // Present and wrong reads as broken, never as an entry that went missing.
+      expect(broken.details?.some((d) => d.includes('is broken'))).toBe(true);
+      expect(broken.details?.some((d) => d.includes('is missing'))).toBe(false);
+      expect(await repositoryCoverage()).toBe('broken');
+    });
   });
 });

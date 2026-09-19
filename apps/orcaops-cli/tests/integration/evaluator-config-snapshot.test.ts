@@ -94,7 +94,13 @@ describe('evaluator config discovery snapshot', () => {
           idempotency_key: randomUUID(),
           task: 'test lifecycle config snapshot',
           label: 'config-snapshot',
-          plan_steps: [{ text: 'one step', label: 'one-step' }],
+          plan_steps: [
+            {
+              text: 'one step',
+              label: 'one-step',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
         })
       ),
     ]);
@@ -115,7 +121,13 @@ describe('evaluator config discovery snapshot', () => {
           idempotency_key: randomUUID(),
           task: 'test checkpoint config snapshot',
           label: 'checkpoint-config-snapshot',
-          plan_steps: [{ text: 'one step', label: 'one-step' }],
+          plan_steps: [
+            {
+              text: 'one step',
+              label: 'one-step',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
         })
       ),
     ]);

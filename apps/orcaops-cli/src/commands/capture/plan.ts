@@ -5,6 +5,8 @@ import {
   type CapturePlanInput,
   CapturePlanInputSchema,
   resolveCaptureExcludes,
+  rubricCoverage,
+  rubricCoverageSentence,
   type SecretFinding,
   type SourcePlanPin,
   SourcePlanPinSchema,
@@ -173,6 +175,7 @@ async function captureDatabasePlanCommand(opts: CapturePlanOptions, signal: Abor
           'The captured plan is not readable from project history; preserve it for explicit repair'
         );
       const plan = retained.thread.plan;
+      const captureCoverage = rubricCoverage(plan);
       const key = { firesAt: 'post-plan' as const, cpN: 0 };
       let lifecycle: {
         status: 'complete' | 'replayed' | 'failed';
@@ -301,6 +304,12 @@ async function captureDatabasePlanCommand(opts: CapturePlanOptions, signal: Abor
         })),
         revision_n: plan.revision_n,
         plan_event_id: captured.planEventId,
+        // `plan` is the CURRENT retained plan, so a replayed capture after a
+        // revision reports that later revision while plan_event_id stays the
+        // original capture event. Deliberate and unchanged: the coverage block
+        // carries revision_n, so the pairing is always legible.
+        acceptance_criteria_coverage: captureCoverage,
+        acceptance_criteria_status: rubricCoverageSentence(captureCoverage),
         source_plan: sourcePlanView(retained.thread.artifactJson?.source_plan ?? sourcePlan),
         operation_id:
           receipt?.kind === 'command'

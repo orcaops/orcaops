@@ -85,7 +85,13 @@ async function fixture() {
         idempotency_key: uuidv7(),
         task: 'Drain the retained thread',
         label: 'Resync fixture',
-        plan_steps: [{ text: 'Drain', label: 'Drain' }],
+        plan_steps: [
+          {
+            text: 'Drain',
+            label: 'Drain',
+            acceptance_criteria: [{ text: 'The pending queue drains to empty' }],
+          },
+        ],
       }),
       sourcePlan,
       agent: 'codex',

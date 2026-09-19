@@ -45,6 +45,7 @@ logs/
 
 # Testing
 coverage/
+.vitest-reports/
 .nyc_output/
 
 # Temporary files

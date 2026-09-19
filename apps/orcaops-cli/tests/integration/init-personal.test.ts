@@ -143,7 +143,9 @@ describe('orcaops init --personal', () => {
           idempotency_key: 'personal-plan-1',
           task: 'personal fixture',
           label: 'personal fixture',
-          plan_steps: [{ text: 's1', label: 's1' }],
+          plan_steps: [
+            { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
           touched_scope: [],
         })
       ),

@@ -135,7 +135,13 @@ describe('database doctor command', () => {
           JSON.stringify({
             task: 'Reuse initialized history',
             label: 'Reuse initialized history',
-            plan_steps: [{ text: 'Record one plan', label: 'Record plan' }],
+            plan_steps: [
+              {
+                text: 'Record one plan',
+                label: 'Record plan',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+            ],
             touched_scope: [],
             non_goals: [],
           })

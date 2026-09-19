@@ -3,17 +3,22 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 
-import { CapturePlanInputSchema, uuidv7 } from '@orcaops/storage';
+import { CapturePlanInputSchema, PlanInputSchema, uuidv7 } from '@orcaops/storage';
 import { normalizeHistoryRoot } from '@orcaops/storage/history/authority';
 import {
+  beginProjectPlanCaptureRetention,
   initializeProjectDatabase,
   planCaptureCommand,
+  planCaptureInput,
+  preparePlanCaptureCommand,
   preparePlanCaptureInput,
+  prepareProjectGitRetention,
   type ProjectDatabase,
   ProjectDatabaseError,
   projectDatabasePath,
   readProjectArtifact,
   readProjectExecution,
+  readProjectPendingCapture,
   readProjectPlanCapture,
 } from '@orcaops/storage/history/database';
 import { digest } from '@orcaops/storage/history/primitives';
@@ -183,6 +188,141 @@ it('retains the original pending command before ref effects and resumes without 
   f.revalidate.mockClear();
   const replay = await captureDatabasePlan(f.handle, f.context, authored);
   expect(replay.publication).toEqual({ ...recovered.publication, replayed: true });
+  expect(f.publish).not.toHaveBeenCalled();
+  expect(f.revalidate).not.toHaveBeenCalled();
+});
+
+it('resumes an admitted pre-upgrade empty-rubric capture from its exact retained input', async () => {
+  const f = await fixture();
+  const authored = rubricFreeInput([]);
+  authored.snapshot.enabled = true;
+  const prepared = preparePlanCaptureInput(
+    { authored: authored.authored, sourcePlan: authored.sourcePlan },
+    []
+  );
+  const request = planCaptureInput(prepared);
+  const operationId = uuidv7();
+  const admissionOperationId = uuidv7();
+  const artifactId = uuidv7();
+  const startedAt = '2026-09-01T00:00:00.000Z';
+  const plan = {
+    ...PlanInputSchema.parse({
+      schema_version: 4,
+      artifact_id: artifactId,
+      branch: 'main',
+      base_sha: 'a'.repeat(40),
+      agent: 'codex',
+      agent_session_id: null,
+      task: authored.authored.task,
+      label: authored.authored.label,
+      plan_steps: authored.authored.plan_steps.map((step) => ({
+        ...step,
+        step_id: uuidv7(),
+        acceptance_criteria: [],
+      })),
+      touched_scope: [],
+      non_goals: [],
+      decisions: [],
+      started_at: startedAt,
+      revision_n: 0,
+      revised_at: null,
+      rationale: null,
+      prior_plan_event_id: null,
+      step_lineage: { added: [], dropped: [], unchanged: [], rewritten: [] },
+      criterion_lineage: { added: [], carried: [], removed: [], rewritten: [] },
+    }),
+    baseline_seed_tree_sha: 'c'.repeat(40),
+  };
+  const event = encodeArtifactEvent({
+    type: 'plan_captured',
+    ts: startedAt,
+    idempotency_key: authored.authored.idempotency_key,
+    payload: plan,
+  });
+  const command = preparePlanCaptureCommand(prepared, {
+    originalOperationId: operationId,
+    admissionOperationId,
+    artifactId,
+    planEventId: event.record.event_id,
+  });
+  const capture = {
+    operationId,
+    artifactId,
+    expectedRevision: null,
+    eventBytes: event.eventBytes,
+    sidecarPayloads: [],
+    secretAllow: [],
+    execution: { kind: 'create' as const, context: f.context.binding!, ts: startedAt },
+  };
+  const retention = prepareProjectGitRetention({
+    operationId,
+    admissionOperationId,
+    preparedTransitionId: uuidv7(),
+    repositoryInstanceId: f.handle.authority.repositoryInstanceId,
+    objectFormat: 'sha1',
+    createdAt: startedAt,
+    target: {
+      kind: 'capture',
+      artifactId,
+      expectedRevision: null,
+      expectedExecutionVersion: null,
+      expectedBindingGeneration: null,
+      expectedBaselinePublicationId: null,
+    },
+    publications: [
+      {
+        publicationId: uuidv7(),
+        role: 'baseline',
+        targetId: event.record.event_id,
+        checkpointNumber: null,
+        checkpointPhase: null,
+        objectOid: 'b'.repeat(40),
+        treeOid: 'c'.repeat(40),
+      },
+    ],
+    secretAllow: [],
+  });
+  await beginProjectPlanCaptureRetention(f.handle, { capture, command, retention });
+  const pending = readProjectPendingCapture(f.handle, operationId).value!;
+  expect(pending.capture.eventBytes).toEqual(event.eventBytes);
+  expect(readProjectArtifact(f.handle, artifactId)).toBeNull();
+
+  f.snapshot.mockClear();
+  const recovered = await captureDatabasePlan(f.handle, f.context, authored);
+  expect(recovered).toMatchObject({
+    artifactId,
+    planEventId: event.record.event_id,
+    replayed: true,
+  });
+  expect(f.snapshot).not.toHaveBeenCalled();
+  expect(f.publish).toHaveBeenCalledTimes(1);
+  expect(f.publish.mock.calls[0]![1]).toMatchObject({
+    objectOid: 'b'.repeat(40),
+    treeOid: 'c'.repeat(40),
+  });
+  expect(readProjectArtifact(f.handle, artifactId)?.thread.plan?.plan_steps[0]).toMatchObject({
+    text: 'Retain original identities',
+    acceptance_criteria: [],
+  });
+  const retained = readProjectPlanCapture(f.handle, prepared);
+  expect(retained?.kind).toBe('command');
+  if (retained?.kind !== 'command') throw new Error('Retained command missing');
+  expect(planCaptureCommand(retained.command)).toMatchObject({
+    originalOperationId: operationId,
+    admissionOperationId,
+    artifactId,
+    planEventId: event.record.event_id,
+    requestBytes: request.requestBytes,
+    requestHash: request.requestHash,
+  });
+  f.publish.mockClear();
+  f.revalidate.mockClear();
+  const replay = await captureDatabasePlan(f.handle, f.context, authored);
+  expect(replay).toMatchObject({
+    artifactId,
+    planEventId: event.record.event_id,
+    replayed: true,
+  });
   expect(f.publish).not.toHaveBeenCalled();
   expect(f.revalidate).not.toHaveBeenCalled();
 });
@@ -421,4 +561,86 @@ it('refuses another registered authority before replaying a genuine command', as
   expect(f.snapshot).not.toHaveBeenCalled();
   expect(f.publish).not.toHaveBeenCalled();
   expect(state(f.handle)).toEqual(before);
+});
+
+function rubricFreeInput(criteria?: unknown): DatabasePlanCaptureInput {
+  return {
+    authored: CapturePlanInputSchema.parse({
+      idempotency_key: 'rubric-free:core-plan',
+      task: 'Capture a step with no rubric',
+      label: 'Rubric-free plan',
+      plan_steps: [
+        {
+          text: 'Retain original identities',
+          label: 'Retain identities',
+          ...(criteria === undefined ? {} : { acceptance_criteria: criteria }),
+        },
+      ],
+    }),
+    sourcePlan: null,
+    agent: 'codex',
+    snapshot: { enabled: false, excludePatterns: [] },
+    secretAllow: [],
+  };
+}
+
+it('refuses a new capture whose step declares no acceptance criteria', async () => {
+  const f = await fixture();
+  const before = state(f.handle);
+  await expect(captureDatabasePlan(f.handle, f.context, rubricFreeInput([]))).rejects.toMatchObject(
+    {
+      code: 'PLAN_ACCEPTANCE_CRITERIA_REQUIRED',
+      path: 'plan_steps',
+      steps: [{ label: 'Retain identities', position: 1, kind: 'authored' }],
+    }
+  );
+  expect(state(f.handle)).toEqual(before);
+  expect(f.revalidate).not.toHaveBeenCalled();
+  expect(f.snapshot).not.toHaveBeenCalled();
+  expect(f.publish).not.toHaveBeenCalled();
+});
+
+it('refuses the same capture when acceptance_criteria is omitted entirely', async () => {
+  const f = await fixture();
+  // The input schema defaults the omitted key to [], so both spellings of
+  // "no rubric" reach the gate as the same shape.
+  const authored = rubricFreeInput();
+  expect(authored.authored.plan_steps[0].acceptance_criteria).toEqual([]);
+  await expect(captureDatabasePlan(f.handle, f.context, authored)).rejects.toMatchObject({
+    code: 'PLAN_ACCEPTANCE_CRITERIA_REQUIRED',
+  });
+});
+
+it('does not let authored origin input bypass the rubric requirement', async () => {
+  const f = await fixture();
+  const authored = rubricFreeInput([]);
+  const forged = {
+    ...authored,
+    authored: CapturePlanInputSchema.parse({
+      ...authored.authored,
+      origin: {
+        kind: 'git-import',
+        imported_at: '2026-09-01T00:00:00.000Z',
+        tool_version: 'forged',
+        source_range: 'HEAD~1..HEAD',
+        authors: ['forged@example.test'],
+        enriched_at: null,
+      },
+    }),
+  };
+  expect(forged.authored).not.toHaveProperty('origin');
+  await expect(captureDatabasePlan(f.handle, f.context, forged)).rejects.toMatchObject({
+    code: 'PLAN_ACCEPTANCE_CRITERIA_REQUIRED',
+  });
+});
+
+it('names the step and teaches the nested YAML shape when the rubric is missing', async () => {
+  const f = await fixture();
+  await expect(captureDatabasePlan(f.handle, f.context, rubricFreeInput([]))).rejects.toThrow(
+    /step #1 "Retain identities" declares no acceptance criteria[\s\S]*acceptance_criteria:\n {6}- text: \|-/
+  );
+});
+
+it('rejects a blank-only criterion at the input boundary', () => {
+  expect(() => rubricFreeInput([{ text: '   ' }])).toThrow();
 });

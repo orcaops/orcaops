@@ -52,7 +52,13 @@ const plan = () =>
     JSON.stringify({
       task: 'Capture in a linked worktree',
       label: 'Linked capture',
-      plan_steps: [{ text: 'Verify linked capture', label: 'Verify capture' }],
+      plan_steps: [
+        {
+          text: 'Verify linked capture',
+          label: 'Verify capture',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: [],
       non_goals: [],
     })

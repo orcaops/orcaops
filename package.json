@@ -33,11 +33,10 @@
   },
   "type": "module",
   "devDependencies": {
-    "@orcaops/cli": "workspace:*",
+    "@orcaops/dev-cli": "workspace:*",
     "@orcaops/eslint-config": "workspace:*",
     "@orcaops/prettier-config": "workspace:*",
     "@orcaops/typescript-config": "workspace:*",
-    "@orcaops/watch": "workspace:*",
     "@types/node": "24.3.1",
     "@vitest/coverage-v8": "^4.0.18",
     "esbuild": "^0.28.0",

@@ -168,7 +168,13 @@ describe('multi-agent install (config.install.agents)', () => {
         JSON.stringify({
           task: 'identity guard slice',
           label: 'identity guard slice',
-          plan_steps: [{ text: 'do the work', label: 'do the work' }],
+          plan_steps: [
+            {
+              text: 'do the work',
+              label: 'do the work',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
         })
       ),
     ]);

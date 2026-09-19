@@ -66,6 +66,7 @@ async function planWithSteps(f: Fixture, count: number) {
     plan_steps: Array.from({ length: count }, (_, index) => ({
       text: `step ${index}`,
       label: `Step ${index}`,
+      acceptance_criteria: [{ text: 'the step is delivered' }],
     })),
     touched_scope: [],
     non_goals: [],
@@ -207,7 +208,12 @@ describe('registered database checkpoint-open gate', { timeout: 180_000 }, () =>
       enable: { 'core/revision-non-goals-stable': true },
     });
     const { artifactId, steps } = await planWithSteps(f, 1);
-    const step = { step_id: steps[0], text: 'step 0', label: 'Step 0' };
+    const step = {
+      step_id: steps[0],
+      text: 'step 0',
+      label: 'Step 0',
+      acceptance_criteria: [{ text: 'the step is delivered' }],
+    };
     const bounded = await capture(f, ['plan', 'revise'], {
       idempotency_key: `revise-${randomUUID()}`,
       artifact_id: artifactId,

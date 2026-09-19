@@ -56,14 +56,18 @@ export function buildContextBlock(
     });
   }
 
-  // The rubric a delivery-coverage evaluator grades each step against.
+  // What the plan RECORDS as its rubric — a fact, stated the same way for every
+  // consumer. What to do about an absent rubric is each prompt's own policy:
+  // the delivery evaluator declares its skip rule in step-coverage.prompt.md,
+  // while conformance treats a missing rubric as something to assess. Carrying
+  // either policy here would hand one of them the other's instruction.
   if (wants('acceptance-criteria')) {
     lines.push('');
-    lines.push('## Acceptance criteria (the rubric to verify per step)');
+    lines.push('## Acceptance criteria (recorded per step)');
     let anyCriteria = false;
     for (const s of context.plan.plan_steps) {
       if (s.acceptance_criteria.length === 0) {
-        lines.push(`  - step ${s.step_id} (${s.label}): no acceptance criteria — NOT graded`);
+        lines.push(`  - step ${s.step_id} (${s.label}): NO ACCEPTANCE CRITERIA RECORDED`);
         continue;
       }
       anyCriteria = true;
@@ -73,7 +77,7 @@ export function buildContextBlock(
       }
     }
     if (!anyCriteria) {
-      lines.push('  (no step declares acceptance criteria — there is nothing to grade)');
+      lines.push('  (no step records any acceptance criteria)');
     }
   }
 

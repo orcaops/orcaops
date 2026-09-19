@@ -34,6 +34,7 @@ const SPECS = [
 ] as const;
 
 const SHARED_PROMPT = 'prompts/plan-conformance.prompt.md';
+const sharedPrompt = readFileSync(path.resolve(packRoot, SHARED_PROMPT), 'utf8');
 
 describe('core/plan-conformance-* (LLM contract)', () => {
   for (const { file, phase } of SPECS) {
@@ -61,6 +62,10 @@ describe('core/plan-conformance-* (LLM contract)', () => {
         expect(parsed.engine.kind).toBe('llm');
         if (parsed.engine.kind !== 'llm') throw new Error('unreachable');
         expect(parsed.engine.prompt_file).toBe(SHARED_PROMPT);
+        expect(parsed.engine.additional_context_sections).toEqual([
+          'source-plan',
+          'acceptance-criteria',
+        ]);
         // Keep the provider requirement explicit in the evaluator contract;
         // the runner also enforces it from engine.kind at dispatch time.
         expect(parsed.filters?.when_llm).toBe('required');
@@ -74,6 +79,19 @@ describe('core/plan-conformance-* (LLM contract)', () => {
 
   it('the shared prompt file exists', () => {
     expect(existsSync(path.resolve(packRoot, SHARED_PROMPT))).toBe(true);
+  });
+
+  it('requires per-obligation rubric representation and makes omissions violations', () => {
+    expect(sharedPrompt).toContain('Judge this per obligation, not per step');
+    expect(sharedPrompt).toMatch(
+      /A step marked `NO ACCEPTANCE CRITERIA RECORDED`\s+represents nothing/
+    );
+    expect(sharedPrompt).toMatch(
+      /unrepresented in the rubric[\s\S]+this evaluator warns rather than blocks/
+    );
+    expect(sharedPrompt).toContain(
+      '- **unrepresented:** "<source obligation>" — planned by step "<step label>"'
+    );
   });
 
   it('synthetic conformance envelope validates against EvaluatorResultEnvelopeSchema', () => {

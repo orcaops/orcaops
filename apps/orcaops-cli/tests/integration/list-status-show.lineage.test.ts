@@ -25,7 +25,14 @@ describe('show: strict lineage-name filter', () => {
       'plan',
       '--no-llm',
       '--input',
-      inputFile(JSON.stringify({ task, plan_steps: [{ text: 's', label: 's1' }] })),
+      inputFile(
+        JSON.stringify({
+          task,
+          plan_steps: [
+            { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+        })
+      ),
     ]);
     return JSON.parse(planRes.stdout) as { artifact_id: string };
   }

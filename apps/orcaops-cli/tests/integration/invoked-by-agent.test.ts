@@ -5,6 +5,7 @@ import { readProjectArtifact } from '@orcaops/storage/history/database';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { doneCriteriaFor } from '../support/test-helpers.js';
 
 /**
  * Runtime invoking-agent attribution, end-to-end through the real CLI:
@@ -28,14 +29,20 @@ describe('--invoked-by-agent runtime attribution', () => {
   const PLAN_PAYLOAD = JSON.stringify({
     task: 'attribution test task',
     label: 'attribution-test',
-    plan_steps: [{ text: 'step one', label: 's1' }],
+    plan_steps: [
+      { text: 'step one', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+    ],
     touched_scope: [],
   });
 
   async function capturePlan(
     agent: ReturnType<typeof makeAgent>,
     extraArgs: string[] = []
-  ): Promise<{ artifact_id: string; plan_steps: Array<{ step_id: string }>; stderr: string }> {
+  ): Promise<{
+    artifact_id: string;
+    plan_steps: Array<{ step_id: string; acceptance_criteria: Array<{ criterion_id: string }> }>;
+    stderr: string;
+  }> {
     const res = await agent.runRaw([
       'capture',
       'plan',
@@ -47,7 +54,7 @@ describe('--invoked-by-agent runtime attribution', () => {
     expect(res.exitCode).toBe(0);
     const out = JSON.parse(res.stdout) as {
       artifact_id: string;
-      plan_steps: Array<{ step_id: string }>;
+      plan_steps: Array<{ step_id: string; acceptance_criteria: Array<{ criterion_id: string }> }>;
     };
     return { ...out, stderr: res.stderr };
   }
@@ -156,7 +163,7 @@ describe('--invoked-by-agent runtime attribution', () => {
           files_changed: [],
           decisions: [],
           uncertainty: [],
-          done_criteria: [],
+          done_criteria: doneCriteriaFor(plan_steps, [stepId]),
           verification: [{ command: 'test fixture', exit_code: 0 }],
           completed_step_ids: [stepId],
         })
@@ -186,8 +193,17 @@ describe('--invoked-by-agent runtime attribution', () => {
           rationale: 'handoff revision',
           prior_plan_event_id: null,
           plan_steps: [
-            { step_id: stepId, text: 'step one', label: 's1' },
-            { text: 'step two', label: 's2' },
+            {
+              step_id: stepId,
+              text: 'step one',
+              label: 's1',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+            {
+              text: 'step two',
+              label: 's2',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
           ],
           touched_scope: [],
           non_goals: [],

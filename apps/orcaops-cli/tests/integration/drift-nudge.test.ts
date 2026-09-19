@@ -303,7 +303,13 @@ describe('orcaops drift nudge', () => {
       '--no-llm',
       '--input',
       inputFile(
-        JSON.stringify({ task: 't', label: 'lbl', plan_steps: [{ text: 's', label: 's1' }] })
+        JSON.stringify({
+          task: 't',
+          label: 'lbl',
+          plan_steps: [
+            { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+        })
       ),
     ]);
     await rm(path.join(repo.path, '.claude', 'skills', 'orcaops-digest', 'SKILL.md'));

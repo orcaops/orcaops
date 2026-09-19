@@ -13,9 +13,9 @@ import { publishProjectExecutionFocus } from '../../../../packages/storage/dist/
 import { fixture, git, inventory } from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
 
-function agent(f: { main: string; root: string }) {
+function agent(f: { main: string; root: string }, cwd = f.main) {
   return makeAgent({
-    cwd: f.main,
+    cwd,
     env: {
       ORCAOPS_DATA_DIR: f.root,
       ORCAOPS_DISABLE_DRAIN: '1',
@@ -53,8 +53,8 @@ async function pin(f: Awaited<ReturnType<typeof fixture>>, id: string) {
     secretAllow: [],
   });
 }
-async function resume(f: { main: string; root: string }, flags: string[] = []) {
-  const raw = await agent(f).runRaw(['resume', '--json', ...flags]);
+async function resume(f: { main: string; root: string }, flags: string[] = [], cwd = f.main) {
+  const raw = await agent(f, cwd).runRaw(['resume', '--json', ...flags]);
   return { raw, result: JSON.parse(raw.stdout) };
 }
 describe('registered passive task resume', { timeout: 30_000 }, () => {
@@ -181,6 +181,33 @@ describe('registered passive task resume', { timeout: 30_000 }, () => {
     expect(result.result.artifact.agent_prompt).toContain(
       'considered fixed window — rejected because boundary burst'
     );
+    expect(await inventory(f.temporary)).toEqual(before);
+  });
+  it('reports historical missing rubrics from a fresh worktree', async () => {
+    const f = await fixture();
+    const id = await f.capture(undefined, { task: 'Resume historical rubric-free work' });
+    await f.capture(undefined, { cwd: f.linked, task: 'Register the fresh worktree' });
+    const before = await inventory(f.temporary);
+
+    const structured = await resume(f, ['--artifact', id], f.linked);
+    expect(structured.raw.exitCode, structured.raw.stderr).toBe(0);
+    expect(structured.result.artifact.acceptance_criteria_coverage).toMatchObject({
+      revision_n: 0,
+      total: 1,
+      covered: 0,
+      missing: 1,
+    });
+    expect(structured.result.artifact.agent_prompt).toContain(
+      'Recorded acceptance criteria: 0 of 1 steps'
+    );
+    expect(structured.result.artifact.agent_prompt).toContain(
+      'Retained evidence — Read retained evidence (no recorded criteria)'
+    );
+
+    const rendered = await agent(f, f.linked).runRaw(['resume', '--artifact', id]);
+    expect(rendered.exitCode, rendered.stderr).toBe(0);
+    expect(rendered.stdout).toContain('Recorded acceptance criteria: 0 of 1 steps');
+    expect(rendered.stdout).toContain('criterion-level completion is unverified');
     expect(await inventory(f.temporary)).toEqual(before);
   });
   it('does not use SHA reachability or another branch binding as implicit task authority', async () => {

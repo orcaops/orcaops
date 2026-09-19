@@ -26,6 +26,7 @@ import {
   resolveDatabaseGitContext,
   revalidateDatabaseGitContext,
 } from '../context/git-context.js';
+import * as gitProcess from '../context/git-process.js';
 import { publishRepositoryRegistration } from '../registration-files.js';
 
 vi.mock('@orcaops/storage/history/database', async (importOriginal) => {
@@ -112,6 +113,39 @@ async function register(
 }
 
 describe('actual Git administration for database setup', () => {
+  it('resolves administrative paths together and observes them again on revalidation', async () => {
+    const f = await fixture();
+    const inspect = vi.spyOn(gitProcess, 'runDatabaseGit');
+    const context = await resolveDatabaseGitContext({ cwd: f.cwd });
+    expect(context).toMatchObject({
+      worktreeRoot: f.cwd,
+      gitDir: path.join(f.cwd, '.git'),
+      commonDir: path.join(f.cwd, '.git'),
+    });
+    expect(inspect).toHaveBeenCalledTimes(1);
+    expect(await revalidateDatabaseGitContext(context)).toEqual(context);
+    expect(inspect).toHaveBeenCalledTimes(2);
+  });
+  it.each(['checkout\nwith newline', 'checkout\n'])(
+    'preserves newlines in the main and linked checkout paths: %j',
+    async (name) => {
+      const f = await fixture();
+      const main = path.join(f.directory, name);
+      await rename(f.cwd, main);
+      const context = await resolveDatabaseGitContext({ cwd: main });
+      expect(context.worktreeRoot).toBe(main);
+      expect(context.gitDir).toBe(path.join(main, '.git'));
+      expect(context.commonDir).toBe(context.gitDir);
+      await git(main, 'commit', '--allow-empty', '-qm', 'Initial fixture');
+      const linked = path.join(f.directory, `linked ${name}`);
+      await git(main, 'worktree', 'add', '-qb', 'linked', linked);
+      const linkedContext = await resolveDatabaseGitContext({ cwd: linked });
+      expect(linkedContext.worktreeRoot).toBe(linked);
+      expect(linkedContext.commonDir).toBe(context.commonDir);
+      expect(linkedContext.gitDir).not.toBe(context.gitDir);
+      expect(await revalidateDatabaseGitContext(linkedContext)).toEqual(linkedContext);
+    }
+  );
   it('inspects main and linked administration without initializing application files', async () => {
     const f = await fixture();
     await git(f.cwd, 'commit', '--allow-empty', '-qm', 'Initial fixture');

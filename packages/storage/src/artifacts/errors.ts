@@ -532,6 +532,34 @@ export class PlanRevisionInputInvalidError extends Error {
   }
 }
 
+/**
+ * Thrown by authored capture and plan revision when a newly authored step
+ * declares no acceptance criteria, or when a revision would leave a covered
+ * step rubric-free. Distinct from `PlanRevisionInputInvalidError` so an agent
+ * can branch on the missing rubric specifically — the remedy is to supply
+ * criteria, not to restructure the request.
+ *
+ * Deliberately NOT enforced on `PlanInputSchema`: that schema also parses
+ * retained history, which predates this contract and must stay readable.
+ */
+export class PlanAcceptanceCriteriaRequiredError extends Error {
+  readonly code = 'PLAN_ACCEPTANCE_CRITERIA_REQUIRED' as const;
+  readonly path = 'plan_steps' as const;
+
+  constructor(
+    message: string,
+    public readonly steps: ReadonlyArray<{
+      stepId: string | null;
+      label: string;
+      position: number;
+      kind: 'authored' | 'added' | 'rubric-removed' | 'historical-step-rewritten';
+    }>
+  ) {
+    super(message);
+    this.name = 'PlanAcceptanceCriteriaRequiredError';
+  }
+}
+
 export class SchemaAheadError extends Error {
   /** Stable, public-facing error code. Always `'SCHEMA_AHEAD'`. */
   readonly code = 'SCHEMA_AHEAD' as const;

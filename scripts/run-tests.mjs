@@ -112,7 +112,10 @@ const turboArgs = [
   ...only.map((pkg) => `--filter=${pkg}`),
   ...excluded.map((pkg) => `--filter=!${pkg}`),
   ...(force ? ['--force'] : []),
-  '--',
+];
+// Turbo includes forwarded arguments in dependency-build hashes too. Only the
+// test task consumes and hashes these options, leaving build results reusable.
+const vitestArgs = [
   `--maxWorkers=${vitestMaxWorkers}`,
   `--reporter=${TEST_POLICY.reporter}`,
   `--silent=${TEST_POLICY.silent}`,
@@ -126,6 +129,7 @@ try {
     cwd: repoRoot,
     env: {
       ...process.env,
+      ORCAOPS_TEST_ARGS: JSON.stringify(vitestArgs),
       TMPDIR: suiteTempRoot,
       TMP: suiteTempRoot,
       TEMP: suiteTempRoot,

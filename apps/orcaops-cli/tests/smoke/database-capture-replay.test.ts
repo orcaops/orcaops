@@ -40,7 +40,13 @@ it(
         idempotency_key: `plan-${randomUUID()}`,
         task: 'packaged replay writes nothing',
         label: 'Packaged replay',
-        plan_steps: [{ text: 'do it', label: 'Do it' }],
+        plan_steps: [
+          {
+            text: 'do it',
+            label: 'Do it',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: [],
         non_goals: [],
       }),

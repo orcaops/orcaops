@@ -89,7 +89,13 @@ async function fixture() {
       idempotency_key: uuidv7(),
       task: 'Preserve exact grouped push identity',
       label: 'Composition fixture',
-      plan_steps: [{ text: 'Keep original calls', label: 'Keep calls' }],
+      plan_steps: [
+        {
+          text: 'Keep original calls',
+          label: 'Keep calls',
+          acceptance_criteria: [{ text: 'Composition preserves the original calls' }],
+        },
+      ],
     }),
     sourcePlan: null,
     agent: 'codex',

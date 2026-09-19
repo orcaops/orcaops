@@ -59,7 +59,13 @@ function planPayload(extra: Record<string, unknown> = {}) {
     idempotency_key: `plan-${randomUUID()}`,
     task: 'Start history on a repository that has none',
     label: 'First capture',
-    plan_steps: [{ text: 'do the thing', label: 'Do it' }],
+    plan_steps: [
+      {
+        text: 'do the thing',
+        label: 'Do it',
+        acceptance_criteria: [{ text: 'the step is delivered' }],
+      },
+    ],
     touched_scope: [],
     non_goals: [],
     ...extra,

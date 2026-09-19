@@ -48,7 +48,13 @@ async function plan(f: Fixture, key = uuidv7(), session?: string) {
       JSON.stringify({
         idempotency_key: key,
         task: 'Retain a task',
-        plan_steps: [{ text: 'Verify the task', label: 'Verify' }],
+        plan_steps: [
+          {
+            text: 'Verify the task',
+            label: 'Verify',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
       })
     ),
   ]);

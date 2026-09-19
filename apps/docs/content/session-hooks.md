@@ -135,6 +135,108 @@ unset, empty, `0`, and `false` leave hooks active; any other non-empty value
 suppresses hook output. Do not export it globally unless you deliberately want
 session-start guidance disabled.
 
+## Detecting a lost registration
+
+Machine hooks live in files Orcaops shares with the agent — and with any other
+tool that writes them. If one of those writers rewrites the file and drops the
+Orcaops entry, the hook cannot report its own absence: it is simply never
+invoked again, and sessions go quiet without an error.
+
+`orcaops doctor` and `orcaops session-hooks status` both answer the same
+question, from the same inspection: **does this repository depend on a machine
+registration that is not there?**
+
+### What is required of whom
+
+A machine registration is required for an agent when hooks are enabled, the
+agent is in the install set, the agent has a machine-level surface, and
+configuration does not select a project hook entry for it. In practice:
+
+| Situation                      | Who needs a machine registration                        |
+| ------------------------------ | ------------------------------------------------------- |
+| Project scope, project entries | Codex (it has no project surface); Claude Code does not |
+| Project scope, `entries: none` | every machine-capable agent in the install set          |
+| Personal or global scope       | every machine-capable agent in the install set          |
+| `session_hooks.enabled: false` | nobody                                                  |
+
+Scope decides where integrations are **installed**, not whether the hook
+fires. A repository under global or personal scope with hooks enabled still
+emits guidance, carried by the machine registration.
+
+### What counts as covered
+
+Coverage is deliberately strict, and separate from ownership. An entry
+verifies coverage only when it is the exact canonical command, in the expected
+event, as a `command` hook, under a matcher that includes every session-start
+alternative Orcaops registers for. A broader matcher of your own still covers.
+
+These do **not** count, even though the command text is present:
+
+- the command in an unrelated field, or under a different event;
+- a hook whose `type` is missing or is not `command`;
+- a matcher that cannot fire for the sessions the hook targets;
+- a registration under a former `CODEX_HOME` or `CLAUDE_CONFIG_DIR` — it stays
+  visible for diagnosis and uninstall, but cannot cover the agent today.
+
+Ownership stays deliberately broader than coverage, which is why a stale or
+hand-edited variant of the Orcaops line is still repaired and removed by
+`session-hooks install` / `uninstall` even when it no longer counts as covered.
+
+Codex has two candidate files and loads both, so a registration in either one
+covers it. Its `features.hooks` setting (and the retired `codex_hooks` alias,
+which `hooks` overrides) disables **every** Codex hook — so with that set to
+false, a canonical registration in `hooks.json` is reported broken, and the
+remedy is to enable the setting, not to reinstall.
+
+### What the states mean
+
+| State          | Meaning                                                           |
+| -------------- | ----------------------------------------------------------------- |
+| `covered`      | a verified registration exists at a current candidate path        |
+| `missing`      | every current candidate is confirmed to lack a valid registration |
+| `broken`       | something is registered, or explicitly disabled, and will not run |
+| `unknown`      | a candidate could not be inspected, or holds a customized command |
+| `not-required` | this agent does not depend on a machine registration here         |
+
+`unknown` is never reported as a removal. A file that could not be read, or a
+customized command whose behavior cannot be verified, is a question — not
+evidence that anything was deleted. A recorded registration that is gone is
+described as missing; an unmet dependency with no record behind it is reported
+as an unmet dependency, without claiming anything was removed or corrupted.
+
+### Recovery
+
+Detection never writes your agent configuration. Repair is the explicit,
+consented command:
+
+```bash
+orcaops session-hooks install --agents codex         # or claude-code
+orcaops session-hooks status                          # confirm coverage
+```
+
+Existing agent sessions may need restarting afterwards, as the install
+command's own notice says. If the reported state is `unknown` because a
+customized command is present, review that entry yourself first: installing
+alongside it adds a second canonical entry and may duplicate guidance.
+
+If you would rather not run machine hooks at all, `orcaops update
+--no-session-hooks` disables them — note that this affects every agent
+governed by that repository configuration, including personal siblings.
+
+### Limits worth knowing
+
+- Diagnostics verify **registration**, not execution. They cannot prove a
+  running agent has reloaded its configuration or will inject the guidance.
+- Detection is on demand. Someone who runs neither `doctor` nor `session-hooks
+status` gets no proactive alert; there is no background monitoring, polling,
+  or automatic restoration.
+- Orcaops does not attribute a lost entry to any particular application. A
+  shared file was rewritten; which writer did it is not something the record
+  can establish.
+- `orcaops session-hooks status` outside a configured repository still lists
+  the machine inventory, and reports the repository as unconfigured rather
+  than implying nothing is required.
+
 ## Payload modes
 
 `session_hooks.payload` selects what the hook emits, read fresh at every

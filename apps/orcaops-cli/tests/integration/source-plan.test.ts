@@ -21,7 +21,9 @@ describe('capture plan --source-plan', { timeout: 60_000 }, () => {
       idempotency_key: key,
       task: 'thing under a pinned plan',
       label: 'pinned-plan-thing',
-      plan_steps: [{ text: 's1', label: 's1' }],
+      plan_steps: [
+        { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+      ],
       touched_scope: [],
     });
 

@@ -210,9 +210,12 @@ function stepCoverageContext(overrides: Partial<EvaluatorContext> = {}): Evaluat
 describe('buildContextBlock — additional sections', () => {
   it('renders the rubric under acceptance-criteria', () => {
     const block = buildContextBlock(stepCoverageContext(), ['acceptance-criteria']);
-    expect(block).toContain('## Acceptance criteria (the rubric to verify per step)');
+    expect(block).toContain('## Acceptance criteria (recorded per step)');
     expect(block).toContain('[crit-1] suite has >= 42 tests');
-    expect(block).toContain('NOT graded'); // step-2 has no criteria
+    // Factual, not a policy: the block states what is recorded and leaves what
+    // to do about an absent rubric to each consuming prompt.
+    expect(block).toContain('NO ACCEPTANCE CRITERIA RECORDED');
+    expect(block).not.toMatch(/NOT graded|nothing to grade/);
   });
 
   it('renders claimed evidence under delivered-checkpoints', () => {
@@ -296,5 +299,79 @@ describe('buildContextBlock — additional sections', () => {
     expect(buildContextBlock(ctx, [])).toBe(
       buildContextBlock({ ...ctx, evaluator_ref: 'acme/anything' }, [])
     );
+  });
+});
+
+/**
+ * The three conformance phases share one prompt, so what reaches that prompt
+ * has to be the same facts every time — and must not carry the delivery
+ * evaluator's skip policy, which would contradict the conformance instruction
+ * to report an unrepresented obligation.
+ */
+describe('buildContextBlock — conformance input', () => {
+  const CONFORMANCE_PHASES = ['post-plan', 'post-plan-revision', 'pre-pr'] as const;
+  const CONFORMANCE_SECTIONS = ['source-plan', 'acceptance-criteria'] as const;
+
+  const withSource = (phase: (typeof CONFORMANCE_PHASES)[number]): EvaluatorContext => {
+    const base = stepCoverageContext();
+    return stepCoverageContext({
+      phase,
+      plan: {
+        ...base.plan,
+        plan_steps: base.plan.plan_steps.map((step) =>
+          step.step_id === 'step-2'
+            ? { ...step, text: 'Make the reader reject an expired pin' }
+            : step
+        ),
+      },
+      source_plan: {
+        source_ref: { kind: 'file', locator: 'docs/slice-plan.md' },
+        content: 'The reader must reject an expired pin.',
+        hash: 'a'.repeat(64),
+      },
+    } as Partial<EvaluatorContext>);
+  };
+
+  it.each(CONFORMANCE_PHASES)('renders the pinned source and the rubric at %s', (phase) => {
+    const block = buildContextBlock(withSource(phase), [...CONFORMANCE_SECTIONS]);
+    expect(block).toContain('docs/slice-plan.md');
+    expect(block).toContain('The reader must reject an expired pin.');
+    expect(block).toContain('Make the reader reject an expired pin (step_id step-2)');
+    expect(block).toContain('## Acceptance criteria (recorded per step)');
+    expect(block).toContain('[crit-1] suite has >= 42 tests');
+  });
+
+  it.each(CONFORMANCE_PHASES)('marks a rubric-free step explicitly at %s', (phase) => {
+    const block = buildContextBlock(withSource(phase), [...CONFORMANCE_SECTIONS]);
+    expect(block).toContain('step step-2 (wire): NO ACCEPTANCE CRITERIA RECORDED');
+  });
+
+  it.each(CONFORMANCE_PHASES)('never instructs the evaluator to skip a step at %s', (phase) => {
+    const block = buildContextBlock(withSource(phase), [...CONFORMANCE_SECTIONS]);
+    expect(block).not.toMatch(/NOT graded|nothing to grade|not coverage-graded|do not flag/i);
+  });
+
+  it('adds no diff or worktree context for conformance', () => {
+    const block = buildContextBlock(withSource('pre-pr'), [...CONFORMANCE_SECTIONS]);
+    // Conformance compares plan text to plan text; the diff boundary and the
+    // inspection-command guidance belong to evaluators that read the worktree.
+    expect(block).not.toContain('## Diff boundary');
+    expect(block).not.toContain('Changed files (the authoritative attribution boundary)');
+    expect(block).not.toContain('## Inspection');
+  });
+
+  it('renders an all-empty rubric as absent rather than as nothing to do', () => {
+    const ctx = stepCoverageContext({
+      plan: {
+        ...stepCoverageContext().plan,
+        plan_steps: stepCoverageContext().plan.plan_steps.map((s) => ({
+          ...s,
+          acceptance_criteria: [],
+        })),
+      },
+    } as Partial<EvaluatorContext>);
+    const block = buildContextBlock(ctx, ['acceptance-criteria']);
+    expect(block).toContain('no step records any acceptance criteria');
+    expect(block).not.toMatch(/nothing to grade/);
   });
 });

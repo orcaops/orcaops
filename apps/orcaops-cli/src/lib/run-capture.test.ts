@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ArtifactLockLeaseLostError,
   attachLeaseLossCause,
+  PlanAcceptanceCriteriaRequiredError,
   StalePlanRevisionError,
 } from '@orcaops/storage';
 
@@ -33,6 +34,18 @@ describe('runCapture — mapped errors keep the lease-loss cause', () => {
     expect(mapped).toBeInstanceOf(OrcaopsError);
     expect(mapped.code).toBe(ErrorCodes.STALE_PLAN_REVISION);
     expect(mapped.cause).toBeInstanceOf(ArtifactLockLeaseLostError);
+  });
+
+  it('maps a missing rubric to its own code so agents can branch on it', async () => {
+    await runCapture(async () => {
+      throw new PlanAcceptanceCriteriaRequiredError('step #1 "a" declares no acceptance criteria', [
+        { stepId: null, label: 'a', position: 1, kind: 'authored' },
+      ]);
+    });
+
+    const mapped = h.emitError.mock.calls[0]?.[0] as OrcaopsError;
+    expect(mapped.code).toBe(ErrorCodes.PLAN_ACCEPTANCE_CRITERIA_REQUIRED);
+    expect(mapped.inputPath).toBe('plan_steps');
   });
 
   it('leaves an unmapped error and its cause untouched', async () => {

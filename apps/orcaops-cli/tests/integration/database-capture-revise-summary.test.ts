@@ -105,7 +105,11 @@ describe('registered database plan revise', { timeout: 60_000 }, () => {
           text: 'Read retained evidence',
           label: 'Retained evidence',
         },
-        { text: 'Verify the port', label: 'Verify' },
+        {
+          text: 'Verify the port',
+          label: 'Verify',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
       ],
       touched_scope: [],
       non_goals: [],
@@ -177,7 +181,13 @@ describe('registered database plan revise', { timeout: 60_000 }, () => {
       label: 'Replace everything',
       rationale: 'Try to drop the declared step',
       prior_plan_event_id: null,
-      plan_steps: [{ text: 'Something else', label: 'Else' }],
+      plan_steps: [
+        {
+          text: 'Something else',
+          label: 'Else',
+          acceptance_criteria: [{ text: 'the step is delivered' }],
+        },
+      ],
       touched_scope: [],
       non_goals: [],
     });

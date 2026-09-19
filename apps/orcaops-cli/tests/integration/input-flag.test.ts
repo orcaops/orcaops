@@ -31,7 +31,9 @@ describe('--input <path> flag', () => {
         idempotency_key: 'k-input-1',
         task: 'thing from file',
         label: 'thing-from-file',
-        plan_steps: [{ text: 's1', label: 's1' }],
+        plan_steps: [
+          { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+        ],
         touched_scope: [],
       }),
       'utf8'
@@ -51,7 +53,9 @@ describe('--input <path> flag', () => {
         idempotency_key: 'k-input-2',
         task: 't',
         label: 'lbl-2',
-        plan_steps: [{ text: 's', label: 's1' }],
+        plan_steps: [
+          { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+        ],
         touched_scope: [],
       }),
       'utf8'

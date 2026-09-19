@@ -89,7 +89,9 @@ function payload() {
     idempotency_key: `plan-${randomUUID()}`,
     task: 'Pin an approved cloud plan',
     label: 'Cloud pin',
-    plan_steps: [{ text: 'do it', label: 'Do' }],
+    plan_steps: [
+      { text: 'do it', label: 'Do', acceptance_criteria: [{ text: 'the step is delivered' }] },
+    ],
     touched_scope: ['cli'],
   };
 }

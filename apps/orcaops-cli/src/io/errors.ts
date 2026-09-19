@@ -362,6 +362,16 @@ export const ErrorCodes = {
    * plan, or otherwise yield an inconsistent step_lineage block.
    */
   PLAN_REVISION_INPUT_INVALID: 'PLAN_REVISION_INPUT_INVALID',
+  /**
+   * Authored capture or plan revision rejected because a newly authored step
+   * declares no acceptance criteria, or because the revision would leave a
+   * covered step rubric-free. Distinct from `PLAN_REVISION_INPUT_INVALID` so
+   * an agent can branch on the missing rubric: the remedy is to supply
+   * criteria, and the message carries the nested YAML shape to write. Steps
+   * that were already rubric-free in retained history carry forward and never
+   * raise this.
+   */
+  PLAN_ACCEPTANCE_CRITERIA_REQUIRED: 'PLAN_ACCEPTANCE_CRITERIA_REQUIRED',
   /** `.orcaops/config.json` violates a current validation rule. */
   INVALID_CONFIG: 'INVALID_CONFIG',
   /**

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 
-import { getAgentOverlay, type ToolId } from '@orcaops/adapters';
+import { type ToolId } from '@orcaops/adapters';
 import { configLocationForScope, loadConfig, Repo, resolveConfigSource } from '@orcaops/core';
 import {
   type DatabaseSetupWait,
@@ -100,6 +100,7 @@ import {
   userHookCapableAgents,
 } from '../lib/session-hooks-user.js';
 import {
+  configSelectsProjectHook,
   SESSION_HOOK_RESTART_NOTICE,
   sessionHookCapableAgents,
   type SessionHookFilePlan,
@@ -720,18 +721,12 @@ async function runInit(
   const expectedMachineAgents = new Set(
     stagedMachineHooks === null ? [] : stagedUserSessionHookAgents(stagedMachineHooks)
   );
-  const projectHookWillBeLive = (agent: SupportedAgentId): boolean => {
-    if (config.install.scope !== 'project' || !config.session_hooks.enabled) return false;
-    const surface = getAgentOverlay(agent)?.sessionHooks;
-    if (surface?.kind === 'plugin-file') return true;
-    return surface?.kind === 'settings-json' && config.session_hooks.entries === 'project';
-  };
   const blockInitialChoice = (): 'managed' | 'manual' => {
     if (preservingConfig) return config.bootstrap;
     const hooksCoverInstallSet =
       config.session_hooks.enabled &&
       config.install.agents.every(
-        (agent) => projectHookWillBeLive(agent) || expectedMachineAgents.has(agent)
+        (agent) => configSelectsProjectHook(config, agent) || expectedMachineAgents.has(agent)
       );
     return hooksCoverInstallSet ? 'manual' : 'managed';
   };
@@ -1196,7 +1191,8 @@ async function runInit(
   const machineHooksDeferred =
     config.session_hooks.enabled &&
     machineHookAgents.some(
-      (agent) => !projectHookWillBeLive(agent) && !machineHooks?.liveAgents.includes(agent)
+      (agent) =>
+        !configSelectsProjectHook(config, agent) && !machineHooks?.liveAgents.includes(agent)
     );
 
   // The seed offer asks the project database whether anything has been captured,

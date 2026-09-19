@@ -89,7 +89,13 @@ async function fixture() {
         idempotency_key: uuidv7(),
         task: 'Record the completed capture sync',
         label: 'Capture sync fixture',
-        plan_steps: [{ text: 'Sync', label: 'Sync' }],
+        plan_steps: [
+          {
+            text: 'Sync',
+            label: 'Sync',
+            acceptance_criteria: [{ text: 'The captured thread syncs once' }],
+          },
+        ],
       }),
       sourcePlan,
       agent: 'codex',

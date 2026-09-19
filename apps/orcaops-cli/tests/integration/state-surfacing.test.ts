@@ -33,7 +33,14 @@ describe('state surfacing in list / status / show', { timeout: 60_000 }, () => {
       'plan',
       '--no-llm',
       '--input',
-      inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
+      inputFile(
+        JSON.stringify({
+          task: 't',
+          plan_steps: [
+            { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+        })
+      ),
     ]);
     expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
@@ -52,7 +59,14 @@ describe('state surfacing in list / status / show', { timeout: 60_000 }, () => {
       'plan',
       '--no-llm',
       '--input',
-      inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
+      inputFile(
+        JSON.stringify({
+          task: 't',
+          plan_steps: [
+            { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+        })
+      ),
     ]);
     expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
@@ -90,7 +104,14 @@ describe('state surfacing in list / status / show', { timeout: 60_000 }, () => {
       'plan',
       '--no-llm',
       '--input',
-      inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
+      inputFile(
+        JSON.stringify({
+          task: 't',
+          plan_steps: [
+            { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+        })
+      ),
     ]);
     expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
@@ -107,7 +128,14 @@ describe('state surfacing in list / status / show', { timeout: 60_000 }, () => {
       'plan',
       '--no-llm',
       '--input',
-      inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
+      inputFile(
+        JSON.stringify({
+          task: 't',
+          plan_steps: [
+            { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+        })
+      ),
     ]);
     expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
@@ -125,7 +153,14 @@ describe('state surfacing in list / status / show', { timeout: 60_000 }, () => {
       'plan',
       '--no-llm',
       '--input',
-      inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
+      inputFile(
+        JSON.stringify({
+          task: 't',
+          plan_steps: [
+            { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+        })
+      ),
     ]);
     expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };
@@ -147,7 +182,14 @@ describe('state surfacing in list / status / show', { timeout: 60_000 }, () => {
       'plan',
       '--no-llm',
       '--input',
-      inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
+      inputFile(
+        JSON.stringify({
+          task: 't',
+          plan_steps: [
+            { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+        })
+      ),
     ]);
     const res = await agent.runRaw(['list']);
     expect(res.stdout).toMatch(/STATE/);
@@ -172,7 +214,9 @@ describe('state surfacing in list / status / show', { timeout: 60_000 }, () => {
         JSON.stringify({
           task: 't',
           label: 'pinned-status',
-          plan_steps: [{ text: 's', label: 's1' }],
+          plan_steps: [
+            { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
         })
       ),
     ]);
@@ -207,7 +251,14 @@ describe('state surfacing in list / status / show', { timeout: 60_000 }, () => {
       'plan',
       '--no-llm',
       '--input',
-      inputFile(JSON.stringify({ task: 't', plan_steps: [{ text: 's', label: 's1' }] })),
+      inputFile(
+        JSON.stringify({
+          task: 't',
+          plan_steps: [
+            { text: 's', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+        })
+      ),
     ]);
     expect(planRes.exitCode, planRes.stdout + planRes.stderr).toBe(0);
     const plan = JSON.parse(planRes.stdout) as { artifact_id: string };

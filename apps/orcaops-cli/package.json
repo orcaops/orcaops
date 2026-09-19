@@ -1,6 +1,6 @@
 {
   "name": "@orcaops/cli",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "license": "FSL-1.1-ALv2",
   "private": true,
   "type": "module",
@@ -19,7 +19,7 @@
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
-    "test": "vitest run",
+    "test": "node ../../scripts/run-vitest.mjs",
     "test:watch": "vitest",
     "test:cli": "vitest run --project cli",
     "test:smoke": "vitest run --project smoke --passWithNoTests",

@@ -848,7 +848,13 @@ describe('cloud gate lifecycle (real credential detection)', () => {
         JSON.stringify({
           task: 'prove the anonymous capture stays quiet about the cloud',
           label: 'quiet anonymous capture',
-          plan_steps: [{ text: 'one step', label: 'one step' }],
+          plan_steps: [
+            {
+              text: 'one step',
+              label: 'one step',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
         })
       ),
@@ -900,7 +906,13 @@ describe('cloud gate lifecycle (real credential detection)', () => {
         JSON.stringify({
           task: 'offer the approval track after a credentialed capture',
           label: 'credentialed capture hint',
-          plan_steps: [{ text: 'one step', label: 'one step' }],
+          plan_steps: [
+            {
+              text: 'one step',
+              label: 'one step',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
         })
       ),

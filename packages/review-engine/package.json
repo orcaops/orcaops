@@ -25,7 +25,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && pnpm run typecheck:contracts",
     "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
     "typecheck:contracts": "tsc --noEmit -p tsconfig.contract-tests.json",
-    "test": "vitest run",
+    "test": "node ../../scripts/run-vitest.mjs",
     "test:watch": "vitest",
     "format": "prettier --write . --ignore-path ../../.prettierignore",
     "format:check": "prettier --check . --ignore-path ../../.prettierignore"

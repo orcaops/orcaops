@@ -79,7 +79,13 @@ async function fixture(linkedOwner = false) {
       idempotency_key: uuidv7(),
       task: 'Preserve exact checkout identity',
       label: 'Checkout fixture',
-      plan_steps: [{ text: 'Keep original selectors', label: 'Keep selectors' }],
+      plan_steps: [
+        {
+          text: 'Keep original selectors',
+          label: 'Keep selectors',
+          acceptance_criteria: [{ text: 'Checkout resolves the original selector' }],
+        },
+      ],
     }),
     sourcePlan: null,
     agent: 'codex',

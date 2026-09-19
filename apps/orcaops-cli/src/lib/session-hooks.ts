@@ -1,7 +1,7 @@
 import path from 'node:path';
 
 import { getAgentOverlay, type SessionHooksSurface } from '@orcaops/adapters';
-import { SUPPORTED_AGENT_IDS, type SupportedAgentId } from '@orcaops/storage';
+import { type Config, SUPPORTED_AGENT_IDS, type SupportedAgentId } from '@orcaops/storage';
 
 import {
   deleteMutation,
@@ -106,6 +106,52 @@ export function sessionHookCapableAgents(agents: SupportedAgentId[]): SupportedA
   return agents.filter((id) => getAgentOverlay(id)?.sessionHooks !== undefined);
 }
 
+/**
+ * Does configuration SELECT a project hook surface for `agent`?
+ *
+ * Configured expectation only — deliberately silent about whether that file
+ * is on disk and healthy. Project hook health is the project planner's
+ * responsibility; conflating the two lets one missing project file produce a
+ * second, contradictory "install the machine hook" instruction.
+ */
+export function configSelectsProjectHook(config: Config, agent: SupportedAgentId): boolean {
+  if (config.install.scope !== 'project' || !config.session_hooks.enabled) return false;
+  const surface = getAgentOverlay(agent)?.sessionHooks;
+  if (surface?.kind === 'plugin-file') return true;
+  return surface?.kind === 'settings-json' && config.session_hooks.entries === 'project';
+}
+
+/**
+ * Does `agent` have a machine-level surface at all? Keyed on the overlay's
+ * `userFile` rather than a resolved path so the answer stays pure — a
+ * resolvable home directory is a separate, environment-dependent question.
+ */
+export function hasMachineSessionHookSurface(agent: SupportedAgentId): boolean {
+  return getAgentOverlay(agent)?.sessionHooks?.userFile !== undefined;
+}
+
+/**
+ * Does `agent` DEPEND on a machine registration under this config?
+ *
+ * Emission is gated on `session_hooks.enabled` alone (see
+ * `readSessionStartState`) — scope decides where integrations are installed,
+ * not whether the hook fires — so under global and personal scope every
+ * hook-capable agent falls back to the machine registration.
+ */
+export function machineSessionHookRequired(config: Config, agent: SupportedAgentId): boolean {
+  return (
+    config.session_hooks.enabled &&
+    config.install.agents.includes(agent) &&
+    hasMachineSessionHookSurface(agent) &&
+    !configSelectsProjectHook(config, agent)
+  );
+}
+
+/** The configured agents that depend on a machine registration, in install order. */
+export function machineSessionHookRequiredAgents(config: Config): SupportedAgentId[] {
+  return config.install.agents.filter((agent) => machineSessionHookRequired(config, agent));
+}
+
 export type JsonObject = Record<string, unknown>;
 
 function isObject(v: unknown): v is JsonObject {
@@ -154,6 +200,120 @@ export function documentHasManagedSessionHook(root: JsonObject, spec: SettingsSp
   return hookEntriesInExpectedRegion(root, spec).some((entry) => isOrcaopsHook(entry, spec));
 }
 
+/**
+ * COVERAGE, as distinct from ownership and from runtime arbitration.
+ *
+ * `isOrcaopsHook` and `documentHasManagedSessionHook` answer "is this entry
+ * ours?" — they drive reconcile/removal and the runtime's project-vs-user
+ * arbitration, and are deliberately left alone here: adding a hook-type test
+ * to `isOrcaopsHook` would stop `stripManagedHookEntries` from removing a
+ * canonical-command entry that carries another type, orphaning it on
+ * uninstall. These predicates answer a different question — "will this
+ * registration actually run at session start?" — and are the only ones a
+ * coverage claim may consult.
+ */
+export type SessionHookCoverage = 'covered' | 'uncovered' | 'unverifiable';
+
+/** A hook object paired with the matcher of the group enclosing it. */
+interface CandidateHook {
+  hook: JsonObject;
+  /** `undefined` where the schema has no matcher dimension at all. */
+  matcher: unknown;
+}
+
+function candidateHooksInExpectedRegion(root: JsonObject, spec: SettingsSpec): CandidateHook[] {
+  if (!isObject(root.hooks)) return [];
+  const entries = root.hooks[spec.eventKey];
+  if (!Array.isArray(entries)) return [];
+  if (spec.schema === 'flat') {
+    return entries.filter(isObject).map((hook) => ({ hook, matcher: undefined }));
+  }
+  return entries.flatMap((entry) =>
+    isObject(entry) && Array.isArray(entry.hooks)
+      ? entry.hooks.filter(isObject).map((hook) => ({ hook, matcher: entry.matcher }))
+      : []
+  );
+}
+
+/**
+ * A matcher we can reason about without regex semantics: literal alternatives
+ * separated by `|`. Anything carrying regex metacharacters is deliberately
+ * out of scope — general equivalence analysis is undecidable in practice, so
+ * those forms resolve to `unverifiable` rather than a guess in either
+ * direction.
+ */
+const LITERAL_ALTERNATION = /^[A-Za-z0-9_-]+(?:\|[A-Za-z0-9_-]+)*$/;
+
+function isCommandHook(hook: JsonObject): boolean {
+  // `type` is REQUIRED by the hook schema, so an entry without one is not a
+  // registration that runs. The marker-bounded ownership reader treats an
+  // absent type as ours on purpose — that keeps a gutted line repairable —
+  // but borrowing its leniency here is exactly the ownership/coverage
+  // conflation this predicate exists to avoid.
+  return hook.type === 'command';
+}
+
+/**
+ * Does `matcher` fire for every session-start alternative the canonical
+ * matcher names?
+ *
+ * The bar is the agent's OWN canonical alternatives, never an absolute "every
+ * session source": both shipped matchers are deliberately narrower than that
+ * (claude-code skips `compact` and `fork`, codex omits `clear`), so an
+ * absolute bar would fail the canonical registrations against their own
+ * validator. A broader user matcher still covers.
+ */
+export function sessionHookMatcherCoverage(
+  matcher: unknown,
+  canonical: string | undefined,
+  options: { defaultCoversAll?: boolean } = {}
+): SessionHookCoverage {
+  // The representation has no matcher dimension — nothing to disagree about.
+  if (canonical === undefined) return 'covered';
+  if (matcher === undefined) {
+    return options.defaultCoversAll === true ? 'covered' : 'unverifiable';
+  }
+  if (typeof matcher !== 'string') return 'unverifiable';
+  if (matcher === canonical) return 'covered';
+  if (!LITERAL_ALTERNATION.test(matcher)) return 'unverifiable';
+  const present = new Set(matcher.split('|'));
+  return canonical.split('|').every((alternative) => present.has(alternative))
+    ? 'covered'
+    : 'uncovered';
+}
+
+function matcherCoverage(matcher: unknown, spec: SettingsSpec): SessionHookCoverage {
+  const canonical = spec.desired.matcher;
+  return sessionHookMatcherCoverage(
+    matcher,
+    typeof canonical === 'string' ? canonical : undefined,
+    { defaultCoversAll: spec.matcherDefaultCoversAll }
+  );
+}
+
+/**
+ * Does `root` carry a registration that will actually run — exact canonical
+ * command, in the expected event, as a command hook, under a matcher that
+ * covers the canonical alternatives?
+ *
+ * `covered` wins over every weaker verdict: one entry that demonstrably runs
+ * is coverage regardless of what else sits beside it.
+ */
+export function documentCoversSessionHook(
+  root: JsonObject,
+  spec: SettingsSpec
+): SessionHookCoverage {
+  let verdict: SessionHookCoverage = 'uncovered';
+  for (const candidate of candidateHooksInExpectedRegion(root, spec)) {
+    if (!isOrcaopsHook(candidate.hook, spec)) continue;
+    if (!isCommandHook(candidate.hook)) continue;
+    const coverage = matcherCoverage(candidate.matcher, spec);
+    if (coverage === 'covered') return 'covered';
+    if (coverage === 'unverifiable') verdict = 'unverifiable';
+  }
+  return verdict;
+}
+
 export function documentHasCustomizedSessionHook(root: JsonObject, spec: SettingsSpec): boolean {
   return hookEntriesInExpectedRegion(root, spec).some(
     (entry) =>
@@ -187,6 +347,13 @@ export interface SettingsSpec {
    * present is always kept in place. Default `append`.
    */
   placement?: 'append' | 'prepend';
+  /**
+   * Does an OMITTED matcher fire for every canonical alternative? Set only
+   * where the agent's matcher is known to NARROW an otherwise-complete
+   * default; elsewhere an absent matcher leaves coverage unverifiable rather
+   * than silently verified.
+   */
+  matcherDefaultCoversAll?: boolean;
 }
 
 function agentSpec(id: SupportedAgentId, sh: SessionHooksSurface): SettingsSpec {
@@ -221,6 +388,12 @@ function agentSpec(id: SupportedAgentId, sh: SessionHooksSurface): SettingsSpec 
     },
     // Codex's hooks.json carries no `version` key, unlike Cursor's.
     seed: {},
+    // Claude Code's matcher NARROWS which session sources fire (the overlay
+    // picks `startup|resume|clear` to skip `compact` and `fork`), so an entry
+    // with no matcher at all is broader than ours, not narrower. Codex gets no
+    // such claim here: its absent-matcher behavior is unverified, so a
+    // matcher-less codex entry stays unverifiable instead of assumed covering.
+    ...(id === 'claude-code' ? { matcherDefaultCoversAll: true } : {}),
     // Superset rewrites ~/.codex/hooks.json on every app start and agent
     // launch, re-pushing its own groups to the END of each event. Codex's
     // hook-trust keys include the group index, so an appended group is

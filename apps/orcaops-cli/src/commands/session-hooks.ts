@@ -1,3 +1,4 @@
+import { configFromSource, resolveConfigSource } from '@orcaops/core';
 import type { SupportedAgentId } from '@orcaops/storage';
 
 import { CliExit } from '../io/exit.js';
@@ -11,14 +12,18 @@ import {
 import { CLI_VERSION } from '../lib/cli-version.js';
 import { isCi } from '../lib/invocation-context.js';
 import {
+  assessMachineSessionHookCoverage,
+  type MachineCoverageResult,
+} from '../lib/session-hooks-coverage.js';
+import {
   applyUserSessionHookInstall,
   codexSessionHookGuidance,
   promptUserSessionHookInstall,
 } from '../lib/session-hooks-install.js';
 import {
   codexConfigTomlPath,
-  codexDualRepresentationNote,
   codexFenceGuidance,
+  type CodexHookGate,
   codexHooksDisabledGuidance,
   codexHooksShapeGuidance,
   codexInvalidTomlGuidance,
@@ -26,7 +31,7 @@ import {
   type CodexRepresentationSurface,
   type CodexTomlRemoveOutcome,
   type CodexTomlState,
-  evaluateUserSessionHookSurfaces,
+  inspectUserSessionHooks,
   isCodexHooksJsonPath,
   planCodexTomlInstall,
   planUserSessionHooks,
@@ -38,9 +43,11 @@ import {
   userHookCapableAgents,
   userHooksRecordPath,
   type UserSessionHookFilePlan,
+  type UserSessionHookSurfaceHealth,
   writeUserHooksRecord,
 } from '../lib/session-hooks-user.js';
 import { SESSION_HOOK_RESTART_NOTICE, sessionHooksRestartRequired } from '../lib/session-hooks.js';
+import { resolveSessionStartLocation } from '../lib/session-start-state.js';
 
 /**
  * `orcaops session-hooks install|uninstall|status` — the MACHINE-level hook
@@ -441,11 +448,66 @@ export async function sessionHooksUninstallAction(
   }
 }
 
+/**
+ * What this repository REQUIRES of the machine registration, as opposed to
+ * what the machine happens to hold. Resolved through the session-start hook's
+ * own passive path — an override-aware location probe plus a read-only config
+ * source — so `status` stays a read: it creates no config, no registration, no
+ * history database and no worktree state.
+ *
+ * A location orcaops does not govern is `unconfigured` and neutral. Only a
+ * context that exists but cannot be used is `unavailable`, and it carries the
+ * reason rather than returning an empty result that would read as "nothing is
+ * required here".
+ */
+function reasonFrom(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+type RepositoryCoverage =
+  | { state: 'unconfigured' }
+  | { state: 'unavailable'; reason: string }
+  | { state: 'available'; root: string; scope: string; agents: MachineCoverageResult[] };
+
+async function assessRepositoryCoverage(
+  surfaces: UserSessionHookSurfaceHealth[],
+  codexGate: CodexHookGate | null
+): Promise<RepositoryCoverage> {
+  let location;
+  try {
+    location = await resolveSessionStartLocation();
+  } catch (err) {
+    return { state: 'unavailable', reason: scrubOutboundText(reasonFrom(err)) };
+  }
+  if (location === null) return { state: 'unconfigured' };
+  try {
+    const source = await resolveConfigSource(location.root, {
+      commonDir: location.probe?.commonDir,
+    });
+    if (source.kind === 'none') return { state: 'unconfigured' };
+    const config = configFromSource(source);
+    return {
+      state: 'available',
+      root: location.root,
+      scope: config.install.scope,
+      agents: assessMachineSessionHookCoverage({ config, surfaces, codexGate }),
+    };
+  } catch (err) {
+    return { state: 'unavailable', reason: scrubOutboundText(reasonFrom(err)) };
+  }
+}
+
 export async function sessionHooksStatusAction(opts: { json?: boolean } = {}): Promise<void> {
   const recordState = await readUserHooksRecordState();
   const record = recordState.status === 'ok' ? recordState.record : null;
-  const evaluated = await evaluateUserSessionHookSurfaces(record);
-  const hooksJsonNote = await codexDualRepresentationNote();
+  const {
+    surfaces: evaluated,
+    codexGate,
+    codexDualRepresentation: hooksJsonNote,
+  } = await inspectUserSessionHooks(record);
+  // Machine inventory stands on its own: a repository we cannot assess must
+  // not take the surface list down with it.
+  const repository = await assessRepositoryCoverage(evaluated, codexGate);
   const codexConfig = codexConfigTomlPath();
   const rows = evaluated.map(({ agent, path, state, remedy }) => ({
     agent,
@@ -466,6 +528,22 @@ export async function sessionHooksStatusAction(opts: { json?: boolean } = {}): P
       record_error: recordError,
       record_path: userHooksRecordPath(),
       surfaces: rows,
+      repository:
+        repository.state === 'available'
+          ? {
+              state: repository.state,
+              root: repository.root,
+              scope: repository.scope,
+              agents: repository.agents.map((r) => ({
+                agent: r.agent,
+                required: r.required,
+                reason: r.reason,
+                coverage: r.state,
+                contributing: r.contributing,
+                ...(r.remedy ? { remedy: scrubOutboundText(r.remedy) } : {}),
+              })),
+            }
+          : repository,
     });
     return;
   }
@@ -476,10 +554,26 @@ export async function sessionHooksStatusAction(opts: { json?: boolean } = {}): P
         ? `Consented ${record.consented_at} (CLI ${record.cli_version}).\n`
         : 'No machine-level registration recorded.\n'
   );
+  writeTerminalSafeStdout('\nMachine inventory (every resolvable path, current or not):\n');
   for (const r of rows) {
     writeTerminalSafeStdout(`  ${r.state.padEnd(24)} ${r.path}  (${r.agent})\n`);
     if (r.remedy) writeTerminalSafeStdout(`  ! ${r.remedy}\n`);
     if (r.note) writeTerminalSafeStdout(`  ${r.note}\n`);
+  }
+
+  writeTerminalSafeStdout('\nThis repository:\n');
+  if (repository.state === 'unconfigured') {
+    writeTerminalSafeStdout('  not an orcaops repository — nothing is required here\n');
+  } else if (repository.state === 'unavailable') {
+    writeTerminalSafeStdout(`  could not be assessed: ${repository.reason}\n`);
+  } else {
+    writeTerminalSafeStdout(`  ${repository.root}  (scope ${repository.scope})\n`);
+    // One line per AGENT, never one per candidate file: codex has two
+    // candidates and neither is individually required.
+    for (const agent of repository.agents) {
+      writeTerminalSafeStdout(`  ${agent.state.padEnd(24)} ${agent.agent}  (${agent.reason})\n`);
+      if (agent.remedy) writeTerminalSafeStdout(`  ! ${agent.remedy}\n`);
+    }
   }
   if (rows.some((r) => r.state === 'registered-but-missing')) {
     writeTerminalSafeStdout(

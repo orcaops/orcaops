@@ -5,6 +5,64 @@ Notable changes to the Orcaops CLI. Format follows
 [SemVer](https://semver.org/spec/v2.0.0.html). Below 1.0.0, minor releases
 may change behaviour. Anything needing action on upgrade is called out.
 
+## [0.2.2] - 2026-09-18
+
+This patch release contains a breaking change: a caret or tilde range on 0.2.1
+picks it up automatically. Run `orcaops update` after upgrading.
+
+### Breaking changes
+
+- Newly authored plan steps must declare at least one acceptance criterion.
+  `capture plan` and `capture plan revise` reject a step with none, and reject a
+  revision that would strip the last criterion off a step that has one — even
+  with `acknowledge_criteria_changes`. The error code is
+  `PLAN_ACCEPTANCE_CRITERIA_REQUIRED` (path `plan_steps`) and its message prints
+  the nested YAML shape to add. Replacing a step's criteria in one revision is
+  still allowed where no checkpoint protects the step.
+
+  Existing stored artifacts remain valid. A step retained with no criteria
+  carries forward as-is, so long as its text is byte-identical; label-only edits
+  stay allowed, and rewriting its text makes it newly authored work that needs a
+  rubric. Git imports are unaffected and continue to record absent criteria
+  without manufacturing acceptance claims.
+
+  **On upgrade:** run `orcaops update` to regenerate your agent instructions.
+  Instructions generated before this release still describe
+  `acceptance_criteria` as optional, so an agent following them produces plans
+  the new CLI rejects. The rejection names the affected step and prints an
+  example of the shape to add. The message never claims your install is
+  stale — malformed input alone does not establish that; `orcaops doctor`
+  remains the check that does.
+
+### Added
+
+- Rubric coverage is reported wherever a plan is surfaced: `capture plan`,
+  `capture plan revise`, `checkpoint close`, `resume` (data, rendered output and
+  the paste-ready prompt) and the digest used by `finish`. Each count carries
+  the plan revision it measured. Revision responses — including a replay of an
+  older revision — report the revision they return, and a checkpoint close
+  reports only the steps it claimed, measured against the revision it opened
+  against.
+
+### Changed
+
+- The digest reports acceptance-criteria coverage unconditionally. It previously
+  stayed silent when every step lacked criteria unless the opt-in `step-coverage`
+  evaluator had run, and described absent criteria as something delivery-coverage
+  "does not grade". Counts now describe what the plan records, and no surface
+  presents an omission as an approved exemption. Rubric presence is not evidence
+  of delivery, and is reported separately from it.
+
+### Fixed
+
+- `orcaops doctor` and `orcaops session-hooks status` no longer report a
+  repository as covered when the session hook it requires is missing,
+  malformed, disabled, superseded, or cannot be read. A shared settings file
+  could lose the registration and both checks kept reporting coverage. Each now
+  names the repair that matches the failure. Both remain read-only: installing a
+  hook still takes `orcaops session-hooks install`, with its consent prompt
+  unchanged.
+
 ## [0.2.1] - 2026-09-11
 
 ### Breaking changes

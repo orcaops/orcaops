@@ -58,7 +58,9 @@
       "dependsOn": ["^build"]
     },
     "test": {
-      "outputs": [],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/run-vitest.mjs"],
+      "env": ["ORCAOPS_TEST_ARGS"],
+      "outputs": [".vitest-reports/**"],
       "dependsOn": ["^build", "build"]
     },
     "clean": {

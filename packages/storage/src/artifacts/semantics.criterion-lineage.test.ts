@@ -23,14 +23,25 @@ describe('criterion-narrowing integrity', () => {
   const STEP_A = '01HX0K8N6ZQF8M5R2V8DZ7T3KA';
   const STEP_B = '01HX0K8N6ZQF8M5R2V8DZ7T3KB';
   const CRIT_A1 = '01HX0K8N6ZQF8M5R2V8DZ7TCA1';
+  const CRIT_A2 = '01HX0K8N6ZQF8M5R2V8DZ7TCA2';
+  /**
+   * Re-states the sibling criterion so a revision that drops CRIT_A1 narrows
+   * the rubric without emptying it — removing a covered step's LAST criterion
+   * is rejected outright, so narrowing can only be observed with a survivor.
+   */
+  const KEEP_A2 = [{ criterion_id: CRIT_A2, text: 'docs updated' }];
 
   beforeEach(() => {
     draft = createRetainedArtifactDraft(artifactId);
     store = draft.semantics;
   });
 
-  /** Initial plan: STEP_A carries one criterion (CRIT_A1), STEP_B has none. */
-  async function writeInitialPlan(): Promise<void> {
+  /**
+   * Initial plan: STEP_A carries CRIT_A1, STEP_B has none. `sibling` adds
+   * CRIT_A2 alongside it, for the tests that remove CRIT_A1 and still need
+   * STEP_A to keep a rubric.
+   */
+  async function writeInitialPlan({ sibling = false } = {}): Promise<void> {
     await store.writePlan(
       {
         schema_version: 4,
@@ -46,7 +57,10 @@ describe('criterion-narrowing integrity', () => {
             step_id: STEP_A,
             text: 'step a text',
             label: 'step-a',
-            acceptance_criteria: [{ criterion_id: CRIT_A1, text: 'suite has >= 42 tests' }],
+            acceptance_criteria: [
+              { criterion_id: CRIT_A1, text: 'suite has >= 42 tests' },
+              ...(sibling ? [{ criterion_id: CRIT_A2, text: 'docs updated' }] : []),
+            ],
           },
           { step_id: STEP_B, text: 'step b text', label: 'step-b', acceptance_criteria: [] },
         ],
@@ -98,7 +112,7 @@ describe('criterion-narrowing integrity', () => {
     return res.plan;
   }
 
-  async function completeStepA(): Promise<void> {
+  async function completeStepA({ sibling = false } = {}): Promise<void> {
     await store.writeCheckpointOpened(
       { artifact_id: artifactId, declared_step_ids: [STEP_A] },
       { idempotencyKey: 'cp-a-open', headSha: 'base000' }
@@ -111,7 +125,10 @@ describe('criterion-narrowing integrity', () => {
         files_changed: ['a.test.ts'],
         decisions: [],
         uncertainty: [],
-        done_criteria: [{ criterion_id: CRIT_A1, evidence: '42 tests added in a.test.ts' }],
+        done_criteria: [
+          { criterion_id: CRIT_A1, evidence: '42 tests added in a.test.ts' },
+          ...(sibling ? [{ criterion_id: CRIT_A2, evidence: 'README documents the flag' }] : []),
+        ],
         verification: [{ command: 'pnpm test', exit_code: 0 }],
         completed_step_ids: [STEP_A],
         head_sha: 'base000',
@@ -121,8 +138,8 @@ describe('criterion-narrowing integrity', () => {
   }
 
   it('records a REMOVED criterion in criterion_lineage with its prior text + step', async () => {
-    await writeInitialPlan();
-    const plan = await revise([]); // drop CRIT_A1, no open cp → cheap
+    await writeInitialPlan({ sibling: true });
+    const plan = await revise(KEEP_A2); // drop CRIT_A1, no open cp → cheap
     expect(plan.criterion_lineage.removed).toEqual([
       { criterion_id: CRIT_A1, prior_step_id: STEP_A, text: 'suite has >= 42 tests' },
     ]);
@@ -144,8 +161,8 @@ describe('criterion-narrowing integrity', () => {
   });
 
   it('criterion_lineage survives retained revision reconstruction', async () => {
-    await writeInitialPlan();
-    await revise([]);
+    await writeInitialPlan({ sibling: true });
+    await revise(KEEP_A2);
     const rev1 = await store.readPlanRevision(artifactId, 1);
     expect(rev1?.criterion_lineage.removed).toEqual([
       { criterion_id: CRIT_A1, prior_step_id: STEP_A, text: 'suite has >= 42 tests' },
@@ -161,9 +178,9 @@ describe('criterion-narrowing integrity', () => {
     }
 
     it('REMOVING a criterion on an open-cp step without ack throws', async () => {
-      await writeInitialPlan();
+      await writeInitialPlan({ sibling: true });
       await openCpOnStepA();
-      await expect(revise([])).rejects.toMatchObject({
+      await expect(revise(KEEP_A2)).rejects.toMatchObject({
         code: 'PLAN_REVISION_UNACKNOWLEDGED_CRITERIA_CHANGES',
       });
     });
@@ -187,20 +204,20 @@ describe('criterion-narrowing integrity', () => {
     });
 
     it('the change succeeds once the criterion_id is acknowledged', async () => {
-      await writeInitialPlan();
+      await writeInitialPlan({ sibling: true });
       await openCpOnStepA();
-      const plan = await revise([], { ack: [CRIT_A1] });
+      const plan = await revise(KEEP_A2, { ack: [CRIT_A1] });
       expect(plan.criterion_lineage.removed.map((r) => r.criterion_id)).toEqual([CRIT_A1]);
     });
 
     it('changing a criterion on a step with NO open cp stays cheap (no ack needed)', async () => {
-      await writeInitialPlan();
+      await writeInitialPlan({ sibling: true });
       // open a cp on STEP_B instead — STEP_A's criterion is free to change
       await store.writeCheckpointOpened(
         { artifact_id: artifactId, declared_step_ids: [STEP_B] },
         { idempotencyKey: 'cp-b-open', headSha: 'base000' }
       );
-      const plan = await revise([]); // no ack
+      const plan = await revise(KEEP_A2); // no ack
       expect(plan.criterion_lineage.removed.map((r) => r.criterion_id)).toEqual([CRIT_A1]);
     });
 
@@ -230,12 +247,12 @@ describe('criterion-narrowing integrity', () => {
 
   describe('completed-step protection', () => {
     it('requires acknowledgement to remove a criterion from a completed step', async () => {
-      await writeInitialPlan();
-      await completeStepA();
-      await expect(revise([])).rejects.toMatchObject({
+      await writeInitialPlan({ sibling: true });
+      await completeStepA({ sibling: true });
+      await expect(revise(KEEP_A2)).rejects.toMatchObject({
         code: 'PLAN_REVISION_UNACKNOWLEDGED_CRITERIA_CHANGES',
       });
-      const plan = await revise([], { ack: [CRIT_A1], key: 'remove-completed' });
+      const plan = await revise(KEEP_A2, { ack: [CRIT_A1], key: 'remove-completed' });
       expect(plan.criterion_lineage.removed.map((entry) => entry.criterion_id)).toEqual([CRIT_A1]);
     });
 
@@ -308,7 +325,7 @@ describe('criterion-narrowing integrity', () => {
     });
 
     it('accepts evidence for a criterion removed by a LATER revision (regression)', async () => {
-      await writeInitialPlan();
+      await writeInitialPlan({ sibling: true });
       // Open the cp against revision 0 (which still has CRIT_A1).
       await store.writeCheckpointOpened(
         { artifact_id: artifactId, declared_step_ids: [STEP_A] },
@@ -317,7 +334,7 @@ describe('criterion-narrowing integrity', () => {
       // A later revise removes CRIT_A1 from the latest plan — but the cp opened
       // against rev 0, so its honest evidence must still validate. Ack required
       // because STEP_A has an open cp.
-      await revise([], { ack: [CRIT_A1] });
+      await revise(KEEP_A2, { ack: [CRIT_A1] });
       await expect(
         store.writeCheckpointClosed(
           {
@@ -327,7 +344,10 @@ describe('criterion-narrowing integrity', () => {
             files_changed: ['a.test.ts'],
             decisions: [],
             uncertainty: ['n/a'],
-            done_criteria: [{ criterion_id: CRIT_A1, evidence: '42 tests added in a.test.ts' }],
+            done_criteria: [
+              { criterion_id: CRIT_A1, evidence: '42 tests added in a.test.ts' },
+              { criterion_id: CRIT_A2, evidence: 'README documents the flag' },
+            ],
             verification: [{ command: 'pnpm test', exit_code: 0 }],
             completed_step_ids: [STEP_A],
             head_sha: 'base000',

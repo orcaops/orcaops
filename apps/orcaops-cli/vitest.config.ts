@@ -59,7 +59,6 @@ export default defineConfig({
           // in-config — `--maxWorkers=1` on the command line is then a
           // restatement, not the thing that makes it correct.
           maxWorkers: 1,
-          minWorkers: 1,
           fileParallelism: false,
           // ceilings.testTimeoutMs. Every other fixed ceiling the
           // scenarios use lives in tests/packaged/support/ceilings.ts so

@@ -48,7 +48,9 @@ describe('personal scope across git worktrees', () => {
       JSON.stringify({
         task,
         label: task,
-        plan_steps: [{ text: 's1', label: 's1' }],
+        plan_steps: [
+          { text: 's1', label: 's1', acceptance_criteria: [{ text: 'the step is delivered' }] },
+        ],
         touched_scope: [],
       })
     );

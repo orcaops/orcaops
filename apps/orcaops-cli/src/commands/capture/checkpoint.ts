@@ -7,6 +7,9 @@ import {
   type CheckpointCloseWriteResult,
   type CheckpointOpenWriteResult,
   resolveCaptureExcludes,
+  rubricCoverage,
+  type RubricCoverage,
+  rubricCoverageSentence,
 } from '@orcaops/storage';
 import { ProjectDatabaseError } from '@orcaops/storage/history/database';
 
@@ -403,6 +406,7 @@ async function captureCheckpointClose(opts: CaptureCheckpointOptions, signal: Ab
         publication: null,
       };
       const closedAt = new Date().toISOString();
+      let closeCoverage: RubricCoverage | null = null;
       const appended = await appendDatabaseCaptureEvents<CheckpointCloseWriteResult>({
         handle: writer,
         binding: context.binding,
@@ -452,6 +456,17 @@ async function captureCheckpointClose(opts: CaptureCheckpointOptions, signal: Ab
             artifactId,
           });
           const checkpoint = thread.checkpoints.find((entry) => entry.n === n);
+          // Coverage for a close describes the revision the cp OPENED against —
+          // the same plan the evidence gate grades done_criteria against — so a
+          // later revise cannot retroactively change what this close reported.
+          if (checkpoint) {
+            const openRev = await semantics.resolveOpenRevisionPlanStrict(
+              artifactId,
+              checkpoint.open_plan_revision_event_id
+            );
+            if (openRev.kind === 'resolved')
+              closeCoverage = rubricCoverage(openRev.plan, input.completed_step_ids);
+          }
           const crossArtifactSiblings =
             checkpoint?.status === 'open' &&
             Date.parse(checkpoint.opened_at) <= Date.parse(closedAt)
@@ -619,6 +634,15 @@ async function captureCheckpointClose(opts: CaptureCheckpointOptions, signal: Ab
         artifact_id: artifactId,
         n: checkpoint.n,
         status: 'closed' as const,
+        ...(closeCoverage
+          ? {
+              acceptance_criteria_coverage: closeCoverage,
+              acceptance_criteria_status:
+                input.completed_step_ids.length === 0
+                  ? 'No step was claimed complete by this checkpoint, so no criterion-level coverage applies.'
+                  : rubricCoverageSentence(closeCoverage),
+            }
+          : {}),
         idempotency_status: replayed ? ('replay' as const) : ('created' as const),
         ...(replayed
           ? {

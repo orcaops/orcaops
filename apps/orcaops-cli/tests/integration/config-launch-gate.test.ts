@@ -30,7 +30,13 @@ describe('current config gate', () => {
     const result = await agent.capturePlan(
       {
         task,
-        plan_steps: [{ text: 'retain history', label: 'retain history' }],
+        plan_steps: [
+          {
+            text: 'retain history',
+            label: 'retain history',
+            acceptance_criteria: [{ text: 'the step is delivered' }],
+          },
+        ],
         touched_scope: [],
       },
       { noLlm: true }

@@ -9,6 +9,7 @@ import { openProjectDatabase } from '@orcaops/storage/history/database';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { doneCriteriaFor } from '../support/test-helpers.js';
 
 /**
  * End-to-end coverage for coding-agent usage stamping across the full
@@ -141,11 +142,15 @@ describe('usage stamping across the capture lifecycle', () => {
     }
   }
 
-  async function capturePlan(): Promise<{ artifactId: string; stepIds: string[] }> {
+  async function capturePlan(): Promise<{
+    artifactId: string;
+    stepIds: string[];
+    planSteps: Array<{ step_id: string; acceptance_criteria: Array<{ criterion_id: string }> }>;
+  }> {
     parseOk(await agent.runRaw(['init', '--json', '--no-llm']));
     const ok = parseOk<{
       artifact_id: string;
-      plan_steps: Array<{ step_id: string }>;
+      plan_steps: Array<{ step_id: string; acceptance_criteria: Array<{ criterion_id: string }> }>;
     }>(
       await agent.runRaw([
         'capture',
@@ -158,16 +163,32 @@ describe('usage stamping across the capture lifecycle', () => {
             task: 'usage stamp lifecycle e2e',
             label: 'usage-stamp-lifecycle-e2e',
             plan_steps: [
-              { text: 'step a', label: 's1' },
-              { text: 'step b', label: 's2' },
-              { text: 'step c', label: 's3' },
+              {
+                text: 'step a',
+                label: 's1',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+              {
+                text: 'step b',
+                label: 's2',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+              {
+                text: 'step c',
+                label: 's3',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
             ],
             touched_scope: [],
           })
         ),
       ])
     );
-    return { artifactId: ok.artifact_id, stepIds: ok.plan_steps.map((s) => s.step_id) };
+    return {
+      artifactId: ok.artifact_id,
+      stepIds: ok.plan_steps.map((s) => s.step_id),
+      planSteps: ok.plan_steps,
+    };
   }
 
   it('stamps plan revision and checkpoint abandon once across replay', async () => {
@@ -185,6 +206,9 @@ describe('usage stamping across the capture lifecycle', () => {
         step_id: id,
         text: `step ${i + 1} (revised)`,
         label: `s${i + 1}`,
+        // Restating the identical text auto-carries the prior criterion id, so
+        // the revision neither churns identity nor empties the rubric.
+        acceptance_criteria: [{ text: 'the step is delivered' }],
       })),
       touched_scope: [],
     };
@@ -265,7 +289,7 @@ describe('usage stamping across the capture lifecycle', () => {
   });
 
   it('stamps checkpoint close, pre-pr, and summary once across replay', async () => {
-    const { artifactId, stepIds } = await capturePlan();
+    const { artifactId, stepIds, planSteps } = await capturePlan();
 
     parseOk(
       await agent.runRaw([
@@ -297,6 +321,7 @@ describe('usage stamping across the capture lifecycle', () => {
             n: 1,
             summary: 'did step b',
             verification: [{ command: 'test fixture', exit_code: 0 }],
+            done_criteria: doneCriteriaFor(planSteps, [stepIds[1]]),
             completed_step_ids: [stepIds[1]],
           })
         ),

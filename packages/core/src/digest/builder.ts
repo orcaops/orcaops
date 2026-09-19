@@ -4,12 +4,17 @@ import {
   type AttributionDegraded,
   type Checkpoint,
   type EvaluatorLog,
+  hasRecordedCriteria,
   type MaterializedEvaluatorDisposition,
   type MaterializedEvaluatorRun,
+  NO_CRITERIA_RECORDED,
   type NonGoal,
   type Plan,
   PlanSchema,
   redactSecretsInObject,
+  rubricCoverage,
+  type RubricCoverage,
+  rubricCoverageSentence,
   type SourcePlanPin,
   type Summary,
   type VerificationEntry,
@@ -330,6 +335,8 @@ export interface DigestData {
   plan_step_labels: string[];
   /** Labels of steps that have NO acceptance criteria. */
   plan_steps_without_criteria: string[];
+  acceptance_criteria_coverage: RubricCoverage;
+  acceptance_criteria_status: string;
   /**
    * True when a `step-coverage` evaluator run exists for
    * this artifact. Gates the all-missing-criteria UNVERIFIED note so it
@@ -689,6 +696,7 @@ function composeDigestData(o: ComposeOpts): DigestData {
     openCheckpoints: o.checkpoints.filter((checkpoint) => checkpoint.status === 'open'),
   });
   const uncompletedStepIds = new Set(coverage.uncompleted_step_ids);
+  const planCoverage = rubricCoverage(o.plan);
 
   return {
     artifact_id: o.plan.artifact_id,
@@ -714,8 +722,10 @@ function composeDigestData(o: ComposeOpts): DigestData {
     plan_step_ids: o.plan.plan_steps.map((s) => s.step_id),
     plan_step_labels: o.plan.plan_steps.map((s) => s.label),
     plan_steps_without_criteria: o.plan.plan_steps
-      .filter((s) => s.acceptance_criteria.length === 0)
+      .filter((s) => !hasRecordedCriteria(s))
       .map((s) => s.label),
+    acceptance_criteria_coverage: planCoverage,
+    acceptance_criteria_status: rubricCoverageSentence(planCoverage),
     // Step-coverage is "active" when a step-coverage run was
     // surfaced (it rides release_checks at pre-pr; process_notes otherwise).
     step_coverage_active: [...release_checks, ...process_notes].some((r) =>
@@ -1128,33 +1138,24 @@ function renderDigestMarkdown(d: DigestData): string {
     lines.push('');
   }
 
-  // When acceptance criteria are in use (some step has them),
-  // flag the steps that have none — those are not coverage-graded by the
-  // step-coverage evaluator. Silent when no step has criteria (the feature
-  // isn't in use) or when every step has them.
-  if (
-    d.plan_steps_without_criteria.length > 0 &&
-    d.plan_steps_without_criteria.length < d.plan_steps.length
-  ) {
-    lines.push('## ⚠ steps without acceptance criteria');
+  if (d.plan_steps.length > 0) {
+    lines.push('## acceptance criteria');
     lines.push('');
-    lines.push(
-      'These steps have no acceptance criteria, so delivery-coverage ' +
-        '(`step-coverage`) does not grade them:'
-    );
-    for (const label of d.plan_steps_without_criteria) {
-      lines.push(`- ${label}`);
+    lines.push(d.acceptance_criteria_status);
+    if (d.plan_steps_without_criteria.length > 0) {
+      lines.push('');
+      lines.push('Steps with no recorded criteria:');
+      for (const label of d.plan_steps_without_criteria) {
+        lines.push(`- ${label}`);
+      }
+      lines.push('');
+      lines.push(NO_CRITERIA_RECORDED);
     }
     lines.push('');
   }
 
-  // When step-coverage is ACTIVE (a step-coverage run exists for
-  // this artifact) but EVERY plan step lacks acceptance criteria, nothing was
-  // coverage-graded — the maximal coverage-dodge that the per-step note above
-  // (which only fires when SOME but not all steps lack criteria) cannot catch.
-  // Surface it loudly as UNVERIFIED rather than staying silent. Gated on
-  // step_coverage_active so the existing criteria-free artifacts (no step-coverage
-  // run) are not spammed.
+  // A step-coverage run over an all-empty rubric graded nothing. The count
+  // above already says so; this names the evaluator that could not act.
   if (
     d.step_coverage_active &&
     d.plan_steps.length > 0 &&
@@ -1164,9 +1165,8 @@ function renderDigestMarkdown(d: DigestData): string {
     lines.push('');
     lines.push(
       'A `step-coverage` evaluator ran, but no plan step declares acceptance ' +
-        'criteria — so 0 of ' +
-        `${d.plan_steps.length} steps were coverage-graded. Delivery against the ` +
-        'plan is UNVERIFIED for this artifact.'
+        `criteria — so 0 of ${d.plan_steps.length} steps were coverage-graded. ` +
+        'Delivery against the plan is UNVERIFIED for this artifact.'
     );
     lines.push('');
   }

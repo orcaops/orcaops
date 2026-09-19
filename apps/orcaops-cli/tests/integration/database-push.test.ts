@@ -65,7 +65,9 @@ async function fixture(sourcePlan: SourcePlanPin | null = null) {
         idempotency_key: uuidv7(),
         task: 'Push it',
         label: 'Push fixture',
-        plan_steps: [{ text: 'Push', label: 'Push' }],
+        plan_steps: [
+          { text: 'Push', label: 'Push', acceptance_criteria: [{ text: 'the step is delivered' }] },
+        ],
       }),
       sourcePlan,
       agent: 'codex',

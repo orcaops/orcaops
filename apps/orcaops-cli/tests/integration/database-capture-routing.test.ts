@@ -41,7 +41,13 @@ function planPayload(key: string) {
     idempotency_key: key,
     task: 'Route the capture payload',
     label: 'Routing subject',
-    plan_steps: [{ text: 'do the thing', label: 'Do it' }],
+    plan_steps: [
+      {
+        text: 'do the thing',
+        label: 'Do it',
+        acceptance_criteria: [{ text: 'the step is delivered' }],
+      },
+    ],
     touched_scope: [],
     non_goals: [],
   });
@@ -78,7 +84,13 @@ describe('registered database capture plan routing', { timeout: 120_000 }, () =>
           label: 'Routed revision',
           rationale: 'The subverb reads its own payload',
           prior_plan_event_id: null,
-          plan_steps: [{ text: 'do the other thing', label: 'Do the other' }],
+          plan_steps: [
+            {
+              text: 'do the other thing',
+              label: 'Do the other',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
           non_goals: [],
         })

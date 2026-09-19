@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { doneCriteriaFor } from '../support/test-helpers.js';
 
 /**
  * An artifact captured by the current writer — plan, revision, checkpoint,
@@ -33,7 +34,13 @@ describe('current writer through a strict rebuild', () => {
         JSON.stringify({
           task: 'survive a strict rebuild end to end',
           label: 'strict rebuild survival fixture',
-          plan_steps: [{ text: 'do the work', label: 's1' }],
+          plan_steps: [
+            {
+              text: 'do the work',
+              label: 's1',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
         })
       ),
@@ -41,7 +48,14 @@ describe('current writer through a strict rebuild', () => {
     expect(plan.exitCode).toBe(0);
     const artifactId = (JSON.parse(plan.stdout) as { artifact_id: string }).artifact_id;
     const shown = JSON.parse((await agent.runRaw(['show', artifactId, '--json'])).stdout) as {
-      artifact: { plan: { plan_steps: Array<{ step_id: string }> } };
+      artifact: {
+        plan: {
+          plan_steps: Array<{
+            step_id: string;
+            acceptance_criteria: Array<{ criterion_id: string }>;
+          }>;
+        };
+      };
     };
     const stepId = shown.artifact.plan.plan_steps[0].step_id;
     const revise = await agent.runRaw([
@@ -57,8 +71,17 @@ describe('current writer through a strict rebuild', () => {
           rationale: 'prove revisions survive the strict rebuild',
           prior_plan_event_id: null,
           plan_steps: [
-            { step_id: stepId, text: 'do the work', label: 's1' },
-            { text: 'verify the work', label: 's2' },
+            {
+              step_id: stepId,
+              text: 'do the work',
+              label: 's1',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+            {
+              text: 'verify the work',
+              label: 's2',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
           ],
           touched_scope: [],
           non_goals: [],
@@ -88,6 +111,7 @@ describe('current writer through a strict rebuild', () => {
           summary: 'did the work',
           files_changed: [],
           verification: [{ command: 'test fixture', exit_code: 0 }],
+          done_criteria: doneCriteriaFor(shown.artifact.plan.plan_steps, [stepId]),
           completed_step_ids: [stepId],
         })
       ),

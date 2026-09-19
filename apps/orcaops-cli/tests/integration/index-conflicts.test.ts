@@ -9,6 +9,7 @@ import { readProjectArtifact } from '@orcaops/storage/history/database';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
+import { doneCriteriaFor } from '../support/test-helpers.js';
 
 /**
  * Read-surface disclosure of an unmerged git index: `status`
@@ -69,7 +70,11 @@ describe('unmerged-index read surfaces', () => {
     await repo.cleanup();
   });
 
-  async function capturePlan(): Promise<{ artifact_id: string; step_ids: string[] }> {
+  async function capturePlan(): Promise<{
+    artifact_id: string;
+    step_ids: string[];
+    plan_steps: Array<{ step_id: string; acceptance_criteria: Array<{ criterion_id: string }> }>;
+  }> {
     const r = await agent.runRaw([
       'capture',
       'plan',
@@ -80,16 +85,26 @@ describe('unmerged-index read surfaces', () => {
           idempotency_key: `plan-${randomUUID()}`,
           task: 'index-conflict read-surface test',
           label: 'index-conflict-surfaces',
-          plan_steps: [{ text: 'step a', label: 's1' }],
+          plan_steps: [
+            {
+              text: 'step a',
+              label: 's1',
+              acceptance_criteria: [{ text: 'the step is delivered' }],
+            },
+          ],
           touched_scope: [],
         })
       ),
     ]);
     const ok = parseOk<{
       artifact_id: string;
-      plan_steps: Array<{ step_id: string }>;
+      plan_steps: Array<{ step_id: string; acceptance_criteria: Array<{ criterion_id: string }> }>;
     }>(r);
-    return { artifact_id: ok.artifact_id, step_ids: ok.plan_steps.map((s) => s.step_id) };
+    return {
+      artifact_id: ok.artifact_id,
+      step_ids: ok.plan_steps.map((s) => s.step_id),
+      plan_steps: ok.plan_steps,
+    };
   }
 
   async function readCheckpoint(artifactId: string, n: number) {
@@ -219,6 +234,7 @@ describe('unmerged-index read surfaces', () => {
             summary: 'work',
             files_changed: ['work.ts'],
             verification: [{ command: 'test fixture', exit_code: 0 }],
+            done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
             completed_step_ids: [plan.step_ids[0]],
           })
         ),
@@ -271,6 +287,7 @@ describe('unmerged-index read surfaces', () => {
       summary: 'work under a failed probe',
       files_changed: ['work.ts'],
       verification: [{ command: 'test fixture', exit_code: 0 }],
+      done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
       completed_step_ids: [plan.step_ids[0]],
     };
     const c = parseOk<{ warnings?: Array<{ code: string; message: string }> }>(
@@ -367,6 +384,7 @@ describe('unmerged-index read surfaces', () => {
             summary: 'resolved the conflict',
             files_changed: ['conflict.txt'],
             verification: [{ command: 'test fixture', exit_code: 0 }],
+            done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
             completed_step_ids: [plan.step_ids[0]],
           })
         ),

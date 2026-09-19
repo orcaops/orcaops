@@ -697,7 +697,7 @@ describe('buildThreadDigest', () => {
           artifact_id: context.artifactId,
           label: 'Rate limiting revision 1',
           plan_steps: [
-            { ...first, acceptance_criteria: [] },
+            { ...first, acceptance_criteria: [{ text: 'Replacement criterion' }] },
             {
               ...second,
               acceptance_criteria: [
@@ -724,7 +724,13 @@ describe('buildThreadDigest', () => {
           artifact_id: context.artifactId,
           label: 'Rate limiting revision 2',
           plan_steps: [
-            { ...first, text: 'Unrelated wording update', acceptance_criteria: [] },
+            {
+              ...first,
+              text: 'Unrelated wording update',
+              // Same text as revision 1 → auto-carries its id, so revision 2 makes
+              // no criterion change of its own.
+              acceptance_criteria: [{ text: 'Replacement criterion' }],
+            },
             {
               ...second,
               acceptance_criteria: [
@@ -925,5 +931,152 @@ describe('demoteBodyHeadings', () => {
 
   it('leaves non-heading hashes and a zero-level request unchanged', () => {
     expect(demoteBodyHeadings('text # hash\n# heading', 0)).toBe('text # hash\n# heading');
+  });
+});
+
+describe('buildThreadDigest — rubric presence is reported unconditionally', () => {
+  const stepWith = (label: string, criteria: string[]) => ({
+    step_id: uuidv7(),
+    label,
+    text: `Deliver ${label}`,
+    acceptance_criteria: criteria.map((text) => ({ criterion_id: uuidv7(), text })),
+  });
+
+  it('reports an all-empty rubric even though no evaluator ran', async () => {
+    const thread = await prepareThread(undefined, {
+      planSteps: [stepWith('Step 1', []), stepWith('Step 2', [])],
+    });
+    const out = buildThreadDigest({ thread });
+    expect(out.data.acceptance_criteria_coverage).toMatchObject({
+      total: 2,
+      covered: 0,
+      missing: 2,
+    });
+    expect(out.data.step_coverage_active).toBe(false);
+    expect(out.markdown).toContain('## acceptance criteria');
+    expect(out.markdown).toContain('0 of 2 steps');
+    expect(out.markdown).toContain('criterion-level completion is unverified');
+  });
+
+  it('reports a mixed rubric and names only the steps missing one', async () => {
+    const thread = await prepareThread(undefined, {
+      planSteps: [stepWith('Covered', ['has a rubric']), stepWith('Bare', [])],
+    });
+    const out = buildThreadDigest({ thread });
+    expect(out.data.acceptance_criteria_coverage).toMatchObject({
+      total: 2,
+      covered: 1,
+      missing: 1,
+    });
+    expect(out.data.plan_steps_without_criteria).toEqual(['Bare']);
+    expect(out.markdown).toContain('1 of 2 steps');
+    expect(out.markdown).toContain('- Bare');
+    expect(out.markdown).not.toContain('- Covered');
+  });
+
+  it('reports a full rubric without implying the work was delivered', async () => {
+    const thread = await prepareThread(undefined, {
+      planSteps: [stepWith('Step 1', ['a']), stepWith('Step 2', ['b'])],
+    });
+    const out = buildThreadDigest({ thread });
+    expect(out.data.acceptance_criteria_coverage).toMatchObject({ covered: 2, missing: 0 });
+    expect(out.markdown).toContain('2 of 2 steps');
+    expect(out.markdown).not.toContain('criterion-level completion is unverified');
+    const section = out.markdown.slice(out.markdown.indexOf('## acceptance criteria'));
+    expect(section.split('##')[1]).not.toMatch(/verified|delivered|graded/i);
+  });
+
+  it('never describes an omission as exempt or as graded by an evaluator', async () => {
+    const thread = await prepareThread(undefined, {
+      planSteps: [stepWith('Covered', ['x']), stepWith('Bare', [])],
+    });
+    const { markdown } = buildThreadDigest({ thread });
+    const section = markdown.slice(
+      markdown.indexOf('## acceptance criteria'),
+      markdown.indexOf('## acceptance criteria') + 400
+    );
+    expect(section).not.toMatch(/exempt|approved|does not grade|step-coverage/i);
+  });
+
+  it('renders the same coverage for the same retained plan on every build', async () => {
+    // `finish` and a direct `digest` both go through buildThreadDigest, so a
+    // stable result for one thread is what keeps the two surfaces agreeing.
+    const thread = await prepareThread(undefined, {
+      planSteps: [stepWith('Covered', ['x']), stepWith('Bare', [])],
+    });
+    const first = buildThreadDigest({ thread });
+    const second = buildThreadDigest({ thread });
+    expect(second.data.acceptance_criteria_coverage).toEqual(
+      first.data.acceptance_criteria_coverage
+    );
+    expect(second.data.acceptance_criteria_status).toBe(first.data.acceptance_criteria_status);
+  });
+
+  it('tags the counts with the revision they measured', async () => {
+    const thread = await prepareThread(undefined, {
+      planSteps: [stepWith('Step 1', [])],
+    });
+    const out = buildThreadDigest({ thread });
+    expect(out.data.acceptance_criteria_coverage.revision_n).toBe(0);
+    expect(out.markdown).toContain('(revision 0)');
+  });
+});
+
+describe('buildThreadDigest — rubric counts do not depend on evaluator activity', () => {
+  const stepWith = (label: string, criteria: string[]) => ({
+    step_id: uuidv7(),
+    label,
+    text: `Deliver ${label}`,
+    acceptance_criteria: criteria.map((text) => ({ criterion_id: uuidv7(), text })),
+  });
+
+  const runStepCoverage = async (context: SeedContext) => {
+    await recordRun(context, {
+      evaluator: 'core/step-coverage',
+      phase: 'checkpoint-close',
+      severity: 'warn',
+      verdict: 'pass',
+      body: 'graded what it could',
+    });
+  };
+
+  const shapes = [
+    { name: 'all-empty', steps: [[], []], covered: 0, total: 2 },
+    { name: 'mixed', steps: [['x'], []], covered: 1, total: 2 },
+    { name: 'full', steps: [['x'], ['y']], covered: 2, total: 2 },
+  ] as const;
+
+  for (const shape of shapes) {
+    it(`reports ${shape.name} identically with and without a step-coverage run`, async () => {
+      const planSteps = shape.steps.map((criteria, i) => stepWith(`Step ${i + 1}`, [...criteria]));
+
+      const without = buildThreadDigest({ thread: await prepareThread(undefined, { planSteps }) });
+      const with_ = buildThreadDigest({
+        thread: await prepareThread(runStepCoverage, { planSteps }),
+      });
+
+      for (const out of [without, with_]) {
+        expect(out.data.acceptance_criteria_coverage).toMatchObject({
+          total: shape.total,
+          covered: shape.covered,
+          missing: shape.total - shape.covered,
+        });
+        expect(out.markdown).toContain(`${shape.covered} of ${shape.total} steps`);
+      }
+      expect(without.data.step_coverage_active).toBe(false);
+      expect(with_.data.step_coverage_active).toBe(true);
+      expect(with_.data.acceptance_criteria_status).toBe(without.data.acceptance_criteria_status);
+    });
+  }
+
+  it('adds the UNVERIFIED note only when an evaluator actually graded nothing', async () => {
+    const planSteps = [stepWith('Step 1', []), stepWith('Step 2', [])];
+    const without = buildThreadDigest({ thread: await prepareThread(undefined, { planSteps }) });
+    const with_ = buildThreadDigest({
+      thread: await prepareThread(runStepCoverage, { planSteps }),
+    });
+    expect(without.markdown).not.toContain('delivery coverage UNVERIFIED');
+    expect(with_.markdown).toContain('delivery coverage UNVERIFIED');
+    expect(without.markdown).toContain('0 of 2 steps');
   });
 });

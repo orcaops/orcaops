@@ -119,12 +119,21 @@ describe('registered database plan revise criteria', { timeout: 120_000 }, () =>
   it('raises the cross-step move advisory when the same text reappears on another step', async () => {
     const f = await fixture();
     const captured = await plan(f, [
-      { text: 'step a', label: 'step-a', acceptance_criteria: [{ text: 'moved criterion text' }] },
-      { text: 'step b', label: 'step-b' },
+      {
+        text: 'step a',
+        label: 'step-a',
+        acceptance_criteria: [{ text: 'moved criterion text' }, { text: 'step a keeps this one' }],
+      },
+      { text: 'step b', label: 'step-b', acceptance_criteria: [{ text: 'the step is delivered' }] },
     ]);
     const [stepA, stepB] = captured.plan_steps;
     const moved = await revise(f, captured.artifact_id, [
-      { step_id: stepA.step_id, text: 'step a', label: 'step-a' },
+      {
+        step_id: stepA.step_id,
+        text: 'step a',
+        label: 'step-a',
+        acceptance_criteria: [{ text: 'step a keeps this one' }],
+      },
       {
         step_id: stepB.step_id,
         text: 'step b',

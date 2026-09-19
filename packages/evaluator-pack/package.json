@@ -23,7 +23,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run --passWithNoTests",
+    "test": "node ../../scripts/run-vitest.mjs --passWithNoTests",
     "test:watch": "vitest",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

@@ -80,6 +80,9 @@ describe('orcaops --input (smoke)', () => {
       '  - text: |-',
       '      wire the thing',
       '    label: wire the thing',
+      '    acceptance_criteria:',
+      '      - text: |-',
+      '          the step is delivered',
     ].join('\n');
     const res = await runCli(['capture', 'plan', '--no-llm', '--input', '-'], {
       cwd: repo.path,

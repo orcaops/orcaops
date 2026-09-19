@@ -32,10 +32,11 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .turbo
-          key: turbo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          key: turbo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml')
+            }}-${{ github.sha }}
           restore-keys: |
-            turbo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
-            turbo-${{ runner.os }}-
+            turbo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
+            turbo-${{ github.job }}-${{ runner.os }}-
       - name: Dependency policy
         run: |
           pnpm check:dependency-policy
@@ -66,10 +67,11 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .turbo
-          key: turbo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          key: turbo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml')
+            }}-${{ github.sha }}
           restore-keys: |
-            turbo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
-            turbo-${{ runner.os }}-
+            turbo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
+            turbo-${{ github.job }}-${{ runner.os }}-
       - name: Typecheck
         run: pnpm typecheck
       - name: Typecheck tests
@@ -92,23 +94,130 @@ jobs:
           bun-version-file: '.bun-version'
       - run: pnpm install --frozen-lockfile
       - name: Cache Turbo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: turbo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .turbo
-          key: turbo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          key: turbo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml')
+            }}-${{ github.sha }}
           restore-keys: |
-            turbo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
-            turbo-${{ runner.os }}-
+            turbo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
+            turbo-${{ github.job }}-${{ runner.os }}-
       - name: Test
-        run: pnpm test --exclude=@orcaops/cli
-      - name: CLI tests + coverage thresholds
-        run: pnpm test --coverage --only=@orcaops/cli
+        run: pnpm test --exclude=@orcaops/cli --exclude=@orcaops/storage
+          --exclude=@orcaops/review-engine --exclude=@orcaops/core
+          --exclude=@orcaops/history-convert
+      - name: Save successful test cache
+        if: steps.turbo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .turbo
+          key: ${{ steps.turbo-cache.outputs.cache-primary-key }}
       - name: Task Review PTY (whole-App keyboard/mouse, 80/110/160)
         if: always()
         run: pnpm --filter @orcaops/watch test:pty
       - name: Task Review 10 MiB production cap benchmark
         if: always()
         run: pnpm --filter @orcaops/watch perf:review-cap
+
+  test-heavy:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [ storage, review-engine, core, history-convert ]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # Legacy conversion provenance tests read their pinned original commit.
+          fetch-depth: 0
+      - run: corepack enable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: '.bun-version'
+      - run: pnpm install --frozen-lockfile
+      - name: Cache Turbo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .turbo
+          key: turbo-${{ github.job }}-${{ matrix.package }}-${{ runner.os }}-${{
+            hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ github.job }}-${{ matrix.package }}-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
+            turbo-${{ github.job }}-${{ matrix.package }}-${{ runner.os }}-
+      - name: Test package
+        run: pnpm test --only=@orcaops/${{ matrix.package }}
+
+  test-cli:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [ 1, 2, 3, 4, 5, 6, 7, 8 ]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # Legacy conversion provenance tests read their pinned original commit.
+          fetch-depth: 0
+      - run: corepack enable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: '.bun-version'
+      - run: pnpm install --frozen-lockfile
+      - name: Cache Turbo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .turbo
+          key: turbo-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{
+            hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
+            turbo-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-
+      - name: CLI tests with coverage
+        run: pnpm test --coverage --only=@orcaops/cli --config=vitest.shard.config.ts
+          --shard=${{ matrix.shard }}/8 --reporter=blob
+      - name: Upload test and coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cli-report-${{ matrix.shard }}
+          path: apps/orcaops-cli/.vitest-reports/blob-${{ matrix.shard }}-8.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  coverage:
+    needs: test-cli
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: corepack enable
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Download every CLI shard report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: cli-report-*
+          path: apps/orcaops-cli/.vitest-reports
+          merge-multiple: true
+      - name: Verify every CLI shard report
+        run: |
+          set -euo pipefail
+          for shard in 1 2 3 4 5 6 7 8; do
+            test -s "apps/orcaops-cli/.vitest-reports/blob-$shard-8.json"
+          done
+      - name: Enforce merged CLI coverage thresholds
+        run: pnpm --filter @orcaops/cli exec vitest --merge-reports --coverage
 
   # Darwin signing and Bun executable cross-compilation require a Mac.
   watch-compile:
@@ -223,7 +332,18 @@ jobs:
 
   check:
     runs-on: ubuntu-latest
-    needs: [ lint, typecheck, test, watch-compile, install-smoke, audit ]
+    needs:
+      [
+        lint,
+        typecheck,
+        test,
+        test-heavy,
+        test-cli,
+        coverage,
+        watch-compile,
+        install-smoke,
+        audit
+      ]
     if: always()
     steps:
       - name: Verify all CI legs succeeded
@@ -231,13 +351,16 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           TYPECHECK_RESULT: ${{ needs.typecheck.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          HEAVY_TEST_RESULT: ${{ needs.test-heavy.result }}
+          CLI_TEST_RESULT: ${{ needs.test-cli.result }}
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
           WATCH_COMPILE_RESULT: ${{ needs.watch-compile.result }}
           INSTALL_SMOKE_RESULT: ${{ needs.install-smoke.result }}
           AUDIT_RESULT: ${{ needs.audit.result }}
         run: |
           set -euo pipefail
-          echo "lint=$LINT_RESULT typecheck=$TYPECHECK_RESULT test=$TEST_RESULT watch-compile=$WATCH_COMPILE_RESULT install-smoke=$INSTALL_SMOKE_RESULT audit=$AUDIT_RESULT"
-          if [ "$LINT_RESULT" != "success" ] || [ "$TYPECHECK_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ] || [ "$WATCH_COMPILE_RESULT" != "success" ] || [ "$INSTALL_SMOKE_RESULT" != "success" ] || [ "$AUDIT_RESULT" != "success" ]; then
+          echo "lint=$LINT_RESULT typecheck=$TYPECHECK_RESULT test=$TEST_RESULT test-heavy=$HEAVY_TEST_RESULT test-cli=$CLI_TEST_RESULT coverage=$COVERAGE_RESULT watch-compile=$WATCH_COMPILE_RESULT install-smoke=$INSTALL_SMOKE_RESULT audit=$AUDIT_RESULT"
+          if [ "$LINT_RESULT" != "success" ] || [ "$TYPECHECK_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ] || [ "$HEAVY_TEST_RESULT" != "success" ] || [ "$CLI_TEST_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$WATCH_COMPILE_RESULT" != "success" ] || [ "$INSTALL_SMOKE_RESULT" != "success" ] || [ "$AUDIT_RESULT" != "success" ]; then
             echo "::error::one or more CI legs failed"
             exit 1
           fi

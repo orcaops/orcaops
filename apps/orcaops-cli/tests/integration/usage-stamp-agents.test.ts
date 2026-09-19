@@ -148,9 +148,21 @@ describe('agent-aware usage stamping (codex / opencode / github-copilot)', () =>
             task: `${captureAgent} usage stamping e2e`,
             label: `usage-agents-e2e-${captureAgent}`,
             plan_steps: [
-              { text: 'step a', label: 's1' },
-              { text: 'step b', label: 's2' },
-              { text: 'step c', label: 's3' },
+              {
+                text: 'step a',
+                label: 's1',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+              {
+                text: 'step b',
+                label: 's2',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
+              {
+                text: 'step c',
+                label: 's3',
+                acceptance_criteria: [{ text: 'the step is delivered' }],
+              },
             ],
             touched_scope: [],
           })

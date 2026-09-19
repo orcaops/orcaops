@@ -1,9 +1,11 @@
 import { execFile } from 'node:child_process';
+import { writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
 
-import { fixture, inventory } from '../helpers/database-history.js';
+import { fixture, git, inventory } from '../helpers/database-history.js';
 import { createReview } from '../helpers/database-review.js';
 
 const execute = promisify(execFile);
@@ -88,6 +90,10 @@ it.each(['absent', 'floorless'])(
   'publishes and reads a review through the compiled sidecar from an %s review',
   async (state) => {
     const f = await fixture();
+    // The sidecar snapshots the worktree; Git can reject '.' when it is empty.
+    await writeFile(path.join(f.main, 'README.md'), 'Review fixture\n');
+    await git(f.main, ['add', 'README.md']);
+    await git(f.main, ['commit', '-qm', 'Add review content']);
     const existingReviewId = state === 'floorless' ? await createReview(f, 'main') : null;
     const sidecarPath = fileURLToPath(
       new URL('../../../../packages/watch-data/dist/sidecar.js', import.meta.url)
