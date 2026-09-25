@@ -784,12 +784,20 @@ describe('orcaops seed', () => {
     expect((await agent.runRaw(['search', 'service'])).stdout).toContain('[imported]');
 
     const why = JSON.parse((await agent.runRaw(['why', 'src/health.ts:1', '--json'])).stdout) as {
-      best: { artifact_id: string; origin?: string } | null;
+      best: string | null;
+      results: Array<{
+        id: string;
+        artifact_id: string;
+        origin?: string;
+        historical_task: string;
+      }>;
     };
-    expect(why.best).toMatchObject({
+    const best = why.results.find((row) => row.id === why.best);
+    expect(best).toMatchObject({
       artifact_id: artifactId,
       origin: 'imported',
     });
+    expect(best?.historical_task).toMatch(/^Imported from git history: .+ … \(2 commits\)$/u);
     const whyText = (await agent.runRaw(['why', 'src/health.ts:1'])).stdout;
     expect(whyText).toContain('Origin: imported from git history (synthesized)');
     expect(whyText).toMatch(/Task: Imported from git history: .+ … \(2 commits\)/u);
@@ -825,14 +833,24 @@ describe('orcaops seed', () => {
     const uncovered = JSON.parse(
       (await agent.runRaw(['why', 'uncovered.ts:1', '--json'])).stdout
     ) as {
-      best: { confidence: string; content_match: string };
+      best: string;
+      results: Array<{ id: string; confidence: string }>;
       target: { blame: { sha: string } };
-      seed_guidance: { state: string; command: null; reasons: string[] };
+      diagnostics: { seed_guidance?: { state: string; command: null; reasons: string[] } };
     };
     expect(uncovered.target.blame.sha).toBe(uncoveredSha);
-    expect(uncovered.best).toMatchObject({ confidence: 'weak', content_match: 'none' });
-    expect(uncovered.seed_guidance).toMatchObject({ state: 'suppressed', command: null });
-    expect(uncovered.seed_guidance.reasons).toContain('RELATED_HISTORY_PRESENT');
+    expect(uncovered.results.find((row) => row.id === uncovered.best)).toMatchObject({
+      confidence: 'weak',
+    });
+    expect(uncovered.diagnostics.seed_guidance).toBeUndefined();
+    const uncoveredAudit = JSON.parse(
+      (await agent.runRaw(['why', 'uncovered.ts:1', '--json', '--details', '--audit'])).stdout
+    ) as { diagnostics: { seed_guidance: { state: string; command: null; reasons: string[] } } };
+    expect(uncoveredAudit.diagnostics.seed_guidance).toMatchObject({
+      state: 'suppressed',
+      command: null,
+    });
+    expect(uncoveredAudit.diagnostics.seed_guidance.reasons).toContain('RELATED_HISTORY_PRESENT');
 
     // A declined area swaps the import call-to-action for the decline state.
     await writeFile(path.join(repo.path, 'src', 'later.ts'), 'export const later = true;\n');
@@ -840,10 +858,15 @@ describe('orcaops seed', () => {
     await git.commit('feat: add later work');
     await agent.runRaw(['seed', 'status', '--decline', 'src', '--json']);
     const declinedWhy = JSON.parse(
-      (await agent.runRaw(['why', 'src/later.ts:1', '--json'])).stdout
-    ) as { project_coverage: { declined_area: string }; seed_guidance: { command: null } };
-    expect(declinedWhy.project_coverage.declined_area).toBe('src');
-    expect(declinedWhy.seed_guidance.command).toBeNull();
+      (await agent.runRaw(['why', 'src/later.ts:1', '--json', '--details', '--audit'])).stdout
+    ) as {
+      diagnostics: {
+        project_coverage: { declined_area: string };
+        seed_guidance: { command: null };
+      };
+    };
+    expect(declinedWhy.diagnostics.project_coverage.declined_area).toBe('src');
+    expect(declinedWhy.diagnostics.seed_guidance.command).toBeNull();
     const declinedWhyText = (await agent.runRaw(['why', 'src/later.ts:1'])).stdout;
     expect(declinedWhyText).toContain('imports for src were declined');
     expect(declinedWhyText).toContain("orcaops seed status --offer-again 'src'");
@@ -1334,6 +1357,71 @@ describe('orcaops seed', () => {
     const completeHuman = await agent.runRaw(['seed', 'status']);
     expect(completeHuman.stdout).toContain('Seed state: complete\n');
     expect(completeHuman.stdout).toContain('Coverage (complete):');
+  });
+
+  it('keeps importance-lane clusters inside an explicit --since window', async () => {
+    await repo.cleanup();
+    repo = await createHistoryRepo([
+      {
+        type: 'commit',
+        label: 'old',
+        subject: 'feat: add durable core',
+        committerDate: '2025-01-01T00:00:00.000Z',
+        files: { 'core/old.ts': 'one\ntwo\nthree\n' },
+      },
+      {
+        type: 'commit',
+        label: 'recent',
+        subject: 'feat: add recent surface',
+        committerDate: '2026-08-01T00:00:00.000Z',
+        files: { 'surface/recent.ts': 'four\nfive\n' },
+      },
+    ]);
+    agent = makeAgent({ cwd: repo.path, env: seedEnv() });
+    await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
+
+    const preview = await agent.runRaw([
+      'seed',
+      '--since',
+      '2026-01-01T00:00:00.000Z',
+      '--dry-run',
+      '--json',
+    ]);
+    expect(preview.exitCode).toBe(0);
+    expect(JSON.parse(preview.stdout)).toMatchObject({
+      since: '2026-01-01T00:00:00.000Z',
+      // The date is git's strict ISO committer date, which newer git releases spell `Z` for UTC
+      // and older ones, such as 2.40, spell `+00:00`.
+      clusters: [
+        {
+          label: 'add recent surface',
+          date: expect.stringMatching(/^2026-08-01T00:00:00(?:Z|\+00:00)$/),
+        },
+      ],
+      totals: { selected: 1, commits: 1 },
+      truncation: { mass_bearing_commits_beyond: 0, mass_bearing_clusters_beyond: 0 },
+    });
+    expect(JSON.parse(preview.stdout).clusters).toHaveLength(1);
+
+    const applied = await agent.runRaw([
+      'seed',
+      '--since',
+      '2026-01-01T00:00:00.000Z',
+      '--yes',
+      '--json',
+    ]);
+    expect(applied.exitCode).toBe(0);
+    expect(JSON.parse(applied.stdout)).toMatchObject({ totals: { selected: 1, created: 1 } });
+    const status = await agent.runRaw(['seed', 'status', '--json']);
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      imported_artifacts: 1,
+      coverage: {
+        directories: {
+          core: { covered_lines: 0, percent: 0 },
+          surface: { percent: 100 },
+        },
+      },
+    });
   });
 
   it('does not expose a seed cloud-push option', async () => {
@@ -2535,6 +2623,8 @@ describe('orcaops seed', () => {
         /--commit does not resolve/,
       ],
       [['seed', '--enrichment-dir', 'nowhere', '--json'], /--enrichment-dir requires --yes/],
+      [['seed', '--dry-run', '--branch', 'nope', '--json'], /--branch does not resolve/],
+      [['seed', '--dry-run', '--since', 'notadate', '--json'], /--since must be an ISO date/],
     ] as Array<[string[], RegExp]>)(
       'rejects flag misuse with INVALID_INPUT: %j',
       async (argv, message) => {

@@ -2,8 +2,8 @@
 name: "Orcaops: recap (standup / changelog / journal)"
 description: "Summarize captured work over a time window or git range as a standup, changelog, or journal. Use for \"what did I do yesterday?\", \"changelog since v1.2\", \"draft the release notes\", or \"journal today\"."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "cd9eedc937ee"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "9254f1a1e680"
 ---
 
 # When to use

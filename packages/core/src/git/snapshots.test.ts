@@ -1211,6 +1211,32 @@ describe('diffSnapshotStats', () => {
     expect(byPath.get('bin.dat')).toEqual({ path: 'bin.dat', added: null, deleted: null });
   });
 
+  it('returns non-ASCII and quote-bearing paths as raw names, not git-quoted strings', async () => {
+    const git = gitClient(repo.path);
+    const treeA = await runGit(repo.path, ['rev-parse', 'HEAD^{tree}']);
+
+    await mkdir(path.join(repo.path, 'docs'), { recursive: true });
+    await writeFile(path.join(repo.path, 'docs', 'café.md'), 'bonjour\n', 'utf8');
+    await writeFile(path.join(repo.path, 'say "hi".txt'), 'hi\n', 'utf8');
+    await git.add(['docs/café.md', 'say "hi".txt']);
+    await git.commit('quoted names');
+    const treeB = await runGit(repo.path, ['rev-parse', 'HEAD^{tree}']);
+
+    const stats = await diffSnapshotStats({
+      repo: new Repo(repo.path),
+      openTreeSha: treeA.stdout.toString('utf8').trim(),
+      closeTreeSha: treeB.stdout.toString('utf8').trim(),
+    });
+    expect(stats.ok).toBe(true);
+    if (!stats.ok) return;
+    expect(stats.entries.map((e) => e.path).sort()).toEqual(['docs/café.md', 'say "hi".txt']);
+    expect(stats.entries.find((e) => e.path === 'docs/café.md')).toEqual({
+      path: 'docs/café.md',
+      added: 1,
+      deleted: 0,
+    });
+  });
+
   it('fails soft on an unresolvable tree', async () => {
     const stats = await diffSnapshotStats({
       repo: new Repo(repo.path),

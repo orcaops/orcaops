@@ -13,6 +13,7 @@ export const sections = [
     title: 'Work through your agent',
     items: [
       { slug: 'working-with-your-agent', title: 'Working with your agent' },
+      { slug: 'project-knowledge', title: 'Project knowledge' },
       { slug: 'skills', title: 'Skills' },
       { slug: 'task-review', title: 'Task Review and Watch' },
       { slug: 'evaluators', title: 'Evaluators' },
@@ -31,6 +32,7 @@ export const sections = [
     title: 'Reference and extensions',
     items: [
       { slug: 'configuration', title: 'Configuration' },
+      { slug: 'project-knowledge-reference', title: 'Project knowledge reference' },
       { slug: 'agent-integrations', title: 'Agent integrations' },
       { slug: 'session-hooks', title: 'Session hooks' },
       { slug: 'data-configuration', title: 'Capture and data' },

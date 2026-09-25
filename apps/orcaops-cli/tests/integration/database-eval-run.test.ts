@@ -11,6 +11,7 @@ import {
   openProjectDatabase,
   type ProjectDatabaseError,
   readProjectArtifact,
+  readProjectEvaluatorRunFindings,
   readProjectExecution,
 } from '@orcaops/storage/history/database';
 import { readProjectExecutionFocus } from '@orcaops/storage/history/database/execution-checkout';
@@ -233,18 +234,21 @@ describe('orcaops eval run with database history', { timeout: 180_000 }, () => {
       },
       append: appendProjectArtifactEvents,
       dispatch: async () => ({
-        schema: 'orcaops.evaluator_run/v1',
-        run_id: uuidv7(),
-        artifact_id: artifactId,
-        evaluator_ref: 'test-pack/pass-fixture',
-        package_id: 'test-pack',
-        evaluator_id: 'pass-fixture',
-        phase: 'post-plan',
-        severity: 'info',
-        run_status: 'completed',
-        verdict: 'pass',
-        body: `ghp_${'A'.repeat(36)}`,
-        ts: new Date().toISOString(),
+        run: {
+          schema: 'orcaops.evaluator_run/v1',
+          run_id: uuidv7(),
+          artifact_id: artifactId,
+          evaluator_ref: 'test-pack/pass-fixture',
+          package_id: 'test-pack',
+          evaluator_id: 'pass-fixture',
+          phase: 'post-plan',
+          severity: 'info',
+          run_status: 'completed',
+          verdict: 'pass',
+          body: `ghp_${'A'.repeat(36)}`,
+          ts: new Date().toISOString(),
+        },
+        findings: { status: 'none' },
       }),
       listenForInterrupt: () => () => undefined,
     });
@@ -309,5 +313,28 @@ describe('orcaops eval run with database history', { timeout: 180_000 }, () => {
       path: 'checkpoint',
     });
     expect(readProjectArtifact(f.writer, artifactId)!.revision).toEqual(before);
+  });
+
+  it('retains what the producer found in the append that recorded the run', async () => {
+    const f = await fixture();
+    const artifactId = await f.capture();
+    await enablePassEvaluator(f);
+
+    const result = await runEval(f, artifactId);
+    expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.findings_retained).toBe(2);
+    expect(result.stdout).not.toContain('The captured plan states every step');
+
+    const retained = readProjectEvaluatorRunFindings(f.writer, parsed.run.run_id);
+    expect(retained.status).toBe('established');
+    if (retained.status !== 'established') throw new Error(retained.status);
+    expect(retained.findings.map((finding) => finding.key)).toEqual(['fixture/plan-covered', null]);
+    expect(retained.basis).toMatchObject({
+      artifactId,
+      evaluatorRef: 'test-pack/pass-fixture',
+      evaluatorVersion: null,
+      producerPayload: null,
+    });
   });
 });

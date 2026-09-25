@@ -2,8 +2,8 @@
 name: "Orcaops: seed git history"
 description: "Backfill Orcaops once from an existing repository's git history. Use when the user says \"seed orcaops from git history\", \"import my git history\", \"backfill my history\", or \"why is orcaops search empty?\". Preview first, explain synthesized provenance, obtain confirmation, orchestrate optional enrichment, apply once, and finish the importance lane."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "ba9fae2c83f6"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "3d2c77037127"
 ---
 
 Only proceed on explicit user request.

@@ -105,6 +105,26 @@ describe('database branch history helpers', { timeout: 60_000 }, () => {
     );
   });
 
+  it("refuses an unavailable project with its first issue's own message", async () => {
+    const f = await fixture();
+    await f.capture();
+    const scope = await openScope(f, 'git-history');
+    const issue = {
+      code: 'HISTORY_FORMAT_UNSUPPORTED',
+      project_id: f.authority.projectId,
+      message: 'Use a build that supports this history format',
+    };
+    const [project] = scope.projects;
+    expect(() =>
+      requireRepositoryScope({
+        ...scope,
+        projects: [
+          { ...project, database: null, completeness: { complete: false, issues: [issue] } },
+        ],
+      })
+    ).toThrow(expect.objectContaining({ code: issue.code, message: issue.message }));
+  });
+
   it('skips only retained-source failures per artifact and refuses the batch otherwise', async () => {
     const f = await fixture();
     const healthy = await f.capture(undefined, { ts: '2026-09-01T00:00:00.000Z' });

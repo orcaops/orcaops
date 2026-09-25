@@ -96,6 +96,8 @@ function threadWithEvents(recentEvents: TickerEvent[]): WatchThread {
     startedAtMs: 0,
     planDecisions: [],
     nonGoals: [],
+    knowledge: null,
+    knowledgeUnavailable: null,
     recentEvents,
     version: '1:retained',
     omittedEvents: 0,

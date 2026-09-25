@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 
-import { EvaluatorResultEnvelopeSchema, EvaluatorSchema } from '@orcaops/evaluator-protocol';
+import { EvaluatorResultEnvelopeV2Schema, EvaluatorSchema } from '@orcaops/evaluator-protocol';
 
 /**
  * LLM contract test for demo/hello-llm. See
@@ -32,13 +32,13 @@ describe('demo/hello-llm (LLM contract)', () => {
     expect(existsSync(promptPath)).toBe(true);
   });
 
-  it('synthetic envelope (info — demo greeting) validates against EvaluatorResultEnvelopeSchema', () => {
+  it('synthetic envelope (info — demo greeting) validates against EvaluatorResultEnvelopeV2Schema', () => {
     const envelope = {
-      schema: 'orcaops.evaluator_result/v1' as const,
+      schema: 'orcaops.evaluator_result/v2' as const,
       verdict: 'info' as const,
       body: 'INFO\n\nHello from the demo LLM evaluator.',
     };
-    const result = EvaluatorResultEnvelopeSchema.safeParse(envelope);
+    const result = EvaluatorResultEnvelopeV2Schema.safeParse(envelope);
     expect(result.success).toBe(true);
   });
 });

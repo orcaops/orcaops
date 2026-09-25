@@ -36,6 +36,7 @@ function cloudClient(
       get: unexpectedSdkCall,
       reviewPull: unexpectedSdkCall,
       reviewPush: unexpectedSdkCall,
+      reviewRequest: unexpectedSdkCall,
       reviewPropose: unexpectedSdkCall,
       reviewComment: unexpectedSdkCall,
       list: unexpectedSdkCall,

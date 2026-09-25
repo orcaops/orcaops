@@ -9,12 +9,17 @@ import {
   type CaptureExecutionContext,
   restoreExecutionCaptureRequest,
 } from './execution-capture.js';
+import { retainedPlanTaskUseHashes } from './knowledge-task-uses.js';
 import {
   planCaptureCommand,
   type PreparedPlanCaptureCommand,
   restorePlanCaptureInput,
 } from './plan-capture-input.js';
-import { preparePlanCaptureInsertion, readProjectPlanCapture } from './plan-capture.js';
+import {
+  composePlanCaptureOperation,
+  preparePlanCaptureInsertion,
+  readProjectPlanCapture,
+} from './plan-capture.js';
 import { type ProjectOperationOptions, runProjectOperation } from './transactions.js';
 import { UuidV7Schema } from '../../ids/uuidv7.js';
 
@@ -105,14 +110,15 @@ export async function replayProjectPlanCapture(
   )
     captureIntegrity('The original direct result event identities differ from retained history');
   const plan = preparePlanCaptureInsertion(input, capture, record.admissionOperationId);
-  return runProjectOperation<typeof result>(
-    handle,
-    {
-      ...capture.operation,
-      kind: 'plan.capture.append',
-      payload: { capture: capture.operation.payload, command: plan.payload },
-    },
-    () => captureIntegrity('The original direct plan receipt disappeared during replay'),
-    options
-  );
+  // A replay settles nothing, so it admits nothing and says so in the same shape
+  // the original publication returned.
+  return {
+    ...(await runProjectOperation<typeof result>(
+      handle,
+      composePlanCaptureOperation(capture, plan, retainedPlanTaskUseHashes(input)),
+      () => captureIntegrity('The original direct plan receipt disappeared during replay'),
+      options
+    )),
+    admittedProcessingJobs: [],
+  };
 }

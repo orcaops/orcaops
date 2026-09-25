@@ -226,7 +226,7 @@ describe('orcaops init --scope global', () => {
     }
   });
 
-  it('a global version mismatch refuses ALL global changes: no files, no refs', async () => {
+  it('an unorderable global version refuses ALL global changes: no files, no refs', async () => {
     const repoA = await createTempRepo({ initialBranch: 'main' });
     const repoB = await createTempRepo({ initialBranch: 'main' });
     try {
@@ -235,7 +235,7 @@ describe('orcaops init --scope global', () => {
       const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
         materialized_by: string;
       };
-      manifest.materialized_by = '0.0.0-other';
+      manifest.materialized_by = 'dev';
       const mismatched = `${JSON.stringify(manifest, null, 2)}\n`;
       await writeFile(manifestPath, mismatched, 'utf8');
       const skill = path.join(globalRoot, 'claude-code', 'skills', 'orcaops-capture', 'SKILL.md');

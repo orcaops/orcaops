@@ -11,6 +11,7 @@ import { translateDatabaseCaptureError } from '../../lib/database-capture-respon
 import { syncDatabaseCapture } from '../../lib/database-capture-sync.js';
 import {
   publishDatabaseLifecycleCompletion,
+  retainedFindings,
   runDatabaseLifecycleEvaluators,
 } from '../../lib/database-evaluators.js';
 import { closeFailedHistoryRead } from '../../lib/history-reader-close.js';
@@ -89,6 +90,7 @@ async function runEvaluators(opts: CaptureRunEvaluatorsOptions, signal: AbortSig
         artifact_id: input.artifact_id,
         fires_at: input.fires_at,
         evaluator_results: evaluated.evaluator_results,
+        ...retainedFindings(evaluated.findings_retained),
         blocking: evaluated.blocking,
         ...(evaluated.pre_pr_review === undefined
           ? {}

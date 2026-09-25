@@ -22,7 +22,7 @@ import {
   prepareArtifactDraft,
 } from '../../../../packages/storage/dist/artifacts/draft-preparation.js';
 import { appendProjectExecutionCapture } from '../../../../packages/storage/dist/history/database/execution-capture.js';
-import { writeGrant } from '../../src/lib/evaluator-grants.js';
+import { type TrustCapability, writeGrant } from '../../src/lib/evaluator-grants.js';
 
 const execute = promisify(execFile);
 const cleanupTasks = new Set<() => Promise<void>>();
@@ -40,7 +40,13 @@ afterEach(async () => {
  */
 export async function grantEvaluatorPack(
   fixtureValue: { main: string; temporary: string },
-  input: { packageId: string; packRoot: string; enable: Record<string, boolean> }
+  input: {
+    packageId: string;
+    packRoot: string;
+    enable: Record<string, boolean>;
+    /** What the grant covers; an LLM evaluator needs more than a command one. */
+    capabilities?: readonly TrustCapability[];
+  }
 ) {
   const packRoot = await realpath(input.packRoot);
   const configDir = path.join(fixtureValue.temporary, 'evaluator-config');
@@ -62,7 +68,7 @@ export async function grantEvaluatorPack(
       kind: 'workspace-dev',
       package_id: input.packageId,
       resolved_path: packRoot,
-      capabilities: ['command_evaluators_present'],
+      capabilities: [...(input.capabilities ?? ['command_evaluators_present'])],
       granted_at: new Date().toISOString(),
     },
     { repoRoot: fixtureValue.main, configDir }

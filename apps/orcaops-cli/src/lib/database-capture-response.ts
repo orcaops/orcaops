@@ -9,7 +9,7 @@ import {
 import { historyMetadataDetails } from '@orcaops/storage/history/metadata-row';
 
 import type { DatabaseCaptureCommandContext } from './database-capture-context.js';
-import { databaseTaskActions } from './database-task-context.js';
+import { databaseTaskActions, openCheckpointCriterionIds } from './database-task-context.js';
 import { discoverEvaluatorsForCli } from './evaluator-discovery.js';
 import { getInvocationCloudBaseUrl } from './invocation-context.js';
 import { buildAcknowledgeByRef } from './next-actions.js';
@@ -48,7 +48,8 @@ export async function databaseCaptureNextActions(
       retained.thread.checkpoints.length,
       historyMetadataDetails(retained.thread, execution?.state ?? null),
       context.registered.git.headOid ?? '',
-      acknowledgeByRef
+      acknowledgeByRef,
+      openCheckpointCriterionIds(retained.thread)
     );
     const sourceKind = retained.thread.artifactJson.source_plan?.source_ref.kind;
     if (options.offerPlanApproval && sourceKind !== 'cloud') {

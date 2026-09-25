@@ -2,8 +2,8 @@
 name: "orcaops:doctor"
 description: "Diagnose adapter health, env, evaluator validity, cache, and watchdog signals."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "df2dee8cfea9"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "8c61988a9db9"
 tags: ["orcaops", "read-only"]
 ---
 

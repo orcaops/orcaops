@@ -34,7 +34,7 @@ import {
 } from './dossier.js';
 import { buildBranchDossier, runDossier } from './dossierCli.js';
 import type { ReviewArgs } from './run.js';
-import { renderAccountRoutineMd } from './twolaneRunCli.js';
+import { laneMarkdown, renderAccountRoutineMd } from './twolaneRunCli.js';
 import { accountCitableIds } from './twolaneSlice.js';
 import { capturedReviewFixture } from '../tests/capturedReviewFixture.js';
 import { accountPromptAliasMaps, promptCitationAlias } from '../tests/support/accountAlias.js';
@@ -1534,6 +1534,109 @@ describe('dossier — the configured exclude set reaches the CLI entry point', (
     expect(err.invalidPatterns).toEqual(['']);
     expect(err.message).toContain('capture.exclude');
     expect(err.message).toContain('no payload minted');
+  });
+});
+
+describe('dossier — task knowledge delivery', () => {
+  const taskKnowledge = {
+    schema_version: 1 as const,
+    tasks: [
+      {
+        artifactId: 'task-a',
+        planEventId: 'plan-a',
+        knowledge: {
+          boundary: 17,
+          mode: 'historical' as const,
+          entries: [
+            {
+              key: 'requirement:offline',
+              placement: 'applicable' as const,
+              governingRevisionIds: ['offline-r1'],
+              statement: 'The exact account bytes retain this unique governing rule.',
+              reason: 'This artifact-local adoption governs this task.',
+              selectedWithPlan: 0,
+              connectedLater: 1,
+            },
+          ],
+          applicableNotSelected: [{ key: 'requirement:offline', revisionIds: ['offline-r1'] }],
+          notSelectedStatement: 'One applicable rule is not selected by plan event plan-a.',
+          coverage: {
+            claim: 'partial' as const,
+            completedThrough: null,
+            statement: 'Processing is partial at this boundary.',
+          },
+          limits: ['Statement bytes were bounded.'],
+        },
+      },
+    ],
+  };
+
+  it('serves each task rule and caveat to the account lane only', () => {
+    const without = buildDossier(makeInput());
+    const withTask = buildDossier(makeInput({ taskKnowledge }));
+    const inputs = {
+      projection: withTask.accountProjection,
+      forensicInput: withTask.forensicInput,
+    };
+    const account = laneMarkdown('account', 'run-task-knowledge', inputs);
+    const forensic = laneMarkdown('forensic', 'run-task-knowledge', inputs);
+
+    expect(account).toContain('Task task-a');
+    expect(account).toContain('The exact account bytes retain this unique governing rule.');
+    expect(account).toContain('Processing is partial at this boundary.');
+    expect(account).toContain('Coverage limit: Statement bytes were bounded.');
+    expect(withTask.forensicInput).toEqual(without.forensicInput);
+    expect(forensic).not.toContain('unique governing rule');
+  });
+
+  it('keeps legacy projections readable and unchanged when task knowledge is absent', () => {
+    const first = buildDossier(makeInput()).accountProjection;
+    const second = buildDossier(makeInput({ taskKnowledge: undefined })).accountProjection;
+
+    expect(second).toEqual(first);
+    expect(accountProjectionSchema.parse(first)).toEqual(first);
+    expect(first).not.toHaveProperty('taskKnowledge');
+  });
+
+  it('refuses the complete rendered task corpus instead of dropping review members', () => {
+    const manyTasks = {
+      ...taskKnowledge,
+      tasks: Array.from({ length: 40 }, (_, index) => ({
+        ...taskKnowledge.tasks[0]!,
+        artifactId: `task-${index}`,
+        knowledge: {
+          ...taskKnowledge.tasks[0]!.knowledge,
+          entries: [
+            {
+              ...taskKnowledge.tasks[0]!.knowledge.entries[0]!,
+              statement: `${index}:${'bounded local rule '.repeat(80)}`,
+            },
+          ],
+        },
+      })),
+    };
+    const retained = buildDossier(
+      makeInput({ taskKnowledge: manyTasks, accountCorpusCeilingBytes: 10_000_000 })
+    ).accountProjection;
+    const protectedFields = Object.fromEntries(
+      PROTECTED_ACCOUNT_FIELDS.map((field) => [field, retained.accountCore[field]])
+    );
+    const actualBytes = Buffer.byteLength(
+      JSON.stringify({ ...protectedFields, taskKnowledge: manyTasks }),
+      'utf8'
+    );
+
+    expect(() =>
+      buildDossier(
+        makeInput({ taskKnowledge: manyTasks, accountCorpusCeilingBytes: actualBytes - 1 })
+      )
+    ).toThrow(
+      expect.objectContaining({
+        code: 'ACCOUNT_CORPUS_CEILING',
+        ceilingBytes: actualBytes - 1,
+        actualBytes,
+      })
+    );
   });
 });
 

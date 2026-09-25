@@ -37,6 +37,26 @@ name is not an exact match, the CLI returns likely matches so the agent can
 confirm the intended teammate before sending the request. Nobody is silently
 requested when the reviewer is unclear.
 
+You can also add reviewers after upload without publishing the plan again:
+
+```sh
+orcaops plan review request <ref> --reviewer alice@example.com
+```
+
+Repeat `--reviewer` for each person. A request accepts 1–25 distinct identifiers
+of 1–200 characters after trimming and case-insensitive deduplication. The
+command reports reviewers that were added, already requested, unresolved, or
+not confirmed when several submitted aliases fold to fewer cloud results.
+Unresolved or unconfirmed identifiers make it exit nonzero even when other
+reviewers were added. The plan body, candidate version, comments, proposals,
+and verdicts remain unchanged.
+
+Repeating the same command normally replays its recorded result and sends
+nothing. Pass `--resend` only when the cloud must receive the identical request
+again, such as after a reviewer was removed or a previously unresolved member
+became available. Reviewer membership is idempotent, so an existing reviewer is
+not added or invited twice.
+
 ## What remains a human decision
 
 - Decide whether the task requires review when repository policy does not already

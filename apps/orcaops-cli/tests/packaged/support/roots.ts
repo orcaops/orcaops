@@ -60,6 +60,10 @@ function pinnedEnvironment(root: Omit<DisposableRoot, 'env' | 'worktree' | 'remo
     ORCAOPS_TMP: path.join(root.base, 'tmp'),
     ORCAOPS_CREDENTIAL_STORE: 'file',
     ORCAOPS_DISABLE_DRAIN: '1',
+    // The packaged binary would otherwise start a real detached worker after
+    // every capture, and its log alone changes the data directory these
+    // scenarios compare. The scrub above removed the suite-wide switch.
+    ORCAOPS_KNOWLEDGE_WORKER_START: '0',
     NODE_DISABLE_COMPILE_CACHE: '1',
     XDG_DATA_HOME: path.join(root.base, 'xdg-data'),
     XDG_CACHE_HOME: root.cacheHome,

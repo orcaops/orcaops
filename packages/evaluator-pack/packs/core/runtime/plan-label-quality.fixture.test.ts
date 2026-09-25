@@ -26,6 +26,7 @@ describe('plan-label-quality (runFixture)', () => {
     expect(r.exitCode).toBe(0);
     expect(r.envelope.verdict).toBe('pass');
     expect(r.envelope.body).toMatch(/looks specific enough/);
+    expect(r.envelope.findings).toBeUndefined();
   });
 
   it('violation: label "wip" is generic + too short', async () => {
@@ -46,5 +47,13 @@ describe('plan-label-quality (runFixture)', () => {
     expect(r.envelope.verdict).toBe('violation');
     expect(r.envelope.body).toMatch(/too short/);
     expect(r.envelope.body).toMatch(/too generic/);
+    // One finding per rule that fired, keyed on the rule so a later run on the
+    // same artifact reports the same identity for the same defect.
+    expect(r.envelope.findings?.map((f) => f.key)).toEqual([
+      'label/too-short',
+      'label/too-generic',
+    ]);
+    expect(r.envelope.findings?.[0].title).toContain('"wip"');
+    expect(r.envelope.findings?.every((f) => f.locations === undefined)).toBe(true);
   });
 });

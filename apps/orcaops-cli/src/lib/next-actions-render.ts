@@ -61,13 +61,33 @@ function renderCommand(a: SemanticAction): string {
       });
     }
 
-    case 'checkpoint-close':
-      return captureHeredoc('checkpoint close', {
+    case 'checkpoint-close': {
+      const stepIds = a.step_ids ?? [];
+      const body: Record<string, unknown> = {
         artifact_id: id,
         n: a.checkpoint_n,
         summary: blockScalar('<what changed and why>'),
-        completed_step_ids: flowSeq(a.step_ids ?? []),
-      });
+        files_changed: flowSeq([]),
+        completed_step_ids: flowSeq(stepIds),
+      };
+      if (stepIds.length > 0) {
+        if (a.criterion_ids && a.criterion_ids.length > 0) {
+          body.done_criteria = a.criterion_ids.map((criterionId) => ({
+            criterion_id: criterionId,
+            evidence: blockScalar('<evidence this criterion is met>'),
+          }));
+        }
+        // Non-integer exit_code placeholder: an unedited template must fail validation.
+        body.verification = [
+          {
+            command: '<command you ran fresh at close>',
+            exit_code: '<exit-code>',
+            output_digest: '<result line, e.g. test counts>',
+          },
+        ];
+      }
+      return captureHeredoc('checkpoint close', body);
+    }
 
     case 'checkpoint-abandon':
       return captureHeredoc('checkpoint abandon', {

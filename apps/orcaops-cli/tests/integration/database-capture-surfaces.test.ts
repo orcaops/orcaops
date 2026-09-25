@@ -465,4 +465,161 @@ describe('registered database capture surfaces', { timeout: 180_000 }, () => {
     expect(readProjectUsage(f.writer)).toBeNull();
     expect(readProjectArtifact(f.writer, result.artifact_id)).not.toBeNull();
   });
+
+  it('offers a checkpoint-close template that closes once its placeholders are filled', async () => {
+    const f = await fixture();
+    const { artifactId, steps, planSteps } = await plan(f, ['a', 'b']);
+    const opened = await run(f, ['checkpoint', 'open'], {
+      artifact_id: artifactId,
+      declared_step_ids: [steps[0]],
+    });
+    expect(opened.raw.exitCode, opened.raw.stdout + opened.raw.stderr).toBe(0);
+    const close = (opened.result.next_actions as Array<{ verb: string; command: string }>).find(
+      (action) => action.verb === 'checkpoint-close'
+    )!;
+    const body = close.command.match(/<<'EOF'\n([\s\S]*)\nEOF$/)![1];
+    expect(body).toContain(planSteps[0].acceptance_criteria[0].criterion_id);
+    expect(body).not.toContain(planSteps[1].acceptance_criteria[0].criterion_id);
+
+    const resumed = await agent(f).runRaw(['resume', '--artifact', artifactId, '--json']);
+    expect(resumed.exitCode, resumed.stdout + resumed.stderr).toBe(0);
+    const resumeClose = (
+      JSON.parse(resumed.stdout).next_actions as Array<{ verb: string; command: string }>
+    ).find((action) => action.verb === 'checkpoint-close')!;
+    expect(resumeClose.command).toBe(close.command);
+
+    const filled = body.replace(/<exit-code>/g, '0').replace(/<[^>\n]+>/g, 'filled in');
+    const raw = await agent(f).runRaw([
+      'capture',
+      'checkpoint',
+      'close',
+      '--no-llm',
+      '--input',
+      inputFile(filled),
+    ]);
+    expect(raw.exitCode, raw.stdout + raw.stderr).toBe(0);
+    const closedCheckpoint = readProjectArtifact(f.writer, artifactId)!.thread.checkpoints[0];
+    expect(closedCheckpoint).toMatchObject({
+      status: 'closed',
+      completed_step_ids: [steps[0]],
+      done_criteria: [{ criterion_id: planSteps[0].acceptance_criteria[0].criterion_id }],
+    });
+  });
+
+  it('keeps the opening revision criterion ids in the close template after a revise narrows them', async () => {
+    const f = await fixture();
+    const captured = await run(f, ['plan'], {
+      idempotency_key: `plan-${randomUUID()}`,
+      task: 'Narrow an open step rubric',
+      label: 'Opening revision criteria',
+      plan_steps: [
+        {
+          text: 'a',
+          label: 'a',
+          acceptance_criteria: [{ text: 'the step is delivered' }, { text: 'the step is tested' }],
+        },
+      ],
+      touched_scope: [],
+      non_goals: [],
+    });
+    expect(captured.raw.exitCode, captured.raw.stdout + captured.raw.stderr).toBe(0);
+    const artifactId = captured.result.artifact_id as string;
+    const step = captured.result.plan_steps[0] as {
+      step_id: string;
+      acceptance_criteria: Array<{ criterion_id: string; text: string }>;
+    };
+    const [kept, removed] = step.acceptance_criteria;
+    const opened = await run(f, ['checkpoint', 'open'], {
+      artifact_id: artifactId,
+      declared_step_ids: [step.step_id],
+    });
+    expect(opened.raw.exitCode, opened.raw.stdout + opened.raw.stderr).toBe(0);
+    const revised = await run(f, ['plan', 'revise'], {
+      idempotency_key: `revise-${randomUUID()}`,
+      artifact_id: artifactId,
+      label: 'Opening revision criteria, narrowed',
+      rationale: 'Drop the testing criterion from the open step',
+      prior_plan_event_id: null,
+      plan_steps: [
+        {
+          step_id: step.step_id,
+          text: 'a',
+          label: 'a',
+          acceptance_criteria: [{ criterion_id: kept.criterion_id, text: kept.text }],
+        },
+      ],
+      touched_scope: [],
+      non_goals: [],
+      acknowledge_criteria_changes: [removed.criterion_id],
+    });
+    expect(revised.raw.exitCode, revised.raw.stdout + revised.raw.stderr).toBe(0);
+
+    const resumed = await agent(f).runRaw(['resume', '--artifact', artifactId, '--json']);
+    expect(resumed.exitCode, resumed.stdout + resumed.stderr).toBe(0);
+    const command = closeCommand(JSON.parse(resumed.stdout).next_actions);
+    expect(command).toContain(kept.criterion_id);
+    expect(command).toContain(removed.criterion_id);
+
+    const closed = await closeFromTemplate(f, command);
+    expect(closed.exitCode, closed.stdout + closed.stderr).toBe(0);
+    expect(readProjectArtifact(f.writer, artifactId)!.thread.checkpoints[0]).toMatchObject({
+      status: 'closed',
+      done_criteria: [{ criterion_id: kept.criterion_id }, { criterion_id: removed.criterion_id }],
+    });
+  });
+
+  it('renders the same close template from status and resume, and the status one closes', async () => {
+    const f = await fixture();
+    const { artifactId, steps, planSteps } = await plan(f, ['a', 'b']);
+    const opened = await run(f, ['checkpoint', 'open'], {
+      artifact_id: artifactId,
+      declared_step_ids: [steps[0]],
+    });
+    expect(opened.raw.exitCode, opened.raw.stdout + opened.raw.stderr).toBe(0);
+
+    const resumed = await agent(f).runRaw(['resume', '--artifact', artifactId, '--json']);
+    expect(resumed.exitCode, resumed.stdout + resumed.stderr).toBe(0);
+    const resumeCommand = closeCommand(JSON.parse(resumed.stdout).next_actions);
+    expect(resumeCommand).toContain(planSteps[0].acceptance_criteria[0].criterion_id);
+
+    const statusJson = await agent(f).runRaw(['status', '--json']);
+    expect(statusJson.exitCode, statusJson.stdout + statusJson.stderr).toBe(0);
+    const statusArtifact = (
+      JSON.parse(statusJson.stdout).artifacts as Array<{ id: string; next_actions: unknown }>
+    ).find((entry) => entry.id === artifactId)!;
+    const statusCommand = closeCommand(statusArtifact.next_actions);
+    expect(statusCommand).toBe(resumeCommand);
+
+    const statusText = await agent(f).runRaw(['status']);
+    expect(statusText.exitCode, statusText.stdout + statusText.stderr).toBe(0);
+    expect(statusText.stdout).toContain(resumeCommand);
+
+    const closed = await closeFromTemplate(f, statusCommand);
+    expect(closed.exitCode, closed.stdout + closed.stderr).toBe(0);
+    expect(readProjectArtifact(f.writer, artifactId)!.thread.checkpoints[0]).toMatchObject({
+      status: 'closed',
+      done_criteria: [{ criterion_id: planSteps[0].acceptance_criteria[0].criterion_id }],
+    });
+  });
 });
+
+function closeCommand(actions: unknown): string {
+  const close = (actions as Array<{ verb: string; command: string }>).find(
+    (action) => action.verb === 'checkpoint-close'
+  );
+  if (!close) throw new Error('no checkpoint-close next action');
+  return close.command;
+}
+
+function closeFromTemplate(f: Fixture, command: string) {
+  const body = command.match(/<<'EOF'\n([\s\S]*)\nEOF$/)![1];
+  const filled = body.replace(/<exit-code>/g, '0').replace(/<[^>\n]+>/g, 'filled in');
+  return agent(f).runRaw([
+    'capture',
+    'checkpoint',
+    'close',
+    '--no-llm',
+    '--input',
+    inputFile(filled),
+  ]);
+}

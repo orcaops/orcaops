@@ -9,6 +9,7 @@ import {
   readProjectExecution,
 } from '@orcaops/storage/history/database';
 import { createExecutionPin } from '@orcaops/storage/history/execution-focus';
+import { createTempRepo } from '@orcaops/test-harness';
 
 import { publishProjectExecutionFocus } from '../../../../packages/storage/dist/history/database/execution-focus.js';
 import type { readDatabaseStatus } from '../../src/lib/database-task-context.js';
@@ -170,5 +171,45 @@ describe('registered passive task status', { timeout: 30_000 }, () => {
     expect(result.stdout).not.toContain('\r');
     expect(result.stdout).toContain('visible taskspoofed artifact id');
     expect(await inventory(f.temporary)).toEqual(before);
+  });
+});
+
+describe('install drift advice without an orcaops config', { timeout: 60_000 }, () => {
+  async function statusWithoutConfig(cwd: string) {
+    const agent = makeAgent({ cwd, env: { CLAUDE_SESSION_ID: 'drift-advice' } });
+    const json = await agent.runRaw(['status', '--json']);
+    expect(json.exitCode, json.stderr || json.stdout).toBe(0);
+    const text = await agent.runRaw(['status']);
+    expect(text.exitCode, text.stderr || text.stdout).toBe(0);
+    return {
+      json: JSON.parse(json.stdout) as { drift?: unknown },
+      text: text.stdout + text.stderr,
+    };
+  }
+
+  it('does not recommend update in a repository that was never initialized', async () => {
+    const repo = await createTempRepo({ initialBranch: 'main' });
+    try {
+      const { json, text } = await statusWithoutConfig(repo.path);
+      expect(json.drift).toBeUndefined();
+      expect(text).not.toMatch(/orcaops update/);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('does not recommend update after uninstall purges the orcaops data', async () => {
+    const repo = await createTempRepo({ initialBranch: 'main' });
+    try {
+      const agent = makeAgent({ cwd: repo.path, env: { CLAUDE_SESSION_ID: 'drift-advice' } });
+      expect((await agent.runRaw(['init', '--scope', 'project', '--no-llm'])).exitCode).toBe(0);
+      const purge = await agent.runRaw(['uninstall', '--purge-data', '--json']);
+      expect(purge.exitCode, purge.stderr || purge.stdout).toBe(0);
+      const { json, text } = await statusWithoutConfig(repo.path);
+      expect(json.drift).toBeUndefined();
+      expect(text).not.toMatch(/orcaops update/);
+    } finally {
+      await repo.cleanup();
+    }
   });
 });

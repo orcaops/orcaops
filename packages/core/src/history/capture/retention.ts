@@ -4,6 +4,7 @@ import { isUuidV7, uuidv7 } from '@orcaops/storage';
 import {
   beginProjectCaptureRetention,
   beginProjectImportedArtifactRetention,
+  type CaptureOperationOptions,
   gitRetentionPreparation,
   type PendingCaptureInput,
   type PreparedProjectGitRetention,
@@ -42,7 +43,7 @@ function originalCapture(handle: ProjectDatabase, operationId: string) {
 function replayCapture(
   handle: ProjectDatabase,
   operationId: string,
-  options: ProjectOperationOptions,
+  options: CaptureOperationOptions,
   mode: 'capture' | 'import'
 ) {
   const records = originalCapture(handle, operationId);
@@ -64,21 +65,21 @@ function resumeRetention(
   handle: ProjectDatabase,
   expected: RegisteredDatabaseContext,
   originalOperationId: string,
-  options: ProjectOperationOptions,
+  options: CaptureOperationOptions,
   mode: 'capture'
 ): ReturnType<typeof settleProjectCaptureRetention>;
 function resumeRetention(
   handle: ProjectDatabase,
   expected: RegisteredDatabaseContext,
   originalOperationId: string,
-  options: ProjectOperationOptions,
+  options: CaptureOperationOptions,
   mode: 'import'
 ): ReturnType<typeof settleProjectImportedArtifactRetention>;
 function resumeRetention(
   handle: ProjectDatabase,
   expected: RegisteredDatabaseContext,
   originalOperationId: string,
-  options: ProjectOperationOptions,
+  options: CaptureOperationOptions,
   mode: 'capture' | 'import'
 ):
   | ReturnType<typeof settleProjectCaptureRetention>
@@ -87,7 +88,7 @@ async function resumeRetention(
   handle: ProjectDatabase,
   expected: RegisteredDatabaseContext,
   originalOperationId: string,
-  options: ProjectOperationOptions,
+  options: CaptureOperationOptions,
   mode: 'capture' | 'import'
 ) {
   if (!isUuidV7(originalOperationId))
@@ -96,7 +97,11 @@ async function resumeRetention(
       'Provide the exact original capture operation UUID'
     );
   const context = structuredClone(expected);
-  const operationOptions = { signal: options.signal, onWait: options.onWait };
+  const operationOptions = {
+    signal: options.signal,
+    onWait: options.onWait,
+    processing: options.processing,
+  };
   checkAuthority(handle, context);
   const replay = replayCapture(handle, originalOperationId, operationOptions, mode);
   if (replay) return replay;
@@ -166,7 +171,7 @@ export function resumeDatabaseCaptureRetention(
   handle: ProjectDatabase,
   expected: RegisteredDatabaseContext,
   originalOperationId: string,
-  options: ProjectOperationOptions = {}
+  options: CaptureOperationOptions = {}
 ) {
   return resumeRetention(handle, expected, originalOperationId, options, 'capture');
 }
@@ -184,21 +189,21 @@ function publishRetention(
   handle: ProjectDatabase,
   expected: RegisteredDatabaseContext,
   input: { capture: PendingCaptureInput; retention: PreparedProjectGitRetention },
-  options: ProjectOperationOptions,
+  options: CaptureOperationOptions,
   mode: 'capture'
 ): ReturnType<typeof settleProjectCaptureRetention>;
 function publishRetention(
   handle: ProjectDatabase,
   expected: RegisteredDatabaseContext,
   input: { capture: PendingCaptureInput; retention: PreparedProjectGitRetention },
-  options: ProjectOperationOptions,
+  options: CaptureOperationOptions,
   mode: 'import'
 ): ReturnType<typeof settleProjectImportedArtifactRetention>;
 function publishRetention(
   handle: ProjectDatabase,
   expected: RegisteredDatabaseContext,
   input: { capture: PendingCaptureInput; retention: PreparedProjectGitRetention },
-  options: ProjectOperationOptions,
+  options: CaptureOperationOptions,
   mode: 'capture' | 'import'
 ):
   | ReturnType<typeof settleProjectCaptureRetention>
@@ -207,14 +212,18 @@ async function publishRetention(
   handle: ProjectDatabase,
   expected: RegisteredDatabaseContext,
   input: { capture: PendingCaptureInput; retention: PreparedProjectGitRetention },
-  options: ProjectOperationOptions,
+  options: CaptureOperationOptions,
   mode: 'capture' | 'import'
 ) {
   const context = structuredClone(expected);
   const capture = structuredClone(input.capture);
   const retention = input.retention;
   const operationId = gitRetentionPreparation(retention).operationId;
-  const operationOptions = { signal: options.signal, onWait: options.onWait };
+  const operationOptions = {
+    signal: options.signal,
+    onWait: options.onWait,
+    processing: options.processing,
+  };
   checkAuthority(handle, context);
   if (!readProjectGitRetention(handle, operationId).value) {
     const current = await revalidateDatabaseExecutionContext(context, {
@@ -236,7 +245,7 @@ export function publishDatabaseCaptureRetention(
   handle: ProjectDatabase,
   expected: RegisteredDatabaseContext,
   input: { capture: PendingCaptureInput; retention: PreparedProjectGitRetention },
-  options: ProjectOperationOptions = {}
+  options: CaptureOperationOptions = {}
 ) {
   return publishRetention(handle, expected, input, options, 'capture');
 }

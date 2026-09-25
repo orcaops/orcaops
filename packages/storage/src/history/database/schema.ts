@@ -2,15 +2,20 @@ import { PROJECT_ARTIFACT_PUSH_SCHEMA } from './artifact-push-schema.js';
 import { PROJECT_CAPTURE_OPERATION_SCHEMA } from './capture-operation-schema.js';
 import { PROJECT_CLOUD_SYNC_SCHEMA } from './cloud-sync-schema.js';
 import { PROJECT_DOMAIN_OPERATION_INDEX_SCHEMA } from './domain-operation-index-schema.js';
+import { PROJECT_EVALUATOR_FINDINGS_SCHEMA } from './evaluator-findings-schema.js';
 import { PROJECT_EXACT_REVISION_SCHEMA } from './exact-revision-schema.js';
 import { PROJECT_EXECUTION_FOCUS_SCHEMA } from './execution-focus-schema.js';
 import { PROJECT_EXECUTION_SCHEMA } from './execution-schema.js';
 import { PROJECT_GROUPED_REMOTE_TRANSPORT_SCHEMA } from './grouped-remote-schema.js';
+import { PROJECT_KNOWLEDGE_EVIDENCE_SCHEMA } from './knowledge-evidence-schema.js';
+import { PROJECT_KNOWLEDGE_RECONSIDERATION_SCHEMA } from './knowledge-reconsideration-schema.js';
+import { PROJECT_KNOWLEDGE_SCHEMA } from './knowledge-schema.js';
 import { PROJECT_LEGACY_IMPORT_SCHEMA } from './legacy-import-schema.js';
 import { PROJECT_OPERATION_RECEIPT_INDEX_SCHEMA } from './operation-receipt-schema.js';
 import { PROJECT_PLAN_CAPTURE_SCHEMA } from './plan-capture-schema.js';
 import { PROJECT_QUERY_METADATA_SCHEMA } from './query-metadata-schema.js';
 import { PROJECT_QUERY_STATISTICS_SCHEMA } from './query-statistics-schema.js';
+import { PROJECT_RATIONALE_SCHEMA } from './rationale-schema.js';
 import { PROJECT_RETAINED_INSERT_SCHEMA } from './retained-insert-schema.js';
 import { PROJECT_RETENTION_BINDING_SCHEMA } from './retention-binding-schema.js';
 import { PROJECT_RETENTION_PUBLICATION_SCHEMA } from './retention-publication-schema.js';
@@ -26,8 +31,8 @@ import { PROJECT_SOURCE_PLAN_SCHEMA } from './source-plan-schema.js';
 import { PROJECT_SOURCE_PLAN_UPLOAD_SCHEMA } from './source-plan-upload-schema.js';
 import { PROJECT_USAGE_SCHEMA } from './usage-schema.js';
 
-// Versions 1–28 belonged to unreleased development builds and must not be adopted.
-export const PROJECT_DATABASE_SCHEMA_VERSION = 29;
+// Upgrades from the released format are explicit.
+export const PROJECT_DATABASE_SCHEMA_VERSION = 33;
 
 export const PROJECT_DATABASE_BASE_SCHEMA = `
 CREATE TABLE store_identity (
@@ -202,6 +207,13 @@ export const PROJECT_DATABASE_SCHEMA =
   PROJECT_QUERY_STATISTICS_SCHEMA +
   PROJECT_LEGACY_IMPORT_SCHEMA +
   PROJECT_EXACT_REVISION_SCHEMA +
+  PROJECT_KNOWLEDGE_SCHEMA +
   PROJECT_SOURCE_PLAN_UPLOAD_SCHEMA +
   PROJECT_REVIEW_FEEDBACK_CURSOR_SCHEMA +
+  PROJECT_EVALUATOR_FINDINGS_SCHEMA +
+  // Observations reference both a knowledge source and an evaluator run's retained context, so
+  // they are created after each of them.
+  PROJECT_KNOWLEDGE_EVIDENCE_SCHEMA +
+  PROJECT_KNOWLEDGE_RECONSIDERATION_SCHEMA +
+  PROJECT_RATIONALE_SCHEMA +
   `PRAGMA user_version = ${PROJECT_DATABASE_SCHEMA_VERSION};`;

@@ -140,6 +140,15 @@ export interface BuildClaudeArgsParams {
    */
   toolPolicy?: { mode: 'none' | 'command-filtered' };
   /**
+   * Harden the deny-all posture for a run that must never reach a tool: remove
+   * every built-in tool from the model's context (`--tools ""`) and leave
+   * permission bypass off. `--disallowed-tools "*"` relies on a wildcard the
+   * CLI does not document, and under bypass a rule that failed to match would
+   * hand the model every tool; without bypass a headless run refuses whatever
+   * slipped through. Only valid with the deny-all tool policy.
+   */
+  withholdAllTools?: boolean;
+  /**
    * Secret-path deny rules to inject via `--settings` when
    * `toolPolicy.mode === 'command-filtered'`. Defaults to
    * `ORCAOPS_CLAUDE_TOOL_DENY_RULES`.
@@ -203,6 +212,9 @@ export function buildClaudeArgs(params: BuildClaudeArgsParams): string[] {
     );
   }
   const commandFiltered = toolPolicyMode === 'command-filtered';
+  if (commandFiltered && params.withholdAllTools) {
+    throw new TypeError('withholdAllTools cannot be combined with the command-filtered policy.');
+  }
   const args: string[] = [
     '--print',
     '--verbose',
@@ -238,6 +250,12 @@ export function buildClaudeArgs(params: BuildClaudeArgsParams): string[] {
     args.push('--permission-mode', 'acceptEdits');
     args.push('--allowed-tools', ...claudeInspectionTools(readGrantRoot));
     args.push('--settings', JSON.stringify({ permissions: { deny: [...denyRules] } }));
+  } else if (params.withholdAllTools) {
+    args.push('--tools', '');
+    if (!params.outputSchema) args.push('--disallowed-tools', '*');
+  } else if (params.outputSchema) {
+    // The wildcard deny also refuses StructuredOutput; dropping it under bypass would expose every tool.
+    args.push('--tools', '');
   } else {
     // Default deny-all posture. skip-permissions is safe here because no
     // tool is allowed at all.
@@ -286,10 +304,12 @@ export function buildClaudeArgs(params: BuildClaudeArgsParams): string[] {
  *   it does not affect auth or cwd — and is the CLAUDE.md half of the
  *   project-context isolation documented on buildClaudeArgs.
  */
-export function buildClaudeEnv(): Record<string, string | undefined> {
+export function buildClaudeEnv(
+  options: { baseEnv?: NodeJS.ProcessEnv; entrypoint?: string } = {}
+): Record<string, string | undefined> {
   return {
-    ...process.env,
-    CLAUDE_CODE_ENTRYPOINT: 'orcaops-evaluator',
+    ...(options.baseEnv ?? process.env),
+    CLAUDE_CODE_ENTRYPOINT: options.entrypoint ?? 'orcaops-evaluator',
     CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1',
     CI: 'true',
     TERM: 'dumb',

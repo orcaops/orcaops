@@ -5,6 +5,7 @@ import type {
   DigestEvaluatorRow,
   DigestUsage,
 } from './builder.js';
+import { evaluatorStatusLabel, latestErrorHeading } from './builder.js';
 
 export interface BranchArtifactAnchor {
   source: 'checkpoint' | 'summary' | 'pre_pr';
@@ -447,9 +448,14 @@ function addEvaluatorRows(
   for (const row of rows.filter((candidate) => candidate.status !== 'pass')) {
     const sources = 'sources' in row ? row.sources : [row.source];
     lines.push(
-      `- **${row.status}** \`${row.evaluator_ref}\` (${row.phase}; ${sources.map(sourceLabel).join('; ')})`
+      `- **${evaluatorStatusLabel(row)}** \`${row.evaluator_ref}\` (${row.phase}; ${sources.map(sourceLabel).join('; ')})`
     );
     for (const bodyLine of row.body.trim().split('\n')) lines.push(`  > ${bodyLine}`);
+    if (row.latest_error !== undefined) {
+      lines.push(`  > **${latestErrorHeading(row.latest_error)}:**`);
+      for (const bodyLine of row.latest_error.body.trim().split('\n'))
+        lines.push(`  > ${bodyLine}`);
+    }
   }
   if (passing.length > 0) {
     lines.push(

@@ -65,6 +65,8 @@ import { normalizeHistoryRoot } from '@orcaops/storage/history/authority';
 import { openProjectDatabase, ProjectDatabaseError } from '@orcaops/storage/history/database';
 
 import { registerMissingDatabaseWorktree } from '../lib/database-worktree-registration.js';
+import { readProcessingHistory } from '../lib/knowledge-processing-queue.js';
+import { checkKnowledgeProcessing } from './knowledge/doctor.js';
 import { inspectSeedClone, repairSeed } from './seed/index.js';
 import { CliExit } from '../io/exit.js';
 import { emitError, emitOk, writeErrorLine, writeTerminalSafeStdout } from '../io/output.js';
@@ -362,6 +364,16 @@ async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
     checks.push(await checkInfoExclude(repoRoot, config));
     checks.push(checkWorkflowHints(config, gates));
     await appendDatabaseHistory(config.evaluators.disposition_ttl_days);
+    checks.push(
+      await guardRepositoryCheck('knowledge-processing', async () =>
+        checkKnowledgeProcessing({
+          repoRoot,
+          config,
+          providerAvailability: providerSnapshot,
+          history: await readProcessingHistory({ cwd: repoRoot }),
+        })
+      )
+    );
     checks.push(await guardRepositoryCheck('usage-source', () => checkUsageSourceHealth()));
     checks.push(await checkScratchCheckouts(repoRoot));
     checks.push(checkShellKey());
@@ -568,6 +580,43 @@ function findProjectDatabaseError(error: unknown): ProjectDatabaseError | null {
   return null;
 }
 
+// What the reported condition asks the person to do. Doctor starts nothing, so a database that
+// needs the explicit upgrade is told which command performs it rather than upgraded here.
+const HISTORY_FAILURE_GUIDANCE = new Map<string, string>([
+  [
+    'HISTORY_MISSING',
+    'Preserve the registration, SQLite companion files and retained evidence. Restore the original registered database from a verified backup if available; otherwise report this Doctor output for investigation. Setup cannot replace missing history.',
+  ],
+  [
+    'HISTORY_INTEGRITY_REQUIRED',
+    'Preserve the database, SQLite companion files, registration and retained evidence. Restore a verified backup if available; otherwise report this Doctor output for investigation. Doctor cannot reconstruct authoritative history.',
+  ],
+  [
+    'STALE_CONTEXT',
+    'History advanced during diagnosis; rerun doctor against the current registered state.',
+  ],
+  [
+    'AUTHORITY_MISMATCH',
+    'Use the exact registered project database and original repository authority.',
+  ],
+  [
+    'HISTORY_UNEXPECTED_OWNER',
+    'Use the exact registered project database and original repository authority.',
+  ],
+  [
+    'HISTORY_UPGRADE_REQUIRED',
+    'This database holds the released schema and this build writes a newer one. Preview the explicit upgrade with `orcaops history upgrade`, then perform it with `orcaops history upgrade --apply`, which takes and verifies a backup first. Doctor upgraded nothing and changed nothing.',
+  ],
+  [
+    'HISTORY_FORMAT_NEWER',
+    'A newer build wrote this database, and this one cannot read it. Use that build, or restore the backup its upgrade took with `orcaops history backups` and `orcaops history restore`. Doctor changed nothing.',
+  ],
+  [
+    'HISTORY_FORMAT_UNSUPPORTED',
+    'This build cannot open this database format and no upgrade leads from it. Preserve the database, SQLite companion files, registration and retained evidence, and use the build that wrote it or report this Doctor output for investigation. Doctor changed nothing.',
+  ],
+]);
+
 export function databaseHistoryFailure(error: unknown): DoctorCheck {
   const failure = findProjectDatabaseError(error);
   const code = failure?.code ?? 'HISTORY_INACCESSIBLE';
@@ -575,15 +624,8 @@ export function databaseHistoryFailure(error: unknown): DoctorCheck {
     failure?.message ??
     (error instanceof Error ? error.message : 'Registered project history is unavailable');
   const guidance =
-    code === 'HISTORY_MISSING'
-      ? 'Preserve the registration, SQLite companion files and retained evidence. Restore the original registered database from a verified backup if available; otherwise report this Doctor output for investigation. Setup cannot replace missing history.'
-      : code === 'HISTORY_INTEGRITY_REQUIRED'
-        ? 'Preserve the database, SQLite companion files, registration and retained evidence. Restore a verified backup if available; otherwise report this Doctor output for investigation. Doctor cannot reconstruct authoritative history.'
-        : code === 'STALE_CONTEXT'
-          ? 'History advanced during diagnosis; rerun doctor against the current registered state.'
-          : ['AUTHORITY_MISMATCH', 'HISTORY_UNEXPECTED_OWNER'].includes(code)
-            ? 'Use the exact registered project database and original repository authority.'
-            : 'Preserve the database and registration, correct the reported boundary, then run doctor again.';
+    HISTORY_FAILURE_GUIDANCE.get(code) ??
+    'Preserve the database and registration, correct the reported boundary, then run doctor again.';
   return {
     name: 'history-database',
     status: 'fail',
@@ -1137,14 +1179,20 @@ async function checkGlobalInstall(repoRoot: string, config: Config): Promise<Doc
   // This repo HAS global materialization → per-user-current version parity matters.
   // Gate this on hasThisRepo so a project repo never warns about another repo's bytes.
   if (manifest && manifest.materialized_by !== CLI_VERSION) {
+    const details = isVersionAhead(CLI_VERSION, manifest.materialized_by)
+      ? ['Run `orcaops update` to refresh the global files with this CLI.']
+      : isVersionAhead(manifest.materialized_by, CLI_VERSION)
+        ? [
+            'A newer orcaops wrote the global files. Upgrade this CLI, or run `orcaops update --force` to deliberately downgrade them.',
+          ]
+        : [
+            'The two versions cannot be ordered. Use that CLI for global operations, or run `orcaops update --force` to take ownership with this one.',
+          ];
     return {
       name,
       status: 'warn',
       summary: `global orcaops materialized by CLI v${manifest.materialized_by}; you are on v${CLI_VERSION}`,
-      details: [
-        'Two repos on different orcaops binaries can fight over the shared global bytes.',
-        'Use that CLI for global ops, `--scope project` here, or `orcaops update --scope global --force` to take ownership.',
-      ],
+      details,
     };
   }
   return {
@@ -1182,8 +1230,13 @@ async function checkGeneratedFiles(
     return { name, status: 'pass', summary: 'generated_files=commit' };
   }
   const drift = await detectInstallDrift(repoRoot, config, CLI_VERSION, gates);
-  // Ahead files are not churn this CLI can fix; checkAgentSkills reports them.
-  const staleCount = drift ? drift.staleSkills.length + drift.staleCommands.length : 0;
+  // Ahead and deleted files are not churn this CLI can fix; checkAgentSkills reports them.
+  const staleCount = drift
+    ? drift.staleSkills.length +
+      drift.staleCommands.length -
+      drift.missingSkills.length -
+      drift.missingCommands.length
+    : 0;
   if (staleCount === 0) {
     return {
       name,
@@ -2670,6 +2723,7 @@ const DOCTOR_SECTIONS = [
       'focus',
       'git-publications',
       'history-database',
+      'knowledge-processing',
       'lineage-identity',
       'lineage-orphan',
       'open-checkpoint-stale',

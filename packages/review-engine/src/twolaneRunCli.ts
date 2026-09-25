@@ -32,6 +32,7 @@ export {
   type TwolaneOwnershipSummary,
 } from './twolaneRunMetadata.js';
 
+import { interpretationLines } from '@orcaops/core';
 import { type ExecutableIdentity, parseCitationId, slugifyBranch } from '@orcaops/review-core';
 import { uuidv7 } from '@orcaops/storage';
 
@@ -511,6 +512,58 @@ export function renderAccountRoutineMd(p: AccountProjection, facts?: AccountRunF
   L.push('');
   L.push('Cite captured records with their inline [c#] aliases and checkpoints with k# aliases.');
 
+  const taskKnowledge = p.taskKnowledge?.tasks ?? [];
+  if (taskKnowledge.length > 0) {
+    L.push('');
+    L.push('## Continuing knowledge by task');
+    for (const task of taskKnowledge) {
+      L.push('');
+      L.push(`### Task ${task.artifactId}`);
+      L.push(`Plan: ${task.planEventId ?? 'no plan visible at this boundary'}`);
+      L.push(
+        `Knowledge boundary: ${task.knowledge.boundary} (${task.knowledge.mode}) · ${task.knowledge.coverage.statement}`
+      );
+      for (const entry of task.knowledge.entries) {
+        L.push(`- ${entry.key} — ${entry.placement}`);
+        if (entry.statement !== null) L.push(`  - ${oneLine(entry.statement)}`);
+        if (entry.rationale !== undefined)
+          L.push(
+            `  - Reason: ${entry.rationale === null ? 'unknown (not supplied)' : oneLine(entry.rationale)}`
+          );
+        L.push(`  - ${oneLine(entry.reason)}`);
+        L.push(
+          `  - task uses: ${entry.selectedWithPlan} selected with plan, ${entry.connectedLater} connected later`
+        );
+      }
+      L.push(`Applicable and not selected: ${task.knowledge.notSelectedStatement}`);
+      for (const interpretation of task.knowledge.interpretations ?? [])
+        L.push(...interpretationLines(interpretation));
+      for (const entry of task.knowledge.applicableNotSelected)
+        L.push(`- ${entry.key}: revision(s) ${entry.revisionIds.join(', ')}`);
+      for (const limit of task.knowledge.limits) L.push(`- Coverage limit: ${oneLine(limit)}`);
+    }
+  } else if (p.knowledge !== undefined && p.knowledge !== null) {
+    L.push('');
+    L.push('## Continuing knowledge');
+    L.push(p.knowledge.coverage.statement);
+    for (const entry of p.knowledge.entries) {
+      L.push(`- ${entry.key} — ${entry.placement}`);
+      if (entry.statement !== null) L.push(`  - ${oneLine(entry.statement)}`);
+      if (entry.rationale !== undefined)
+        L.push(
+          `  - Reason: ${entry.rationale === null ? 'unknown (not supplied)' : oneLine(entry.rationale)}`
+        );
+    }
+    L.push(`Applicable and not selected: ${p.knowledge.notSelectedStatement}`);
+    for (const interpretation of p.knowledge.interpretations ?? [])
+      L.push(...interpretationLines(interpretation));
+    for (const limit of p.knowledge.limits) L.push(`- Coverage limit: ${oneLine(limit)}`);
+  } else if (p.knowledgeStatement !== undefined) {
+    L.push('');
+    L.push('## Continuing knowledge');
+    L.push(p.knowledgeStatement);
+  }
+
   const planDecisions = c.planDecisions;
   const criterionEvidence = c.criterionEvidence;
   const verification = c.verification;
@@ -960,6 +1013,46 @@ function parseLane(value: string | undefined): Lane | null {
  * The account payload's facts block is the run's own scope, so it is derived
  * from the pinned forensic metrics rather than recomputed from the worktree.
  */
+/**
+ * The run-scoped facts the account lane receives: the one legitimate crossing from the forensic
+ * side, all identifiers or counts, derived from the pinned metrics and never from the worktree.
+ */
+export function accountRunFacts(
+  runId: string,
+  inputs: { projection: AccountProjection; forensicInput: ForensicInput }
+): AccountRunFacts {
+  const metrics = inputs.forensicInput.metrics;
+  return {
+    runId,
+    baseSha: inputs.forensicInput.baseSha ?? null,
+    floorInputHash: inputs.projection.floor_input_hash,
+    eligibleFiles: metrics.eligibleFiles,
+    eligibleDiffBytes: metrics.eligibleDiffBytes,
+    excludedFiles: metrics.excludedFiles,
+    unreviewableFiles: metrics.unreviewableFiles,
+    policyStubFiles: metrics.policyStubFiles ?? (inputs.forensicInput.policyStubs ?? []).length,
+    policyStubRows:
+      metrics.policyStubRows ??
+      (inputs.forensicInput.policyStubs ?? []).reduce((n, x) => n + x.adds + x.dels, 0),
+    latencyTier: latencyTierFor(metrics.eligibleDiffBytes),
+  };
+}
+
+/**
+ * The exact bytes one lane's runner is handed. Exported so the isolation tests read what is served
+ * rather than a copy of this assembly: a new fact, or a renderer called with something else, has to
+ * reach them.
+ */
+export function laneMarkdown(
+  lane: Lane,
+  runId: string,
+  inputs: { projection: AccountProjection; forensicInput: ForensicInput }
+): string {
+  return lane === 'forensic'
+    ? renderForensicRoutineMd(inputs.forensicInput)
+    : renderAccountRoutineMd(inputs.projection, accountRunFacts(runId, inputs));
+}
+
 async function serveLaneEnvelope(
   root: string,
   branch: string,
@@ -976,25 +1069,7 @@ async function serveLaneEnvelope(
   payload_bytes: number;
   served_at: string;
 }> {
-  const metrics = inputs.forensicInput.metrics;
-  const markdown =
-    lane === 'forensic'
-      ? renderForensicRoutineMd(inputs.forensicInput)
-      : renderAccountRoutineMd(inputs.projection, {
-          runId,
-          baseSha: inputs.forensicInput.baseSha ?? null,
-          floorInputHash: inputs.projection.floor_input_hash,
-          eligibleFiles: metrics.eligibleFiles,
-          eligibleDiffBytes: metrics.eligibleDiffBytes,
-          excludedFiles: metrics.excludedFiles,
-          unreviewableFiles: metrics.unreviewableFiles,
-          policyStubFiles:
-            metrics.policyStubFiles ?? (inputs.forensicInput.policyStubs ?? []).length,
-          policyStubRows:
-            metrics.policyStubRows ??
-            (inputs.forensicInput.policyStubs ?? []).reduce((n, x) => n + x.adds + x.dels, 0),
-          latencyTier: latencyTierFor(metrics.eligibleDiffBytes),
-        });
+  const markdown = laneMarkdown(lane, runId, inputs);
   const payloadPath = payloadPathFor(root, branch, runId, lane);
   // Written with plain fs on purpose: the payload is not review publication
   // state, so it must not go through the review write surface that constrains

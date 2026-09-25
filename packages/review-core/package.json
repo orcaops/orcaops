@@ -28,7 +28,7 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
-    "@orcaops/diff-fingerprint": "0.0.8",
+    "@orcaops/diff-fingerprint": "0.0.9",
     "zod": "^4.0.17"
   },
   "devDependencies": {

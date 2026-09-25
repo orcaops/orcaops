@@ -80,6 +80,32 @@ describe('orcaops init --personal', () => {
     expect(result.stderr).not.toMatch(/\n\s+at /u);
   });
 
+  it('names --scope project when --reset-config would move a committed project install to personal', async () => {
+    const projectInit = await agent.runRaw(['init', '--scope', 'project', '--json', '--no-llm']);
+    expect(projectInit.exitCode).toBe(0);
+    execFileSync('git', ['add', '-A'], { cwd: repo.path });
+    execFileSync('git', ['commit', '-m', 'commit orcaops bootstrap'], { cwd: repo.path });
+
+    const refused = await agent.runRaw(['init', '--force', '--reset-config', '--yes', '--no-llm']);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain('--reset-config');
+    expect(refused.stderr).toContain('--scope project');
+    expect(refused.stderr).toContain('orcaops update --scope personal');
+
+    const kept = await agent.runRaw([
+      'init',
+      '--force',
+      '--reset-config',
+      '--scope',
+      'project',
+      '--yes',
+      '--no-llm',
+      '--json',
+    ]);
+    expect(kept.exitCode).toBe(0);
+    expect((JSON.parse(kept.stdout) as { scope: string }).scope).toBe('project');
+  });
+
   it('keeps `git status` clean: no instruction file, skills global, ownership in the common dir', async () => {
     const r = await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
     expect(r.exitCode).toBe(0);
@@ -181,8 +207,7 @@ describe('orcaops init --personal', () => {
 
       Tip: pass \`--session-hooks\` to inject orcaops capture guidance at every agent session start.
 
-      LLM tool: none (no \`claude\` or \`codex\` found on PATH).
-      LLM evaluators will be skipped until a provider CLI is installed.
+      LLM tool: none (llm.tool is "none"). Evaluators run in deterministic-only mode.
 
       Invisible install: nothing touches git — \`git status\` stays clean, teammates
       see nothing. To adopt orcaops as a team later: \`orcaops update --scope project\`,

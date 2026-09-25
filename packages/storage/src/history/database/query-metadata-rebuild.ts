@@ -22,6 +22,7 @@ import {
   replaceExecutionQueryMetadata,
 } from './query-metadata-records.js';
 import { prepareProjectQueryMetadata } from './query-metadata-snapshot.js';
+import { RATIONALE_INDEX_VERSION } from './rationale-accounts.js';
 import { validateProjectSchemaDefinition } from './schema-validation.js';
 import { replaceArtifactSearchRows } from './search-records.js';
 import type { ProjectOperationOptions, ProjectWait } from './transactions.js';
@@ -32,6 +33,10 @@ export interface ProjectQueryRebuildResult {
   counters: ProjectCounters;
 }
 const queryTables = [
+  'rationale_terms',
+  'rationale_accounts',
+  'rationale_events',
+  'rationale_pending_artifacts',
   'artifact_plan_step_history',
   'artifact_query_metadata',
   'execution_query_metadata',
@@ -173,6 +178,10 @@ export async function rebuildProjectQueryMetadata(
         }
         for (const execution of prepared.executions)
           replaceExecutionQueryMetadata(transaction, execution);
+        transaction.run(
+          'INSERT OR REPLACE INTO rationale_index_state VALUES (1,?)',
+          RATIONALE_INDEX_VERSION
+        );
         cancelled(signal);
         assertProjectDatabasePath(handle);
         database.exec('COMMIT');

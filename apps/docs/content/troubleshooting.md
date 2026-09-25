@@ -34,7 +34,10 @@ orcaops doctor — v<version>
 
 ✓ repository           8 checks passed
 ✓ install surfaces     10 checks passed
-✓ artifact state       18/19 checks passed
+✓ artifact state       19/20 checks passed
+  knowledge-processing: off — no captured content is sent to a model for interpretation
+    Knowledge processing is off: knowledge_processing.enabled is false in <repo>/.orcaops/config.json.
+    Run `orcaops knowledge enable` at a terminal to turn it on.
 ⚠ seed                 Git history exists but the project database has no seed state
   Preview with `orcaops seed --dry-run`; apply with `orcaops seed --yes`.
 ✓ evaluator health     10 checks passed
@@ -88,10 +91,14 @@ should remain personal before retrying the interrupted command.
 
 ## History format or derived indexes need attention
 
-Watch opens existing project history without migrating it or rebuilding indexes.
-If the database requires an upgrade, use a compatible installed CLI and the
-specific action reported by Doctor. A database from a newer unsupported version
-must not be downgraded or replaced.
+Watch opens existing project history without migrating it or rebuilding indexes,
+and neither does any other command. A database an earlier release wrote is
+refused with the exact upgrade it needs: preview it with `orcaops history
+upgrade` and perform it with `orcaops history upgrade --apply`, which takes and
+verifies a backup first. See
+[Upgrading a project database](./local-data.md#upgrading-a-project-database).
+A database from a newer unsupported version must not be downgraded or replaced;
+use the build that wrote it, or restore the backup its upgrade took.
 
 `orcaops rebuild` rebuilds derived query and search metadata from valid retained
 database rows. It does not restore missing authoritative history. Do not delete

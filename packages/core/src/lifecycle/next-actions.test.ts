@@ -112,6 +112,20 @@ describe('nextActions', () => {
     expect(actions[0].effect).toContain('before you change the worktree');
   });
 
+  it('checkpoint-close carries the open checkpoint criterion ids, and omits them when unknown', () => {
+    const actions = nextActions(
+      snap({
+        state: 'active',
+        open_checkpoints: [
+          { n: 1, declared_step_ids: ['s1'], criterion_ids: ['c1', 'c2'] },
+          { n: 2, declared_step_ids: ['s2'] },
+        ],
+      })
+    );
+    expect(actions[0]).toMatchObject({ verb: 'checkpoint-close', criterion_ids: ['c1', 'c2'] });
+    expect(actions[1]).not.toHaveProperty('criterion_ids');
+  });
+
   it('coverage complete and nothing open recommends finish', () => {
     const s = snap({ state: 'active', plan_coverage_complete: true });
     expect(verbs(s)).toEqual(['finish']);

@@ -15,6 +15,13 @@ export {
 } from './comments.js';
 export { buildFloor, FLOOR_PRODUCER_VERSION } from './floor.js';
 export {
+  DOSSIER_KNOWLEDGE_BOUNDS,
+  type DossierKnowledge,
+  type DossierKnowledgeEntry,
+  dossierKnowledge,
+} from './dossier.js';
+export { reviewKnowledge } from './database/run-inputs.js';
+export {
   type DatabaseReviewPane,
   type PaneRoutineStory,
   type PaneStoryAnchors,

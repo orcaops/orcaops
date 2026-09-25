@@ -26,6 +26,8 @@ function thread(id: string, branch: string, state: AgentState): WatchThread {
     startedAtMs: null,
     planDecisions: [],
     nonGoals: [],
+    knowledge: null,
+    knowledgeUnavailable: null,
     recentEvents: [],
     version: '1:retained',
     omittedEvents: 0,

@@ -13,19 +13,21 @@ import {
 import {
   appendProjectPlanCapture,
   beginProjectPlanCaptureRetention,
+  type CaptureOperationOptions,
   type PlanCaptureAuthoredInput,
   planCaptureCommand,
   planCaptureInput,
   preparePlanCaptureCommand,
   preparePlanCaptureInput,
+  preparePlanTaskUses,
   prepareProjectGitRetention,
   type ProjectDatabase,
   ProjectDatabaseError,
-  type ProjectOperationOptions,
   queryProjectArtifacts,
   readProjectArtifact,
   readProjectPlanCapture,
   replayProjectPlanCapture,
+  requireRetainedUseTargets,
 } from '@orcaops/storage/history/database';
 
 import { copyDatabaseAuthoredValue, refuseDatabaseAuthoredSecrets } from '../authored-input.js';
@@ -84,7 +86,7 @@ export async function captureDatabasePlan(
   handle: ProjectDatabase,
   expected: RegisteredDatabaseContext,
   raw: DatabasePlanCaptureInput,
-  options: ProjectOperationOptions = {}
+  options: CaptureOperationOptions = {}
 ): Promise<DatabasePlanCaptureResult> {
   const copied = copyDatabaseAuthoredValue(
     raw,
@@ -108,7 +110,11 @@ export async function captureDatabasePlan(
   );
   const original = planCaptureInput(prepared);
   const context = structuredClone(expected);
-  const runtime = { signal: options.signal, onWait: options.onWait };
+  const runtime = {
+    signal: options.signal,
+    onWait: options.onWait,
+    processing: options.processing,
+  };
   const replay = async (): Promise<DatabasePlanCaptureResult | null> => {
     const found = readProjectPlanCapture(handle, prepared);
     if (!isDeepStrictEqual(handle.authority, context.authority))
@@ -243,7 +249,7 @@ export async function captureDatabasePlan(
   }
   if (snapshot && !snapshot.ok)
     warnings.push(
-      'Plan baseline snapshot is unavailable; empty-fence seed recovery has no baseline.'
+      `Plan baseline snapshot is unavailable${snapshot.error_message ? ` (${snapshot.error_message})` : ''}; empty-fence seed recovery has no baseline.`
     );
   const draft = await prepareArtifactDraft(
     {
@@ -274,6 +280,20 @@ export async function captureDatabasePlan(
       'INVALID_INPUT',
       'Initial plan preparation must produce its one original plan event without unrelated attempt changes'
     );
+  // Read before the writer settles anything: a plan naming a revision this history does not
+  // retain is refused with the writer's own code and captures nothing. The settlement checks the
+  // same targets again inside its transaction, which is what actually decides.
+  const uses = preparePlanTaskUses({
+    artifactId: plan.artifact_id,
+    planEventId: event.record.event_id,
+    uses: authored.knowledge_uses,
+    secretAllow: settings.data.secretAllow,
+  });
+  if (uses)
+    handle.read((view) => {
+      requireRetainedUseTargets(view, uses);
+      return null;
+    });
   const capture = {
     operationId,
     artifactId: plan.artifact_id,
@@ -326,7 +346,8 @@ export async function captureDatabasePlan(
       });
       await beginProjectPlanCaptureRetention(handle, { capture, command, retention }, runtime);
       publication = await resumeDatabaseCaptureRetention(handle, current, operationId, runtime);
-    } else publication = await appendProjectPlanCapture(handle, { capture, command }, runtime);
+    } else
+      publication = await appendProjectPlanCapture(handle, { capture, command, uses }, runtime);
     return {
       artifactId: plan.artifact_id,
       planEventId: event.record.event_id,

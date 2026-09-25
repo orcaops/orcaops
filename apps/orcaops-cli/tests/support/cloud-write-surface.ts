@@ -59,6 +59,7 @@ export const DISPOSITIONS: Record<string, Record<string, Disposition>> = {
     attachPin: { gatedIn: 'src/lib/source-plan-resolver.ts' },
     create: { gatedIn: 'src/commands/plan/upload.ts' },
     reviewPush: { gatedIn: 'src/commands/plan/review/push.ts' },
+    reviewRequest: { gatedIn: 'src/commands/plan/review/request.ts' },
     reviewPropose: { gatedIn: 'src/commands/plan/review/propose.ts' },
     reviewComment: { gatedIn: 'src/commands/plan/review/comment.ts' },
     setReviewerVerdict: { gatedIn: 'src/commands/plan/review/verdict.ts' },

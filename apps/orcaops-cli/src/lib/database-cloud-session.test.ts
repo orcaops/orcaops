@@ -43,6 +43,7 @@ function cloudClient(): OrcaCloudClient {
       get: unavailable,
       reviewPull: unavailable,
       reviewPush: unavailable,
+      reviewRequest: unavailable,
       reviewPropose: unavailable,
       reviewComment: unavailable,
       list: unavailable,

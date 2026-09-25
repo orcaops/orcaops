@@ -105,7 +105,10 @@ export function buildContextBlock(
     lines.push(`base_sha: ${context.repo.base_sha}`);
     lines.push(`head_sha: ${context.repo.head_sha}`);
     if (context.changed_files.length > 0) {
-      lines.push('Changed files (the authoritative attribution boundary):');
+      lines.push(
+        "Changed files reported by the agent's checkpoints (the attribution boundary; " +
+          'self-reported, so confirm against git):'
+      );
       for (const f of context.changed_files) lines.push(`  - ${f}`);
     }
     lines.push(
@@ -153,8 +156,21 @@ export function buildContextBlock(
 
   if (context.changed_files.length > 0) {
     lines.push('');
-    lines.push(`Changed files (since plan.base_sha):`);
+    lines.push(reportedChangedFilesHeading(context.phase));
     for (const f of context.changed_files) lines.push(`  - ${f}`);
+  }
+
+  if (context.observed_changed_files !== undefined) {
+    const observed = context.observed_changed_files;
+    lines.push('');
+    lines.push("Changed files observed by git between this checkpoint's open and close snapshots:");
+    if (observed.length === 0) lines.push('  (none)');
+    for (const f of observed) lines.push(`  - ${f}`);
+    const unreported = unreportedChangedPaths(observed, context.changed_files);
+    if (unreported.length > 0) {
+      lines.push('Observed but NOT reported by the agent:');
+      for (const f of unreported) lines.push(`  - ${f}`);
+    }
   }
 
   if (context.summary !== null) {
@@ -166,6 +182,34 @@ export function buildContextBlock(
   }
 
   return lines.join('\n');
+}
+
+function normalizeReportedPath(reported: string): string {
+  return reported
+    .trim()
+    .replace(/^(\.\/)+/u, '')
+    .replace(/\/+$/u, '');
+}
+
+export function unreportedChangedPaths(
+  observed: readonly string[],
+  reported: readonly string[]
+): string[] {
+  const normalized = reported.map(normalizeReportedPath).filter((entry) => entry.length > 0);
+  return observed.filter(
+    (candidate) =>
+      !normalized.some((entry) => candidate === entry || candidate.startsWith(`${entry}/`))
+  );
+}
+
+function reportedChangedFilesHeading(phase: EvaluatorContext['phase']): string {
+  const scope =
+    phase === 'checkpoint-close'
+      ? ' at this checkpoint'
+      : phase === 'pre-pr'
+        ? ' across closed checkpoints'
+        : '';
+  return `Changed files reported by the agent${scope} (self-reported files_changed, not verified against git):`;
 }
 
 /**

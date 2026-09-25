@@ -4,6 +4,8 @@ import {
   type ContextSection,
   type EvaluatorContext,
   type EvaluatorVerdict,
+  type FindingsRead,
+  parseFindingsBlock,
   parseMarkdownVerdict,
 } from '@orcaops/evaluator-protocol';
 
@@ -33,6 +35,13 @@ export interface RunLlmFixtureResult {
    * reports it rather than throwing.
    */
   verdict: EvaluatorVerdict | null;
+  /**
+   * What the runner would make of an optional `orcaops-findings` block:
+   * `absent` when the response carries none, `unreadable` with the reason
+   * when it carries one that cannot be established. A prompt that asks for
+   * the block is exactly as testable as one that asks for a verdict.
+   */
+  findings: FindingsRead;
 }
 
 /**
@@ -42,8 +51,8 @@ export interface RunLlmFixtureResult {
  * The two halves are what a pack author can actually get wrong and what no
  * amount of model quality will fix — whether the prompt contains the data it
  * asks the model to reason over, and whether the response shape it documents
- * parses to the verdict it means. Both are deterministic, so both belong in
- * an ordinary unit test.
+ * parses to the verdict and the findings it means. Both are deterministic, so
+ * both belong in an ordinary unit test.
  *
  * Deliberately provider-free: it constructs no client, resolves no consent,
  * and dispatches nothing, so provider identity has no place in its signature.
@@ -62,5 +71,6 @@ export function runLlmFixture(opts: RunLlmFixtureOptions): RunLlmFixtureResult {
     // would silently truncate the block a test is asserting against.
     contextBlock: buildContextBlock(opts.context, opts.additionalContextSections),
     verdict: parseMarkdownVerdict(opts.response),
+    findings: parseFindingsBlock(opts.response),
   };
 }

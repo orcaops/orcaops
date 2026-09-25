@@ -342,10 +342,13 @@ describe('unmerged-index read surfaces', () => {
     // why downgrades WINDOW-WIDE: work.ts was never unmerged, but the
     // checkpoint's exclusion set is unverified.
     interface WhyJson {
-      best: { reasons: string[] } | null;
+      best: string | null;
+      results: Array<{ id: string; reasons: string[] }>;
     }
     const why = parseOk<WhyJson>(await agent.runRaw(['why', 'work.ts', '--json']));
-    expect(why.best?.reasons.join('\n')).toMatch(/boundary attribution is degraded/);
+    expect(why.results.find((row) => row.id === why.best)?.reasons.join('\n')).toMatch(
+      /boundary attribution is degraded/
+    );
   });
 
   it('why annotates a degraded path in whole-file and line mode', async () => {
@@ -392,14 +395,19 @@ describe('unmerged-index read surfaces', () => {
     );
 
     interface WhyJson {
-      best: { reasons: string[] } | null;
+      best: string | null;
+      results: Array<{ id: string; reasons: string[] }>;
     }
     const whole = parseOk<WhyJson>(await agent.runRaw(['why', 'conflict.txt', '--json']));
     expect(whole.best).not.toBeNull();
-    expect(whole.best?.reasons).toContain('Checkpoint boundary attribution is degraded');
+    expect(whole.results.find((row) => row.id === whole.best)?.reasons).toContain(
+      'Checkpoint boundary attribution is degraded'
+    );
 
     const line = parseOk<WhyJson>(await agent.runRaw(['why', 'conflict.txt:1', '--json']));
     expect(line.best).not.toBeNull();
-    expect(line.best?.reasons).toContain('Checkpoint boundary attribution is degraded');
+    expect(line.results.find((row) => row.id === line.best)?.reasons).toContain(
+      'Checkpoint boundary attribution is degraded'
+    );
   });
 });

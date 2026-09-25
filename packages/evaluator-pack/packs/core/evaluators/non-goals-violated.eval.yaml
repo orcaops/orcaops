@@ -3,9 +3,10 @@ id: non-goals-violated
 phase: checkpoint-close
 severity: warn
 description: >-
-  Compare the latest checkpoint's summary and `files_changed` against
-  the plan's captured `non_goals` (things this work was intentionally
-  NOT going to do). Flag changes that cross any non-goal. Catching
+  Compare the latest checkpoint's summary and changed files (the reported
+  `files_changed` and, when available, the paths observed in the snapshot
+  diff) against the plan's captured `non_goals` (things this work was
+  intentionally NOT going to do). Flag changes that cross any non-goal. Catching
   this at checkpoint time gives the agent a chance to course-correct;
   at PR review the cost of unwinding is sunk. Paired with
   `non-goals-info` (info, deterministic, when_llm: absent) which fills
@@ -16,7 +17,7 @@ engine:
   prompt_file: prompts/non-goals-violated.prompt.md
   output_format: markdown
   # The baseline block already carries non-goals, checkpoint summaries, and
-  # changed files — everything this prompt reads.
+  # the reported and observed changed files — everything this prompt reads.
   additional_context_sections: []
 filters:
   when_llm: required

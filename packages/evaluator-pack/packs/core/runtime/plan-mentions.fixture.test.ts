@@ -90,6 +90,12 @@ describe('plan-mentions (runFixture / subprocess)', () => {
     expect(result.envelope.raw).toMatchObject({
       matches: [{ source: 'criterion', stepIndex: 1, criterionIndex: 1 }],
     });
+    // The finding points at the criterion the evidence was found in, by the
+    // id the context already carries.
+    const [found] = result.envelope.findings ?? [];
+    expect(found.title).toContain('plan step 1, criterion 1');
+    expect(found.locations?.[0].kind).toBe('acceptance-criterion');
+    expect(found.key).toMatch(/^criterion\/.+\/tests$/);
   });
 
   it('violation: no plan step mentions any token → verdict=violation', async () => {
@@ -103,6 +109,9 @@ describe('plan-mentions (runFixture / subprocess)', () => {
     expect(result.exitCode).toBe(0);
     expect(result.envelope.verdict).toBe('violation');
     expect(result.envelope.body).toMatch(/No explicit, non-negated test intent/);
+    // Nothing was found and nothing was negated, so there is no per-item
+    // result to state. The verdict carries the answer on its own.
+    expect(result.envelope.findings).toEqual([]);
   });
 
   it('rejects embedded and negated token occurrences through the command engine', async () => {
@@ -123,6 +132,9 @@ describe('plan-mentions (runFixture / subprocess)', () => {
     expect(result.envelope.verdict).toBe('violation');
     expect(result.envelope.body).toContain('1 acceptance criterion');
     expect(result.envelope.body).toContain('ignored negated evidence');
+    expect(result.envelope.findings).toHaveLength(1);
+    expect(result.envelope.findings?.[0].title).toContain('is negated');
+    expect(result.envelope.findings?.[0].locations?.[0].kind).toBe('acceptance-criterion');
   });
 
   it('recognizes positive double-negative intent through the command engine', async () => {

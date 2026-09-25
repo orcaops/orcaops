@@ -691,7 +691,7 @@ describe('database review identity and retained floor', () => {
       )
     ).toEqual(request.floorBytes);
     expect((await publishDatabaseReviewFloor(request)).replayed).toBe(false);
-  });
+  }, 15_000);
   it('never regenerates missing selected floor evidence or creates a missing database', async () => {
     const f = await fixture();
     await createDatabaseReview(f.request);

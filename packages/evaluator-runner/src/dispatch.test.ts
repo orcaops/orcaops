@@ -163,13 +163,13 @@ describe('dispatchEvaluators', () => {
     const scriptA = await writeScript(
       'a.sh',
       `cat <<'JSON'
-{"schema":"orcaops.evaluator_result/v1","verdict":"pass","body":"A"}
+{"schema":"orcaops.evaluator_result/v2","verdict":"pass","body":"A"}
 JSON`
     );
     const scriptB = await writeScript(
       'b.sh',
       `cat <<'JSON'
-{"schema":"orcaops.evaluator_result/v1","verdict":"info","body":"B"}
+{"schema":"orcaops.evaluator_result/v2","verdict":"info","body":"B"}
 JSON`
     );
     const evaluators = [
@@ -189,6 +189,64 @@ JSON`
     expect(out.runs[1].verdict).toBe('info');
   });
 
+  it('returns one findings handover per run, in the same order', async () => {
+    const withFindings = await writeScript(
+      'with-findings.sh',
+      `cat <<'JSON'
+{"schema":"orcaops.evaluator_result/v2","verdict":"violation","body":"A","findings":[{"key":"rule/a","title":"what a found"}]}
+JSON`
+    );
+    const withoutFindings = await writeScript(
+      'without-findings.sh',
+      `cat <<'JSON'
+{"schema":"orcaops.evaluator_result/v2","verdict":"pass","body":"B"}
+JSON`
+    );
+    const out = await dispatchEvaluators({
+      evaluators: [
+        makeCommandEvaluator({ id: 'a', scriptPath: withFindings, packageRoot: tmpRoot }),
+        makeCommandEvaluator({ id: 'b', scriptPath: withoutFindings, packageRoot: tmpRoot }),
+      ],
+      trust: ALL_TRUSTED,
+      context: makeContext(),
+      llm: makeStubClient({} as EvaluateResult),
+    });
+
+    expect(out.findings).toHaveLength(out.runs.length);
+    const first = out.findings[0];
+    if (first.status !== 'established') throw new Error('expected established findings');
+    expect(first.record.run_id).toBe(out.runs[0].run_id);
+    expect(first.record.findings[0].title).toBe('what a found');
+    expect(out.findings[1]).toEqual({ status: 'none' });
+    // The runs themselves are byte-for-byte what they were before findings
+    // existed: nothing a producer says about its findings reaches them.
+    expect(out.runs.every((run) => !Object.hasOwn(run, 'findings'))).toBe(true);
+  });
+
+  it('hands over no findings for an evaluator the filter skipped', async () => {
+    const script = await writeScript(
+      'skipped.sh',
+      `cat <<'JSON'
+{"schema":"orcaops.evaluator_result/v2","verdict":"pass","body":"A"}
+JSON`
+    );
+    const out = await dispatchEvaluators({
+      evaluators: [
+        makeCommandEvaluator({
+          id: 'skipped',
+          scriptPath: script,
+          packageRoot: tmpRoot,
+          filters: { paths: ['src/**/*.py'] },
+        }),
+      ],
+      trust: ALL_TRUSTED,
+      context: makeContext({ changed_files: ['src/foo.ts'] }),
+      llm: makeStubClient({} as EvaluateResult),
+    });
+    expect(out.runs[0].run_status).toBe('skipped');
+    expect(out.findings).toEqual([{ status: 'none' }]);
+  });
+
   // Dispatch-level skip-reason coverage. Three tests that
   // exercise the full dispatchEvaluators → makeSkippedRun pipeline
   // for each of the filter gates. Filter unit tests at
@@ -199,7 +257,7 @@ JSON`
     const scriptA = await writeScript(
       'paths-skip.sh',
       `cat <<'JSON'
-{"schema":"orcaops.evaluator_result/v1","verdict":"pass","body":"A"}
+{"schema":"orcaops.evaluator_result/v2","verdict":"pass","body":"A"}
 JSON`
     );
     const evaluators = [
@@ -225,7 +283,7 @@ JSON`
     const scriptA = await writeScript(
       'scopes-skip.sh',
       `cat <<'JSON'
-{"schema":"orcaops.evaluator_result/v1","verdict":"pass","body":"A"}
+{"schema":"orcaops.evaluator_result/v2","verdict":"pass","body":"A"}
 JSON`
     );
     const evaluators = [
@@ -253,7 +311,7 @@ JSON`
     const scriptA = await writeScript(
       'llm-skip.sh',
       `cat <<'JSON'
-{"schema":"orcaops.evaluator_result/v1","verdict":"pass","body":"A"}
+{"schema":"orcaops.evaluator_result/v2","verdict":"pass","body":"A"}
 JSON`
     );
     const evaluators = [
@@ -288,7 +346,7 @@ JSON`
     const script = await writeScript(
       'llm-absent.sh',
       `cat <<'JSON'
-{"schema":"orcaops.evaluator_result/v1","verdict":"info","body":"No LLM available"}
+{"schema":"orcaops.evaluator_result/v2","verdict":"info","body":"No LLM available"}
 JSON`
     );
     const evaluator = makeCommandEvaluator({
@@ -317,7 +375,7 @@ JSON`
     const scriptA = await writeScript(
       'a.sh',
       `cat <<'JSON'
-{"schema":"orcaops.evaluator_result/v1","verdict":"pass","body":"A"}
+{"schema":"orcaops.evaluator_result/v2","verdict":"pass","body":"A"}
 JSON`
     );
     // Evaluator B declares filters.paths but no changed files; expect skip.
@@ -350,7 +408,7 @@ JSON`
       'slow.sh',
       `sleep 0.25
 cat <<'JSON'
-{"schema":"orcaops.evaluator_result/v1","verdict":"info","body":"done"}
+{"schema":"orcaops.evaluator_result/v2","verdict":"info","body":"done"}
 JSON`
     );
     const evaluators = Array.from({ length: 8 }, (_, i) =>
@@ -387,7 +445,7 @@ JSON`
     const script = await writeScript(
       'pass.sh',
       `cat <<'JSON'
-{"schema":"orcaops.evaluator_result/v1","verdict":"pass","body":"ok"}
+{"schema":"orcaops.evaluator_result/v2","verdict":"pass","body":"ok"}
 JSON`
     );
     const evaluators = [
@@ -645,7 +703,7 @@ JSON`
     const script = await writeScript(
       'pass.sh',
       `cat <<'JSON'
-{"schema":"orcaops.evaluator_result/v1","verdict":"pass","body":"ok"}
+{"schema":"orcaops.evaluator_result/v2","verdict":"pass","body":"ok"}
 JSON`
     );
     let n = 0;
@@ -686,7 +744,7 @@ JSON`
       'echo.sh',
       `cp "$ORCAOPS_CONTEXT_PATH" "${sideDir}/$(echo "$ORCAOPS_EVALUATOR_REF" | tr / _).json"
 cat <<JSON
-{"schema":"orcaops.evaluator_result/v1","verdict":"info","body":"ok"}
+{"schema":"orcaops.evaluator_result/v2","verdict":"info","body":"ok"}
 JSON`
     );
     const evA = makeCommandEvaluator({ id: 'a', scriptPath: echoScript, packageRoot: tmpRoot });

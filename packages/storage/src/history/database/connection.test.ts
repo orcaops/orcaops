@@ -363,7 +363,7 @@ describe('project database authority', () => {
       openProjectDatabase({ authority: { ...authority, projectId: uuidv7() }, mode: 'writer' })
     ).rejects.toMatchObject({ code: 'HISTORY_MISSING' });
   });
-  it('does not adopt an occupied empty database or unsupported schema', async () => {
+  it('does not adopt an occupied empty database or a schema a newer build wrote', async () => {
     const { input, authority } = await fixture();
     await writeFile(projectDatabasePath(authority), '');
     await expect(initializeProjectDatabase(input)).rejects.toMatchObject({
@@ -373,7 +373,7 @@ describe('project database authority', () => {
     raw.pragma('user_version = 200');
     raw.close();
     await expect(openProjectDatabase({ authority, mode: 'writer' })).rejects.toMatchObject({
-      code: 'HISTORY_FORMAT_UNSUPPORTED',
+      code: 'HISTORY_FORMAT_NEWER',
     });
   });
   it('refuses internal symlinks before opening SQLite', async () => {

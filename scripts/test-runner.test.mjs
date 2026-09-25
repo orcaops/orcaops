@@ -35,7 +35,12 @@ importers:
         version: link:../core
 `,
     '.gitignore': 'node_modules/\ndist/\n.turbo/\n',
+    'scripts/run-tests.mjs': await readFile(path.join(repository, 'scripts/run-tests.mjs')),
     'scripts/run-vitest.mjs': await readFile(path.join(repository, 'scripts/run-vitest.mjs')),
+    'node_modules/turbo/package.json': JSON.stringify({
+      name: 'turbo',
+      bin: { turbo },
+    }),
     'scripts/build.cjs': `const fs = require('node:fs');
 fs.mkdirSync('dist', { recursive: true });
 fs.writeFileSync('dist/index.js', fs.readFileSync('src/index.js'));
@@ -57,7 +62,10 @@ fs.appendFileSync(process.env.FIXTURE_OBSERVATIONS, JSON.stringify({
   files['turbo.json'] = JSON.stringify({
     tasks: {
       build: { ...config.tasks.build, passThroughEnv: ['FIXTURE_OBSERVATIONS'] },
-      test: { ...config.tasks.test, passThroughEnv: ['FIXTURE_OBSERVATIONS'] },
+      test: {
+        ...config.tasks.test,
+        passThroughEnv: [...config.tasks.test.passThroughEnv, 'FIXTURE_OBSERVATIONS'],
+      },
     },
   });
   for (const pkg of ['core', 'app']) {
@@ -103,6 +111,30 @@ it('keeps test options literal and local to the Vitest invocation', async () => 
   }
   expect(await f.records()).toHaveLength(1);
 });
+
+it('finishes independent suites after a failure before cleaning their shared temporary root', async () => {
+  const f = await fixture();
+  await writeFile(
+    path.join(f.cwd, 'node_modules/vitest/cli.mjs'),
+    `import fs from 'node:fs';
+import path from 'node:path';
+if (path.basename(process.cwd()) === 'core') process.exit(1);
+await new Promise(resolve => setTimeout(resolve, 500));
+fs.writeFileSync(path.join(process.env.TMPDIR, 'completed'), 'finished');
+fs.appendFileSync(process.env.FIXTURE_OBSERVATIONS, 'finished ' + process.env.TMPDIR + '\\n');
+`
+  );
+
+  const failure = await f.run(['scripts/run-tests.mjs']).catch((error) => error);
+  expect(failure).toMatchObject({ code: 1 });
+  const finished = (await f.records()).filter((line) => line.startsWith('finished '));
+  expect(finished, failure.stdout + failure.stderr).toHaveLength(1);
+  await expect(
+    readFile(path.join(finished[0].slice('finished '.length), 'completed'))
+  ).rejects.toMatchObject({
+    code: 'ENOENT',
+  });
+}, 30_000);
 
 it('reuses builds across test options while invalidating tests for options and dependency changes', async () => {
   const f = await fixture();

@@ -42,6 +42,12 @@ Per-evaluator provider, model, and timeout overrides live in
 `.orcaops/evaluators.yaml`; see [Evaluators](./evaluators.md). A user override
 wins the pack author's value for these operational fields only.
 
+Background project-knowledge processing has its own provider, model, effort,
+limits, and consent. Its restricted Codex mode reuses the Codex login but not
+the user's Codex config file or execution rules. See
+[Restricted Codex configuration](./configuration.md#restricted-codex-configuration)
+before enabling it; ordinary evaluator settings do not authorize that workload.
+
 ## Secret protection and scrubbing
 
 Orcaops checks agent-authored content for recognizable credentials before a
@@ -222,19 +228,19 @@ transport test controls are not user configuration.
 
 ### Supported user overrides
 
-| Variable                   | Effect                                                                                                                                          |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ORCAOPS_ROOT`             | Overrides project-root discovery, equivalent to passing `--root`.                                                                               |
-| `ORCAOPS_TOKEN`            | Provides a cloud credential from the environment (read-only store; no refresh). See [authentication](./authentication.md).                      |
-| `ORCAOPS_CREDENTIAL_STORE` | Selects the OS keychain credential store when set to `keyring`.                                                                                 |
-| `ORCAOPS_CONFIG_HOME`      | Overrides the config/credentials directory (default: XDG config dir, e.g. `~/.config/orcaops`).                                                 |
-| `ORCAOPS_DATA_DIR`         | Selects the canonical history data root (default: XDG data dir, else `~/.orcaops`).                                                             |
-| `ORCAOPS_GLOBAL_ROOT`      | Overrides the global state root (default `~/.orcaops`).                                                                                         |
-| `ORCAOPS_INVOKED_BY_AGENT` | Provides the capture-attribution fallback when `--invoked-by-agent` is not passed.                                                              |
-| `ORCAOPS_DISABLE_DRAIN`    | Disables the automatic cloud push drain when set to `1`.                                                                                        |
-| `ORCAOPS_HOOK_SUPPRESS`    | Suppresses session-start hook output for any non-empty value except `0`/`false`. Orcaops sets it to prevent recursion around agent invocations. |
-| `ORCAOPS_CLAUDE_PATH`      | Overrides the path to the `claude` CLI used by LLM evaluators and review lanes.                                                                 |
-| `ORCAOPS_CODEX_PATH`       | Overrides the path to the `codex` CLI used by LLM evaluators and review lanes.                                                                  |
+| Variable                   | Effect                                                                                                                                                                                  |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ORCAOPS_ROOT`             | Overrides project-root discovery, equivalent to passing `--root`.                                                                                                                       |
+| `ORCAOPS_TOKEN`            | Provides a cloud credential from the environment (read-only store; no refresh). See [authentication](./authentication.md).                                                              |
+| `ORCAOPS_CREDENTIAL_STORE` | Selects the OS keychain credential store when set to `keyring`.                                                                                                                         |
+| `ORCAOPS_CONFIG_HOME`      | Overrides the config/credentials directory (default: XDG config dir, e.g. `~/.config/orcaops`).                                                                                         |
+| `ORCAOPS_DATA_DIR`         | Selects the canonical history data root (default: XDG data dir, else `~/.orcaops`).                                                                                                     |
+| `ORCAOPS_GLOBAL_ROOT`      | Overrides the global state root (default `~/.orcaops`).                                                                                                                                 |
+| `ORCAOPS_INVOKED_BY_AGENT` | Provides the capture-attribution fallback when `--invoked-by-agent` is not passed.                                                                                                      |
+| `ORCAOPS_DISABLE_DRAIN`    | Disables the automatic cloud push drain when set to `1`.                                                                                                                                |
+| `ORCAOPS_HOOK_SUPPRESS`    | Suppresses session-start hook output for any non-empty value except `0`/`false`. Orcaops sets it to prevent recursion around agent invocations.                                         |
+| `ORCAOPS_CLAUDE_PATH`      | Overrides the `claude` CLI for evaluators, review lanes, and knowledge processing. Knowledge processing requires a native CLI or official npm entrypoint; launcher scripts are refused. |
+| `ORCAOPS_CODEX_PATH`       | Overrides the `codex` CLI for evaluators, review lanes, and knowledge processing. Knowledge processing requires a native CLI or official npm entrypoint; launcher scripts are refused.  |
 
 ### Evaluator subprocess protocol
 

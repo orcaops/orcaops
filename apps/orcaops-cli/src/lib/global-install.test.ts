@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { SKILL_TEMPLATES } from '@orcaops/adapters';
+import { SKILL_TEMPLATES, stampedDocument } from '@orcaops/adapters';
 import { sha256Hex, type SupportedAgentId } from '@orcaops/storage';
 
 import {
@@ -55,6 +55,45 @@ describe('global install', () => {
     cliVersion: '9.9.9',
   };
   const skillsDir = (): string => resolveGlobalSkillsDir('claude-code')!;
+  const captureSkill = (): string => path.join(skillsDir(), 'orcaops-capture', 'SKILL.md');
+  const at = (version: string) => ({ generatedBy: version, cliVersion: version });
+  const manifestBytes = (): Promise<string> =>
+    readFile(path.join(root, 'install.local.json'), 'utf8');
+  const storeOf = (entry: { path: string; symlinkTarget?: string | null }): string =>
+    path.resolve(path.dirname(entry.path), entry.symlinkTarget!);
+  const entryAt = async (entryPath: string) =>
+    (await readGlobalManifest())!.entries.find((e) => e.path === entryPath)!;
+  const refusal = async (attempt: Promise<unknown>): Promise<string> => {
+    try {
+      await attempt;
+    } catch (err) {
+      return (err as Error).message;
+    }
+    throw new Error('expected the install to be refused');
+  };
+  /** This CLI's own store bytes for `store`, rendered at `version` in a scratch root. */
+  const canonicalStoreAt = async (version: string, store: string): Promise<string> => {
+    const scratch = await mkdtemp(path.join(tmpdir(), 'orcaops-render-'));
+    process.env.ORCAOPS_GLOBAL_ROOT = scratch;
+    try {
+      await planGlobalInstall(
+        { repoId: 'render', ...base, ...at(version), link: 'symlink' },
+        'apply'
+      );
+      return await readFile(path.join(scratch, path.relative(root, store)), 'utf8');
+    } finally {
+      process.env.ORCAOPS_GLOBAL_ROOT = root;
+      await rm(scratch, { recursive: true, force: true });
+    }
+  };
+  /** Apply `edit` to a rendered document, then recompute its contentHash so it stays self-consistent. */
+  const restamp = (doc: string, edit: (unstamped: string) => string): string => {
+    const hashLine = doc.match(/\n {2}contentHash: "[^"\n]+"/)![0];
+    const hashAt = doc.indexOf(hashLine);
+    const edited = edit(doc.slice(0, hashAt) + doc.slice(hashAt + hashLine.length));
+    const headEnd = edited.indexOf('\n', edited.search(/generatedBy: "orcaops@/));
+    return stampedDocument(edited.slice(0, headEnd), edited.slice(headEnd));
+  };
 
   it.each(['copy', 'symlink'] as const)(
     'reports %s no-ops separately from reference changes',
@@ -358,26 +397,22 @@ describe('global install', () => {
     expect(orcaopsKey!.refs).toEqual(['repoB']);
   });
 
-  it('refuses a CLI version mismatch without reporting or persisting ownership changes', async () => {
-    // generatedBy tracks cliVersion as every real caller does — otherwise the
-    // fixture's stamps would trip the AHEAD guard before the mismatch branch.
-    await planGlobalInstall(
-      { repoId: 'repoA', ...base, generatedBy: '1.0.0', cliVersion: '1.0.0' },
-      'apply'
-    );
+  it('refuses an unorderable CLI version pair without reporting or persisting ownership changes', async () => {
+    // Equal triples with different suffixes have no order. generatedBy tracks
+    // cliVersion as every real caller does.
+    await planGlobalInstall({ repoId: 'repoA', ...base, ...at('2.0.0-rc.1') }, 'apply');
     const manifestPath = path.join(root, 'install.local.json');
     const beforeBytes = await readFile(manifestPath, 'utf8');
     const before = await readGlobalManifest();
 
-    const r = await planGlobalInstall(
-      { repoId: 'repoB', ...base, generatedBy: '2.0.0', cliVersion: '2.0.0' },
-      'apply'
-    );
+    const r = await planGlobalInstall({ repoId: 'repoB', ...base, ...at('2.0.0') }, 'apply');
 
     expect(r.skippedVersionMismatch).toBe(true);
     expect(r.materialized).toEqual([]);
     expect(r.removed).toEqual([]);
-    expect(r.warnings.join(' ')).toMatch(/materialized by CLI v1\.0\.0/);
+    expect(r.warnings.join(' ')).toMatch(/materialized by CLI v2\.0\.0-rc\.1/);
+    expect(r.warnings.join(' ')).toMatch(/cannot be ordered/);
+    expect(r.warnings.join(' ')).not.toMatch(/--scope project/);
     expect(r.materialized).toEqual([]);
     expect(r.removed).toEqual([]);
     expect(r.copyFallbacks).toEqual([]);
@@ -387,23 +422,15 @@ describe('global install', () => {
     expect(before!.entries.every((entry) => !entry.refs.includes('repoB'))).toBe(true);
   });
 
-  it('warns + SKIPS the rewrite on a CLI version mismatch (per-user-current)', async () => {
-    // generatedBy tracks cliVersion as every real caller does; the base
-    // fixture's 9.9.9 bytes would be ahead of BOTH CLIs and trip the ahead guard.
-    await planGlobalInstall(
-      { repoId: 'repoA', ...base, generatedBy: '1.0.0', cliVersion: '1.0.0' },
-      'apply'
-    );
-    const r = await planGlobalInstall(
-      { repoId: 'repoB', ...base, generatedBy: '2.0.0', cliVersion: '2.0.0' },
-      'apply'
-    );
-    expect(r.skippedVersionMismatch).toBe(true);
-    expect(r.warnings.join(' ')).toMatch(/materialized by CLI v1\.0\.0/);
-    const m = await readGlobalManifest();
-    expect(m!.materialized_by).toBe('1.0.0'); // ownership not taken over by the newer CLI
-    expect(r.materialized).toEqual([]);
-    expect(r.removed).toEqual([]);
+  it('a newer CLI refreshes a tree an older CLI materialized, without force', async () => {
+    await planGlobalInstall({ repoId: 'repoA', ...base, ...at('1.0.0') }, 'apply');
+    const r = await planGlobalInstall({ repoId: 'repoB', ...base, ...at('2.0.0') }, 'apply');
+    expect(r.skippedVersionMismatch).toBe(false);
+    expect(r.warnings.join(' ')).not.toMatch(/materialized by CLI/);
+    const m = (await readGlobalManifest())!;
+    expect(m.materialized_by).toBe('2.0.0');
+    expect(m.entries.every((e) => e.refs.includes('repoA') && e.refs.includes('repoB'))).toBe(true);
+    expect(await readFile(captureSkill(), 'utf8')).toContain('orcaops@2.0.0');
   });
 
   it('a non-skipped PREVIEW still reports what it would materialize (dry-run intact)', async () => {
@@ -594,7 +621,7 @@ describe('global install', () => {
     expect(await readGlobalManifest()).toBeNull();
   });
 
-  it('force still bypasses a BEHIND-version mismatch (existing upgrade path unregressed)', async () => {
+  it('force still refreshes a tree an older CLI materialized', async () => {
     await planGlobalInstall(
       { repoId: 'repoA', ...base, generatedBy: '1.0.0', cliVersion: '1.0.0' },
       'apply'
@@ -640,25 +667,20 @@ describe('global install', () => {
         },
         'apply'
       )
-    ).rejects.toThrow(/unowned or modified/);
+    ).rejects.toThrow(/not owned by orcaops/);
     expect(await readFile(skill, 'utf8')).toBe(aheadBytes);
     expect(await readGlobalManifest()).toBeNull();
   });
 
-  it('preserves refs when their owning CLI version cannot release them', async () => {
-    // generatedBy tracks cliVersion so this pins the MISMATCH branch, not the
-    // ahead guard (the base fixture's 9.9.9 stamps would be ahead of 2.0.0).
-    await planGlobalInstall(
-      { repoId: 'repoA', ...base, generatedBy: '1.0.0', cliVersion: '1.0.0' },
-      'apply'
-    );
+  it('preserves refs when an unorderable CLI version cannot release them', async () => {
+    await planGlobalInstall({ repoId: 'repoA', ...base, ...at('1.0.0-rc.1') }, 'apply');
     const manifestPath = path.join(root, 'install.local.json');
     const beforeBytes = await readFile(manifestPath, 'utf8');
 
-    const r = await releaseGlobalRefs({ repoId: 'repoA', cliVersion: '2.0.0' }, 'apply');
+    const r = await releaseGlobalRefs({ repoId: 'repoA', cliVersion: '1.0.0' }, 'apply');
 
     expect(r?.skippedVersionMismatch).toBe(true);
-    expect(r?.warnings.join(' ')).toMatch(/materialized by CLI v1\.0\.0/);
+    expect(r?.warnings.join(' ')).toMatch(/materialized by CLI v1\.0\.0-rc\.1/);
     expect(r?.removed).toEqual([]);
     expect(await readFile(manifestPath, 'utf8')).toBe(beforeBytes);
     expect(
@@ -682,6 +704,264 @@ describe('global install', () => {
     expect(manifest.materialized_by).toBe('1.0.0');
     expect(manifest.entries.every((entry) => entry.refs.includes('repoB'))).toBe(true);
     expect(manifest.entries.every((entry) => !entry.refs.includes('repoA'))).toBe(true);
+  });
+
+  it('releases refs on a tree an older CLI materialized, without force', async () => {
+    await planGlobalInstall({ repoId: 'repoA', ...base, ...at('1.0.0') }, 'apply');
+
+    const r = await releaseGlobalRefs({ repoId: 'repoA', cliVersion: '2.0.0' }, 'apply');
+
+    expect(r?.skippedVersionMismatch).toBe(false);
+    expect(r?.removed).toContain(captureSkill());
+    expect(await exists(captureSkill())).toBe(false);
+    expect((await readGlobalManifest())!.entries).toEqual([]);
+  });
+
+  it('refuses an edited copy on upgrade and leaves global state unchanged', async () => {
+    await planGlobalInstall({ repoId: 'repoA', ...base, ...at('1.0.0') }, 'apply');
+    await writeFile(captureSkill(), 'edited by hand', 'utf8');
+    const untouched = (await readGlobalManifest())!.entries.find(
+      (e) => e.surface === 'skill' && e.path !== captureSkill()
+    )!.path;
+    const before = await manifestBytes();
+
+    for (const mode of ['preview', 'apply'] as const) {
+      const message = await refusal(
+        planGlobalInstall({ repoId: 'repoA', ...base, ...at('2.0.0') }, mode)
+      );
+      expect(message).toMatch(/no longer matches what orcaops recorded/);
+      expect(message).toMatch(/orcaops update --force/);
+    }
+    expect(await readFile(captureSkill(), 'utf8')).toBe('edited by hand');
+    expect(await readFile(untouched, 'utf8')).toContain('orcaops@1.0.0');
+    expect(await manifestBytes()).toBe(before);
+  });
+
+  it('names a force remedy that works for an edited recorded copy', async () => {
+    await planGlobalInstall({ repoId: 'repoA', ...base }, 'apply');
+    await writeFile(captureSkill(), 'edited by hand', 'utf8');
+
+    expect(await refusal(planGlobalInstall({ repoId: 'repoA', ...base }, 'apply'))).toMatch(
+      /orcaops update --force/
+    );
+    await planGlobalInstall({ repoId: 'repoA', ...base, force: true }, 'apply');
+    expect(await readFile(captureSkill(), 'utf8')).toContain('orcaops@9.9.9');
+  });
+
+  describe.each(['recorded', 'unrecorded'] as const)('%s directory collisions', (ownership) => {
+    it.each([
+      { target: 'artifact', link: 'copy' },
+      { target: 'artifact', link: 'symlink' },
+      { target: 'store', link: 'symlink' },
+    ] as const)(
+      'refuses a $target directory in $link mode even with force',
+      async ({ target, link }) => {
+        const input = { repoId: 'repoA', ...base, ...at('1.0.0'), link };
+        const collision =
+          target === 'artifact'
+            ? captureSkill()
+            : path.join(root, 'store', 'claude-code', 'skill', 'orcaops-capture', 'SKILL.md');
+        if (ownership === 'recorded') {
+          await planGlobalInstall(input, 'apply');
+          await rm(collision);
+        }
+        await mkdir(collision, { recursive: true });
+        const before = ownership === 'recorded' ? await manifestBytes() : null;
+
+        for (const populated of [false, true]) {
+          const userFile = path.join(collision, 'notes.txt');
+          if (populated) await writeFile(userFile, 'user content', 'utf8');
+          for (const force of [false, true]) {
+            for (const mode of ['preview', 'apply'] as const) {
+              const message = await refusal(
+                planGlobalInstall({ ...input, ...at('2.0.0'), force, overrideAhead: force }, mode)
+              );
+              expect(message).toContain(collision);
+              expect(message).toContain('is a directory');
+              expect(message).toContain('move or remove it');
+              expect(message).not.toContain('--force');
+              expect((await lstat(collision)).isDirectory()).toBe(true);
+              if (populated) expect(await readFile(userFile, 'utf8')).toBe('user content');
+              if (before === null) expect(await readGlobalManifest()).toBeNull();
+              else expect(await manifestBytes()).toBe(before);
+            }
+          }
+        }
+      }
+    );
+  });
+
+  it.each([false, true])(
+    'refuses an unowned artifact collision without promising force (force: %s)',
+    async (force) => {
+      await mkdir(path.dirname(captureSkill()), { recursive: true });
+      await writeFile(captureSkill(), 'a file orcaops never wrote', 'utf8');
+
+      const message = await refusal(
+        planGlobalInstall({ repoId: 'repoA', ...base, force }, 'apply')
+      );
+
+      expect(message).toMatch(/not owned by orcaops/);
+      expect(message).not.toMatch(/--force/);
+      expect(await readFile(captureSkill(), 'utf8')).toBe('a file orcaops never wrote');
+      expect(await readGlobalManifest()).toBeNull();
+    }
+  );
+
+  it.each([false, true])(
+    'refuses an unowned store collision without promising force (force: %s)',
+    async (force) => {
+      const store = path.join(root, 'store', 'claude-code', 'skill', 'orcaops-capture', 'SKILL.md');
+      await mkdir(path.dirname(store), { recursive: true });
+      await writeFile(store, 'a file orcaops never wrote', 'utf8');
+
+      const message = await refusal(
+        planGlobalInstall({ repoId: 'repoA', ...base, link: 'symlink', force }, 'apply')
+      );
+
+      expect(message).toMatch(/not owned by orcaops/);
+      expect(message).not.toMatch(/--force/);
+      expect(await readFile(store, 'utf8')).toBe('a file orcaops never wrote');
+      expect(await readGlobalManifest()).toBeNull();
+    }
+  );
+
+  it('refreshes older symlink stores whose template bodies did not change, without force', async () => {
+    await planGlobalInstall({ repoId: 'repoA', ...base, ...at('1.0.0'), link: 'symlink' }, 'apply');
+
+    const r = await planGlobalInstall(
+      { repoId: 'repoA', ...base, ...at('2.0.0'), link: 'symlink' },
+      'apply'
+    );
+
+    expect(r.skippedVersionMismatch).toBe(false);
+    expect(await readFile(captureSkill(), 'utf8')).toContain('orcaops@2.0.0');
+  });
+
+  it("verifies stores another repo's upgrade left at an older generation", async () => {
+    // A holds one shared claude-code skill; B holds every skill for claude-code
+    // and codex. A's upgrade restamps the manifest and the shared store only,
+    // so B's group mixes 2.0.0 and 1.0.0 stores under one agent and prefix.
+    const aInput = {
+      repoId: 'repoA',
+      ...base,
+      link: 'symlink',
+      skills: [SKILL_TEMPLATES[0]],
+    } as const;
+    const bInput = {
+      repoId: 'repoB',
+      ...base,
+      agents: ['claude-code', 'codex'] as SupportedAgentId[],
+      link: 'symlink',
+    } as const;
+    await planGlobalInstall({ ...aInput, ...at('1.0.0') }, 'apply');
+    await planGlobalInstall({ ...bInput, ...at('1.0.0') }, 'apply');
+    const bOnly = (await readGlobalManifest())!.entries.filter((e) => !e.refs.includes('repoA'));
+    const bStores = bOnly.map(storeOf);
+    const bBytes = await Promise.all(bStores.map((store) => readFile(store, 'utf8')));
+
+    const upgradedA = await planGlobalInstall({ ...aInput, ...at('2.0.0') }, 'apply');
+
+    expect(upgradedA.skippedVersionMismatch).toBe(false);
+    const afterA = (await readGlobalManifest())!;
+    expect(afterA.materialized_by).toBe('2.0.0');
+    expect(await Promise.all(bStores.map((store) => readFile(store, 'utf8')))).toEqual(bBytes);
+    expect(afterA.entries.filter((e) => !e.refs.includes('repoA'))).toEqual(bOnly);
+
+    const upgradedB = await planGlobalInstall({ ...bInput, ...at('2.0.0') }, 'apply');
+
+    expect(upgradedB.skippedVersionMismatch).toBe(false);
+    for (const store of bStores) expect(await readFile(store, 'utf8')).toContain('orcaops@2.0.0');
+  });
+
+  it.each(['release', 'convert to copy'] as const)(
+    'can %s stores another repo left at an older generation',
+    async (action) => {
+      const aInput = {
+        repoId: 'repoA',
+        ...base,
+        link: 'symlink',
+        skills: [SKILL_TEMPLATES[0]],
+      } as const;
+      const bInput = { repoId: 'repoB', ...base, link: 'symlink' } as const;
+      await planGlobalInstall({ ...aInput, ...at('1.0.0') }, 'apply');
+      await planGlobalInstall({ ...bInput, ...at('1.0.0') }, 'apply');
+      await planGlobalInstall({ ...aInput, ...at('2.0.0') }, 'apply');
+      const bOnly = (await readGlobalManifest())!.entries.filter((e) => !e.refs.includes('repoA'));
+
+      const r =
+        action === 'release'
+          ? (await releaseGlobalRefs({ repoId: 'repoB', cliVersion: '2.0.0' }, 'apply'))!
+          : await planGlobalInstall({ ...bInput, ...at('2.0.0'), link: 'copy' }, 'apply');
+
+      expect(r.warnings.join(' ')).not.toMatch(/preserved/);
+      for (const entry of bOnly) expect(await exists(storeOf(entry))).toBe(false);
+      if (action === 'release')
+        expect(r.removed).toEqual(expect.arrayContaining(bOnly.map((e) => e.path)));
+      else for (const entry of bOnly) expect((await lstat(entry.path)).isFile()).toBe(true);
+    }
+  );
+
+  it('verifies a store changed only to equal a canonical render at another version', async () => {
+    // The stamp only selects which render to compare against, so bytes that
+    // are exactly this CLI's render at 1.5.0 carry no user content to protect.
+    await planGlobalInstall({ repoId: 'repoA', ...base, ...at('1.0.0'), link: 'symlink' }, 'apply');
+    const store = storeOf(await entryAt(captureSkill()));
+    await writeFile(store, await canonicalStoreAt('1.5.0', store), 'utf8');
+
+    const r = await planGlobalInstall(
+      { repoId: 'repoA', ...base, ...at('2.0.0'), link: 'symlink' },
+      'apply'
+    );
+
+    expect(r.skippedVersionMismatch).toBe(false);
+    expect(await readFile(store, 'utf8')).toContain('orcaops@2.0.0');
+  });
+
+  it.each([
+    [
+      'an edited body with a recomputed fingerprint',
+      (doc: string) => restamp(doc, (unstamped) => `${unstamped}\nA note added by hand.\n`),
+    ],
+    [
+      'a version stamp altered without re-rendering',
+      (doc: string) => doc.replace('orcaops@1.0.0', 'orcaops@1.5.0'),
+    ],
+  ])('refuses an older symlink store with %s', async (_label, tamper) => {
+    await planGlobalInstall({ repoId: 'repoA', ...base, ...at('1.0.0'), link: 'symlink' }, 'apply');
+    const store = storeOf(await entryAt(captureSkill()));
+    const tampered = tamper(await readFile(store, 'utf8'));
+    await writeFile(store, tampered, 'utf8');
+    const before = await manifestBytes();
+    const upgrade = { repoId: 'repoA', ...base, ...at('2.0.0'), link: 'symlink' } as const;
+
+    for (const mode of ['preview', 'apply'] as const) {
+      const message = await refusal(planGlobalInstall(upgrade, mode));
+      expect(message).toMatch(/can't be verified as unmodified orcaops output/);
+      expect(message).toMatch(/orcaops update --force/);
+    }
+    expect(await readFile(store, 'utf8')).toBe(tampered);
+    expect(await manifestBytes()).toBe(before);
+
+    await planGlobalInstall({ ...upgrade, force: true }, 'apply');
+    expect(await readFile(store, 'utf8')).toContain('orcaops@2.0.0');
+  });
+
+  it('never accepts a store stamped newer than the CLI through its stamp', async () => {
+    await planGlobalInstall({ repoId: 'repoA', ...base, ...at('1.0.0'), link: 'symlink' }, 'apply');
+    const store = storeOf(await entryAt(captureSkill()));
+    const newer = await canonicalStoreAt('99.0.0', store);
+    await writeFile(store, newer, 'utf8');
+    const before = await manifestBytes();
+
+    const r = await planGlobalInstall(
+      { repoId: 'repoA', ...base, ...at('2.0.0'), link: 'symlink' },
+      'apply'
+    );
+
+    expect(r.skippedAhead).toBe(true);
+    expect(await readFile(store, 'utf8')).toBe(newer);
+    expect(await manifestBytes()).toBe(before);
   });
 
   it('sole-ref release of an AHEAD tree needs the downgrade override, not plain force (copy)', async () => {
@@ -920,7 +1200,7 @@ describe('global install', () => {
 
     await expect(
       planGlobalInstall({ repoId: 'repoA', ...base, link: 'copy' }, 'apply')
-    ).rejects.toThrow('is unowned or modified');
+    ).rejects.toThrow("can't be verified as unmodified orcaops output");
 
     expect((await lstat(skill)).isSymbolicLink()).toBe(true);
     expect(await readFile(store, 'utf8')).toBe('user edit through installed symlink');

@@ -5,6 +5,20 @@
 // Each writer prepares its row outside the transaction — validating input, resolving the exact
 // endpoints it names and hashing the authored bytes — and settles inside the accepted operation
 // runner, so a stale precondition refuses rather than retargets.
+//
+// They write released-shaped rows: a name on the basis `unknown`, a relationship established
+// whoever it is attributed to, an adoption with no authorization. The continuing-knowledge
+// contract refuses every one of those for a new write, so these writers exist to reproduce
+// history a released binary already wrote — the schema-29 fixtures — and must not gain a
+// production caller. Publishing new knowledge belongs to the domain operations delivered with
+// the new records, which record standing, basis and authorization.
+//
+// `claim_revisions.asserted_by`, `claim_revisions.assertion_source_json` and
+// `decision_revisions.alternative_count` are taken as the caller states them and are never
+// compared with the record stored beside them: a released row's payload has no shape this build
+// can read, so there is nothing here to compare them against. The caller reproducing a released
+// row is what makes them agree, and a released row nobody reproduces faithfully is a row this
+// store would have to invent a reading for.
 import { canonicalJson } from '../../events/canonical-json.js';
 import { isUuidV7 } from '../../ids/uuidv7.js';
 import { digest } from '../event-integrity.js';
@@ -132,7 +146,7 @@ export interface EntityRevisionRow {
   readonly revisionId: string;
   readonly previousRevisionId: string | null;
   readonly occurrence: RecordOccurrence;
-  readonly attributedTo: string;
+  readonly attributedTo: string | null;
   readonly recordHex: string;
   readonly recordSha256: string;
   readonly operationId: string;
@@ -155,7 +169,7 @@ export interface RecordRelationshipRow {
   readonly to: { kind: string; entityId: string; revisionId: string };
   readonly scopeKind: string;
   readonly scopeValue: string | null;
-  readonly attribution: { kind: string; id: string };
+  readonly attribution: { kind: string; id: string | null };
   readonly sourceRefs: readonly string[];
   readonly operationId: string;
 }
@@ -165,7 +179,7 @@ export interface AdoptionRow {
   readonly targetKind: string;
   readonly targetId: string;
   readonly targetRevisionId: string;
-  readonly approver: string;
+  readonly approver: string | null;
   readonly approvedAt: string;
   readonly scopeKind: string;
   readonly scopeValue: string | null;
@@ -437,8 +451,11 @@ export async function publishProjectClaimRevision(
     handle,
     op,
     (transaction: ProjectSettlement) => {
+      // This writer takes a name and no basis, so its rows read exactly as released ones do: an
+      // actor on an unknown basis.
       transaction.run(
-        'INSERT INTO claim_revisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        `INSERT INTO claim_revisions (revision_id, claim_id, previous_revision_id, source_event_id, field_path, position, asserted_by, attributed_kind, attributed_basis, assertion_source_json, verification_json, verification_provenance, record_bytes, record_sha256, operation_id)
+         VALUES (?,?,?,?,?,?,?,'actor','unknown',?,?,?,?,?,?)`,
         revisionId,
         claimId,
         input.previousRevisionId,
@@ -518,7 +535,8 @@ export async function publishProjectDecisionRevision(
     op,
     (transaction: ProjectSettlement) => {
       transaction.run(
-        'INSERT INTO decision_revisions VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+        `INSERT INTO decision_revisions (revision_id, decision_id, previous_revision_id, source_event_id, field_path, position, authored_by, attributed_kind, attributed_basis, alternative_count, record_bytes, record_sha256, operation_id)
+         VALUES (?,?,?,?,?,?,?,'actor','unknown',?,?,?,?)`,
         revisionId,
         decisionId,
         input.previousRevisionId,
@@ -552,7 +570,7 @@ export async function publishProjectRecordRelationship(
   const operationId = operation(input.operationId);
   const relationshipId = identifier(input.relationshipId, 'relationship ID');
   if (!RELATIONS.includes(input.relation))
-    invalid('Phase 1 relationships are supersedes or challenges');
+    invalid('A released relationship names one revision as superseding or challenging another');
   const from = {
     kind: input.from.kind,
     entityId: identifier(input.from.entityId, 'from entity ID'),
@@ -603,8 +621,11 @@ export async function publishProjectRecordRelationship(
     handle,
     op,
     (transaction: ProjectSettlement) => {
+      // This writer records no standing, basis or authorization, so its rows read exactly as
+      // upgraded ones do: established, on an unknown basis, unauthorized.
       transaction.run(
-        'INSERT INTO record_relationships VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        `INSERT INTO record_relationships (relationship_id, relation, from_entity_kind, from_entity_id, from_revision_id, to_entity_kind, to_entity_id, to_revision_id, scope_kind, scope_value, attributed_kind, attributed_to, attributed_basis, standing, source_refs_json, operation_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'established',?,?)`,
         relationshipId,
         input.relation,
         from.kind,
@@ -617,6 +638,7 @@ export async function publishProjectRecordRelationship(
         scopeValue,
         input.attribution.kind,
         attributedTo,
+        input.attribution.kind === 'author' ? 'unknown' : null,
         sourceRefs,
         operationId
       );
@@ -684,7 +706,8 @@ export async function publishProjectAdoption(
     op,
     (transaction: ProjectSettlement) => {
       transaction.run(
-        'INSERT INTO adoptions VALUES (?,?,?,?,?,?,?,?,?,?)',
+        `INSERT INTO adoptions (adoption_id, target_kind, target_id, target_revision_id, approver, approver_basis, approved_at, scope_kind, scope_value, designation, source_refs_json, operation_id)
+         VALUES (?,?,?,?,?,'unknown',?,?,?,'adopted',?,?)`,
         adoptionId,
         target.kind,
         target.id,
@@ -851,7 +874,7 @@ export function readProjectClaim(
       StoredOccurrence & {
         revision_id: string;
         previous_revision_id: string | null;
-        asserted_by: string;
+        asserted_by: string | null;
         assertion_source_json: string;
         verification_json: string | null;
         verification_provenance: string | null;
@@ -892,7 +915,7 @@ export function readProjectDecision(
       StoredOccurrence & {
         revision_id: string;
         previous_revision_id: string | null;
-        authored_by: string;
+        authored_by: string | null;
         alternative_count: number;
         record_hex: string;
         record_sha256: string;
@@ -946,7 +969,7 @@ export function listProjectRecordRelationships(
       scope_kind: string;
       scope_value: string | null;
       attributed_kind: string;
-      attributed_to: string;
+      attributed_to: string | null;
       source_refs_json: string;
       operation_id: string;
     }>(
@@ -980,7 +1003,7 @@ export function listProjectAdoptions(
       target_kind: string;
       target_id: string;
       target_revision_id: string;
-      approver: string;
+      approver: string | null;
       approved_at: string;
       scope_kind: string;
       scope_value: string | null;

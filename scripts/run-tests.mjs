@@ -109,6 +109,7 @@ const turboArgs = [
   'run',
   'test',
   `--concurrency=${TEST_POLICY.turboConcurrency}`,
+  '--continue=dependencies-successful',
   ...only.map((pkg) => `--filter=${pkg}`),
   ...excluded.map((pkg) => `--filter=!${pkg}`),
   ...(force ? ['--force'] : []),

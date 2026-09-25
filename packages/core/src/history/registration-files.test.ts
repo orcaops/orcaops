@@ -14,7 +14,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { uuidv7 } from '@orcaops/storage';
-import { normalizeHistoryRoot } from '@orcaops/storage/history/authority';
+import { historyRootKey, normalizeHistoryRoot } from '@orcaops/storage/history/authority';
 
 import { registrationBytes, sealRegistration } from './registration-files-format.js';
 import {
@@ -176,9 +176,36 @@ describe('immutable registration candidates', () => {
       registrationBytes(f.repository)
     );
     const requestedRoot = await normalizeHistoryRoot({ root: path.join(f.base, 'different') });
-    await expect(
-      readRepositoryRegistration({ commonDir: f.commonDir, requestedRoot })
-    ).rejects.toMatchObject({ code: 'AUTHORITY_MISMATCH' });
+    const refusal = readRepositoryRegistration({ commonDir: f.commonDir, requestedRoot });
+    await expect(refusal).rejects.toMatchObject({ code: 'AUTHORITY_MISMATCH' });
+    const { message } = (await refusal.catch((error: unknown) => error)) as Error;
+    expect(message).toContain(f.root.resolvedRoot);
+    expect(message).toContain(path.join(f.commonDir, 'orcaops', 'registration.json'));
+    expect(message).toContain('ORCAOPS_DATA_DIR');
+  });
+
+  it('names a registered root that no longer resolves to itself', async () => {
+    const f = await fixture();
+    await mkdir(path.join(f.base, 'real'));
+    const alias = path.join(f.base, 'alias');
+    await symlink(path.join(f.base, 'real'), alias);
+    await place(
+      path.join(f.commonDir, 'orcaops', 'registration.json'),
+      registrationBytes(
+        changedMarker(f.repository, {
+          authority: {
+            ...f.repository.authority,
+            resolved_root: alias,
+            root_key: historyRootKey(alias),
+          },
+        })
+      )
+    );
+    const refusal = readRepositoryRegistration({ commonDir: f.commonDir });
+    await expect(refusal).rejects.toMatchObject({ code: 'AUTHORITY_MISMATCH' });
+    const { message } = (await refusal.catch((error: unknown) => error)) as Error;
+    expect(message).toContain(alias);
+    expect(message).not.toContain('ORCAOPS_DATA_DIR');
   });
 
   it('protects a symlink instead of following or replacing it', async () => {

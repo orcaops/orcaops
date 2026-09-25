@@ -45,6 +45,9 @@ describe('completion-claims / completed-steps-claimed (runFixture)', () => {
     expect(r.exitCode).toBe(0);
     expect(r.envelope.verdict).toBe('pass');
     expect(r.envelope.body).toMatch(/Checkpoint claims step_id/);
+    // A claimed checkpoint has nothing to report, and absence of a finding is
+    // never a conclusion about the step.
+    expect(r.envelope.findings).toBeUndefined();
   });
 
   it('violation: closed cp has no completed_step_ids but content overlaps a plan step', async () => {
@@ -88,5 +91,13 @@ describe('completion-claims / completed-steps-claimed (runFixture)', () => {
     expect(r.exitCode).toBe(0);
     expect(r.envelope.verdict).toBe('violation');
     expect(r.envelope.body).toMatch(/completed_step_ids/);
+    expect(r.envelope.findings).toEqual([
+      {
+        key: `step/${step.step_id}`,
+        title: 'Checkpoint content overlaps plan step 1 but does not claim it',
+        detail: expect.stringContaining(step.text),
+        locations: [{ kind: 'plan-step', step_id: step.step_id }],
+      },
+    ]);
   });
 });

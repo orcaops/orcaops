@@ -22,9 +22,13 @@ import {
 } from '../lib/database-capture-finalize.js';
 import { translateDatabaseCaptureError } from '../lib/database-capture-response.js';
 import { syncDatabaseCapture } from '../lib/database-capture-sync.js';
-import { databaseEvaluatorContext } from '../lib/database-evaluators.js';
+import { databaseEvaluatorContext, retainedFindings } from '../lib/database-evaluators.js';
 import { captureDatabaseExisting } from '../lib/database-existing-capture.js';
-import { readDatabasePrePrReview, runDatabasePrePrPass } from '../lib/database-pre-pr-pass.js';
+import {
+  authorityReport,
+  readDatabasePrePrReview,
+  runDatabasePrePrPass,
+} from '../lib/database-pre-pr-pass.js';
 import { buildEvaluatorContext } from '../lib/evaluator-bridge.js';
 import { discoverEvaluatorsForCli } from '../lib/evaluator-discovery.js';
 import { classifyFinishPrePr } from '../lib/finish-decision.js';
@@ -102,6 +106,7 @@ type PrePrPhase =
       artifactId: string;
       reviewId: string | null;
       evaluatorResults: EvaluatorRunPayload[];
+      findingsRetained: number;
     }
   | { kind: 'paused'; response: Record<string, unknown> };
 
@@ -137,14 +142,20 @@ async function runPrePrPhase(
     // Re-running an LLM cannot improve it, and the summary half below decides replay,
     // conflict or explicit supersede on its own.
     if (retained.thread.summary !== null)
-      return { kind: 'proceed', artifactId, reviewId: null, evaluatorResults: [] };
+      return {
+        kind: 'proceed',
+        artifactId,
+        reviewId: null,
+        evaluatorResults: [],
+        findingsRetained: 0,
+      };
     if (input.accepted_warnings !== undefined) {
       const reviewId = input.accepted_warnings[0]!.review_id;
       await assertReviewCurrent(context, writer, artifactId, reviewId);
-      return { kind: 'proceed', artifactId, reviewId, evaluatorResults: [] };
+      return { kind: 'proceed', artifactId, reviewId, evaluatorResults: [], findingsRetained: 0 };
     }
     const options = { signal };
-    const { evaluated, marker } = await runDatabasePrePrPass({
+    const { evaluated, marker, authority } = await runDatabasePrePrPass({
       context,
       handle: writer,
       artifactId,
@@ -154,6 +165,8 @@ async function runPrePrPhase(
       options,
     });
     const decision = classifyFinishPrePr(evaluated.evaluator_results, evaluated.blocking);
+    const moved = authority?.moved ?? [];
+    const authorityField = authority === null ? {} : { authority: authorityReport(authority) };
     if (decision.kind === 'blocked') {
       return {
         kind: 'paused',
@@ -162,12 +175,16 @@ async function runPrePrPhase(
           status: 'blocked',
           blocking: true,
           evaluator_results: evaluated.evaluator_results,
+          ...retainedFindings(evaluated.findings_retained),
+          ...authorityField,
           cloud_sync: await syncDatabaseCapture(context, writer, artifactId, options, deps),
         },
       };
     }
     if (marker === null) throw new Error('a non-blocking pre-PR pass produced no marker');
-    if (decision.kind === 'needs_attention') {
+    if (decision.kind === 'needs_attention' || moved.length > 0) {
+      const acceptance =
+        moved.length === 0 && decision.kind === 'needs_attention' && decision.acceptance_allowed;
       return {
         kind: 'paused',
         response: {
@@ -175,18 +192,28 @@ async function runPrePrPhase(
           status: 'needs_attention',
           review_id: marker.event_id,
           evaluator_results: evaluated.evaluator_results,
-          acceptance_allowed: decision.acceptance_allowed,
+          ...retainedFindings(evaluated.findings_retained),
+          ...authorityField,
+          acceptance_allowed: acceptance,
           cloud_sync: await syncDatabaseCapture(context, writer, artifactId, options, deps),
-          ...(decision.acceptance_allowed
+          ...(acceptance
             ? {
-                accepted_warnings: decision.runs.map((run) => ({
+                accepted_warnings: (
+                  decision as Extract<typeof decision, { kind: 'needs_attention' }>
+                ).runs.map((run) => ({
                   review_id: marker.event_id,
                   run_id: run.run_id,
                   evaluator_ref: run.evaluator_ref,
                   reason: '',
                 })),
               }
-            : { action: 'Re-run finish; evaluator errors cannot be accepted.' }),
+            : {
+                action:
+                  moved.length > 0
+                    ? 'Record a use of the revision that governs now with `orcaops task uses ' +
+                      'record`, or revise the plan, then re-run finish.'
+                    : 'Re-run finish; evaluator errors cannot be accepted.',
+              }),
         },
       };
     }
@@ -195,6 +222,7 @@ async function runPrePrPhase(
       artifactId,
       reviewId: marker.event_id,
       evaluatorResults: evaluated.evaluator_results,
+      findingsRetained: evaluated.findings_retained,
     };
   } catch (cause) {
     failed = true;
@@ -214,6 +242,7 @@ export async function finish(
     parse: async () =>
       CaptureSummaryInputSchema.parse(await readPayloadInput({ inputPath: opts.input })),
     signal,
+    noLlm: opts.noLlm,
   });
   const { context, input } = prepared;
   try {
@@ -222,7 +251,13 @@ export async function finish(
 
     // The summary lands on the artifact the pre-PR pass checked, not a fresh branch
     // selection a concurrent completion could have moved onto a different artifact.
-    const captured = await captureDatabaseExisting('summary', prepared, signal, phase.artifactId);
+    const captured = await captureDatabaseExisting(
+      'summary',
+      prepared,
+      signal,
+      phase.artifactId,
+      phase.reviewId ?? undefined
+    );
     const { writer, result } = captured;
     let failed = false;
     try {
@@ -241,6 +276,7 @@ export async function finish(
         extra: {
           ...(phase.reviewId === null ? {} : { review_id: phase.reviewId }),
           evaluator_results: phase.evaluatorResults,
+          ...retainedFindings(phase.findingsRetained),
         },
       });
     } catch (cause) {

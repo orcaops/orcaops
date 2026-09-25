@@ -26,6 +26,8 @@ function agent(
     planSteps: [],
     planDecisions: [],
     nonGoals: [],
+    knowledge: null,
+    knowledgeUnavailable: null,
     checkpoints: [],
     recentEvents: [],
     omittedEvents: 0,

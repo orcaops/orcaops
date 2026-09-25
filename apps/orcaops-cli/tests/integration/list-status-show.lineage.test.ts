@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
 
+import { readArtifactExport } from '../support/artifact-export.js';
 import { makeAgent } from '../support/test-agent.js';
 import { commitFile } from '../support/test-helpers.js';
 
@@ -40,7 +41,7 @@ describe('show: strict lineage-name filter', () => {
   describe('show', () => {
     it('emits lineage_sha_drift: null when current HEAD matches the lineage entry', async () => {
       const plan = await capturePlan('t');
-      const showRes = await agent.runRaw(['show', plan.artifact_id, '--json']);
+      const showRes = await readArtifactExport(agent, plan.artifact_id);
       expect(showRes.exitCode).toBe(0);
       const show = JSON.parse(showRes.stdout) as {
         artifact: { lineage_sha_drift: unknown; branch_lineage: Array<{ branch: string }> };
@@ -53,7 +54,7 @@ describe('show: strict lineage-name filter', () => {
       const plan = await capturePlan('t');
       await commitFile(repo.path, 'b.ts', 'b\n', 'after artifact');
 
-      const showRes = await agent.runRaw(['show', plan.artifact_id, '--json']);
+      const showRes = await readArtifactExport(agent, plan.artifact_id);
       const show = JSON.parse(showRes.stdout) as {
         artifact: {
           lineage_sha_drift: { branch: string; recorded_sha: string; current_sha: string } | null;
@@ -70,7 +71,7 @@ describe('show: strict lineage-name filter', () => {
       const plan = await capturePlan('on main');
       const git = gitClient(repo.path);
       await git.checkoutLocalBranch('feat/y');
-      const showRes = await agent.runRaw(['show', plan.artifact_id, '--json']);
+      const showRes = await readArtifactExport(agent, plan.artifact_id);
       const show = JSON.parse(showRes.stdout) as {
         artifact: { lineage_sha_drift: unknown };
       };

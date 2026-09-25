@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Repo } from '@orcaops/core';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
+import { MANIFEST_VERSION } from '../../src/lib/install-manifest.js';
 import { withRepositoryInstallLock } from '../../src/lib/repository-install-lock.js';
 import { makeAgent } from '../support/test-agent.js';
 import { effectiveConfigPath } from '../support/test-helpers.js';
@@ -296,6 +297,145 @@ describe('orcaops update/doctor — personal scope', () => {
     expect(await readFile(p('.gitignore'))).toEqual(original);
   });
 
+  it.each([
+    ['deletes an untracked .gitignore orcaops created', null, false, null],
+    // Accepted edge case: an untracked file cannot show it predates orcaops.
+    ['deletes a pre-existing untracked empty .gitignore', '', false, null],
+    ['keeps a tracked empty .gitignore', '', true, ''],
+    ['keeps user lines in an untracked .gitignore', 'dist/\n', false, 'dist/\n'],
+  ] as const)('leaving global scope %s', async (_label, original, tracked, expected) => {
+    if (original !== null) await writeFile(p('.gitignore'), original);
+    if (tracked) {
+      execFileSync('git', ['add', '.gitignore'], { cwd: repo.path });
+      execFileSync('git', ['commit', '-m', 'empty gitignore'], { cwd: repo.path });
+    }
+    expect(
+      (await agent.runRaw(['init', '--personal', '--agents', 'claude-code', '--no-llm'])).exitCode
+    ).toBe(0);
+    expect((await agent.runRaw(['update', '--scope', 'global'])).exitCode).toBe(0);
+    expect(await readFile(p('.gitignore'), 'utf8')).toContain('# >>> orcaops >>>');
+
+    const back = await agent.runRaw(['update', '--scope', 'personal']);
+
+    expect(back.exitCode).toBe(0);
+    expect(back.stdout).toContain('scope changed global → personal');
+    expect(back.stdout).toContain('de-adopts the repo');
+    expect(await exists(p('.orcaops', 'install.local.json'))).toBe(false);
+    if (expected === null) {
+      expect(await exists(p('.gitignore'))).toBe(false);
+      expect(back.stdout).toContain('  - .gitignore\n');
+    } else {
+      expect(await readFile(p('.gitignore'), 'utf8')).toBe(expected);
+    }
+    if (tracked) expect(gitStatus()).not.toContain('.gitignore');
+  });
+
+  describe('a leftover worktree install.local.json in a steady personal run', () => {
+    const leftover = (): string => p('.orcaops', 'install.local.json');
+    const validManifest = `${JSON.stringify({ manifest_version: MANIFEST_VERSION, entries: [] }, null, 2)}\n`;
+    const plant = async (content: string): Promise<void> => {
+      expect(
+        (await agent.runRaw(['init', '--personal', '--agents', 'claude-code', '--no-llm'])).exitCode
+      ).toBe(0);
+      await mkdir(p('.orcaops'), { recursive: true });
+      await writeFile(leftover(), content, 'utf8');
+    };
+
+    it('is removed when valid and untracked, and a dry run only reports it', async () => {
+      await plant(validManifest);
+
+      const preview = await agent.runRaw(['update', '--dry-run']);
+
+      expect(preview.exitCode).toBe(0);
+      expect(preview.stdout).toContain('  - .orcaops/install.local.json\n');
+      expect(await readFile(leftover(), 'utf8')).toBe(validManifest);
+
+      const applied = await agent.runRaw(['update']);
+
+      expect(applied.exitCode).toBe(0);
+      expect(await exists(leftover())).toBe(false);
+      expect(gitStatus()).toBe('');
+    });
+
+    it('survives with a warning when git tracks it', async () => {
+      await plant(validManifest);
+      execFileSync('git', ['add', '-f', '.orcaops/install.local.json'], { cwd: repo.path });
+      execFileSync('git', ['commit', '-m', 'track the leftover'], { cwd: repo.path });
+
+      const res = await agent.runRaw(['update', '--json']);
+
+      expect(res.exitCode).toBe(0);
+      const out = JSON.parse(res.stdout) as { warnings: string[] };
+      expect(
+        out.warnings.some(
+          (w) => w.includes('.orcaops/install.local.json') && w.includes('git tracks it')
+        )
+      ).toBe(true);
+      expect(await readFile(leftover(), 'utf8')).toBe(validManifest);
+      expect(gitStatus()).toBe('');
+    });
+
+    it.each([
+      ['malformed JSON', '{ not json'],
+      [
+        'an unknown field',
+        JSON.stringify({ manifest_version: MANIFEST_VERSION, entries: [], extra: true }),
+      ],
+    ])('survives with a warning when it holds %s', async (_label, content) => {
+      await plant(content);
+
+      const res = await agent.runRaw(['update', '--json']);
+
+      expect(res.exitCode).toBe(0);
+      const out = JSON.parse(res.stdout) as { warnings: string[] };
+      expect(
+        out.warnings.some(
+          (w) =>
+            w.includes('.orcaops/install.local.json') &&
+            w.includes('not a valid orcaops install manifest')
+        )
+      ).toBe(true);
+      expect(await readFile(leftover(), 'utf8')).toBe(content);
+    });
+  });
+
+  it('reports a personal → global switch and every file it writes, in preview and apply', async () => {
+    expect(
+      (await agent.runRaw(['init', '--personal', '--agents', 'claude-code', '--no-llm', '--json']))
+        .exitCode
+    ).toBe(0);
+    const switchWrites = [
+      '+ .orcaops/config.json',
+      '+ .gitignore',
+      '+ .orcaops/install.json',
+      '+ .orcaops/install.local.json',
+      '~ .git/info/exclude',
+    ];
+
+    const preview = await agent.runRaw(['update', '--scope', 'global', '--dry-run']);
+
+    expect(preview.exitCode).toBe(0);
+    expect(preview.stdout).toContain('Scope changed: personal → global');
+    for (const line of switchWrites) expect(preview.stdout).toContain(`  ${line}\n`);
+    expect(preview.stdout).not.toContain('Everything is already up to date');
+    expect(gitStatus()).toBe('');
+
+    const applied = await agent.runRaw(['update', '--scope', 'global']);
+
+    expect(applied.exitCode).toBe(0);
+    expect(applied.stdout).toContain('Scope changed: personal → global');
+    for (const line of switchWrites) expect(applied.stdout).toContain(`  ${line}\n`);
+    expect(applied.stdout).not.toContain('Everything is already up to date');
+
+    const steady = await agent.runRaw(['update', '--json']);
+    const out = JSON.parse(steady.stdout) as {
+      scope_changed: unknown;
+      other_changes: unknown[];
+    };
+    expect(out.scope_changed).toBeNull();
+    expect(out.other_changes).toEqual([]);
+  });
+
   it('scope switch project → personal → project reconciles every surface', async () => {
     // 1. Standard project install, committed (the "enterprise baseline").
     const init = await agent.runRaw([
@@ -322,10 +462,15 @@ describe('orcaops update/doctor — personal scope', () => {
     const personalOut = JSON.parse(toPersonal.stdout) as {
       scope: string;
       pruned: string[];
+      preserved_orphans: Array<{ path: string; reason: string }>;
       removed_install_manifest: boolean;
+      scope_changed: { from: string; to: string } | null;
       warnings: string[];
     };
     expect(personalOut.scope).toBe('personal');
+    expect(personalOut.scope_changed).toEqual({ from: 'project', to: 'personal' });
+    // The planner excised the instruction blocks, so none is "preserved".
+    expect(personalOut.preserved_orphans).toEqual([]);
     // De-adoption is visible work: committing the tracked modifications this
     // transition makes would de-adopt the repo team-wide, so it must say so.
     expect(personalOut.warnings.some((w) => w.includes('de-adopts the repo'))).toBe(true);
@@ -333,6 +478,7 @@ describe('orcaops update/doctor — personal scope', () => {
     expect(personalOut.removed_install_manifest).toBe(true);
     expect(await exists(p('.claude', 'skills', 'orcaops-capture', 'SKILL.md'))).toBe(false);
     expect(await exists(p('.orcaops', 'install.json'))).toBe(false);
+    expect(await exists(p('.orcaops', 'install.local.json'))).toBe(false);
     expect(await exists(p('CLAUDE.local.md'))).toBe(false);
     expect(await exists(p('AGENTS.md'))).toBe(false);
     expect(await exists(p('CLAUDE.md'))).toBe(false);

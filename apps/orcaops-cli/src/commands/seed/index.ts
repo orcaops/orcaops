@@ -637,7 +637,14 @@ export async function prepareSeedGitSelection(
   pendingSelection = pendingSelection ? structuredClone(pendingSelection) : undefined;
   const maxCommits = validateSeedOptions(opts);
   const preflight = await inspectSeedClone(repo);
-  let sinceIso = opts.since ? await resolveSeedSince(repo, opts.since) : undefined;
+  let sinceIso: string | undefined;
+  if (opts.since) {
+    try {
+      sinceIso = await resolveSeedSince(repo, opts.since);
+    } catch (error) {
+      throw invalidInput(error instanceof Error ? error.message : String(error));
+    }
+  }
   let sinceExplicit = opts.since !== undefined;
   if (sinceIso === undefined && opts.yes === true) {
     if (pendingSelection && selectionFlagsMatch(opts, maxCommits, pendingSelection)) {
@@ -645,6 +652,8 @@ export async function prepareSeedGitSelection(
       sinceExplicit = pendingSelection.since_explicit === true;
     }
   }
+  if (opts.branch && !(await repo.resolveCommit(opts.branch)))
+    throw invalidInput(`--branch does not resolve to a commit: ${opts.branch}`);
   const commitSha = opts.commit ? await repo.resolveCommit(opts.commit) : null;
   if (opts.commit && !commitSha)
     throw invalidInput(`--commit does not resolve to a commit: ${opts.commit}`);
@@ -666,12 +675,10 @@ export async function prepareSeedGitSelection(
   const sinceMs = Date.parse(history.sinceIso);
   const withinWindow = (cluster: SeedCluster): boolean =>
     Date.parse(cluster.latestCommitDateIso) >= sinceMs;
-  // Targeted lanes ignore the window unless --since was explicit; explicit
-  // since selects whole clusters in or out, it never reshapes them.
-  const targetedCandidates =
-    sinceExplicit && (opts.path || opts.commit)
-      ? canonicalClusters.filter(withinWindow)
-      : canonicalClusters;
+  // The default window must not bound these lanes; an explicit --since drops whole clusters only.
+  const windowedCandidates = sinceExplicit
+    ? canonicalClusters.filter(withinWindow)
+    : canonicalClusters;
   let selectedClusters = history.clusters;
   let ownership: SeedFileOwnership[] = [];
   let coverageComplete = false;
@@ -685,7 +692,7 @@ export async function prepareSeedGitSelection(
   let importanceClustersBeyond = 0;
   let probeMedianMs: number | null = null;
   if (opts.path && preflight.partialClone) {
-    const touched = targetedCandidates.filter((cluster) => clusterTouchesPath(cluster, opts.path!));
+    const touched = windowedCandidates.filter((cluster) => clusterTouchesPath(cluster, opts.path!));
     const touchMass = new Map(
       touched.flatMap((cluster) =>
         [cluster.headSha, ...cluster.commits.map((commit) => commit.sha)].map(
@@ -693,7 +700,7 @@ export async function prepareSeedGitSelection(
         )
       )
     );
-    const selection = selectImportanceClusters(targetedCandidates, touchMass, {
+    const selection = selectImportanceClusters(windowedCandidates, touchMass, {
       maxCommits,
       maxClusters: DEFAULT_ARTIFACT_CEILING,
     });
@@ -724,17 +731,13 @@ export async function prepareSeedGitSelection(
         (total, cluster) => total + cluster.commits.length,
         0
       );
-      const importance = selectImportanceClusters(
-        opts.path ? targetedCandidates : canonicalClusters,
-        ranking.lineMassByCommit,
-        {
-          maxCommits: opts.path ? maxCommits : Math.max(0, maxCommits - recencyCommitCount),
-          maxClusters: opts.path
-            ? DEFAULT_ARTIFACT_CEILING
-            : Math.max(0, DEFAULT_ARTIFACT_CEILING - history.clusters.length),
-          ...(opts.path ? {} : { excludedClusterKeys: recencyKeys }),
-        }
-      );
+      const importance = selectImportanceClusters(windowedCandidates, ranking.lineMassByCommit, {
+        maxCommits: opts.path ? maxCommits : Math.max(0, maxCommits - recencyCommitCount),
+        maxClusters: opts.path
+          ? DEFAULT_ARTIFACT_CEILING
+          : Math.max(0, DEFAULT_ARTIFACT_CEILING - history.clusters.length),
+        ...(opts.path ? {} : { excludedClusterKeys: recencyKeys }),
+      });
       importanceTruncated = importance.truncated;
       importanceLaneRan = true;
       importanceCommitsBeyond = importance.candidateCommitCount - importance.selectedCommitCount;

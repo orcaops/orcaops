@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -18,6 +18,22 @@ const exists = async (p: string): Promise<boolean> => {
     return false;
   }
 };
+
+/** Every file under `dir` (symlinks by target), skipping the named top-level entries. */
+async function snapshotTree(dir: string, skip: string[]): Promise<Record<string, string>> {
+  const files: Record<string, string> = {};
+  const walk = async (rel: string): Promise<void> => {
+    for (const entry of await readdir(path.join(dir, rel), { withFileTypes: true })) {
+      if (rel === '' && skip.includes(entry.name)) continue;
+      const child = path.join(rel, entry.name);
+      if (entry.isDirectory()) await walk(child);
+      else if (entry.isSymbolicLink()) files[child] = `-> ${await readlink(path.join(dir, child))}`;
+      else files[child] = await readFile(path.join(dir, child), 'utf8');
+    }
+  };
+  await walk('');
+  return files;
+}
 
 interface GlobalManifest {
   materialized_by: string;
@@ -222,17 +238,15 @@ describe('orcaops update --scope global', () => {
       await writeFile(obsoletePath, oldBytes);
       manifest.entries.push({ ...entry, prefix: 'obsolete', path: obsoletePath });
       await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-      const warning = await agent.runRaw(['update']);
-      expect(warning.stdout).toContain('SKIPPED');
-      expect(warning.stdout).not.toContain('Everything is already up to date');
       const before = await readFile(manifestPath, 'utf8');
-      const preview = await agent.runRaw(['update', '--force', '--dry-run']);
+      const preview = await agent.runRaw(['update', '--dry-run']);
       expect(preview.exitCode).toBe(0);
+      expect(preview.stdout).not.toContain('SKIPPED');
       expect(preview.stdout).toContain('1 file(s) would change, 1 would be removed');
       expect(preview.stdout).not.toContain('Everything is already up to date');
       expect(await readFile(manifestPath, 'utf8')).toBe(before);
       expect(await readFile(entry.path, 'utf8')).toBe(oldBytes);
-      const applied = await agent.runRaw(['update', '--force']);
+      const applied = await agent.runRaw(['update']);
       expect(applied.exitCode).toBe(0);
       expect(applied.stdout).toContain('1 file(s) changed, 1 removed');
       expect(applied.stdout).not.toContain('Everything is already up to date');
@@ -242,6 +256,135 @@ describe('orcaops update --scope global', () => {
       await repo.cleanup();
     }
   });
+
+  it.each([
+    ['an initialized repo', false],
+    ['a repo without a project id', true],
+  ] as const)(
+    'a refused upgrade in %s changes nothing but a first project id',
+    async (_label, dropProjectId) => {
+      const repo = await createTempRepo({ initialBranch: 'main' });
+      const agent = agentFor(repo);
+      try {
+        expect(
+          (
+            await agent.runRaw([
+              'init',
+              '--personal',
+              '--agents',
+              'claude-code',
+              '--no-llm',
+              '--json',
+            ])
+          ).exitCode
+        ).toBe(0);
+        const manifestPath = path.join(globalRoot, 'install.local.json');
+        const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as GlobalManifest;
+        manifest.materialized_by = '0.0.1';
+        await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+        await writeFile(
+          manifest.entries.find((e) => e.surface === 'skill')!.path,
+          'edited by hand'
+        );
+        if (dropProjectId) {
+          execFileSync('git', ['config', '--unset', 'orcaops.projectid'], { cwd: repo.path });
+        }
+        const gitDir = path.join(repo.path, '.git');
+        const snapshot = async (): Promise<unknown> => ({
+          global: await snapshotTree(globalRoot, ['locks']),
+          worktree: await snapshotTree(repo.path, ['.git']),
+          status: execFileSync('git', ['status', '--porcelain', '--ignored'], {
+            cwd: repo.path,
+          }).toString(),
+          gitOrcaops: await snapshotTree(path.join(gitDir, 'orcaops'), ['locks']),
+          exclude: await readFile(path.join(gitDir, 'info', 'exclude'), 'utf8'),
+        });
+        const before = await snapshot();
+        const configBefore = await readFile(path.join(gitDir, 'config'), 'utf8');
+
+        // Apply first: without a project id a dry-run skips global planning,
+        // so only the apply run mints the id and reaches the refusal.
+        for (const flags of [[], ['--dry-run']]) {
+          const result = await agent.runRaw(['update', ...flags]);
+          expect(result.exitCode).toBe(1);
+          expect(result.stderr).toMatch(/no longer matches what orcaops recorded/);
+          expect(result.stderr).toMatch(/orcaops update --force/);
+        }
+
+        expect(await snapshot()).toEqual(before);
+        const configAfter = await readFile(path.join(gitDir, 'config'), 'utf8');
+        const withoutProjectId = (config: string): string =>
+          config
+            .split('\n')
+            .filter((line) => !/^\s*projectid\s*=/.test(line) && line !== '[orcaops]')
+            .join('\n');
+        if (dropProjectId) {
+          expect(configAfter).toMatch(/projectid\s*=/);
+          expect(withoutProjectId(configAfter)).toBe(withoutProjectId(configBefore));
+        } else {
+          expect(configAfter).toBe(configBefore);
+        }
+      } finally {
+        await repo.cleanup();
+      }
+    }
+  );
+
+  it.each(['artifact', 'store'] as const)(
+    'refuses a global %s directory before writing a scope change, even with force',
+    async (target) => {
+      const repo = await createTempRepo({ initialBranch: 'main' });
+      const agent = agentFor(repo);
+      try {
+        expect(
+          (
+            await agent.runRaw([
+              'init',
+              '--personal',
+              '--agents',
+              'claude-code',
+              '--link',
+              'symlink',
+              '--no-llm',
+            ])
+          ).exitCode
+        ).toBe(0);
+        const manifest = await globalManifest();
+        const entry = manifest.entries.find((e) => e.surface === 'skill')!;
+        const collision =
+          target === 'artifact'
+            ? entry.path
+            : path.resolve(path.dirname(entry.path), await readlink(entry.path));
+        await rm(collision);
+        await mkdir(collision);
+        await writeFile(path.join(collision, 'notes.txt'), 'user content', 'utf8');
+        const gitDir = path.join(repo.path, '.git');
+        const snapshot = async () => ({
+          global: await snapshotTree(globalRoot, ['locks']),
+          worktree: await snapshotTree(repo.path, ['.git']),
+          gitOrcaops: await snapshotTree(path.join(gitDir, 'orcaops'), ['locks']),
+          exclude: await readFile(path.join(gitDir, 'info', 'exclude'), 'utf8'),
+          config: await readFile(path.join(gitDir, 'config'), 'utf8'),
+          status: execFileSync('git', ['status', '--porcelain', '--ignored'], {
+            cwd: repo.path,
+          }).toString(),
+        });
+        const before = await snapshot();
+
+        for (const flags of [[], ['--force'], ['--dry-run'], ['--dry-run', '--force']]) {
+          const result = await agent.runRaw(['update', '--scope', 'global', ...flags]);
+          expect(result.exitCode).toBe(1);
+          expect(result.stderr).toContain('is a directory');
+          expect(result.stderr).toContain('move or remove it');
+          expect(result.stderr).not.toContain('--force');
+          expect(await snapshot()).toEqual(before);
+          expect((await stat(collision)).isDirectory()).toBe(true);
+        }
+      } finally {
+        await repo.cleanup();
+      }
+    }
+  );
 
   /** Seed a credential file into a caller-owned config home; returns its path. */
   function seedCreds(configHome: string): string {

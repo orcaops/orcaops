@@ -506,14 +506,6 @@ export async function planInstallMutations(
   const prevInstallJson = input.prevInstall
     ? `${JSON.stringify(input.prevInstall, null, 2)}\n`
     : null;
-  // The churn-free compare must read the file AT THE DESTINATION: on a
-  // personal→project switch `input.prevLocal` is the common manifest while
-  // the worktree manifest does not exist yet, and a "replace" planned against
-  // absent bytes is refused at apply.
-  const currentWorktreeLocal = await readLocalManifest(repoRoot);
-  const prevLocalJson = currentWorktreeLocal
-    ? `${JSON.stringify(currentWorktreeLocal, null, 2)}\n`
-    : null;
   // Personal scope writes NO committed install.json and NO worktree
   // manifest — a shared enterprise repo must see zero tracked-file changes,
   // and the ownership record belongs to the repository, not one checkout. It
@@ -531,6 +523,15 @@ export async function planInstallMutations(
       )
     );
   } else {
+    // The churn-free compare must read the file AT THE DESTINATION: on a
+    // personal→project switch `input.prevLocal` is the common manifest while
+    // the worktree manifest does not exist yet, and a "replace" planned against
+    // absent bytes is refused at apply. Personal never reads it, so a corrupt
+    // leftover there cannot fail the run.
+    const currentWorktreeLocal = await readLocalManifest(repoRoot);
+    const prevLocalJson = currentWorktreeLocal
+      ? `${JSON.stringify(currentWorktreeLocal, null, 2)}\n`
+      : null;
     mutations.push(
       writeMutation(
         repoRoot,

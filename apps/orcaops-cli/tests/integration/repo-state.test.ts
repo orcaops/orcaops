@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createTempRepo, gitClient, inputFile, type TempRepo } from '@orcaops/test-harness';
 
+import { readArtifactExport } from '../support/artifact-export.js';
 import { makeAgent } from '../support/test-agent.js';
 import { doneCriteriaFor } from '../support/test-helpers.js';
 import { commitFile } from '../support/test-helpers.js';
@@ -95,7 +96,7 @@ describe('repo_state in resume + show', () => {
   }
 
   async function captureCheckpoint(artifactId: string, n: number, files: string[]): Promise<void> {
-    const showRes = await agent.runRaw(['show', artifactId, '--json']);
+    const showRes = await readArtifactExport(agent, artifactId);
     const showJson = JSON.parse(showRes.stdout) as {
       artifact?: { plan?: { plan_steps?: Array<{ step_id: string }> } };
     };
@@ -223,7 +224,7 @@ describe('repo_state in resume + show', () => {
   describe('show', () => {
     it('emits repo_state in show --json', async () => {
       const id = await planArtifact();
-      const res = await agent.runRaw(['show', id, '--json']);
+      const res = await readArtifactExport(agent, id);
       expect(res.exitCode).toBe(0);
       const out = JSON.parse(res.stdout) as ShowOk;
       expect(out.artifact.repo_state).not.toBeNull();
@@ -232,10 +233,10 @@ describe('repo_state in resume + show', () => {
 
     it('show human format renders a Repo state section', async () => {
       const id = await planArtifact();
-      const res = await agent.runRaw(['show', id]);
+      const res = await agent.runRaw(['show', id, '--section', 'repository']);
       expect(res.exitCode).toBe(0);
-      expect(res.stdout).toMatch(/Repo state:/);
-      expect(res.stdout).toMatch(/current_branch=main/);
+      expect(res.stdout).toContain('repo_state');
+      expect(res.stdout).toMatch(/"current_branch":\s*"main"/);
     });
 
     it('shows ahead-commit count when there are matching commits', async () => {
@@ -243,7 +244,7 @@ describe('repo_state in resume + show', () => {
       const id = await planArtifact();
       await captureCheckpoint(id, 1, ['src/a.ts']);
       await commitFile(repo.path, 'src/a.ts', 'two\n', 'modify src/a.ts');
-      const res = await agent.runRaw(['show', id, '--json']);
+      const res = await readArtifactExport(agent, id);
       const out = JSON.parse(res.stdout) as ShowOk;
       expect(
         out.artifact.repo_state?.commits_since_artifact_head_touching_artifact_files

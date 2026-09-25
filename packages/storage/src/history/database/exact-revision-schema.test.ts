@@ -26,6 +26,14 @@ function receipt(db: Database.Database, id = uuidv7()) {
   return id;
 }
 
+// The three NULLs are source_standing, subject_id and subject_revision_id: a released claim
+// revision records none of them, and the table still admits one.
+const CLAIM_REVISION =
+  "INSERT INTO claim_revisions VALUES (?,?,?,?,?,?,?,'actor','source_attributed',NULL,NULL,NULL,?,?,?,?,?,?)";
+// The same three, and the three derivation columns a released decision revision never had.
+const DECISION_REVISION =
+  "INSERT INTO decision_revisions VALUES (?,?,?,?,?,?,?,'actor','source_attributed',NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?)";
+
 const bytes = (value: unknown) => Buffer.from(JSON.stringify(value));
 const hash = (value: Buffer) => createHash('sha256').update(value).digest('hex');
 
@@ -36,7 +44,7 @@ function claim(db: Database.Database, previous: { claimId: string; revisionId: s
   // The continuing entity and its first revision reference each other, so they are published
   // together and the deferred constraints resolve at commit.
   db.exec('BEGIN IMMEDIATE');
-  db.prepare('INSERT INTO claim_revisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+  db.prepare(CLAIM_REVISION).run(
     revisionId,
     claimId,
     previous?.revisionId ?? null,
@@ -69,7 +77,7 @@ function decision(
     alternatives: [{ option: 'governing views', rejected_because: 'separately gated' }],
   });
   db.exec('BEGIN IMMEDIATE');
-  db.prepare('INSERT INTO decision_revisions VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(
+  db.prepare(DECISION_REVISION).run(
     revisionId,
     decisionId,
     previous?.revisionId ?? null,
@@ -88,30 +96,86 @@ function decision(
   return { decisionId, revisionId };
 }
 
-function relationship(
+interface Endpoint {
+  kind: string;
+  id: string;
+  revisionId: string;
+}
+
+function insertRelationship(
   db: Database.Database,
-  from: { kind: string; id: string; revisionId: string },
-  to: { kind: string; id: string; revisionId: string },
-  relation = 'supersedes'
+  row: {
+    relationshipId?: string;
+    relation?: string;
+    from: Endpoint;
+    to: Endpoint;
+    scope?: [kind: string, value: string | null];
+    attribution?: [kind: string, to: string | null, basis: string | null];
+    standing?: string;
+    authorization?: string | null;
+  },
+  verb = 'INSERT'
 ) {
-  const relationshipId = uuidv7();
-  db.prepare('INSERT INTO record_relationships VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+  const relationshipId = row.relationshipId ?? uuidv7();
+  db.prepare(
+    `${verb} INTO record_relationships VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).run(
     relationshipId,
-    relation,
-    from.kind,
-    from.id,
-    from.revisionId,
-    to.kind,
-    to.id,
-    to.revisionId,
-    'project',
-    null,
-    'author',
-    'claude-code',
+    row.relation ?? 'supersedes',
+    row.from.kind,
+    row.from.id,
+    row.from.revisionId,
+    row.to.kind,
+    row.to.id,
+    row.to.revisionId,
+    ...(row.scope ?? ['project', null]),
+    ...(row.attribution ?? ['author', 'claude-code', 'source_attributed']),
+    row.standing ?? 'established',
+    'the later revision replaces the earlier one',
     '[]',
+    row.authorization ?? null,
+    null,
     receipt(db)
   );
   return relationshipId;
+}
+
+function relationship(
+  db: Database.Database,
+  from: Endpoint,
+  to: Endpoint,
+  relation = 'supersedes'
+) {
+  return insertRelationship(db, { from, to, relation });
+}
+
+function insertAdoption(
+  db: Database.Database,
+  row: {
+    adoptionId?: string;
+    target: Endpoint;
+    approver?: [name: string | null, basis: string];
+    approvedAt?: string;
+    scope?: [kind: string, value: string | null];
+    designation?: string;
+    authorization?: string | null;
+  },
+  verb = 'INSERT'
+) {
+  db.prepare(`${verb} INTO adoptions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    row.adoptionId ?? uuidv7(),
+    row.target.kind,
+    row.target.id,
+    row.target.revisionId,
+    ...(row.approver ?? ['owner', 'authenticated']),
+    row.approvedAt ?? '2026-09-01T00:00:00.000Z',
+    ...(row.scope ?? ['project', null]),
+    row.designation ?? 'adopted',
+    '[]',
+    row.authorization ?? null,
+    null,
+    receipt(db)
+  );
 }
 
 it('keeps continuing entities, their immutable revisions and the frozen occurrence tuple', () => {
@@ -131,7 +195,7 @@ it('keeps continuing entities, their immutable revisions and the frozen occurren
   // A second record cannot claim an occurrence another record already holds.
   expect(() =>
     db
-      .prepare('INSERT INTO claim_revisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .prepare(CLAIM_REVISION)
       .run(
         uuidv7(),
         first.claimId,
@@ -150,7 +214,7 @@ it('keeps continuing entities, their immutable revisions and the frozen occurren
   ).toThrow();
   // The same text at a different original occurrence stays a separate record.
   const other = uuidv7();
-  db.prepare('INSERT INTO claim_revisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+  db.prepare(CLAIM_REVISION).run(
     other,
     first.claimId,
     second.revisionId,
@@ -178,18 +242,9 @@ it('refuses to update, delete or replace any retained exact-revision row', () =>
     { kind: 'decision', id: two.decisionId, revisionId: two.revisionId },
     'challenges'
   );
-  db.prepare('INSERT INTO adoptions VALUES (?,?,?,?,?,?,?,?,?,?)').run(
-    uuidv7(),
-    'decision',
-    two.decisionId,
-    two.revisionId,
-    'owner',
-    '2026-09-01T00:00:00.000Z',
-    'project',
-    null,
-    '[]',
-    receipt(db)
-  );
+  const decided = { kind: 'decision', id: two.decisionId, revisionId: two.revisionId };
+  const claimed = { kind: 'claim', id: one.claimId, revisionId: one.revisionId };
+  insertAdoption(db, { target: decided });
   const record = bytes({ assessment: 'eligible' });
   db.prepare('INSERT INTO assessments VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(
     uuidv7(),
@@ -233,90 +288,119 @@ it('refuses to update, delete or replace any retained exact-revision row', () =>
     .get(edge);
   const retainedAdoption = db.prepare('SELECT * FROM adoptions').get() as Record<string, unknown>;
   const replaceEdge = (relationshipId: string, scope: string, scopeValue: string | null) =>
-    db
-      .prepare('INSERT OR REPLACE INTO record_relationships VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(
+    insertRelationship(
+      db,
+      {
         relationshipId,
-        'challenges',
-        'claim',
-        one.claimId,
-        one.revisionId,
-        'decision',
-        two.decisionId,
-        two.revisionId,
-        scope,
-        scopeValue,
-        'detector',
-        'someone-else',
-        '[]',
-        receipt(db)
-      );
+        relation: 'challenges',
+        from: claimed,
+        to: decided,
+        scope: [scope, scopeValue],
+        attribution: ['detector', 'someone-else', null],
+        standing: 'suggested',
+      },
+      'INSERT OR REPLACE'
+    );
   const replaceAdoption = (adoptionId: string, scope: string, scopeValue: string | null) =>
-    db
-      .prepare('INSERT OR REPLACE INTO adoptions VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .run(
+    insertAdoption(
+      db,
+      {
         adoptionId,
-        'decision',
-        two.decisionId,
-        two.revisionId,
-        'owner',
-        '2099-01-01T00:00:00.000Z',
-        scope,
-        scopeValue,
-        '[]',
-        receipt(db)
-      );
-  // The primary key is not the only way in: a fresh ID colliding on a secondary unique tuple or
-  // on the partial project-scope index would replace the retained row just as silently.
+        target: decided,
+        approvedAt: '2099-01-01T00:00:00.000Z',
+        scope: [scope, scopeValue],
+        designation: 'background',
+      },
+      'INSERT OR REPLACE'
+    );
   expect(() => replaceEdge(edge, 'project', null)).toThrow(/cannot be replaced/);
-  expect(() => replaceEdge(uuidv7(), 'project', null)).toThrow(/cannot be replaced/);
-  expect(() => replaceAdoption(uuidv7(), 'project', null)).toThrow(/cannot be replaced/);
+  expect(() => replaceAdoption(retainedAdoption.adoption_id as string, 'project', null)).toThrow(
+    /cannot be replaced/
+  );
   expect(
     db.prepare('SELECT * FROM record_relationships WHERE relationship_id=?').get(edge)
   ).toEqual(retainedEdge);
   expect(db.prepare('SELECT * FROM adoptions').get()).toEqual(retainedAdoption);
+});
 
-  const branch = 'history-database-gate-second-half';
-  db.prepare('INSERT INTO record_relationships VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
-    uuidv7(),
-    'challenges',
-    'claim',
-    one.claimId,
-    one.revisionId,
-    'decision',
-    two.decisionId,
-    two.revisionId,
-    'branch',
-    branch,
-    'author',
-    'claude-code',
-    '[]',
-    receipt(db)
+it('writes the same relationship or adoption again under a new id and keeps every earlier row', () => {
+  const db = database();
+  const one = claim(db, null);
+  const two = decision(db, null);
+  const claimed = { kind: 'claim', id: one.claimId, revisionId: one.revisionId };
+  const decided = { kind: 'decision', id: two.decisionId, revisionId: two.revisionId };
+  const edge = (attribution: [string, string | null, string | null], standing: string) =>
+    insertRelationship(db, {
+      relation: 'challenges',
+      from: claimed,
+      to: decided,
+      attribution,
+      standing,
+    });
+  const edges = () =>
+    db
+      .prepare(
+        'SELECT relationship_id, standing, attributed_to FROM record_relationships ORDER BY rowid'
+      )
+      .all();
+
+  // A detector only ever suggests: an actor establishing the same edge is the first act that makes
+  // it stand. A withdrawal is a correction action in another table, so putting the edge back is an
+  // ordinary insert here.
+  const suggested = edge(['detector', 'overlap-detector', null], 'suggested');
+  const established = edge(['author', 'owner@example.test', 'authenticated'], 'established');
+  const again = edge(['author', 'owner@example.test', 'authenticated'], 'established');
+  expect(new Set([suggested, established, again]).size).toBe(3);
+  const written = edges();
+  expect(written).toHaveLength(3);
+
+  const adopt = (designation: string) =>
+    insertAdoption(db, { target: decided, designation, approver: ['owner', 'authenticated'] });
+  adopt('adopted');
+  adopt('adopted');
+  adopt('background');
+  const adoptions = () =>
+    db.prepare('SELECT adoption_id, designation FROM adoptions ORDER BY rowid').all() as Record<
+      string,
+      unknown
+    >[];
+  expect(adoptions()).toHaveLength(3);
+  const retained = adoptions();
+
+  // Nothing collides, so INSERT OR REPLACE with a fresh id has nothing to replace and appends.
+  insertRelationship(
+    db,
+    { relation: 'challenges', from: claimed, to: decided, standing: 'established' },
+    'INSERT OR REPLACE'
   );
-  db.prepare('INSERT INTO adoptions VALUES (?,?,?,?,?,?,?,?,?,?)').run(
-    uuidv7(),
-    'decision',
-    two.decisionId,
-    two.revisionId,
-    'owner',
-    '2026-09-01T00:00:00.000Z',
-    'branch',
-    branch,
-    '[]',
-    receipt(db)
-  );
-  const branchEdge = db
-    .prepare('SELECT * FROM record_relationships WHERE scope_kind=?')
-    .get('branch');
-  const branchAdoption = db.prepare('SELECT * FROM adoptions WHERE scope_kind=?').get('branch');
-  expect(() => replaceEdge(uuidv7(), 'branch', branch)).toThrow(/cannot be replaced/);
-  expect(() => replaceAdoption(uuidv7(), 'branch', branch)).toThrow(/cannot be replaced/);
-  expect(db.prepare('SELECT * FROM record_relationships WHERE scope_kind=?').get('branch')).toEqual(
-    branchEdge
-  );
-  expect(db.prepare('SELECT * FROM adoptions WHERE scope_kind=?').get('branch')).toEqual(
-    branchAdoption
-  );
+  insertAdoption(db, { target: decided }, 'INSERT OR REPLACE');
+  expect(edges().slice(0, 3)).toEqual(written);
+  expect(adoptions().slice(0, 3)).toEqual(retained);
+  expect(edges()).toHaveLength(4);
+  expect(adoptions()).toHaveLength(4);
+
+  expect(() =>
+    insertRelationship(
+      db,
+      {
+        relationshipId: established,
+        relation: 'challenges',
+        from: claimed,
+        to: decided,
+        standing: 'suggested',
+      },
+      'INSERT OR REPLACE'
+    )
+  ).toThrow(/cannot be replaced/);
+  expect(() =>
+    insertAdoption(
+      db,
+      { adoptionId: retained[0]!.adoption_id as string, target: decided },
+      'INSERT OR REPLACE'
+    )
+  ).toThrow(/cannot be replaced/);
+  expect(edges()).toHaveLength(4);
+  expect(adoptions()).toHaveLength(4);
 });
 
 it('refuses a revision that names itself as its own previous revision', () => {
@@ -325,7 +409,7 @@ it('refuses a revision that names itself as its own previous revision', () => {
   const revisionId = uuidv7();
   expect(() =>
     db
-      .prepare('INSERT INTO claim_revisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .prepare(CLAIM_REVISION)
       .run(
         revisionId,
         first.claimId,
@@ -346,7 +430,7 @@ it('refuses a revision that names itself as its own previous revision', () => {
   const decisionRevisionId = uuidv7();
   expect(() =>
     db
-      .prepare('INSERT INTO decision_revisions VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .prepare(DECISION_REVISION)
       .run(
         decisionRevisionId,
         decided.decisionId,
@@ -369,6 +453,56 @@ it('refuses a revision that names itself as its own previous revision', () => {
       .prepare('SELECT count(*) AS n FROM decision_revisions WHERE decision_id=?')
       .get(decided.decisionId)
   ).toEqual({ n: 1 });
+});
+
+it('requires the exact revision a derived decision came from', () => {
+  const db = database();
+  const parent = decision(db, null);
+  const derived = (changes: { id?: string; revisionId?: string; decisionId?: string } = {}) => {
+    const decisionId = changes.decisionId ?? uuidv7();
+    const revisionId = uuidv7();
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare(
+        `INSERT INTO decision_revisions (revision_id, decision_id, previous_revision_id, source_event_id,
+           field_path, position, authored_by, attributed_kind, attributed_basis,
+           derived_from_kind, derived_from_id, derived_from_revision_id, alternative_count,
+           record_bytes, record_sha256, operation_id)
+         VALUES (?,?,NULL,?,'plan.decisions',0,'claude-code','actor','source_attributed','decision',?,?,0,?,?,?)`
+      ).run(
+        revisionId,
+        decisionId,
+        uuidv7(),
+        changes.id ?? parent.decisionId,
+        changes.revisionId ?? parent.revisionId,
+        bytes({ derived: true }),
+        hash(bytes({ derived: true })),
+        receipt(db)
+      );
+      db.prepare('INSERT INTO decisions VALUES (?,?,?)').run(decisionId, revisionId, receipt(db));
+      db.exec('COMMIT');
+    } catch (cause) {
+      db.exec('ROLLBACK');
+      throw cause;
+    }
+    return decisionId;
+  };
+
+  const child = derived();
+  expect(
+    db
+      .prepare(
+        'SELECT derived_from_kind, derived_from_id, derived_from_revision_id FROM decision_revisions WHERE decision_id=?'
+      )
+      .get(child)
+  ).toEqual({
+    derived_from_kind: 'decision',
+    derived_from_id: parent.decisionId,
+    derived_from_revision_id: parent.revisionId,
+  });
+  expect(() => derived({ revisionId: uuidv7() })).toThrow(
+    /exact expectation revision it derives from/
+  );
 });
 
 it('requires both exact endpoint revisions and leaves an older edge on the revision it named', () => {
@@ -402,42 +536,23 @@ it('requires both exact endpoint revisions and leaves an older edge on the revis
       db,
       { kind: 'claim', id: claimOne.claimId, revisionId: claimOne.revisionId },
       { kind: 'decision', id: second.decisionId, revisionId: second.revisionId },
-      'depends_on'
+      'refutes'
     )
-  ).toThrow();
+  ).toThrow(/CHECK constraint failed/);
 });
 
 it('refuses an adoption without its exact target revision and keeps approval out of authorship', () => {
   const db = database();
   const authored = decision(db, null);
   expect(() =>
-    db
-      .prepare('INSERT INTO adoptions VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .run(
-        uuidv7(),
-        'decision',
-        authored.decisionId,
-        uuidv7(),
-        'owner',
-        '2026-09-01T00:00:00.000Z',
-        'project',
-        null,
-        '[]',
-        receipt(db)
-      )
+    insertAdoption(db, {
+      target: { kind: 'decision', id: authored.decisionId, revisionId: uuidv7() },
+    })
   ).toThrow(/exact approval target revision/);
-  db.prepare('INSERT INTO adoptions VALUES (?,?,?,?,?,?,?,?,?,?)').run(
-    uuidv7(),
-    'decision',
-    authored.decisionId,
-    authored.revisionId,
-    'owner',
-    '2026-09-01T00:00:00.000Z',
-    'branch',
-    'history-database-gate-second-half',
-    '[]',
-    receipt(db)
-  );
+  insertAdoption(db, {
+    target: { kind: 'decision', id: authored.decisionId, revisionId: authored.revisionId },
+    scope: ['branch', 'history-database-gate-second-half'],
+  });
   expect(
     db
       .prepare('SELECT authored_by FROM decision_revisions WHERE revision_id=?')

@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { readJsonAnswer } from '../json-rescue.js';
 import type { EvaluateError, EvaluateOptions, EvaluateResult } from '../types.js';
 import { buildCodexArgs, buildCodexEnv } from './args.js';
 
@@ -88,7 +89,7 @@ function* runOneShot(cfg: OneShotConfig, opts: EvaluateOptions): Operation<Evalu
     // emits error/close (SIGTERM ignored) must not leave it polling forever.
     let watchTimeout: ReturnType<typeof setInterval> | null = null;
 
-    const finish = (body: string, errorOverride?: EvaluateError): void => {
+    const finish = (body: string, errorOverride?: EvaluateError, cleanExit = false): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -109,8 +110,10 @@ function* runOneShot(cfg: OneShotConfig, opts: EvaluateOptions): Operation<Evalu
         });
         return;
       }
+      const answer = opts.outputSchema && cleanExit ? readJsonAnswer(body) : null;
       resolve({
-        body,
+        body: answer?.body ?? body,
+        ...(answer?.jsonRepair === undefined ? {} : { jsonRepair: answer.jsonRepair }),
         model,
         sessionId,
         durationMs,
@@ -263,7 +266,7 @@ function* runOneShot(cfg: OneShotConfig, opts: EvaluateOptions): Operation<Evalu
             });
             return;
           }
-          finish(body);
+          finish(body, undefined, exitCode === 0);
         });
       } catch (err) {
         // A setup failure racing the teardown must still clean the scratch:

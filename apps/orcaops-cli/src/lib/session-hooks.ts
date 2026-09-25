@@ -536,10 +536,12 @@ export function serializeSettings(root: JsonObject): string {
  * next init/update/doctor --fix.
  *
  * INSTALL is project-scope only in v1: under `global`/`personal`, an agent whose
- * entry would otherwise be desired reports `skipped-scope` when there is
- * nothing to reconcile. STRIP is deliberately scope-agnostic — leaving an
- * entry behind because the scope changed would make doctor's lingering-entry
- * warning unfixable. (Stripping under `personal` edits a tracked file, which
+ * entry would otherwise be desired reports `skipped-scope` (with a warning)
+ * when there is nothing to reconcile — unless entries are `none`, the
+ * machine-registration steady state personal scope always stores, which
+ * reports `skipped-entries` silently under every scope. STRIP is deliberately
+ * scope-agnostic — leaving an entry behind because the scope changed would
+ * make doctor's lingering-entry warning unfixable. (Stripping under `personal` edits a tracked file, which
  * matches the scope-switch precedent: update already prunes tracked install
  * trees on the way into personal, and git surfaces the deletion to commit.)
  */
@@ -628,11 +630,11 @@ export async function planSessionHookSettings(
     await planSpec(spec, installAllowed && inSet && entriesWanted);
     if (plans.length !== before) continue;
     // A would-be install held back by entries:'none' is a deliberate steady
-    // state (machine-level registration covers the repo) — reported without
-    // a warning. Blocked only by scope: reported AND warned (the strip /
-    // invalid outcomes above are strictly more informative and take
-    // precedence over either).
-    if (inSet && installAllowed && !entriesWanted) {
+    // state under any scope (machine-level registration covers the repo) —
+    // reported without a warning. Blocked only by scope: reported AND warned
+    // (the strip / invalid outcomes above are strictly more informative and
+    // take precedence over either).
+    if (inSet && !entriesWanted) {
       plans.push({ agent: spec.agent, path: spec.path, action: 'skipped-entries' });
     } else if (inSet && !installAllowed) {
       plans.push({ agent: spec.agent, path: spec.path, action: 'skipped-scope' });
@@ -642,7 +644,8 @@ export async function planSessionHookSettings(
   if (skippedScope) {
     warnings.push(
       `settings-file hook entries are project-scope only — under scope "${input.scope}" ` +
-        'use the machine-level registration instead (`orcaops session-hooks install`)'
+        'use the machine-level registration instead (`orcaops session-hooks install`), then ' +
+        'run `orcaops update --session-hook-entries none` to record that choice'
     );
   }
 

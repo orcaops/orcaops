@@ -1,11 +1,16 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { Repo } from '@orcaops/core';
+import type { EvaluatorContext } from '@orcaops/evaluator-protocol';
 import { getDefaultConfig, type SourcePlanPin } from '@orcaops/storage';
 import { readProjectArtifact } from '@orcaops/storage/history/database';
 
 import { databaseEvaluatorStore } from './database-evaluators.js';
-import { buildEvaluatorContext, type LifecycleEvaluatorContext } from './evaluator-bridge.js';
+import {
+  buildEvaluatorContext,
+  evaluatorRunBasis,
+  type LifecycleEvaluatorContext,
+} from './evaluator-bridge.js';
 import { fixture } from '../../tests/helpers/database-history.js';
 
 /**
@@ -420,5 +425,42 @@ describe('buildEvaluatorContext — verified-close verification mapping', () => 
     expect(cp.verification).toEqual([
       { command: 'pnpm test', exit_code: 0, output_digest: 'turbo 23/23', note: 'full gate' },
     ]);
+  });
+});
+
+describe('evaluatorRunBasis', () => {
+  const context = (run_id: string, evaluator_ref: string): EvaluatorContext =>
+    ({
+      schema: 'orcaops.evaluator_context/v1',
+      run_id,
+      evaluator_ref,
+      phase: 'post-plan',
+      artifact_id: '01999999-9999-7000-8000-00000000000a',
+      checkpoint_n: null,
+      repo: { root: '/repo', branch: 'main', base_sha: 'a'.repeat(40), head_sha: 'b'.repeat(40) },
+      changed_files: [],
+      params: {},
+    }) as unknown as EvaluatorContext;
+
+  it('digests the inputs an evaluator saw, not the placeholders the base context mints', () => {
+    const first = evaluatorRunBasis(context('run-one', '<base>'), { params: { depth: 2 } });
+    const second = evaluatorRunBasis(context('run-two', '<base>'), { params: { depth: 2 } });
+
+    expect(first.context_sha256).toBe(second.context_sha256);
+    expect([first.base_sha, first.head_sha]).toEqual(['a'.repeat(40), 'b'.repeat(40)]);
+    expect(first.evaluator_version).toBeNull();
+    expect(first.producer_payload).toBeNull();
+  });
+
+  it('digests a changed parameter apart from the one it replaced', () => {
+    const first = evaluatorRunBasis(context('run-one', '<base>'), { params: { depth: 2 } });
+    const deeper = evaluatorRunBasis(context('run-one', '<base>'), { params: { depth: 3 } });
+    const elsewhere = evaluatorRunBasis(
+      { ...context('run-one', '<base>'), changed_files: ['src/a.ts'] } as EvaluatorContext,
+      { params: { depth: 2 } }
+    );
+
+    expect(deeper.context_sha256).not.toBe(first.context_sha256);
+    expect(elsewhere.context_sha256).not.toBe(first.context_sha256);
   });
 });

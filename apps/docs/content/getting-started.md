@@ -9,8 +9,10 @@ keep talking to the agent in plain language; the skills call the Orcaops CLI and
 record a structured plan, checkpoints, decisions, verification, and a final
 summary underneath.
 
-Everything in this guide runs locally. You do not need an Orcaops account to
-capture work, run evaluators, or use Orcaops Watch.
+You do not need an Orcaops account to capture work, run evaluators, or use
+Orcaops Watch. Captures stay in local project history. Optional background
+knowledge processing uses a provider CLI and may send captured content to that
+provider after you enable and consent to it.
 
 ## How Orcaops names the work
 
@@ -165,7 +167,73 @@ The installed count includes the default-enabled skills compatible with that
 agent and scope. The [complete skill index](./skills.md#complete-skill-index)
 also lists opt-in and capability-gated skills.
 
-## 3. Give your agent a normal task
+## 3. Set up project knowledge
+
+Orcaops can connect decisions and requirements across captured tasks so your
+agent can find them later. This background processing is **off by default** and
+needs both a configuration choice and your consent.
+
+First, find the configuration file this checkout actually uses:
+
+```bash
+orcaops knowledge status
+```
+
+The first line names the config file to edit. Open it in your editor, keep its
+existing keys, and choose one of these setups. Set `schema_version` to `8` when
+you add `knowledge_processing`.
+
+For fast, lower-cost processing with Codex, use GPT-6 Luna at high effort:
+
+```json
+{
+  "schema_version": 8,
+  "knowledge_processing": {
+    "enabled": false,
+    "provider": "codex",
+    "model": "gpt-6-luna",
+    "effort": "high",
+    "tool_access": "codex_restricted",
+    "max_cost_usd_per_call": "none"
+  }
+}
+```
+
+If you use Claude Code instead, start with Claude Sonnet 5 at high effort:
+
+```json
+{
+  "schema_version": 8,
+  "knowledge_processing": {
+    "enabled": false,
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "effort": "high"
+  }
+}
+```
+
+Merge the chosen keys into your existing JSON file rather than replacing it.
+Keep `enabled` false; the command below turns it on after you consent. See
+[Project knowledge](./project-knowledge.md) for model choices, cost guidance,
+and the full configuration options.
+
+Then run this **yourself in an interactive terminal**:
+
+```bash
+orcaops knowledge enable
+orcaops knowledge status
+```
+
+`enable` shows the provider, model, content sent, and effective limits before
+asking for typed consent. `status` confirms the settings, consent, queue, and
+coverage. If you already captured work while processing was off, use
+`orcaops knowledge enable --include-backlog` to include those waiting captures.
+Older Git commits require a separate [Git-history import](./seed.md), which
+previews the selection before you approve it. Imported commits become searchable
+history; they do not get knowledge-processing jobs.
+
+## 4. Give your agent a normal task
 
 Open your coding agent in the repository and describe the task normally:
 
@@ -185,7 +253,7 @@ or recover from a missed trigger. Learn those controls—and the everyday
 on-demand requests—in
 [Working with your agent](./working-with-your-agent.md).
 
-## 4. Generate and inspect the branch review
+## 5. Generate and inspect the branch review
 
 One branch or worktree can contain several captured task artifacts, so you
 decide when the combined work is ready for review. Then ask your agent:
@@ -206,13 +274,12 @@ changes. Use it to inspect the captured reasoning alongside the diff and read
 the generated Task Review. Ask the agent to regenerate it after material branch
 changes.
 
-Capture, evaluation, and Task Review stay local unless you deliberately enable a
-Cloud workflow.
+Capture and Task Review stay local unless you deliberately enable a Cloud
+workflow. Knowledge processing sends prepared captures to the provider you
+consented to; model-backed evaluators can also contact their configured provider.
 
 ## Where to go next
 
-- Starting in an established repository? [Backfill its git history](./seed.md)
-  so search and provenance have earlier context.
 - Want more ways to use the installed skills? Browse the
   [skill catalog](./skills.md).
 - Need to change agents, install scope, hooks, or generated files? Use
@@ -244,5 +311,6 @@ orcaops uninstall
 npm rm -g @orcaops/cli
 ```
 
-Captured data under `.orcaops/` is kept by default. `--purge-data` is the
-explicit destructive option when you also intend to remove it.
+The worktree `.orcaops/` directory is kept by default. `--purge-data` also
+removes it. Neither form deletes canonical project history, which lives in the
+orcaops data directory; see [local data](./local-data.md).

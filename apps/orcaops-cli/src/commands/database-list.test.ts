@@ -5,7 +5,11 @@ import { getDefaultConfig } from '@orcaops/storage';
 import { ProjectDatabaseError } from '@orcaops/storage/history/database';
 
 import { createDatabaseListAction } from './database-list.js';
-import { type DatabaseListContext, type DatabaseListOptions } from '../lib/database-list.js';
+import {
+  type DatabaseListContext,
+  type DatabaseListOptions,
+  formatDatabaseList,
+} from '../lib/database-list.js';
 
 afterEach(() => vi.restoreAllMocks());
 function output() {
@@ -184,4 +188,20 @@ it('detaches selectors and pagination before asynchronous context resolution', a
     filters: { limit: 1, offset: 2 },
     scope: { branch: { value: 'main' } },
   });
+});
+
+it('names the project of each incomplete-history issue in text output', () => {
+  const text = formatDatabaseList({
+    results: [],
+    completeness: {
+      complete: false,
+      issues: [{ project_id: 'project-1', code: 'HISTORY_MISSING', message: 'm' }],
+    },
+    origin_counts: {
+      returned: { captured: 0, imported: 0 },
+      matching: { captured: 0, imported: 0 },
+    },
+    page: { next_offset: null },
+  } as unknown as Parameters<typeof formatDatabaseList>[0]);
+  expect(text).toContain('\nproject-1: HISTORY_MISSING: m\n');
 });

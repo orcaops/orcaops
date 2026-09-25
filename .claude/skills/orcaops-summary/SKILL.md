@@ -2,8 +2,8 @@
 name: "Orcaops: capture summary"
 description: "Manually save or repair the final outcome of completed work. Use the finish workflow for normal finalization."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "10c80eba0d0c"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "79a9ab794c69"
 tags: ["orcaops", "capture"]
 ---
 

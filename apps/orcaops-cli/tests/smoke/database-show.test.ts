@@ -35,9 +35,8 @@ it('shows a project-qualified artifact through the executable without changing a
   );
   expect(JSON.parse(result.stdout)).toMatchObject({
     ok: true,
-    schema_version: 3,
+    schema_version: 4,
     artifact: expect.objectContaining({ id, project_id: f.authority.projectId }),
-    results: [expect.objectContaining({ id, project_id: f.authority.projectId })],
     completeness: { complete: true },
   });
   expect(await inventory(f.temporary)).toEqual(before);

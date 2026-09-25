@@ -148,7 +148,9 @@ orcaops eval fork-pack core --to ./orcaops-evaluators-core
 
 Third-party evaluator packs are trusted executable code. Command evaluators and
 processes they launch run with your permissions; Orcaops does not sandbox or
-confine them to the repository. Explicit consent is required before they run.
+confine them to the repository. Explicit consent is required before they run, and
+[What Orcaops enforces, and what it only observes](./local-data.md#what-orcaops-enforces-and-what-it-only-observes)
+says which checks refuse and which only report.
 The consent fingerprint covers the pack manifest, evaluator specs, referenced
 description and prompt files, pack-contained regular files named by
 `engine.command[]`, and `fingerprint.include` matches. It does not cover
@@ -177,6 +179,26 @@ repository): a cloned repo's checked-in configuration can declare and enable
 evaluators but can never authorize them. Built-in packs shipped with the
 installed CLI are covered by its installation trust manifest instead.
 `orcaops doctor` reports per-pack grant status.
+
+### Result protocol upgrades
+
+This Orcaops release runs evaluator result envelope
+`orcaops.evaluator_result/v2`. A custom producer that still emits
+`orcaops.evaluator_result/v1` is refused with `UNSUPPORTED_PROTOCOL`, including
+the required update: move `@orcaops/evaluator-sdk` to `0.2.x` and rebuild the
+pack. A hand-written producer changes the one `schema` literal; the verdict and
+gate meanings do not change, and `findings` remains optional.
+
+Upgrade the pack before upgrading Orcaops when a block-severity evaluator guards
+a lifecycle boundary. The new runner will not execute the old envelope, and an
+old runner may reject a new v2 envelope under its existing strict rules. You can
+temporarily disable or lower the evaluator's severity while coordinating the
+upgrade, but do not treat a protocol error as a passing check.
+
+Previously retained evaluator output is read in its original form. Upgrading
+does not re-run it, reinterpret it, or invent finding identities. See
+[Upgrading from `orcaops.evaluator_result/v1`](./authoring-evaluator-packs.md#upgrading-from-orcaops-evaluator-result-v1)
+for the compatibility table and producer checklist.
 
 ## Register an existing custom pack
 

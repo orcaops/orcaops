@@ -1,5 +1,6 @@
 import {
   type EvaluatorContext,
+  type EvaluatorRunFindingsOutcome,
   type EvaluatorRunPayload,
   type ResolvedEvaluator,
 } from '@orcaops/evaluator-protocol';
@@ -9,6 +10,7 @@ import type { LLMClient } from '@orcaops/llm';
 import { runCommandEngine } from './engines/command.js';
 import { runLlmEngine } from './engines/llm.js';
 import { makeSkippedRun, shouldSkipEvaluator } from './filter.js';
+import type { EvaluatorEngineRun } from './findings.js';
 import { evaluateConsentGate, type PackTrustDecision } from './trust-capability.js';
 
 /**
@@ -69,6 +71,14 @@ export interface DispatchResult {
    * callers can `zip(evaluators, results)` without surprises.
    */
   runs: EvaluatorRunPayload[];
+  /**
+   * What became of each run's findings, in the same order as `runs`, so a
+   * caller that retains findings has one place to take them from and a caller
+   * that does not can ignore them entirely. They are deliberately NOT on the
+   * run payload: that shape is strict, re-parsed on every rebuild and mirrored
+   * to a cloud shape this repository does not own.
+   */
+  findings: EvaluatorRunFindingsOutcome[];
 }
 
 /**
@@ -92,7 +102,7 @@ export async function dispatchEvaluators(opts: DispatchOptions): Promise<Dispatc
 
   // Results array indexed by input position. Workers fill in slots
   // independently; this preserves input order for the caller.
-  const results: EvaluatorRunPayload[] = new Array(evaluators.length);
+  const results: EvaluatorEngineRun[] = new Array(evaluators.length);
   let nextIdx = 0;
   const takeNext = (): number => {
     if (nextIdx >= evaluators.length) return -1;
@@ -109,7 +119,10 @@ export async function dispatchEvaluators(opts: DispatchOptions): Promise<Dispatc
   }
 
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
-  return { runs: results };
+  return {
+    runs: results.map((result) => result.run),
+    findings: results.map((result) => result.findings),
+  };
 }
 
 /**
@@ -151,6 +164,9 @@ export function makeConsentRefusedRun(opts: {
  * filter check; if the evaluator is filtered out, return a skipped payload
  * without engine dispatch. Otherwise route to the matching engine.
  *
+ * Returns the run payload and its findings handover. A refused, skipped or
+ * errored evaluator hands over no findings — it established nothing.
+ *
  * Exported so the CLI's `eval run <ref>` command can dispatch one
  * evaluator directly without spinning up the pool.
  */
@@ -160,7 +176,7 @@ export async function dispatchOne(
   llm: LLMClient,
   opts: Pick<DispatchOptions, 'trust' | 'signal' | 'validateRaw' | 'jsonModeRetries' | 'parentEnv'>,
   runIdFactory: RunIdFactory = defaultRunIdFactory
-): Promise<EvaluatorRunPayload> {
+): Promise<EvaluatorEngineRun> {
   const run_id = runIdFactory();
   // The context an evaluator consumes carries its own resolved
   // params, ref, and run_id. The bridge passes a base
@@ -183,12 +199,15 @@ export async function dispatchOne(
     llm.defaultProvider
   );
   if (!consent.allowed) {
-    return makeConsentRefusedRun({
-      evaluator,
-      context: evalContext,
-      run_id,
-      reason: consent.reason,
-    });
+    return {
+      run: makeConsentRefusedRun({
+        evaluator,
+        context: evalContext,
+        run_id,
+        reason: consent.reason,
+      }),
+      findings: { status: 'none' },
+    };
   }
   const effectiveProvider =
     evaluator.engine.kind === 'llm'
@@ -209,13 +228,16 @@ export async function dispatchOne(
     providerAvailability
   );
   if (skipReason !== null) {
-    return makeSkippedRun({
-      evaluator,
-      context: evalContext,
-      run_id,
-      reason: skipReason,
-      ...(evaluator.engine.kind === 'llm' ? { provider: effectiveProvider } : {}),
-    });
+    return {
+      run: makeSkippedRun({
+        evaluator,
+        context: evalContext,
+        run_id,
+        reason: skipReason,
+        ...(evaluator.engine.kind === 'llm' ? { provider: effectiveProvider } : {}),
+      }),
+      findings: { status: 'none' },
+    };
   }
   if (evaluator.engine.kind === 'command') {
     return runCommandEngine({

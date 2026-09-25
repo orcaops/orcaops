@@ -324,3 +324,223 @@ describe('capture plan revise: criterion_lineage + reword warnings', () => {
     expect(out.criterion_move_warnings).toEqual([]);
   });
 });
+
+describe('capture plan revise: revision-rationale-required block', () => {
+  let repo: TempRepo;
+  let agent: ReturnType<typeof makeAgent>;
+
+  beforeEach(async () => {
+    repo = await createTempRepo({ initialBranch: 'main' });
+    agent = makeAgent({ cwd: repo.path });
+    await agent.init({ noLlm: true });
+    const added = await agent.runRaw([
+      'eval',
+      'add-pack',
+      '@orcaops/evaluator-pack',
+      'core',
+      '--yes',
+      '--json',
+    ]);
+    expect(added.exitCode).toBe(0);
+  });
+
+  afterEach(async () => {
+    await repo.cleanup();
+  });
+
+  interface RationalePlan {
+    artifact_id: string;
+    plan_steps: Array<{ step_id: string }>;
+  }
+
+  async function capturePlan(): Promise<RationalePlan> {
+    const res = await agent.runRaw([
+      'capture',
+      'plan',
+      '--no-llm',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          task: 'deliver the slice with tests',
+          label: 'deliver the slice',
+          plan_steps: [
+            {
+              text: 'step a with tests',
+              label: 'step-a',
+              acceptance_criteria: [{ text: 'the step a tests pass' }],
+            },
+          ],
+          touched_scope: [],
+          non_goals: [],
+        })
+      ),
+    ]);
+    expect(res.exitCode).toBe(0);
+    return JSON.parse(res.stdout) as RationalePlan;
+  }
+
+  async function revisePlan(
+    plan: RationalePlan,
+    rationale: string
+  ): Promise<{ ok: boolean; revision_n: number; blocking: boolean }> {
+    const res = await agent.runRaw([
+      'capture',
+      'plan',
+      'revise',
+      '--no-llm',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          artifact_id: plan.artifact_id,
+          label: 'deliver the slice',
+          rationale,
+          prior_plan_event_id: null,
+          plan_steps: [
+            {
+              step_id: plan.plan_steps[0]!.step_id,
+              text: 'step a with tests',
+              label: 'step-a',
+              acceptance_criteria: [{ text: 'the step a tests pass' }],
+            },
+          ],
+          touched_scope: [],
+          non_goals: [],
+        })
+      ),
+    ]);
+    expect(res.exitCode, res.stdout + res.stderr).toBe(0);
+    return JSON.parse(res.stdout) as { ok: boolean; revision_n: number; blocking: boolean };
+  }
+
+  it('commits a short-rationale revision and leaves a blocking violation, as the evaluator text says', async () => {
+    const planned = await agent.runRaw([
+      'capture',
+      'plan',
+      '--no-llm',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          task: 'deliver the slice with tests',
+          label: 'deliver the slice',
+          plan_steps: [
+            {
+              text: 'step a with tests',
+              label: 'step-a',
+              acceptance_criteria: [{ text: 'the step a tests pass' }],
+            },
+          ],
+          touched_scope: [],
+          non_goals: [],
+        })
+      ),
+    ]);
+    expect(planned.exitCode).toBe(0);
+    const plan = JSON.parse(planned.stdout) as {
+      artifact_id: string;
+      plan_steps: Array<{ step_id: string }>;
+    };
+
+    const revised = await agent.runRaw([
+      'capture',
+      'plan',
+      'revise',
+      '--no-llm',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          artifact_id: plan.artifact_id,
+          label: 'deliver the slice',
+          rationale: 'x',
+          prior_plan_event_id: null,
+          plan_steps: [
+            {
+              step_id: plan.plan_steps[0]!.step_id,
+              text: 'step a with tests',
+              label: 'step-a',
+              acceptance_criteria: [{ text: 'the step a tests pass' }],
+            },
+          ],
+          touched_scope: [],
+          non_goals: [],
+        })
+      ),
+    ]);
+    expect(revised.exitCode).toBe(0);
+    const out = JSON.parse(revised.stdout) as {
+      ok: boolean;
+      revision_n: number;
+      capture_status: string;
+      blocking: boolean;
+      evaluator_results: Array<{ evaluator_ref: string; verdict: string | null }>;
+    };
+    expect(out).toMatchObject({
+      ok: true,
+      revision_n: 1,
+      capture_status: 'committed',
+      blocking: true,
+    });
+    expect(out.evaluator_results).toContainEqual(
+      expect.objectContaining({
+        evaluator_ref: 'core/revision-rationale-required',
+        verdict: 'violation',
+      })
+    );
+
+    const shown = await agent.runRaw([
+      'eval',
+      'show',
+      'core/revision-rationale-required',
+      '--json',
+    ]);
+    expect(shown.exitCode).toBe(0);
+    const { evaluator } = JSON.parse(shown.stdout) as {
+      evaluator: { description: string; on_block_message: string };
+    };
+    expect(evaluator.description).not.toContain('fails the revise call');
+    expect(evaluator.description).toContain('the revision is still recorded');
+    expect(evaluator.on_block_message).toContain('The revision was committed');
+    expect(evaluator.on_block_message).toContain('orcaops block dismiss');
+    expect(evaluator.on_block_message).not.toContain('block acknowledge');
+  });
+
+  it('clears the rationale block when a later revision states a full rationale', async () => {
+    const plan = await capturePlan();
+    expect((await revisePlan(plan, 'x')).blocking).toBe(true);
+
+    const fuller = await revisePlan(plan, 'narrowed step a to the tested path after review');
+    expect(fuller).toMatchObject({ ok: true, revision_n: 2, blocking: false });
+  });
+
+  it('resolves the rationale block with block dismiss, as the block message says', async () => {
+    const plan = await capturePlan();
+    expect((await revisePlan(plan, 'x')).blocking).toBe(true);
+
+    const acknowledged = await agent.runRaw([
+      'block',
+      'acknowledge',
+      '--artifact',
+      plan.artifact_id,
+      '--evaluator',
+      'core/revision-rationale-required',
+      '--reason',
+      'accepted',
+    ]);
+    expect(acknowledged.exitCode).toBe(1);
+    expect((JSON.parse(acknowledged.stdout) as { error: { code: string } }).error.code).toBe(
+      'BLOCK_NOT_ACKNOWLEDGEABLE'
+    );
+
+    const dismissed = await agent.runRaw([
+      'block',
+      'dismiss',
+      '--artifact',
+      plan.artifact_id,
+      '--evaluator',
+      'core/revision-rationale-required',
+      '--reason',
+      'rationale recorded elsewhere',
+    ]);
+    expect(dismissed.exitCode, dismissed.stdout + dismissed.stderr).toBe(0);
+    expect(JSON.parse(dismissed.stdout)).toMatchObject({ ok: true, action: 'dismissed' });
+  });
+});

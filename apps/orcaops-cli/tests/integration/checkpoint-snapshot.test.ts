@@ -1745,6 +1745,79 @@ describe('checkpoint snapshot + fingerprint capture', () => {
     });
   });
 
+  describe('unreported changed paths at close', () => {
+    type CloseEnvelope = OkEnvelope & { warnings?: WarningEntry[] };
+
+    async function openFirstStep(): Promise<CapturedPlan> {
+      const plan = await capturePlan(['update the readme']);
+      parseOk(
+        await openCp({ artifact_id: plan.artifact_id, declared_step_ids: [plan.step_ids[0]] })
+      );
+      return plan;
+    }
+
+    function closeFirstStep(plan: CapturedPlan, filesChanged: string[]): Promise<CliResult> {
+      return closeCp({
+        artifact_id: plan.artifact_id,
+        n: 1,
+        summary: 'readme updated',
+        files_changed: filesChanged,
+        done_criteria: doneCriteriaFor(plan.plan_steps, [plan.step_ids[0]]),
+        completed_step_ids: [plan.step_ids[0]],
+      });
+    }
+
+    it('warns naming a committed path the agent left out of files_changed', async () => {
+      const plan = await openFirstStep();
+      await writeFile(path.join(repo.path, 'README.md'), '# Camera controls\n', 'utf8');
+      await commitFile(
+        repo.path,
+        'scripts/camera/free_camera.gd',
+        'var fly_speed = 9.0\n',
+        'readme and camera'
+      );
+
+      const closed = parseOk<CloseEnvelope>(await closeFirstStep(plan, ['README.md']));
+
+      const warning = findWarning(closed.warnings, 'unreported-changed-paths');
+      expect(warning?.message).toContain('scripts/camera/free_camera.gd');
+      expect(warning?.message).not.toContain('README.md');
+    });
+
+    it('warns about an uncommitted new file the agent left out of files_changed', async () => {
+      const plan = await openFirstStep();
+      await writeFile(path.join(repo.path, 'README.md'), '# Camera controls\n', 'utf8');
+      await writeFile(path.join(repo.path, 'notes.txt'), 'scratch\n', 'utf8');
+
+      const closed = parseOk<CloseEnvelope>(await closeFirstStep(plan, ['README.md']));
+
+      expect(findWarning(closed.warnings, 'unreported-changed-paths')?.message).toContain(
+        'notes.txt'
+      );
+    });
+
+    it('stays quiet when every changed path is reported, directly or under a reported directory', async () => {
+      const plan = await openFirstStep();
+      await writeFile(path.join(repo.path, 'README.md'), '# Camera controls\n', 'utf8');
+      await commitFile(repo.path, 'scripts/camera/free_camera.gd', 'var fly_speed = 9.0\n', 'cam');
+
+      const closed = parseOk<CloseEnvelope>(
+        await closeFirstStep(plan, ['./README.md', 'scripts/camera/'])
+      );
+
+      expect(findWarning(closed.warnings, 'unreported-changed-paths')).toBeUndefined();
+    });
+
+    it('matches a reported non-ASCII path against the raw name git saw change', async () => {
+      const plan = await openFirstStep();
+      await commitFile(repo.path, 'docs/café.md', 'bonjour\n', 'accented doc');
+
+      const closed = parseOk<CloseEnvelope>(await closeFirstStep(plan, ['docs/café.md']));
+
+      expect(findWarning(closed.warnings, 'unreported-changed-paths')).toBeUndefined();
+    });
+  });
+
   // ── Snapshot-capture failure diagnostics ────────────────────────────────
   //
   // The persisted boundary can hold nothing but the typed reason, and 'unknown'

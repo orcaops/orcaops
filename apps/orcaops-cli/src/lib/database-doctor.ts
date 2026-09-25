@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
-import { Repo } from '@orcaops/core';
+import { computeUnresolvedBlocks, EMPTY_TREE_SHA, Repo } from '@orcaops/core';
 import {
   type DatabaseMaintenanceInspection,
   type DatabaseMaintenanceResource,
@@ -125,14 +125,9 @@ interface ArtifactEvaluatorRuns {
 
 function unresolvedBlocks(artifacts: readonly ArtifactEvaluatorRuns[]): DoctorCheck {
   const unresolved = artifacts.flatMap(({ artifactId, runs }) =>
-    runs
-      .filter(
-        (run) =>
-          run.severity === 'block' &&
-          run.verdict === 'violation' &&
-          (run.disposition === null || run.disposition === 'unresolved')
-      )
-      .map((run) => ({ artifactId, ...run }))
+    computeUnresolvedBlocks(runs)
+      .filter((block) => block.kind === 'violation')
+      .map((block) => ({ artifactId, ...block }))
   );
   return unresolved.length
     ? {
@@ -630,13 +625,15 @@ async function lineageCheck(
     artifactId,
     lineage: thread.artifactJson!.branch_lineage.at(-1)!,
   }));
+  // A root-commit import's lineage starts at git's empty tree, which no branch walk reaches.
+  const commits = rows.filter((row) => row.lineage.head_sha !== EMPTY_TREE_SHA);
   const orphaned: typeof rows = [];
   const uncertain: typeof rows = [];
   const reachability = await repo.checkReachabilityFromTips(
-    rows.map((row) => row.lineage.head_sha),
+    commits.map((row) => row.lineage.head_sha),
     tips.tips
   );
-  for (const row of rows) {
+  for (const row of commits) {
     const state = reachability.get(row.lineage.head_sha);
     if (state === 'reachable') continue;
     if (state === 'unreachable') orphaned.push(row);
@@ -668,8 +665,11 @@ async function lineageCheck(
 
 function pendingPlanCheck(database: ProjectDatabase): DoctorCheck {
   const pending = database.read((view) =>
+    // Plan keys are permanent; only one whose event never reached artifact_events is unsettled.
     view.all<{ operationId: string }>(
-      'SELECT DISTINCT original_operation_id AS operationId FROM pending_plan_keys ORDER BY original_operation_id'
+      `SELECT DISTINCT k.original_operation_id AS operationId FROM pending_plan_keys k
+        LEFT JOIN artifact_events e ON e.event_id = k.event_id
+        WHERE e.event_id IS NULL ORDER BY k.original_operation_id`
     )
   ).value;
   for (const { operationId } of pending) {
@@ -684,7 +684,10 @@ function pendingPlanCheck(database: ProjectDatabase): DoctorCheck {
         name: 'plan-idempotency',
         status: 'warn',
         summary: `${pending.length} plan capture operation(s) retain unsettled idempotency ownership`,
-        details: pending.map(({ operationId }) => `  - ${operationId}`),
+        details: [
+          ...pending.map(({ operationId }) => `  - ${operationId}`),
+          'Re-run each original plan capture with the same input and idempotency key to finish its admission.',
+        ],
       }
     : {
         name: 'plan-idempotency',

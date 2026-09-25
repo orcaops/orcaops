@@ -71,9 +71,9 @@ const DIST_DEPENDENCIES = {
   '@orcaops/evaluator-pack': '0.1.0',
   '@orcaops/evaluator-protocol': '0.1.0',
   '@orcaops/evaluator-sdk': '0.1.0',
-  '@orcaops/protocol': '0.0.26',
-  '@orcaops/sdk': '0.1.23',
-  '@orcaops/diff-fingerprint': '0.0.8',
+  '@orcaops/protocol': '0.0.27',
+  '@orcaops/sdk': '0.1.24',
+  '@orcaops/diff-fingerprint': '0.0.9',
 };
 // The compiled Watch UI ships as one os/cpu-filtered optional package per
 // platform, versioned with the CLI that launches it; npm installs the one that

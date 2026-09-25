@@ -4,10 +4,15 @@ import type { AppendProjectArtifactEvents } from './artifacts.js';
 import type { ProjectDatabase } from './connection.js';
 import { ProjectDatabaseError } from './errors.js';
 import {
+  pendingEvaluatorEvidenceRows,
+  restorePendingEvaluatorEvidence,
+} from './evaluator-findings.js';
+import {
   type CaptureExecutionContext,
   type prepareExecutionCaptureRequest,
   restoreExecutionCaptureRequest,
 } from './execution-capture.js';
+import { type PreparedTaskUses, restoreAcceptedPlanTaskUses } from './knowledge-task-uses.js';
 import { insertPendingPlanKeys } from './pending-plan-keys.js';
 import {
   preparePlanCaptureInsertion,
@@ -76,11 +81,21 @@ export function assertCaptureRetentionInput(
   }
 }
 
-export function insertPendingCapture(tx: ProjectSettlement, capture: CapturePreparation): void {
+/**
+ * `withoutModel` is the staging invocation's no-LLM choice. It is retained here
+ * because the settlement can run from a later invocation that sees only this
+ * row, and that invocation's own choice must never decide what a capture it did
+ * not make sends to a model.
+ */
+export function insertPendingCapture(
+  tx: ProjectSettlement,
+  capture: CapturePreparation,
+  withoutModel: boolean
+): void {
   const { request, execution } = capture;
   const context = execution.context;
   tx.run(
-    'INSERT INTO pending_capture_requests VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO pending_capture_requests VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     request.operationId,
     execution.kind,
     context.repository_instance_id,
@@ -88,7 +103,8 @@ export function insertPendingCapture(tx: ProjectSettlement, capture: CapturePrep
     context.git_context.branch,
     context.git_context.head_sha,
     execution.kind === 'create' ? execution.ts : null,
-    execution.kind === 'create' ? null : Number(execution.explicitTarget)
+    execution.kind === 'create' ? null : Number(execution.explicitTarget),
+    Number(withoutModel)
   );
   request.incoming.forEach(({ event, bytes, sidecar }, index) =>
     tx.run(
@@ -104,6 +120,17 @@ export function insertPendingCapture(tx: ProjectSettlement, capture: CapturePrep
       sidecar === null ? null : digest(sidecar)
     )
   );
+  if (request.evidence)
+    pendingEvaluatorEvidenceRows(request.evidence).forEach((row, index) =>
+      tx.run(
+        'INSERT INTO pending_capture_evaluator_evidence VALUES (?, ?, ?, ?, ?)',
+        request.operationId,
+        row.runId,
+        index,
+        row.bytes,
+        row.producerPayload
+      )
+    );
   insertPendingPlanKeys(tx, capture);
 }
 
@@ -120,8 +147,9 @@ export function readProjectPendingCapture(handle: ProjectDatabase, originalOpera
       head: string | null;
       createdAt: string | null;
       explicit: number | null;
+      withoutModel: number;
     }>(
-      'SELECT capture_kind AS kind, repository_instance_id AS repository, worktree_id AS worktree, branch, head_oid AS head, created_at AS createdAt, explicit_target AS explicit FROM pending_capture_requests WHERE original_operation_id = ?',
+      'SELECT capture_kind AS kind, repository_instance_id AS repository, worktree_id AS worktree, branch, head_oid AS head, created_at AS createdAt, explicit_target AS explicit, without_model AS withoutModel FROM pending_capture_requests WHERE original_operation_id = ?',
       originalOperationId
     );
     if (!request) return { retention, request: null, rows: [], receipt: null };
@@ -138,6 +166,12 @@ export function readProjectPendingCapture(handle: ProjectDatabase, originalOpera
       'SELECT ordinal, event_id AS eventId, event_type AS type, hex(event_bytes) AS bytes, CASE WHEN sidecar_bytes IS NULL THEN NULL ELSE hex(sidecar_bytes) END AS sidecar, event_checksum AS checksum, record_hash AS hash, sidecar_hash AS sidecarHash FROM pending_capture_events WHERE original_operation_id = ? ORDER BY ordinal',
       originalOperationId
     );
+    const evidence = view.all<{ bytes: string; producerPayload: string | null }>(
+      `SELECT hex(evidence_bytes) AS bytes,
+          CASE WHEN producer_payload_bytes IS NULL THEN NULL ELSE hex(producer_payload_bytes) END AS producerPayload
+         FROM pending_capture_evaluator_evidence WHERE original_operation_id = ? ORDER BY position`,
+      originalOperationId
+    );
     const receipt = view.get<{ kind: string; target: string; payload: string; expected: string }>(
       'SELECT operation_kind AS kind, target_json AS target, payload_json AS payload, expected_state_json AS expected FROM operations WHERE operation_id = ?',
       retention.input.admissionOperationId
@@ -146,7 +180,7 @@ export function readProjectPendingCapture(handle: ProjectDatabase, originalOpera
       receipt?.kind === 'plan.capture.retention.begin'
         ? selectPlanCaptureCommand(view, { originalOperationId })
         : null;
-    return { retention, request, rows, receipt, planCommand };
+    return { retention, request, rows, evidence, receipt, planCommand };
   });
   const value = observed.value;
   if (!value) return { value: null, counters: observed.counters };
@@ -157,7 +191,7 @@ export function readProjectPendingCapture(handle: ProjectDatabase, originalOpera
     );
   }
   try {
-    const { retention, request, rows, receipt } = value;
+    const { retention, request, rows, evidence, receipt } = value;
     const target = retention.input.target;
     if (target.kind !== 'capture' || !rows.length || !receipt) retentionIntegrity();
     const context = {
@@ -177,7 +211,10 @@ export function readProjectPendingCapture(handle: ProjectDatabase, originalOpera
           };
     if (
       (request.kind === 'create') !== (request.createdAt !== null) ||
-      (request.kind === 'create' ? request.explicit !== null : ![0, 1].includes(request.explicit!))
+      (request.kind === 'create'
+        ? request.explicit !== null
+        : ![0, 1].includes(request.explicit!)) ||
+      ![0, 1].includes(request.withoutModel)
     )
       retentionIntegrity();
     const input: PendingCaptureInput = {
@@ -190,6 +227,17 @@ export function readProjectPendingCapture(handle: ProjectDatabase, originalOpera
         .map((row) => ({ eventId: row.eventId, bytes: Buffer.from(row.sidecar!, 'hex') })),
       secretAllow: [],
       execution,
+      ...(evidence.length
+        ? {
+            evaluatorEvidence: restorePendingEvaluatorEvidence(
+              evidence.map((row) => ({
+                bytes: Buffer.from(row.bytes, 'hex'),
+                producerPayload:
+                  row.producerPayload === null ? null : Buffer.from(row.producerPayload, 'hex'),
+              }))
+            ),
+          }
+        : {}),
     };
     const restored = restoreExecutionCaptureRequest(handle, input);
     if (restored.request.incoming.length !== rows.length) retentionIntegrity();
@@ -209,10 +257,15 @@ export function readProjectPendingCapture(handle: ProjectDatabase, originalOpera
     const mode = receipt.kind === 'import.retention.begin' ? 'import' : 'capture';
     const originalOperation = captureRetentionOperation(restored, retention.input, mode);
     let operation: ReturnType<typeof captureRetentionOperation> = originalOperation;
+    // The uses the staging invocation named travel with the request itself, in the original plan
+    // input the admission retained, so the settlement writes exactly what the interrupted one
+    // would have and no later invocation's own input can reach them.
+    let acceptedPlanCommand: Parameters<typeof restoreAcceptedPlanTaskUses>[0] | null = null;
     if (receipt.kind === 'plan.capture.retention.begin') {
       if (!value.planCommand) retentionIntegrity();
       const { command } = restorePlanCaptureCommand(value.planCommand);
       const plan = preparePlanCaptureInsertion(command, restored, originalOperation.operationId);
+      acceptedPlanCommand = command;
       operation = {
         ...originalOperation,
         kind: 'plan.capture.retention.begin',
@@ -226,7 +279,18 @@ export function readProjectPendingCapture(handle: ProjectDatabase, originalOpera
       receipt.expected !== canonicalJson(operation.expectedState)
     )
       retentionIntegrity();
-    return { value: { capture: input, retention, mode }, counters: observed.counters };
+    const planUses: PreparedTaskUses | null =
+      acceptedPlanCommand === null ? null : restoreAcceptedPlanTaskUses(acceptedPlanCommand);
+    return {
+      value: {
+        capture: input,
+        retention,
+        mode,
+        withoutModel: request.withoutModel === 1,
+        planUses,
+      },
+      counters: observed.counters,
+    };
   } catch (cause) {
     throw new ProjectDatabaseError(
       'HISTORY_INTEGRITY_REQUIRED',

@@ -341,4 +341,72 @@ describe('buildBranchDigestData', () => {
     expect(markdown).toContain('## unreadable artifacts');
     expect(markdown).toContain('`unreadable-repository-artifact`');
   });
+
+  it('names the checkpoints of a checkpoint-scoped violation', () => {
+    const data = buildBranchDigestData({
+      range,
+      artifacts: [
+        {
+          data: digest('primary', 'Scoped', 'Done.', {
+            process_notes: [
+              {
+                evaluator_ref: 'core/non-goals-violated',
+                phase: 'checkpoint-close',
+                severity: 'warn',
+                status: 'violation',
+                violation_checkpoints: [3],
+                body: 'Non-goal crossed',
+                ts: '2026-01-01T00:00:00.000Z',
+              },
+            ],
+          }),
+          state: 'summarized',
+          order: 1,
+          anchors: [],
+          matched_anchors: [],
+        },
+      ],
+    });
+    expect(renderBranchDigestMarkdown(data)).toContain(
+      '- **violation at checkpoint 3** `core/non-goals-violated` (checkpoint-close;'
+    );
+  });
+
+  it('lists a later error beside a checkpoint-scoped violation', () => {
+    const data = buildBranchDigestData({
+      range,
+      artifacts: [
+        {
+          data: digest('primary', 'Scoped', 'Done.', {
+            release_checks: [
+              {
+                evaluator_ref: 'test-pack/scoped',
+                phase: 'checkpoint-close',
+                severity: 'block',
+                status: 'violation',
+                violation_checkpoints: [1],
+                latest_error: {
+                  checkpoint_n: 2,
+                  body: 'ERROR (LLM_ERROR)\n\nprovider timed out',
+                  ts: '2026-01-01T00:02:00.000Z',
+                },
+                body: 'Scope crossed',
+                ts: '2026-01-01T00:01:00.000Z',
+              },
+            ],
+          }),
+          state: 'summarized',
+          order: 1,
+          anchors: [],
+          matched_anchors: [],
+        },
+      ],
+    });
+    expect(renderBranchDigestMarkdown(data)).toContain(
+      '- **violation at checkpoint 1; error at checkpoint 2** `test-pack/scoped` (checkpoint-close;'
+    );
+    expect(renderBranchDigestMarkdown(data)).toContain(
+      '  > Scope crossed\n  > **Latest run errored at checkpoint 2:**\n  > ERROR (LLM_ERROR)\n  > \n  > provider timed out'
+    );
+  });
 });

@@ -79,7 +79,7 @@ describe('runFixture', () => {
       const fs = require('fs');
       const ctx = JSON.parse(fs.readFileSync(process.env.${ORCAOPS_CONTEXT_PATH_ENV}, 'utf8'));
       process.stdout.write(JSON.stringify({
-        schema: 'orcaops.evaluator_result/v1',
+        schema: 'orcaops.evaluator_result/v2',
         verdict: 'pass',
         body: 'PASS\\n\\nref=' + ctx.evaluator_ref,
       }));
@@ -136,7 +136,7 @@ describe('runFixture', () => {
     const runtime = path.join(scratch, 'wrong-shape.cjs');
     await writeFile(
       runtime,
-      `process.stdout.write(JSON.stringify({ schema: 'wrong', verdict: 'pass', body: 'x' }));`,
+      `process.stdout.write(JSON.stringify({ schema: 'orcaops.evaluator_result/v2', verdict: 'nope', body: 'x' }));`,
       'utf8'
     );
     await expect(
@@ -148,12 +148,71 @@ describe('runFixture', () => {
     ).rejects.toThrow(/schema validation/);
   });
 
+  it('tells an author to upgrade when the runtime emits a superseded envelope', async () => {
+    // A pack built against the old SDK fails here rather than in production,
+    // and with the one wording the runner would have used.
+    const runtime = path.join(scratch, 'old-protocol.cjs');
+    await writeFile(
+      runtime,
+      `process.stdout.write(JSON.stringify({ schema: 'orcaops.evaluator_result/v1', verdict: 'pass', body: 'x' }));`,
+      'utf8'
+    );
+    await expect(
+      runFixture({
+        command: [process.execPath, runtime],
+        cwd: scratch,
+        context: fixtureContext(),
+      })
+    ).rejects.toThrow(/unsupported protocol[\s\S]*@orcaops\/evaluator-sdk/);
+  });
+
+  it('parses the findings an envelope carries', async () => {
+    const runtime = path.join(scratch, 'with-findings.cjs');
+    await writeFile(
+      runtime,
+      `process.stdout.write(JSON.stringify({
+        schema: 'orcaops.evaluator_result/v2',
+        verdict: 'violation',
+        body: 'VIOLATION',
+        findings: [{ key: 'rule/one', title: 'what it found' }],
+      }));`,
+      'utf8'
+    );
+    const result = await runFixture({
+      command: [process.execPath, runtime],
+      cwd: scratch,
+      context: fixtureContext(),
+    });
+    expect(result.envelope.findings).toEqual([{ key: 'rule/one', title: 'what it found' }]);
+  });
+
+  it('throws on a malformed finding, naming the field', async () => {
+    const runtime = path.join(scratch, 'bad-finding.cjs');
+    await writeFile(
+      runtime,
+      `process.stdout.write(JSON.stringify({
+        schema: 'orcaops.evaluator_result/v2',
+        verdict: 'violation',
+        body: 'VIOLATION',
+        findings: [{ title: 'a statement', conclusion: 'supported' }],
+      }));`,
+      'utf8'
+    );
+    await expect(
+      runFixture({
+        command: [process.execPath, runtime],
+        cwd: scratch,
+        context: fixtureContext(),
+      })
+    ).rejects.toThrow(/findings\.0\.conclusion/);
+  });
+
   it('forwards optional metrics + raw fields through the envelope', async () => {
     const runtime = path.join(scratch, 'rich.cjs');
     await writeFile(
       runtime,
       `process.stdout.write(JSON.stringify({
-        schema: 'orcaops.evaluator_result/v1',
+        schema: 'orcaops.evaluator_result/v2',
         verdict: 'violation',
         body: 'V',
         raw: { found: 3 },
@@ -180,7 +239,7 @@ describe('runFixture', () => {
     await writeFile(
       runtime,
       `process.stdout.write(JSON.stringify({
-        schema: 'orcaops.evaluator_result/v1',
+        schema: 'orcaops.evaluator_result/v2',
         verdict: 'info',
         body: 'INFO\\n\\nctx-path-tail=' + process.env.${ORCAOPS_CONTEXT_PATH_ENV}.split('/').pop(),
       }));`,

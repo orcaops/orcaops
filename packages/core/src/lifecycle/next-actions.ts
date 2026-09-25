@@ -44,6 +44,7 @@ export interface SemanticAction {
   checkpoint_n?: number;
   /** checkpoint-open declared scope (uncovered steps); also the rejected scope on an open-retry. */
   step_ids?: string[];
+  criterion_ids?: string[];
   /** block-acknowledge / block-dismiss target. */
   evaluator_ref?: string;
   run_id?: string;
@@ -74,6 +75,8 @@ export interface UnresolvedBlock {
 export interface OpenCheckpoint {
   n: number;
   declared_step_ids: string[];
+  /** From the plan revision the checkpoint opened against; absent when unresolved. */
+  criterion_ids?: string[];
 }
 
 /**
@@ -228,6 +231,7 @@ export function nextActions(s: LifecycleSnapshot): SemanticAction[] {
       artifact_id: s.artifact_id,
       checkpoint_n: cp.n,
       step_ids: cp.declared_step_ids,
+      ...(cp.criterion_ids === undefined ? {} : { criterion_ids: cp.criterion_ids }),
       effect: `Close in-flight checkpoint ${cp.n} once its declared work is done — then open the next checkpoint before you change the worktree.`,
     });
   }

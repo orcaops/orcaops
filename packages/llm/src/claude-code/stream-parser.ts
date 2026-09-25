@@ -48,6 +48,18 @@ export interface ClaudeResultEvent {
   numTurns?: number;
   /** Session id reported by the CLI (matches what we passed in). */
   sessionId?: string;
+  /** The schema-validated answer the CLI reports when `--json-schema` was passed. */
+  structuredOutput?: unknown;
+  /** Why generation stopped, when the CLI says. */
+  stopReason?: string;
+  /** Names of the tools the CLI says it refused the model. */
+  permissionDenials?: string[];
+  /**
+   * The usage counters exactly as reported, with nothing defaulted. `tokens`
+   * fills a missing counter with zero; a caller that must tell "zero" from
+   * "not reported" reads this instead.
+   */
+  reportedUsage?: { in?: number; out?: number; cacheRead?: number; cacheWrite?: number };
 }
 
 /**
@@ -59,6 +71,11 @@ export interface ClaudeResultEvent {
  * `undefined`, and unexpected types are silently dropped.
  */
 export function parseClaudeStreamLine(line: string): ClaudeResultEvent | null {
+  const obj = parseStreamObject(line);
+  return obj === null ? null : resultEventFrom(obj);
+}
+
+function parseStreamObject(line: string): Record<string, unknown> | null {
   const trimmed = line.trim();
   if (trimmed.length === 0) return null;
 
@@ -69,8 +86,10 @@ export function parseClaudeStreamLine(line: string): ClaudeResultEvent | null {
     return null;
   }
   if (typeof json !== 'object' || json === null) return null;
+  return json as Record<string, unknown>;
+}
 
-  const obj = json as Record<string, unknown>;
+function resultEventFrom(obj: Record<string, unknown>): ClaudeResultEvent | null {
   if (obj.type !== 'result') return null;
 
   const body = typeof obj.result === 'string' ? obj.result : '';
@@ -85,8 +104,19 @@ export function parseClaudeStreamLine(line: string): ClaudeResultEvent | null {
   }
 
   let tokens: ClaudeResultEvent['tokens'];
+  let reportedUsage: ClaudeResultEvent['reportedUsage'];
   if (obj.usage && typeof obj.usage === 'object') {
     const usage = obj.usage as Record<string, unknown>;
+    reportedUsage = {
+      ...(typeof usage.input_tokens === 'number' ? { in: usage.input_tokens } : {}),
+      ...(typeof usage.output_tokens === 'number' ? { out: usage.output_tokens } : {}),
+      ...(typeof usage.cache_read_input_tokens === 'number'
+        ? { cacheRead: usage.cache_read_input_tokens }
+        : {}),
+      ...(typeof usage.cache_creation_input_tokens === 'number'
+        ? { cacheWrite: usage.cache_creation_input_tokens }
+        : {}),
+    };
     const tIn = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
     const tOut = typeof usage.output_tokens === 'number' ? usage.output_tokens : 0;
     const tCacheRead =
@@ -112,6 +142,18 @@ export function parseClaudeStreamLine(line: string): ClaudeResultEvent | null {
   }
   const numTurns = typeof obj.num_turns === 'number' ? obj.num_turns : undefined;
   const sessionId = typeof obj.session_id === 'string' ? obj.session_id : undefined;
+  const structuredOutput =
+    obj.structured_output !== undefined && obj.structured_output !== null
+      ? obj.structured_output
+      : undefined;
+  const stopReason = typeof obj.stop_reason === 'string' ? obj.stop_reason : undefined;
+  let permissionDenials: string[] | undefined;
+  if (Array.isArray(obj.permission_denials) && obj.permission_denials.length > 0) {
+    permissionDenials = obj.permission_denials.map((denial: unknown) => {
+      const name = isRecord(denial) ? denial.tool_name : undefined;
+      return typeof name === 'string' && name.length > 0 ? name : 'unknown';
+    });
+  }
 
   return {
     body,
@@ -123,7 +165,114 @@ export function parseClaudeStreamLine(line: string): ClaudeResultEvent | null {
     errorMessages,
     numTurns,
     sessionId,
+    structuredOutput,
+    stopReason,
+    permissionDenials,
+    reportedUsage,
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export interface ClaudeInitEvent {
+  /** The tools offered to the model; null when an init event did not list them. */
+  tools: string[] | null;
+  mcpServers: Array<{ name: string; status: string | null }>;
+}
+
+export interface ClaudeToolUse {
+  id: string | null;
+  name: string;
+}
+
+export interface ClaudeStreamSummary {
+  /** Every `result` event in order. A well-formed stream carries exactly one. */
+  results: ClaudeResultEvent[];
+  /** What the init events said the session offers; null when there was none. */
+  init: ClaudeInitEvent | null;
+  /** Tool calls by the model, from whole assistant messages and partial stream events alike. */
+  toolUses: ClaudeToolUse[];
+  /** Tool results handed back to the model, by the call they answer. */
+  toolResults: Array<{ toolUseId: string | null }>;
+  lastAssistantStopReason: string | null;
+}
+
+/**
+ * Read a complete, already-collected stream. The caller bounds the text it
+ * passes, which is what keeps the line buffer bounded on a stream with no
+ * newline.
+ */
+export function summarizeClaudeStream(stdout: string): ClaudeStreamSummary {
+  const buffer = new LineBuffer();
+  const lines = [...buffer.push(stdout), buffer.flush()];
+  const summary: ClaudeStreamSummary = {
+    results: [],
+    init: null,
+    toolUses: [],
+    toolResults: [],
+    lastAssistantStopReason: null,
+  };
+  for (const line of lines) {
+    const obj = parseStreamObject(line);
+    if (obj === null) continue;
+    const result = resultEventFrom(obj);
+    if (result !== null) summary.results.push(result);
+    if (obj.type === 'system' && obj.subtype === 'init') {
+      summary.init = mergeInit(summary.init, obj);
+    } else if (obj.type === 'assistant') {
+      const message = isRecord(obj.message) ? obj.message : {};
+      summary.toolUses.push(...contentBlocks(message).flatMap(toolUseFrom));
+      if (typeof message.stop_reason === 'string') {
+        summary.lastAssistantStopReason = message.stop_reason;
+      }
+    } else if (obj.type === 'user') {
+      const message = isRecord(obj.message) ? obj.message : {};
+      summary.toolResults.push(...contentBlocks(message).flatMap(toolResultFrom));
+    } else if (obj.type === 'stream_event' && isRecord(obj.event)) {
+      summary.toolUses.push(...toolUseFrom(obj.event.content_block));
+    }
+  }
+  return summary;
+}
+
+function mergeInit(earlier: ClaudeInitEvent | null, obj: Record<string, unknown>): ClaudeInitEvent {
+  const listed = Array.isArray(obj.tools)
+    ? obj.tools.filter((tool): tool is string => typeof tool === 'string')
+    : null;
+  const servers = Array.isArray(obj.mcp_servers) ? obj.mcp_servers.filter(isRecord) : [];
+  const mcpServers = servers.map((server) => ({
+    name: typeof server.name === 'string' ? server.name : 'unknown',
+    status: typeof server.status === 'string' ? server.status : null,
+  }));
+  if (earlier === null) return { tools: listed, mcpServers };
+  return {
+    tools: earlier.tools === null || listed === null ? null : [...earlier.tools, ...listed],
+    mcpServers: [...earlier.mcpServers, ...mcpServers],
+  };
+}
+
+function contentBlocks(message: Record<string, unknown>): unknown[] {
+  return Array.isArray(message.content) ? message.content : [];
+}
+
+function toolUseFrom(block: unknown): ClaudeToolUse[] {
+  if (!isRecord(block)) return [];
+  // Covers `tool_use`, `server_tool_use`, and `mcp_tool_use` blocks alike.
+  if (typeof block.type !== 'string' || !block.type.endsWith('tool_use')) return [];
+  return [
+    {
+      id: typeof block.id === 'string' ? block.id : null,
+      name: typeof block.name === 'string' && block.name.length > 0 ? block.name : 'unknown',
+    },
+  ];
+}
+
+function toolResultFrom(block: unknown): Array<{ toolUseId: string | null }> {
+  if (!isRecord(block)) return [];
+  if (typeof block.type !== 'string' || !block.type.endsWith('tool_result')) return [];
+  return [{ toolUseId: typeof block.tool_use_id === 'string' ? block.tool_use_id : null }];
 }
 
 /**

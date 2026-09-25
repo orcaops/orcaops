@@ -1,0 +1,1503 @@
+{
+  "fixture": "Project database written by the published @orcaops/cli 0.2.0",
+  "producer": {
+    "package": "@orcaops/cli",
+    "version": "0.2.0",
+    "registry": {
+      "integrity": "sha512-DFg3kVgrk50FeToQ+ex4A1AkDvwRZd2FPOEwLpxDoghUQawQvchInY7NRs8+RfdGzjWMWJ5qGnTUQW4jsL2hBw==",
+      "shasum": "ca88e16affc03d00a08b3f7d0ecb1a20f1de2c7e",
+      "tarball": "https://registry.npmjs.org/@orcaops/cli/-/cli-0.2.0.tgz"
+    },
+    "tarball": {
+      "integrity": "sha512-DFg3kVgrk50FeToQ+ex4A1AkDvwRZd2FPOEwLpxDoghUQawQvchInY7NRs8+RfdGzjWMWJ5qGnTUQW4jsL2hBw==",
+      "shasum": "ca88e16affc03d00a08b3f7d0ecb1a20f1de2c7e",
+      "bytes": 5717099
+    },
+    "installed": {
+      "version": "0.2.0",
+      "resolved": "https://registry.npmjs.org/@orcaops/cli/-/cli-0.2.0.tgz",
+      "integrity": "sha512-DFg3kVgrk50FeToQ+ex4A1AkDvwRZd2FPOEwLpxDoghUQawQvchInY7NRs8+RfdGzjWMWJ5qGnTUQW4jsL2hBw==",
+      "reported_version": "0.2.0"
+    },
+    "dependencies": [
+      {
+        "path": "node_modules/@napi-rs/keyring",
+        "version": "1.3.0",
+        "integrity": "sha512-WrOw/bcXm0f9qHkumlT1QlArXSTWqaY9sunsDpOk+yCCorCKMxvWT/a3xko4EYHVdeZoh00yI2TydXn6eyICDA=="
+      },
+      {
+        "path": "node_modules/@napi-rs/keyring-darwin-arm64",
+        "version": "1.3.0",
+        "integrity": "sha512-pl76hJvdYUBn6I24bXiOBMA9nbDapo3I5B+f3OorjDU4dUMSypXeKbOVehJe8fhgTiH24flMyTS3aAIy43xegQ=="
+      },
+      {
+        "path": "node_modules/@orcaops/cli/node_modules/@orcaops/evaluator-pack",
+        "version": "0.1.0",
+        "bundled": true
+      },
+      {
+        "path": "node_modules/@orcaops/cli/node_modules/@orcaops/evaluator-protocol",
+        "version": "0.1.0",
+        "bundled": true
+      },
+      {
+        "path": "node_modules/@orcaops/cli/node_modules/@orcaops/evaluator-sdk",
+        "version": "0.1.0",
+        "bundled": true
+      },
+      {
+        "path": "node_modules/@orcaops/cli/node_modules/picomatch",
+        "version": "4.0.4",
+        "bundled": true
+      },
+      {
+        "path": "node_modules/@orcaops/cli/node_modules/typescript",
+        "version": "5.9.2",
+        "bundled": true
+      },
+      {
+        "path": "node_modules/@orcaops/cli/node_modules/zod",
+        "version": "4.4.3",
+        "bundled": true
+      },
+      {
+        "path": "node_modules/@orcaops/diff-fingerprint",
+        "version": "0.0.8",
+        "integrity": "sha512-ua3zt9vU2g2TWRieVrOR19wPMQnfdUOOhFFM9sZFX6AfUytBHJ12KcyVuPC/Ovn0qgIp5MZOnuXzvPLT4rDYfQ=="
+      },
+      {
+        "path": "node_modules/@orcaops/protocol",
+        "version": "0.0.26",
+        "integrity": "sha512-aabywroQH6QMYAhmV/b6RWdRCDCHtmzy1rSAjL0iHnKd4Mq7BKL5ytUkj8zl+/jVEYJHzI/qU6ZSRrazElUc3A=="
+      },
+      {
+        "path": "node_modules/@orcaops/sdk",
+        "version": "0.1.23",
+        "integrity": "sha512-4cX/7HBt+gA6l1t5uQTa2FoTSgVUZZY2bCUH2vx/dFcxtWhs2mamYzpg6ssvBbA4hCJHYX1vRErn2tzBvbspUQ=="
+      },
+      {
+        "path": "node_modules/@orcaops/watch-darwin-arm64",
+        "version": "0.2.0",
+        "integrity": "sha512-YIUEnCu1q7LoJMP7Tl4kpWOyGuf1DJQU0i1847GLuuPe4UTPQNilVai30GoS0cb+gE3Gq6kCn+xiPgMi40bhbw=="
+      },
+      {
+        "path": "node_modules/better-sqlite3",
+        "version": "13.0.3",
+        "integrity": "sha512-RbOBxmLBG8uvFUc15X9+9SFemKcQ0WBuISBVkpuiaUB2qblC8UWlHEjdWVoZ8AdhSwmoEgsiXKfopX0CQxaACQ=="
+      },
+      {
+        "path": "node_modules/canonicalize",
+        "version": "3.0.0",
+        "integrity": "sha512-yYLfHyDMIXRyRqsKBRLX023riFLpXY2YOfdtqKXZRZy9qsfOJ9U+4F9YZL7MEzL5+ziN2x2nlBvY/Voi3EBljA=="
+      },
+      {
+        "path": "node_modules/hash-wasm",
+        "version": "4.12.0",
+        "integrity": "sha512-+/2B2rYLb48I/evdOIhP+K/DD2ca2fgBjp6O+GBEnCDk2e4rpeXIK8GvIyRPjTezgmWn9gmKwkQjjx6BtqDHVQ=="
+      },
+      {
+        "path": "node_modules/node-addon-api",
+        "version": "8.9.2",
+        "integrity": "sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg=="
+      },
+      {
+        "path": "node_modules/zod",
+        "version": "4.6.5",
+        "integrity": "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q=="
+      }
+    ],
+    "runtime": {
+      "node": "v22.14.0",
+      "modules_abi": "127",
+      "platform": "darwin",
+      "arch": "arm64"
+    },
+    "sqlite_driver": {
+      "package": "better-sqlite3",
+      "version": "13.0.3",
+      "sqlite_version": "3.53.4",
+      "addon": "prebuilds/darwin-arm64.node",
+      "addon_sha256": "98e0e8acd01c632fe5615243e1296af0372826f8783b18fc31c506f73c47459c"
+    }
+  },
+  "generation": {
+    "command": "node packages/storage/tests/released-producer-database.generate.mjs 0.2.0 <output-dir>",
+    "procedure_sha256": {
+      "released-producer-database.generate.mjs": "8f3df8f67014656e9bac4058f9c33b55f0d174a953be17c55429d93818f9a422",
+      "released-producer-support.mjs": "922abb759427c962418995d075fdbad1efb2f969cd8f8a451b7c708cebe47427"
+    },
+    "captured_events_between": ["2026-09-17T13:27:27.240Z", "2026-09-17T13:28:27.888Z"],
+    "workflow": [
+      {
+        "worktree": "repo",
+        "command": "init --yes --no-llm --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "eval add-pack @orcaops/evaluator-pack core --yes --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "seed --path src --since 2026-08-01 --dry-run --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "seed --path src --since 2026-08-01 --yes --enrichment-dir repo/.orcaops/cache/seed/pending --json --invoked-by-agent claude-code",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "seed enrich --artifact 019fcc00-4e80-7591-b144-f1ff7bfa4463 --dry-run --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "seed enrich --artifact 019fcc00-4e80-7591-b144-f1ff7bfa4463 --yes --enrichment-dir repo/.orcaops/cache/seed/amend/019fcc00-4e80-7591-b144-f1ff7bfa4463 --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "capture plan --invoked-by-agent claude-code --no-llm --source-plan docs/rate-limit-plan.md --input inputs/01-capture-plan.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "checkout 01a0af8c-fb08-70c7-ade8-70732d6f9287 --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "seed status --offered docs --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "seed status --decline src --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "capture checkpoint open --invoked-by-agent claude-code --no-llm --input inputs/02-capture-checkpoint-open.json",
+        "exit_code": 1,
+        "ok": false,
+        "error": "INVALID_INPUT"
+      },
+      {
+        "worktree": "repo",
+        "command": "capture checkpoint open --invoked-by-agent claude-code --no-llm --input inputs/03-capture-checkpoint-open.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "capture checkpoint close --invoked-by-agent claude-code --no-llm --input inputs/04-capture-checkpoint-close.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "lineage --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "capture plan revise --invoked-by-agent claude-code --no-llm --input inputs/05-capture-plan-revise.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "capture checkpoint open --invoked-by-agent claude-code --no-llm --input inputs/06-capture-checkpoint-open.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "capture checkpoint abandon --invoked-by-agent claude-code --input inputs/07-capture-checkpoint-abandon.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "capture checkpoint open --invoked-by-agent claude-code --no-llm --input inputs/08-capture-checkpoint-open.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "capture checkpoint close --invoked-by-agent claude-code --no-llm --input inputs/09-capture-checkpoint-close.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "eval run --ref core/plan-mentions-tests --artifact 01a0af8c-fb08-70c7-ade8-70732d6f9287 --no-llm --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "capture pre-pr-check --invoked-by-agent claude-code --no-llm --input inputs/10-capture-pre-pr-check.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "capture summary --invoked-by-agent claude-code --input inputs/11-capture-summary.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "capture summary --invoked-by-agent claude-code --input inputs/12-capture-summary.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "review routine-start --branch rate-limit --json",
+        "exit_code": 1,
+        "ok": false,
+        "error": "Floor references a checkpoint not closed in its exact member revision"
+      },
+      {
+        "worktree": "repo",
+        "command": "capture plan --invoked-by-agent claude-code --no-llm --input inputs/13-capture-plan.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "capture checkpoint open --invoked-by-agent claude-code --no-llm --input inputs/14-capture-checkpoint-open.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "capture checkpoint close --invoked-by-agent claude-code --no-llm --input inputs/15-capture-checkpoint-close.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "capture summary --invoked-by-agent claude-code --input inputs/16-capture-summary.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo",
+        "command": "review data --branch retry-header --base 72c5b6a9bfa42951571126b9aafa0abf14abc100 --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review routine-start --branch retry-header --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review routine-submit --branch retry-header --run eb9f283c-71cc-4be7-b798-dc15ecef221d --lane forensic --isolation sequential --json --input inputs/17-review-routine-submit.json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review routine-submit --branch retry-header --run eb9f283c-71cc-4be7-b798-dc15ecef221d --lane forensic --isolation sequential --json --input inputs/18-review-routine-submit.json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review routine-submit --branch retry-header --run eb9f283c-71cc-4be7-b798-dc15ecef221d --lane account --isolation sequential --json --input inputs/19-review-routine-submit.json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review run-show --branch retry-header --run eb9f283c-71cc-4be7-b798-dc15ecef221d --semantic-input --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review semantic-anchor-submit --branch retry-header --run eb9f283c-71cc-4be7-b798-dc15ecef221d --profile semantic-anchor-profile-v1 --json --input inputs/20-review-semantic-anchor-submit.json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review anchor --branch retry-header --file src/charge.js --side add --start 2 --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review comment add --branch retry-header --input {\"author\":\"reviewer\",\"body\":\"Synthetic reviewer comment: should the threshold come from the limiter?\",\"anchor\":{\"kind\":\"DIFF_LINE\",\"file\":\"src/charge.js\",\"side\":\"add\",\"line\":2,\"lineHash\":\"-JvDtFF1q1j5XYZM\",\"hunkKey\":\"hunk_ZkDBZYV58q0\"}} --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review comment reply --id f87ab135-5cff-4fc6-88bb-90b8f8daecb5 --branch retry-header --input {\"author\":\"agent\",\"body\":\"Synthetic agent reply: the threshold stays local until the limiter is mounted.\"} --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review comment resolve --id f87ab135-5cff-4fc6-88bb-90b8f8daecb5 --branch retry-header --author reviewer --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review comment reopen --id f87ab135-5cff-4fc6-88bb-90b8f8daecb5 --branch retry-header --author reviewer --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review pane --branch retry-header --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review journal --branch retry-header --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review journal --branch retry-header --add {\"type\":\"review_lifecycle\",\"ts\":\"2026-09-17T13:28:10.844Z\",\"action\":\"PARTIAL\",\"review_basis\":\"STORY\",\"floor_input_hash\":\"G4f3q-Jy8-U\",\"story_generation\":\"AfmneEik2s0\",\"ledger_generation\":\"rW6Pe-4LmJk\",\"actor\":\"REVIEWER\",\"source\":\"WATCH\",\"remaining_work\":\"Synthetic note: the open comment needs an answer.\"} --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review journal --branch retry-header --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo",
+        "command": "review journal --branch retry-header --add {\"type\":\"review_lifecycle\",\"ts\":\"2026-09-17T13:28:12.059Z\",\"action\":\"REOPEN\",\"review_basis\":\"STORY\",\"floor_input_hash\":\"G4f3q-Jy8-U\",\"story_generation\":\"AfmneEik2s0\",\"ledger_generation\":\"sC3R88HVVCQ\",\"actor\":\"REVIEWER\",\"source\":\"WATCH\"} --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo-docs",
+        "command": "capture plan --invoked-by-agent claude-code --no-llm --input inputs/21-capture-plan.json",
+        "exit_code": 1,
+        "ok": false,
+        "error": "IDENTITY_RECOVERY_REQUIRED"
+      },
+      {
+        "worktree": "repo-docs",
+        "command": "init --yes --no-llm --force --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo-docs",
+        "command": "capture plan --invoked-by-agent claude-code --no-llm --input inputs/22-capture-plan.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo-docs",
+        "command": "capture checkpoint open --invoked-by-agent claude-code --no-llm --input inputs/23-capture-checkpoint-open.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo-docs",
+        "command": "capture checkpoint close --invoked-by-agent claude-code --no-llm --input inputs/24-capture-checkpoint-close.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo-docs",
+        "command": "capture plan revise --invoked-by-agent claude-code --no-llm --input inputs/25-capture-plan-revise.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      },
+      {
+        "worktree": "repo-docs",
+        "command": "capture summary --invoked-by-agent claude-code --input inputs/26-capture-summary.json",
+        "exit_code": 1,
+        "ok": false,
+        "error": "BLOCKED"
+      },
+      {
+        "worktree": "repo-docs",
+        "command": "block acknowledge --artifact 01a0af8d-b5a7-7314-923f-4411ab79fcfc --evaluator core/revision-rationale-required --reason Acknowledgement attempted --json",
+        "exit_code": 1,
+        "ok": false,
+        "error": "BLOCK_NOT_ACKNOWLEDGEABLE"
+      },
+      {
+        "worktree": "repo-docs",
+        "command": "block dismiss --artifact 01a0af8d-b5a7-7314-923f-4411ab79fcfc --evaluator core/revision-rationale-required --reason The one-character rationale was deliberate --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo-docs",
+        "command": "review routine-start --branch limit-docs --json",
+        "exit_code": 0,
+        "ok": true
+      },
+      {
+        "worktree": "repo-docs",
+        "command": "capture checkpoint open --invoked-by-agent claude-code --no-llm --input inputs/27-capture-checkpoint-open.json",
+        "exit_code": 0,
+        "ok": true,
+        "cloud_sync": "skipped:no_cloud_configured"
+      }
+    ],
+    "isolation": {
+      "user_directories": [
+        {
+          "path": "~/.orcaops",
+          "exists": true,
+          "changed": []
+        },
+        {
+          "path": "~/.config/orcaops",
+          "exists": true,
+          "changed": []
+        },
+        {
+          "path": "~/.claude/skills",
+          "exists": true,
+          "changed": []
+        },
+        {
+          "path": "~/.claude/commands",
+          "exists": false,
+          "changed": []
+        },
+        {
+          "path": "~/.claude/settings.json",
+          "exists": true,
+          "changed": []
+        },
+        {
+          "path": "~/.codex/config.toml",
+          "exists": true,
+          "changed": []
+        },
+        {
+          "path": "~/.codex/hooks.json",
+          "exists": true,
+          "changed": []
+        },
+        {
+          "path": "~/.codex/skills",
+          "exists": true,
+          "changed": []
+        },
+        {
+          "path": "~/.codex/prompts",
+          "exists": false,
+          "changed": []
+        },
+        {
+          "path": "~/.codex/AGENTS.md",
+          "exists": true,
+          "changed": []
+        },
+        {
+          "path": "~/.agents",
+          "exists": true,
+          "changed": []
+        },
+        {
+          "path": "~/.gitconfig",
+          "exists": true,
+          "changed": []
+        },
+        {
+          "path": "~/.config/git",
+          "exists": true,
+          "changed": []
+        }
+      ]
+    },
+    "integrity_check": "ok"
+  },
+  "original_database": {
+    "note": "The files the release left, brotli-compressed and base64-encoded. The rows were read through the write-ahead log; a copy of the main file alone holds fewer rows.",
+    "files": [
+      {
+        "name": "history.sqlite3",
+        "bytes": 3141632,
+        "sha256": "3c86fc69a51f230040ac2fc7edafb2124b80e96d0d14068a5e4746f8ec3a2dc2",
+        "stored_as": "history.sqlite3.br.base64",
+        "stored_sha256": "8e0abcb52b6910a7d716d2e5602387db1f8fc604b57d8b48a955b0eff1eecbc6"
+      },
+      {
+        "name": "history.sqlite3-wal",
+        "bytes": 552112,
+        "sha256": "cc21d80d89df37208bff9a9a0355ba4002150ae07d4e1be8074d6c5c62fb9b79",
+        "stored_as": "history.sqlite3-wal.br.base64",
+        "stored_sha256": "47c27c2385efea32aed21fb47efd1e4b6137eca240b413f35985c5338d4cc1c2"
+      }
+    ],
+    "pragmas": {
+      "application_id": 0,
+      "user_version": 29,
+      "journal_mode": "wal",
+      "page_size": 4096,
+      "auto_vacuum": 0,
+      "encoding": "UTF-8",
+      "schema_version": 530
+    },
+    "total_rows": 901,
+    "write_ahead_log": {
+      "page_size": 4096,
+      "checkpoint_sequence": 0,
+      "frames": 134,
+      "rows_in_main_file_alone": 879,
+      "rows_only_in_the_log": 22,
+      "main_file_alone_integrity_check": "ok"
+    }
+  },
+  "schema": {
+    "user_version": 29,
+    "file": "../schema.json",
+    "objects": 530,
+    "object_kinds": {
+      "index": 53,
+      "table": 126,
+      "trigger": 351
+    },
+    "sql_sha256": "6ddee53aff2eae90328c12fb91d84b8214b8e9ee3fcac61f2b4b91c54d1f1c77",
+    "whitespace_normalized_sql_sha256": "85ecc46f5d7662a28bdb571be43a4378b49730af097442b29d2ed336f3f78a73",
+    "shared_definition": "The definitions in ../schema.json were compared byte for byte with this database when it was frozen. Releases that share them can still write different rows: compare content and generation.workflow."
+  },
+  "content": {
+    "sha256": "f51aad108d80f152967642b2b1e253683bcbd7c2afebd5ff0f61ef7186a959e2",
+    "tables": {
+      "activation": {
+        "rows": 1,
+        "sha256": "f9fddbc598b79db42092ffd832a17257de1ed893deb54c6e0790d67f48743f6e"
+      },
+      "artifact_attempt_current": {
+        "rows": 1,
+        "sha256": "dfe97fa79592e439ac3d68ce698ce8647353bb8fa5a5f3c2560a6f2b7f67fca7"
+      },
+      "artifact_attempt_revisions": {
+        "rows": 1,
+        "sha256": "1fae77451e820c0489a4bd22e6edbdcb6ea1382d4ecd59954eab6e0745535da0"
+      },
+      "artifact_baseline_current": {
+        "rows": 3,
+        "sha256": "582fda03e892b02a00fcf7c90156bb5a4e9e53b27ef1ff3a55c1290986c899a2"
+      },
+      "artifact_branches": {
+        "rows": 9,
+        "sha256": "d9dda46838934d36b6f645510668d19d44662b5104791b1297e83a5dbcc89b9f"
+      },
+      "artifact_events": {
+        "rows": 77,
+        "sha256": "3abfabb7d3e147ecc3b84048ef1d9c1947ccb907625af453f04d98d123f7bfca"
+      },
+      "artifact_lifecycle_current": {
+        "rows": 16,
+        "sha256": "fb9cba4a8c3d37d3a1dbdf7a13cd322963f0a427d0054013e18ff4706f60defe"
+      },
+      "artifact_lifecycle_revisions": {
+        "rows": 16,
+        "sha256": "ac8c0658f4ac5cb2e92f4c947141168b72f80576c1bcca498514dd48ff82e247"
+      },
+      "artifact_metadata": {
+        "rows": 6,
+        "sha256": "6cf6c8ec0a1256bfdbe1e62469e2d1482741889f4bff6448cf51353081b9021c"
+      },
+      "artifact_plan_step_history": {
+        "rows": 11,
+        "sha256": "2d447f18d277e63069f786926f309646cf3cdc1b1d9630ed67d3cbdf697667d0"
+      },
+      "artifact_query_metadata": {
+        "rows": 6,
+        "sha256": "fccf614e6f67d91101449976316ebb4d856317268e4c4bf2a14842f3ce1eb198"
+      },
+      "artifact_retention_selections": {
+        "rows": 20,
+        "sha256": "785e95f762952530e1b21fda88201ed1bda90d5335e5192edbd3c8986e7e6090"
+      },
+      "artifact_revisions": {
+        "rows": 42,
+        "sha256": "262cd480b87337d2eae11a37bd7cd51554cdc0c51ff10f05783f4c37b9fbc605"
+      },
+      "artifact_search_sources": {
+        "rows": 81,
+        "sha256": "0fd7448eea1884995af314fd0ec88301ae3663b89538097017ec6e611a2dc892"
+      },
+      "artifact_search_state": {
+        "rows": 6,
+        "sha256": "bf0e0796aa0d49182cccf6abd2674e265e983505a488e060e7314aecad307783"
+      },
+      "artifact_touched_files": {
+        "rows": 7,
+        "sha256": "dd62fca3baba8eb3fa9ab34c6b6f3f639361cabf3bed8cc488a69148ab449b26"
+      },
+      "artifacts": {
+        "rows": 6,
+        "sha256": "ac0aa2b216ffed628ca4709a005e0c8a1eba07f95806f05afd01fa6350a24ce2"
+      },
+      "execution_associations": {
+        "rows": 3,
+        "sha256": "e1a22fe18e17e961c81d31d11dc6d342f4177b91ca3691d95dda28f4be1d5693"
+      },
+      "execution_checkpoint_attributions": {
+        "rows": 6,
+        "sha256": "2750d29ac5e4c43b3ace8bec9b1a5120c33d7aee4d5d46374ada1f4919b9dfbc"
+      },
+      "execution_current": {
+        "rows": 6,
+        "sha256": "0cf9ab1a953888b25d37534651d601127323517b0d82dae8f4711a4a27e54ce0"
+      },
+      "execution_focus_current": {
+        "rows": 2,
+        "sha256": "a9ca304ffb2b6818fb3e0b287456282a918dc818ae4158820774fd2aa21a161e"
+      },
+      "execution_focus_records": {
+        "rows": 6,
+        "sha256": "14905cb0f097a1ed2f50950679bbff01ff51036bb987c3e479a4c565ccacf2b4"
+      },
+      "execution_initializations": {
+        "rows": 6,
+        "sha256": "2db41861a816ffecf4f69752f9708cdfa1570ecbe38b040ebc1ebfc21658a8ef"
+      },
+      "execution_query_branches": {
+        "rows": 3,
+        "sha256": "853661cd084fc5a97e3819d0f90ccf30559fa99c4740268f9b5c2ed1ce0d65b1"
+      },
+      "execution_query_metadata": {
+        "rows": 6,
+        "sha256": "1c1963d7811f0943a07f817a7d577c1a1b0f7502c96df5634bf32bf3d01538a3"
+      },
+      "execution_transitions": {
+        "rows": 8,
+        "sha256": "c90c29edeeb103140af830daed1f0f1b063787cfa14ddde5fe84704f132ea82f"
+      },
+      "git_retention_capture_targets": {
+        "rows": 17,
+        "sha256": "21ef2c22f555344dcf23d6ad7db285673f1a9178e6eaa1b68f527c3ad02981e6"
+      },
+      "git_retention_current": {
+        "rows": 19,
+        "sha256": "882e73d8bcbbc61cd05f1d86cf184aee9b21b8106a1e1b227e23ff9114111eec"
+      },
+      "git_retention_operations": {
+        "rows": 19,
+        "sha256": "d22672276b5eb5b10f018509d56611ccfb4fe2aee16d0bb0f8b0607b459ebdfa"
+      },
+      "git_retention_publications": {
+        "rows": 25,
+        "sha256": "acd2f1b28dad2a0f954b1254befa7b71b1a93b943096aeae111f46ef2eb831eb"
+      },
+      "git_retention_review_targets": {
+        "rows": 2,
+        "sha256": "71d9d83d876299bb1ec999f8ed3b941403160f6f16e2418798c17284bf2781ac"
+      },
+      "git_retention_transitions": {
+        "rows": 38,
+        "sha256": "991df147ff020ef10c901914bf41bdb9b18e562c1bd7a1cc4b097a353090e988"
+      },
+      "operations": {
+        "rows": 132,
+        "sha256": "4b09c53955930ff3d66a2545f41dfddefd182b96b6520ec5f8684de406eebde6"
+      },
+      "pending_capture_events": {
+        "rows": 26,
+        "sha256": "df76441b70abe88666859af9869e08dd01887864f39b55011340b0268f135d3c"
+      },
+      "pending_capture_requests": {
+        "rows": 17,
+        "sha256": "00d82eb8e32df2dc76750d7f9073c05832765854294d5031fe6f1cc335e32e0a"
+      },
+      "pending_plan_keys": {
+        "rows": 6,
+        "sha256": "679b5432c5ca973bcc21bddb87de65b759a615c691d46bc4bed897be54031c93"
+      },
+      "pending_review_base_records": {
+        "rows": 1,
+        "sha256": "cabbdebe40f61bb1fb831cf570f7aaeec3fc7f56f8741ab88a2dbfe018439e1d"
+      },
+      "pending_review_evidence_members": {
+        "rows": 4,
+        "sha256": "f85c72d667506e0c64865fc74fca6b2b6e7d5312504feaa258ba7c65f0b1b010"
+      },
+      "pending_review_floor_inputs": {
+        "rows": 2,
+        "sha256": "c8e1fcf3755095ffa4487ea3d73571ddc56220b8eea4a02c7c220bbfd20b48b3"
+      },
+      "pending_review_requests": {
+        "rows": 2,
+        "sha256": "5c3bba673be20e3a158cc17e6ca22393633b8aa438589729790a798e32e044d7"
+      },
+      "pending_review_untracked_paths": {
+        "rows": 1,
+        "sha256": "483448ea13fe5aff2f01b089fbf839a3247a4052da842bb34be3b2217ee69dea"
+      },
+      "plan_capture_commands": {
+        "rows": 3,
+        "sha256": "31839f061e3d080762e0f620d81b54d02556c38fde33754f6a7f8611cffe33bf"
+      },
+      "project_counters": {
+        "rows": 1,
+        "sha256": "f16540e6a46b7ca04b6191388c91798998dca628ee05ea23b9dc84080ed6504e"
+      },
+      "repository_creation": {
+        "rows": 1,
+        "sha256": "1aa690c09e59051b34981dd3830c89590e241dae88fb33c18b878f08c57f2ed3"
+      },
+      "review_attempts": {
+        "rows": 11,
+        "sha256": "0c301ab5debd7ee1b2053f742c058741ce232f86074a2afe14c587b42e1cc899"
+      },
+      "review_base_revisions": {
+        "rows": 1,
+        "sha256": "d6760910b31cb49fabb596754b723e9a1c7a06cec0ab3e3c27fa654219f15a63"
+      },
+      "review_comment_revisions": {
+        "rows": 4,
+        "sha256": "cb45105797ab2efd4e6542d2a7fcaa881d82ce4aae18a704f2a39b8adbb3dd98"
+      },
+      "review_comments": {
+        "rows": 1,
+        "sha256": "c6b868cc06d63182e89851af525171ebfb9b5418a2a0caf401e208019c5ebdb8"
+      },
+      "review_evidence_members": {
+        "rows": 32,
+        "sha256": "e42debb5f4cbea1c7df21367ff6ae65be77edef8e00e585a2cb272e8753908c8"
+      },
+      "review_evidence_publications": {
+        "rows": 9,
+        "sha256": "d7612fe0891483973354c09e431ba3c35618ead28003017d308246592a19e47f"
+      },
+      "review_members": {
+        "rows": 6,
+        "sha256": "51f7f69354985e004e44e0e9ccc3aa72aa57bbd5509cb484a3f1f615f26a4093"
+      },
+      "review_membership_revisions": {
+        "rows": 3,
+        "sha256": "f7613effe722c3bccec0842a163a3448832228b95534a0e16ef56570602ceecf"
+      },
+      "review_retention_bindings": {
+        "rows": 5,
+        "sha256": "e0f07b52446267a4a4c26539c308d4e3d26ce40ee6f57e8074a3729659e2e166"
+      },
+      "review_run_finalizations": {
+        "rows": 1,
+        "sha256": "81bba5219a650812172bd7c16ef171f67e324601b25a98226aacf56745aa93ea"
+      },
+      "review_run_revisions": {
+        "rows": 9,
+        "sha256": "7941a64eec2420a9f7f36c78359ff9fa0e728dd598e883e85aefa2e76498de69"
+      },
+      "review_runs": {
+        "rows": 2,
+        "sha256": "74a2c233ede86ea4281bb5c9275d35e1f851354af685d819f4ed46268f162d31"
+      },
+      "review_selections": {
+        "rows": 3,
+        "sha256": "24fd42d5ce5b4d8acced15c41866ba77a614b23659f039d029fd3f8c891f3e0d"
+      },
+      "review_semantic_attempts": {
+        "rows": 1,
+        "sha256": "b1449da002d09b06b19e4554f40fdb794dc613000d44f6431199cda1fa5de4b6"
+      },
+      "review_semantic_current": {
+        "rows": 1,
+        "sha256": "378b4934738e2a72bf32f32eed1072c78a423718044b3f4909a2d0bede26c2fe"
+      },
+      "review_semantic_generations": {
+        "rows": 1,
+        "sha256": "5ff5fbbebcceeea81b54ed1cb5a4ea24d7041cd093a0b8f738591948268d4dc1"
+      },
+      "review_semantic_terminals": {
+        "rows": 1,
+        "sha256": "f3dab76368365982756f91f201a8aea3d9a511b60abc9ed5d23138e5d8a0013b"
+      },
+      "review_workflow_current": {
+        "rows": 1,
+        "sha256": "6141903c9d5cd3b7240394237066cccce3e736b850e3ff8bb0fcb17522193852"
+      },
+      "review_workflow_transitions": {
+        "rows": 2,
+        "sha256": "888d117b24836d743a9a6e9148d75b5206139ea51771e4b103a3a47a339111f1"
+      },
+      "reviews": {
+        "rows": 3,
+        "sha256": "f02bc0844fe5824faacc7bf775926324910b8ef758b5e8161362a7f19eeccfc6"
+      },
+      "seed_bundle_details": {
+        "rows": 3,
+        "sha256": "4e46b01e095dd1feadbf133a0c4b8b5cea7b76d7123252581f5b56aab2eeae63"
+      },
+      "seed_bundle_entries": {
+        "rows": 1,
+        "sha256": "633a2c21c3db4e95dc4bf5398206c3b869987d4554cbd33bf84aebd38e75b67f"
+      },
+      "seed_bundle_members": {
+        "rows": 6,
+        "sha256": "3115a032b963bfff22f0a32926e90def49062c9aa08ae925a5c62cd05f199704"
+      },
+      "seed_bundle_revisions": {
+        "rows": 3,
+        "sha256": "01cdb098977cd636166c772c2b8313430f3cece7219e9a9764db2387e3329f17"
+      },
+      "seed_bundle_selection": {
+        "rows": 3,
+        "sha256": "8833103fa6df38966336a134311f278b32ed522cf1b73ca544482cc159a3092d"
+      },
+      "seed_bundle_sources": {
+        "rows": 6,
+        "sha256": "b72a3808585d61cfdadc70af080e34986c592b045d0890522df5217f1428b591"
+      },
+      "seed_clusters": {
+        "rows": 12,
+        "sha256": "500d3da2c66d5e61e14722819c8a373fabe49ab4ce9b7178aa7691f5e92cf950"
+      },
+      "seed_discovery_areas": {
+        "rows": 3,
+        "sha256": "9cbafb64bc276299d2f713aa357958fbcd97b345b13c1f3e9343e7be4b62dd67"
+      },
+      "seed_jobs": {
+        "rows": 4,
+        "sha256": "92b2def55c78a4c29545bfbbe1ca24cc97ea7195ac48204e17ac827ef67efc21"
+      },
+      "seed_state_details": {
+        "rows": 4,
+        "sha256": "f33c47acd7fc6929aea725de85bce2664b1b036b3223413ee68438315f45347a"
+      },
+      "seed_state_members": {
+        "rows": 11,
+        "sha256": "3c0ba3a10db8d6b378cae4ac69e479921c6d9019eb03f124dbecaeeaf66f4470"
+      },
+      "seed_state_revisions": {
+        "rows": 4,
+        "sha256": "4279111e2d7f8d0b3f6bb384fa5ee86792516d86eb43ced47fa7d9a6a82c55db"
+      },
+      "seed_state_selection": {
+        "rows": 1,
+        "sha256": "84d82423db32d9b4d5cb8562b3cb7c4284b5e36f9f7268b3734fc4d5db323ff9"
+      },
+      "seed_state_sources": {
+        "rows": 11,
+        "sha256": "6b70bc7f90acb07fd70efef171ea96b7d7666c6aad0dfc024f906ba07e0bea48"
+      },
+      "store_identity": {
+        "rows": 1,
+        "sha256": "574fe513b8785b729c8020854e073798b4a7470577d3df3ad213ccf3ed3e45eb"
+      },
+      "usage_events": {
+        "rows": 20,
+        "sha256": "e4cb4695d6216e4df72fa6ea7385d81f3842ac5d381fdd84e8f1c9a4dfb180b5"
+      },
+      "usage_links": {
+        "rows": 1,
+        "sha256": "b23bf4a1c72e4dddc8746962d9fb3e533886657291aaa87cbafbffcc89f734ff"
+      },
+      "usage_revisions": {
+        "rows": 19,
+        "sha256": "fc781eec81c49385b636bddf41364b02d73704e5747de85c67806b64d672891f"
+      },
+      "usage_selection": {
+        "rows": 1,
+        "sha256": "6c9abc781c3d789c6042a78ce02aae0a446ed84b06b8c5931ad81fd9cdf168eb"
+      },
+      "usage_snapshots": {
+        "rows": 19,
+        "sha256": "631dfe929a83ee017c5a498dc71ea64d19dd34198a92a0a102079a9b469cbbce"
+      }
+    },
+    "empty_tables": {
+      "adoptions": {
+        "reason": "no_writer_in_the_release",
+        "insert_statements_in_the_bundle": 0
+      },
+      "artifact_push_current": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "artifact_push_requests": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "artifact_push_terminal_calls": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "artifact_push_terminals": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "assessments": {
+        "reason": "no_writer_in_the_release",
+        "insert_statements_in_the_bundle": 0
+      },
+      "claim_revisions": {
+        "reason": "no_writer_in_the_release",
+        "insert_statements_in_the_bundle": 0
+      },
+      "claims": {
+        "reason": "no_writer_in_the_release",
+        "insert_statements_in_the_bundle": 0
+      },
+      "cloud_sync_current": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 2
+      },
+      "cloud_sync_records": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 2
+      },
+      "criterion_lineage": {
+        "reason": "no_writer_in_the_release",
+        "insert_statements_in_the_bundle": 0
+      },
+      "decision_revisions": {
+        "reason": "no_writer_in_the_release",
+        "insert_statements_in_the_bundle": 0
+      },
+      "decisions": {
+        "reason": "no_writer_in_the_release",
+        "insert_statements_in_the_bundle": 0
+      },
+      "execution_checkpoint_recoveries": {
+        "reason": "writer_never_reached_in_the_release",
+        "insert_statements_in_the_bundle": 1
+      },
+      "git_retention_reclamations": {
+        "reason": "needs_racing_writers",
+        "insert_statements_in_the_bundle": 1
+      },
+      "legacy_artifact_cloud_facts": {
+        "reason": "written_only_by_legacy_conversion",
+        "insert_statements_in_the_bundle": 1
+      },
+      "legacy_import": {
+        "reason": "written_only_by_legacy_conversion",
+        "insert_statements_in_the_bundle": 1
+      },
+      "legacy_session_branch_state": {
+        "reason": "written_only_by_legacy_conversion",
+        "insert_statements_in_the_bundle": 1
+      },
+      "legacy_source_plan_records": {
+        "reason": "written_only_by_legacy_conversion",
+        "insert_statements_in_the_bundle": 1
+      },
+      "legacy_sqlite_images": {
+        "reason": "written_only_by_legacy_conversion",
+        "insert_statements_in_the_bundle": 1
+      },
+      "plan_idempotency_records": {
+        "reason": "written_only_by_legacy_conversion",
+        "insert_statements_in_the_bundle": 1
+      },
+      "record_relationships": {
+        "reason": "no_writer_in_the_release",
+        "insert_statements_in_the_bundle": 0
+      },
+      "remote_attempts": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "remote_current": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 2
+      },
+      "remote_outcomes": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "remote_requests": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 2
+      },
+      "review_comment_claim_links": {
+        "reason": "no_writer_in_the_release",
+        "insert_statements_in_the_bundle": 0
+      },
+      "review_feedback_watch_cursors": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "seed_bundle_authoring": {
+        "reason": "writer_never_reached_in_the_release",
+        "insert_statements_in_the_bundle": 1
+      },
+      "session_branch_acknowledgements": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "session_branch_current": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "session_branch_revisions": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 2
+      },
+      "source_plan_approved": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "source_plan_locator_current": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "source_plan_locator_revisions": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "source_plan_namespaces": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "source_plan_records": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "source_plan_review_current": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "source_plan_upload_commands": {
+        "reason": "needs_the_cloud_service",
+        "insert_statements_in_the_bundle": 1
+      },
+      "source_time_current": {
+        "reason": "no_writer_in_the_release",
+        "insert_statements_in_the_bundle": 0
+      },
+      "source_time_revisions": {
+        "reason": "no_writer_in_the_release",
+        "insert_statements_in_the_bundle": 0
+      },
+      "source_time_sources": {
+        "reason": "no_writer_in_the_release",
+        "insert_statements_in_the_bundle": 0
+      }
+    },
+    "empty_table_reasons": {
+      "no_writer_in_the_release": "The released bundle holds no INSERT statement for this table, so no released build can write it.",
+      "writer_never_reached_in_the_release": "The bundle can insert here but never produces a row to insert: checkpoint recovery records have no producer, and no code builds the keyed authored sources the seed bundle authoring rows come from.",
+      "needs_the_cloud_service": "Written only inside an authenticated cloud session: pushes, remote transport, cloud sync, session-branch observations, review feedback cursors, and pulled or uploaded source plans.",
+      "needs_racing_writers": "A retained Git publication is retired only when a concurrent capture wins a race, and only a retired publication can be reclaimed. A single offline writer cannot produce that.",
+      "written_only_by_legacy_conversion": "Only the conversion of a legacy file-backed history writes this table; the converted fixture beside this one holds it."
+    },
+    "operations_by_kind": {
+      "artifact.append": 5,
+      "attempt.publish": 1,
+      "capture.append": 20,
+      "capture.retention.begin": 11,
+      "capture.retention.select": 14,
+      "execution.focus": 6,
+      "import.retention.begin": 3,
+      "import.retention.select": 3,
+      "lifecycle.publish": 16,
+      "plan.capture.retention.begin": 3,
+      "project.display_name": 1,
+      "review.comment.add": 1,
+      "review.comment.append": 3,
+      "review.create": 3,
+      "review.floor": 2,
+      "review.floor.admit": 2,
+      "review.run.attempt": 3,
+      "review.run.finalize": 1,
+      "review.run.inputs-served": 3,
+      "review.run.start": 2,
+      "review.semantic.submit": 1,
+      "review.workflow.append": 2,
+      "seed.bundle": 3,
+      "seed.state": 4,
+      "usage.append": 19
+    },
+    "events_by_type": {
+      "branch_lineage_updated": 4,
+      "checkpoint_abandoned": 1,
+      "checkpoint_closed": 7,
+      "checkpoint_opened": 9,
+      "evaluator_disposition_recorded": 1,
+      "evaluator_run_recorded": 39,
+      "git_import_enriched": 1,
+      "plan_captured": 6,
+      "plan_revised": 2,
+      "pre_pr_checked": 1,
+      "summary_captured": 6
+    },
+    "artifacts_by_origin_and_state": {
+      "captured:active": 1,
+      "captured:summarized": 2,
+      "git-import:summarized": 3
+    },
+    "evaluator_verdicts_by_severity": {
+      "block:pass": 13,
+      "block:violation": 1,
+      "info:pass": 4,
+      "warn:pass": 19,
+      "warn:violation": 2
+    },
+    "import_origin_tool_versions": ["0.2.0"],
+    "review_evidence": {
+      "files": 33,
+      "bytes": 85217,
+      "sha256": "70456a501b4203ef4b698b7af7aa43c85dfd11bcf6626010f8429126e4210cd9"
+    },
+    "machine_specific_cells": {
+      "naming_the_run_directory": [
+        "operations.payload_json",
+        "operations.result_json",
+        "repository_creation.common_directory",
+        "review_run_finalizations.record_bytes",
+        "review_run_revisions.record_bytes",
+        "review_semantic_attempts.record_json",
+        "review_semantic_terminals.manifest_json",
+        "seed_bundle_sources.record_bytes",
+        "seed_bundle_sources.source_location",
+        "store_identity.resolved_root"
+      ],
+      "identifying_the_repository": [
+        "repository_creation.device",
+        "repository_creation.inode",
+        "repository_creation.birthtime_ns"
+      ],
+      "note": "The run directory sits under the per-user temporary root of the machine that generated the fixture, so its path carries that user token. Restoring a fixture replaces the store root. The repository directory no longer exists and its device, inode and birth time belong to the deleted directory, so repository identity cannot match after a restore."
+    }
+  },
+  "retained_git_evidence": {
+    "bundle": {
+      "file": "retained-refs.bundle.base64",
+      "bytes": 7782,
+      "sha256": "1ec23f9e5af296f0b49206ce4511132900372e7821b28035a5725a60f1967392"
+    },
+    "refs": [
+      {
+        "ref": "refs/orcaops/baseline/01a0af8c-fb08-70c7-ade8-70732d6f9287-01a0af8c-fd97-7a33-a19f-dca454f27511",
+        "object": "54974e76236816d5da70b7fb7d5e6dacc2c7602a",
+        "tree": "1f922759be8444e753bf3ecb889117b8eda079ec",
+        "named_by": "git_retention_publications",
+        "role": "baseline",
+        "artifact_id": "01a0af8c-fb08-70c7-ade8-70732d6f9287",
+        "artifact_label": "Rate limit the charge route with headers",
+        "artifact_origin": "captured"
+      },
+      {
+        "ref": "refs/orcaops/baseline/01a0af8d-53b0-734b-b563-47211e50f46e-01a0af8d-560e-7048-9051-20a9098e8134",
+        "object": "9748eb7ae1b2199d8139ecb6cd67c7dcbd5448c5",
+        "tree": "b5a1ed4daef86575a7efab8f80f4fec8d2c9dfc9",
+        "named_by": "git_retention_publications",
+        "role": "baseline",
+        "artifact_id": "01a0af8d-53b0-734b-b563-47211e50f46e",
+        "artifact_label": "Retry-After header on rejection",
+        "artifact_origin": "captured"
+      },
+      {
+        "ref": "refs/orcaops/baseline/01a0af8d-b5a7-7314-923f-4411ab79fcfc-01a0af8d-b80e-7fa7-97b3-3267ab0bf5df",
+        "object": "470d53802e3a89b8814db5599559a1bd6ff00839",
+        "tree": "b5a1ed4daef86575a7efab8f80f4fec8d2c9dfc9",
+        "named_by": "git_retention_publications",
+        "role": "baseline",
+        "artifact_id": "01a0af8d-b5a7-7314-923f-4411ab79fcfc",
+        "artifact_label": "Operator notes for charge limits",
+        "artifact_origin": "captured"
+      },
+      {
+        "ref": "refs/orcaops/review/01a0af8d-6e51-79f1-bc11-3c948e01a69e-01a0af8d-752b-74df-9869-ef28bac40c07-base",
+        "object": "72c5b6a9bfa42951571126b9aafa0abf14abc100",
+        "tree": "b5a1ed4daef86575a7efab8f80f4fec8d2c9dfc9",
+        "named_by": "git_retention_publications",
+        "role": "review-base",
+        "review_id": "01a0af8d-6e51-79f1-bc11-3c948e01a69e",
+        "review_branch": "retry-header"
+      },
+      {
+        "ref": "refs/orcaops/review/01a0af8d-6e51-79f1-bc11-3c948e01a69e-01a0af8d-752b-78cd-a412-4ce1e31f0c2c-base",
+        "object": "72c5b6a9bfa42951571126b9aafa0abf14abc100",
+        "tree": "b5a1ed4daef86575a7efab8f80f4fec8d2c9dfc9",
+        "named_by": "git_retention_publications",
+        "role": "review-floor-base",
+        "review_id": "01a0af8d-6e51-79f1-bc11-3c948e01a69e",
+        "review_branch": "retry-header"
+      },
+      {
+        "ref": "refs/orcaops/review/01a0af8d-6e51-79f1-bc11-3c948e01a69e-01a0af8d-752b-7b4d-8cf7-87871ad27fec",
+        "object": "fb2f675e73a9908bb1061993ecf2366e09a1c008",
+        "tree": "57a51c3d845080618afba8afa95ab9b14fbc75f1",
+        "named_by": "git_retention_publications",
+        "role": "review-floor",
+        "review_id": "01a0af8d-6e51-79f1-bc11-3c948e01a69e",
+        "review_branch": "retry-header"
+      },
+      {
+        "ref": "refs/orcaops/review/01a0af8d-d949-7104-9344-98bd10183386-01a0af8d-dee7-76d9-9422-220382433786-base",
+        "object": "72c5b6a9bfa42951571126b9aafa0abf14abc100",
+        "tree": "b5a1ed4daef86575a7efab8f80f4fec8d2c9dfc9",
+        "named_by": "git_retention_publications",
+        "role": "review-floor-base",
+        "review_id": "01a0af8d-d949-7104-9344-98bd10183386",
+        "review_branch": "limit-docs"
+      },
+      {
+        "ref": "refs/orcaops/review/01a0af8d-d949-7104-9344-98bd10183386-01a0af8d-dee7-76e6-8938-424b90a80afa",
+        "object": "5dbb0e472d204cbe671bc0da2c5abf6cd07baf3a",
+        "tree": "59a807136af70f0e9e39354c5b7c65778ea8df93",
+        "named_by": "git_retention_publications",
+        "role": "review-floor",
+        "review_id": "01a0af8d-d949-7104-9344-98bd10183386",
+        "review_branch": "limit-docs"
+      },
+      {
+        "ref": "refs/orcaops/snap/019fc6d9-f280-7624-9c3f-b91942c3580c/1/close-019fc6d9-f280-7704-94ed-9fbfc9bacedd",
+        "object": "bb49426019dede945e9ad194e8cf456a6e47abae",
+        "tree": "1bbd221cda630d613a35709f97f2f56754c5ad06",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "019fc6d9-f280-7624-9c3f-b91942c3580c",
+        "artifact_label": "Add the charge route",
+        "artifact_origin": "git-import",
+        "checkpoint": 1,
+        "phase": "close"
+      },
+      {
+        "ref": "refs/orcaops/snap/019fc6d9-f280-7624-9c3f-b91942c3580c/1/open-019fc6d9-f280-7f1b-b6d2-75f7a482e7b1",
+        "object": "6b02d26883babb41b486447f5897cca922f938b9",
+        "tree": "8e76695c9b617375597173633a736d31a9a5784d",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "019fc6d9-f280-7624-9c3f-b91942c3580c",
+        "artifact_label": "Add the charge route",
+        "artifact_origin": "git-import",
+        "checkpoint": 1,
+        "phase": "open"
+      },
+      {
+        "ref": "refs/orcaops/snap/019fcc00-4e80-7591-b144-f1ff7bfa4463/1/close-019fcc00-4e80-7be3-80f2-092cf99bd509",
+        "object": "1deadf1b50d237cb52e1593550b3347656fe645e",
+        "tree": "2c13d932f415306fcc08f8e86843c004644b87a8",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "019fcc00-4e80-7591-b144-f1ff7bfa4463",
+        "artifact_label": "Add request logging",
+        "artifact_origin": "git-import",
+        "checkpoint": 1,
+        "phase": "close"
+      },
+      {
+        "ref": "refs/orcaops/snap/019fcc00-4e80-7591-b144-f1ff7bfa4463/1/open-019fcc00-4e80-7427-a36e-7813ccd000ad",
+        "object": "bb49426019dede945e9ad194e8cf456a6e47abae",
+        "tree": "1bbd221cda630d613a35709f97f2f56754c5ad06",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "019fcc00-4e80-7591-b144-f1ff7bfa4463",
+        "artifact_label": "Add request logging",
+        "artifact_origin": "git-import",
+        "checkpoint": 1,
+        "phase": "open"
+      },
+      {
+        "ref": "refs/orcaops/snap/019fd126-aa80-76d7-b763-45ec205842e0/1/close-019fd126-aa80-7f76-8a5f-212cffb2a442",
+        "object": "72c5b6a9bfa42951571126b9aafa0abf14abc100",
+        "tree": "b5a1ed4daef86575a7efab8f80f4fec8d2c9dfc9",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "019fd126-aa80-76d7-b763-45ec205842e0",
+        "artifact_label": "Round the charged amount",
+        "artifact_origin": "git-import",
+        "checkpoint": 1,
+        "phase": "close"
+      },
+      {
+        "ref": "refs/orcaops/snap/019fd126-aa80-76d7-b763-45ec205842e0/1/open-019fd126-aa80-74ce-b8ee-dcef0a867e87",
+        "object": "1deadf1b50d237cb52e1593550b3347656fe645e",
+        "tree": "2c13d932f415306fcc08f8e86843c004644b87a8",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "019fd126-aa80-76d7-b763-45ec205842e0",
+        "artifact_label": "Round the charged amount",
+        "artifact_origin": "git-import",
+        "checkpoint": 1,
+        "phase": "open"
+      },
+      {
+        "ref": "refs/orcaops/snap/01a0af8c-fb08-70c7-ade8-70732d6f9287/1/close-01a0af8d-1527-7e5c-85dc-64b6536ea884",
+        "object": "c149140552dd42f0f5c81505efb3dc38a8a22fe6",
+        "tree": "0ebc1e090eb8ebbe825e5f95be060127b5181b31",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "01a0af8c-fb08-70c7-ade8-70732d6f9287",
+        "artifact_label": "Rate limit the charge route with headers",
+        "artifact_origin": "captured",
+        "checkpoint": 1,
+        "phase": "close"
+      },
+      {
+        "ref": "refs/orcaops/snap/01a0af8c-fb08-70c7-ade8-70732d6f9287/1/open-01a0af8d-0d82-7db7-8b24-d2f10c3e723b",
+        "object": "1ea2d97be103813a65cd241ac77417701ab19f03",
+        "tree": "1f922759be8444e753bf3ecb889117b8eda079ec",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "01a0af8c-fb08-70c7-ade8-70732d6f9287",
+        "artifact_label": "Rate limit the charge route with headers",
+        "artifact_origin": "captured",
+        "checkpoint": 1,
+        "phase": "open"
+      },
+      {
+        "ref": "refs/orcaops/snap/01a0af8c-fb08-70c7-ade8-70732d6f9287/2/abandon-01a0af8d-2b91-725c-9dbb-a7b8d817581e",
+        "object": "95622cdf4528e22f4a63413f3fe9d0b1a193237f",
+        "tree": "0ebc1e090eb8ebbe825e5f95be060127b5181b31",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "01a0af8c-fb08-70c7-ade8-70732d6f9287",
+        "artifact_label": "Rate limit the charge route with headers",
+        "artifact_origin": "captured",
+        "checkpoint": 2,
+        "phase": "abandon"
+      },
+      {
+        "ref": "refs/orcaops/snap/01a0af8c-fb08-70c7-ade8-70732d6f9287/2/open-01a0af8d-240a-71ef-b95e-9747318f5f99",
+        "object": "24eac3629ff9018f494ffc829972e2032d70adfa",
+        "tree": "0ebc1e090eb8ebbe825e5f95be060127b5181b31",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "01a0af8c-fb08-70c7-ade8-70732d6f9287",
+        "artifact_label": "Rate limit the charge route with headers",
+        "artifact_origin": "captured",
+        "checkpoint": 2,
+        "phase": "open"
+      },
+      {
+        "ref": "refs/orcaops/snap/01a0af8c-fb08-70c7-ade8-70732d6f9287/3/close-01a0af8d-3aca-7932-9492-02f254fc4b72",
+        "object": "1abeae9ab923a7d9c67791e32a10ea77ec688b7b",
+        "tree": "3784b402276d6def85c4e19617db9e7de8faf6dd",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "01a0af8c-fb08-70c7-ade8-70732d6f9287",
+        "artifact_label": "Rate limit the charge route with headers",
+        "artifact_origin": "captured",
+        "checkpoint": 3,
+        "phase": "close"
+      },
+      {
+        "ref": "refs/orcaops/snap/01a0af8c-fb08-70c7-ade8-70732d6f9287/3/open-01a0af8d-3300-7ec8-a6f6-dcf3c9453324",
+        "object": "569a0678c458aff9db3bfbc241cabe6b07cf897e",
+        "tree": "0ebc1e090eb8ebbe825e5f95be060127b5181b31",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "01a0af8c-fb08-70c7-ade8-70732d6f9287",
+        "artifact_label": "Rate limit the charge route with headers",
+        "artifact_origin": "captured",
+        "checkpoint": 3,
+        "phase": "open"
+      },
+      {
+        "ref": "refs/orcaops/snap/01a0af8d-53b0-734b-b563-47211e50f46e/1/close-01a0af8d-6348-7496-9f5e-68e92ede5d06",
+        "object": "b624b0a39fdd8cd7f686fa6a996d48afdc0d2ba7",
+        "tree": "b77d41093daee13a766a5ff0e95443d90b22ad8f",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "01a0af8d-53b0-734b-b563-47211e50f46e",
+        "artifact_label": "Retry-After header on rejection",
+        "artifact_origin": "captured",
+        "checkpoint": 1,
+        "phase": "close"
+      },
+      {
+        "ref": "refs/orcaops/snap/01a0af8d-53b0-734b-b563-47211e50f46e/1/open-01a0af8d-5bbb-724d-9b9b-9df7ccc0ad46",
+        "object": "12f1f00c8f3798ee98cea1eb22f3941af5881a33",
+        "tree": "b5a1ed4daef86575a7efab8f80f4fec8d2c9dfc9",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "01a0af8d-53b0-734b-b563-47211e50f46e",
+        "artifact_label": "Retry-After header on rejection",
+        "artifact_origin": "captured",
+        "checkpoint": 1,
+        "phase": "open"
+      },
+      {
+        "ref": "refs/orcaops/snap/01a0af8d-b5a7-7314-923f-4411ab79fcfc/1/close-01a0af8d-c574-7fbb-bfb8-7898620de2c9",
+        "object": "45654f314b258a48d14e322f0507d9ca7435e913",
+        "tree": "59a807136af70f0e9e39354c5b7c65778ea8df93",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "01a0af8d-b5a7-7314-923f-4411ab79fcfc",
+        "artifact_label": "Operator notes for charge limits",
+        "artifact_origin": "captured",
+        "checkpoint": 1,
+        "phase": "close"
+      },
+      {
+        "ref": "refs/orcaops/snap/01a0af8d-b5a7-7314-923f-4411ab79fcfc/1/open-01a0af8d-bdd2-7a2f-8d86-cc6305ca9efc",
+        "object": "596ba64ce1ab925afd6b15fbae9fd6cbc6231f95",
+        "tree": "b5a1ed4daef86575a7efab8f80f4fec8d2c9dfc9",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "01a0af8d-b5a7-7314-923f-4411ab79fcfc",
+        "artifact_label": "Operator notes for charge limits",
+        "artifact_origin": "captured",
+        "checkpoint": 1,
+        "phase": "open"
+      },
+      {
+        "ref": "refs/orcaops/snap/01a0af8d-b5a7-7314-923f-4411ab79fcfc/2/open-01a0af8d-e7f0-7e63-92ba-4f1a337987da",
+        "object": "f566f47ea3e981ada2da691c9649b81cf55d3866",
+        "tree": "59a807136af70f0e9e39354c5b7c65778ea8df93",
+        "named_by": "git_retention_publications",
+        "role": "checkpoint",
+        "artifact_id": "01a0af8d-b5a7-7314-923f-4411ab79fcfc",
+        "artifact_label": "Operator notes for charge limits",
+        "artifact_origin": "captured",
+        "checkpoint": 2,
+        "phase": "open"
+      }
+    ]
+  },
+  "not_exercised": [
+    "No LLM evaluator ran: the pack was installed with its deterministic profile and every capture passed --no-llm.",
+    "The Task Review ended FULL with both lanes accepted; no degraded or failed run, and the review lifecycle stops at a reopen because completing it needs every row dispositioned.",
+    "One block-severity violation was dismissed; none was acknowledged, because the only deterministic block evaluator does not permit acknowledgement."
+  ]
+}

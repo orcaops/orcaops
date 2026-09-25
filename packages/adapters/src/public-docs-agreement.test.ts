@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { CONFIG_SCHEMA_VERSION, resolveConfig } from '@orcaops/storage';
+import { CONFIG_SCHEMA_VERSION, configVersionForWrite, resolveConfig } from '@orcaops/storage';
 
 import { SKILL_IDS } from './types.js';
 
@@ -16,7 +16,8 @@ async function doc(relativePath: string): Promise<string> {
 
 function referencedSkills(markdown: string): string[] {
   const pattern = /(^|[^/.\w-])\/?orcaops-([a-z][a-z0-9-]*)(?![a-z0-9-])/gm;
-  const nonSkillIdentifiers = new Set(['verdict']);
+  // Fence info strings an evaluator prompt and its response use, not skills.
+  const nonSkillIdentifiers = new Set(['verdict', 'findings']);
   return [...markdown.matchAll(pattern)]
     .map((match) => match[2]!)
     .filter((id) => !nonSkillIdentifiers.has(id));
@@ -56,7 +57,7 @@ describe('published documentation agreement', () => {
     }
   });
 
-  it('keeps the configuration example on the current schema and runtime attribution model', async () => {
+  it('keeps the configuration example on the stamp a fresh file gets and the runtime attribution model', async () => {
     const [configuration, gettingStarted, workingWithYourAgent] = await Promise.all([
       doc('configuration.md'),
       doc('getting-started.md'),
@@ -65,8 +66,11 @@ describe('published documentation agreement', () => {
     const exampleBlock = configuration.match(/```json\n([\s\S]*?)\n```/);
     expect(exampleBlock, 'configuration.md must contain a JSON example').not.toBeNull();
 
-    const example = JSON.parse(exampleBlock![1]) as Record<string, unknown>;
-    expect(example.schema_version).toBe(CONFIG_SCHEMA_VERSION);
+    const { schema_version: exampleVersion, ...exampleBody } = JSON.parse(
+      exampleBlock![1]
+    ) as Record<string, unknown>;
+    const example = { schema_version: exampleVersion, ...exampleBody };
+    expect(exampleVersion).toBe(configVersionForWrite(exampleBody));
     expect(example).not.toHaveProperty('agent');
     expect(resolveConfig(example).schema_version).toBe(CONFIG_SCHEMA_VERSION);
     const attributionDocs = `${configuration}\n${gettingStarted}\n${workingWithYourAgent}`;

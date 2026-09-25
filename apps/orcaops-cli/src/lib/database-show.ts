@@ -7,31 +7,43 @@ import {
   estimateArtifactUsage,
 } from '@orcaops/storage/history/usage-accounting';
 
+import {
+  artifactKnowledgeBlock,
+  knowledgeBoundaryOption,
+  planInView,
+} from './artifact-knowledge.js';
 import type { resolveDatabaseHistoryCommandContext } from './database-history-context.js';
 import { historyPlanRevisions } from './history-read-model.js';
 import { getInvocationEnv } from './invocation-context.js';
+import { artifactKnowledgeUses } from './plan-knowledge-uses.js';
 
 export interface DatabaseShowOptions {
   project?: string;
   json?: boolean;
+  /** The write sequence the continuing-knowledge answer is read at. Absent means now. */
+  atBoundary?: number;
 }
 export function validateDatabaseShow(artifactId: string, options: DatabaseShowOptions) {
-  if (Object.keys(options).some((key) => !['project', 'json'].includes(key)))
+  if (Object.keys(options).some((key) => !['project', 'json', 'atBoundary'].includes(key)))
     throw new HistoryScopeError(
       'INVALID_INPUT',
-      'Exact artifact reads accept only project qualification and output format'
+      'Exact artifact reads accept only project qualification, a knowledge boundary and output format'
     );
   if (typeof artifactId !== 'string' || !/^[0-9a-f-]{1,36}$/i.test(artifactId))
     throw new HistoryScopeError('INVALID_INPUT', 'Provide an artifact UUID or hexadecimal prefix');
+  knowledgeBoundaryOption(options.atBoundary);
   const selector = { projectId: options.project };
   validateHistorySelector({ profile: 'exact', selector });
   return selector;
 }
 export async function readDatabaseShow(
   context: Awaited<ReturnType<typeof resolveDatabaseHistoryCommandContext>>,
-  requested: string
+  requested: string,
+  options: DatabaseShowOptions = {}
 ) {
-  const target = resolveDatabaseHistoryOverview(context.scope, requested);
+  const target = resolveDatabaseHistoryOverview(context.scope, requested, {
+    boundary: knowledgeBoundaryOption(options.atBoundary),
+  });
   return readDatabaseShowTarget(context, target);
 }
 export async function readDatabaseShowTarget(
@@ -105,6 +117,19 @@ export async function readDatabaseShowTarget(
   const lineage = git?.branch
     ? thread.artifactJson!.branch_lineage.filter((entry) => entry.branch === git.branch).at(-1)
     : undefined;
+  const knowledgeUses = artifactKnowledgeUses(target.knowledgeUses);
+  const usesOfPlanEvent = new Map(
+    knowledgeUses.plan_events.map((entry) => [entry.plan_event_id, entry])
+  );
+  // Null only where no answer was composed at all — `usage`, `checkout` and `diff` take this same
+  // overview and read none. It is never a shorthand for "this thread is answerable to nothing".
+  const knowledge =
+    target.knowledgeContext === null
+      ? null
+      : artifactKnowledgeBlock({
+          context: target.knowledgeContext,
+          plan: planInView(target.artifactId, knowledgeUses),
+        });
   const usage = {
     accounting: aggregateCanonicalUsage([target.usage]),
     estimates: [
@@ -127,7 +152,14 @@ export async function readDatabaseShowTarget(
     completed_at: thread.summary?.ts ?? null,
     plan: thread.plan,
     plan_revisions: historyPlanRevisions(thread),
-    checkpoints: thread.checkpoints,
+    // A checkpoint inherits the uses of the plan revision it already pins; nothing is written at
+    // open, and a use connected to that plan event after the fact stays in its own list.
+    checkpoints: thread.checkpoints.map((checkpoint) => ({
+      ...checkpoint,
+      knowledge_uses: usesOfPlanEvent.get(checkpoint.open_plan_revision_event_id) ?? null,
+    })),
+    knowledge_uses: knowledgeUses,
+    knowledge,
     summary: thread.summary,
     evaluator_log: thread.evaluatorLog,
     branch_lineage: thread.artifactJson!.branch_lineage,

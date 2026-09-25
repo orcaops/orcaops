@@ -25,12 +25,14 @@ A pack depends on exactly two Orcaops packages and nothing else from the
 workspace:
 
 - `@orcaops/evaluator-protocol` — schemas, types, and the glob/resolution
-  utilities. Pack code imports `EvaluatorContext`, `EvaluatorResultEnvelope`,
+  utilities. Pack code imports `EvaluatorContext`, `EvaluatorResultEnvelopeV2`,
   `EvaluatorVerdict`, and the like from here.
 - `@orcaops/evaluator-sdk` — the runtime contract helpers
   (`readEvaluatorContext`, `writeResult`, `pass` / `violation` / `info`
-  envelope constructors, `runIfDispatched`, `safeExecute`) and the testing
-  helpers (`makeContext`, `makePlanStep`, `runFixture`, `runLlmFixture`).
+  envelope constructors, the `finding` / `fileLocation` / `planStepLocation` /
+  `acceptanceCriterionLocation` / `findingKey` finding builders,
+  `runIfDispatched`, `safeExecute`) and the testing helpers (`makeContext`,
+  `makePlanStep`, `runFixture`, `runLlmFixture`).
 
 Packs **MUST NOT** depend on `@orcaops/core`, `@orcaops/storage`, or
 `@orcaops/cli`. Guardrail tests enforce this — a stray cross-package
@@ -109,10 +111,10 @@ they reach your runtime.
 
 ```typescript
 #!/usr/bin/env node
-import type { EvaluatorContext, EvaluatorResultEnvelope } from '@orcaops/evaluator-protocol';
+import type { EvaluatorContext, EvaluatorResultEnvelopeV2 } from '@orcaops/evaluator-protocol';
 import { pass, runIfDispatched, violation } from '@orcaops/evaluator-sdk';
 
-export function check(ctx: EvaluatorContext): EvaluatorResultEnvelope {
+export function check(ctx: EvaluatorContext): EvaluatorResultEnvelopeV2 {
   const tokens = ctx.params.tokens as string[];
   const haystack = ctx.plan.plan_steps.map((s) => s.text.toLowerCase()).join(' ');
   const hit = tokens.find((t) => haystack.includes(t.toLowerCase()));
@@ -138,6 +140,200 @@ The contract:
 
 `check()` is exported so fixture tests can call it without spawning a
 subprocess.
+
+## The result envelope
+
+Every evaluator answers with one `orcaops.evaluator_result/v2` envelope: a
+command engine prints it on stdout, and an LLM evaluator with
+`output_format: json` returns it as its whole response. `pass()` /
+`violation()` / `info()` build it. `orcaops eval schema result` prints the
+field reference, with a filled-in envelope under `examples` and the rules the
+shape cannot state in `$comment`.
+
+| Field      | Required | Meaning                                                         |
+| ---------- | -------- | --------------------------------------------------------------- |
+| `schema`   | yes      | `orcaops.evaluator_result/v2`                                   |
+| `verdict`  | yes      | `pass`, `violation`, or `info`                                  |
+| `body`     | yes      | the prose a reader acts on                                      |
+| `raw`      | no       | evaluator-defined, validated against the spec's `output_schema` |
+| `metrics`  | no       | evaluator-defined numbers                                       |
+| `findings` | no       | structured findings; keys unique within the array               |
+
+### Findings
+
+A finding is one factual statement your evaluator makes about the work it
+inspected. `body` is that statement for a person; a finding is the same
+statement in a shape Orcaops can retain, point at a file or a criterion, and
+recognise again on a later run.
+
+Findings are optional under every verdict. A `pass` may carry them, a
+`violation` may carry none, and they never decide the gate — that stays the
+evaluator's configured `severity`, the run status, and the verdict, exactly as
+before.
+
+| Field        | Required | Meaning                                            |
+| ------------ | -------- | -------------------------------------------------- |
+| `title`      | yes      | the statement, as one line                         |
+| `detail`     | no       | elaboration, quotes, reasoning                     |
+| `locations`  | no       | what it points at; at least one entry when present |
+| `conclusion` | no       | `supported`, `contradicted`, or `unresolved`       |
+| `key`        | no       | recurrence identity (see below)                    |
+
+`locations` is a discriminated union, so a location is always exactly one kind
+of pointer and can never be empty or incoherent:
+
+| `kind`                 | Fields                                                                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `file`                 | `path` (repository-relative, POSIX), optional `start_line` / `end_line`, optional `revision` — a full 40- or 64-character lowercase git object id |
+| `plan-step`            | `step_id`                                                                                                                                         |
+| `acceptance-criterion` | `criterion_id`                                                                                                                                    |
+| `requirement`          | `revision_id`                                                                                                                                     |
+| `decision`             | `revision_id`                                                                                                                                     |
+
+Build them with `fileLocation()`, `planStepLocation()`, and
+`acceptanceCriterionLocation()`. `fileLocation(path, { repoRoot })` normalizes
+separators and strips the root you give it, which the schema will not do on
+your behalf — it refuses a non-relative path rather than rewriting it, because
+your original payload is retained beside the finding and a silently normalized
+record would differ from what you emitted. There is no builder for
+`requirement` or `decision`: no field of today's `EvaluatorContext` carries
+such a revision id, so nothing you are given can populate one honestly.
+
+A finding with no `locations` at all is valid. "The rationale does not explain
+the trade-off" points at nothing in particular and is not worth less for it.
+`revision` is the one identified input anywhere in the chain, so set it when
+you actually read a committed object and leave it out otherwise — an
+unconstrained value would collect `HEAD` and `working tree`, which identify
+nothing.
+
+`conclusion` is your conclusion about the expectation the finding names, in
+this run, and nothing more. It is allowed **only** on a finding carrying at
+least one expectation location — a plan step, an acceptance criterion, a
+requirement, or a decision — because a path is where you looked, not what you
+graded. `supported` is how you say an expectation is now met, and it matters:
+no consumer may read that out of the absence of a finding, so a check that
+verified something has to say so. The fourth conclusion the contract names,
+_not assessed_, has no spelling here on purpose — it is the absence of a
+finding, and giving it a value would let a producer assert it.
+
+A finding deliberately carries nothing else, and each omission is load-bearing:
+no `severity`, `confidence`, or score, because findings never decide the gate
+and a self-rating is not knowledge — a producer-specific measure belongs in
+`raw`, where your own `output_schema` validates it; no `kind` or `category`,
+which would be an open vocabulary nobody validates when `evaluator_ref`
+already categorizes the producer and `key` categorizes within it; no
+`relation` on a location and no `suggested_fix`, because a typed relationship
+and an assigned remediation are an actor's act, not a signal's; no `excerpt`,
+which duplicates `detail` and adds a second path for repository content to
+reach a retained record; no `basis` or `method`, because the runner already
+establishes the engine, provider, model, and context it handed you, and a
+self-declared basis would compete with an established one; and no `run_id` or
+`artifact_id`, because the run event owns the run's identity and a second copy
+is a second place for them to disagree.
+
+### Identity and `key`
+
+`key` is your answer to "is this the same thing I said last time?". A
+recurrence is recognized as `(artifact_id, evaluator_ref, key)` — never across
+artifacts.
+
+Set `key` only when a later run of the same evaluator can name the same thing
+the same way: a rule id, a path, a step id. Omit it when it cannot — a
+judgement that happens to resemble last week's has no cross-run identity, and
+nothing invents one for it. In particular nothing hashes your `title` into an
+identity, because that would make a reworded statement a different finding and
+two coincidentally identical statements one finding.
+
+A key is at most 200 characters of letters, digits, `.`, `_`, `:`, `/`, and
+`-`, starting with a letter or digit, with no `.` or `..` segment — so an
+absolute path, a home-relative path, and a Windows path are all refused.
+**A key built from a timestamp, a run id, or a counter is refused by nothing
+and is still wrong**: it mints a fresh identity on every run, which is the
+opposite of what `key` is for. `findingKey('rule', somePath)` joins segments
+and returns `undefined` when they do not form a usable key, so a file name
+with a space costs that one finding its identity instead of failing your run.
+
+Two findings in one result may not claim the same key. There is no honest way
+to pick between them.
+
+### Bounds, and what never costs you the verdict
+
+Two kinds of rule act on findings, and they act differently.
+
+**Bounds truncate.** At most 100 findings, a `title` at 500 characters, a
+`detail` at 4096, 10 locations per finding. Crossing one keeps the result,
+shortens the content with a `…[truncated]` marker, and records a notice saying
+how many findings were dropped, how many locations were dropped, and how many
+titles and details were shortened — so a reader is never shown a shortened set
+as if it were the whole one. They truncate rather than refuse on purpose: a
+hundred-and-first finding that turned a dispositionable violation into an
+error run would be a count deciding a gate, with no way out.
+
+**Shape refuses**: an unknown key, a wrong type, an incoherent location, a
+duplicate key, a `conclusion` with no expectation location. So do identifier
+lengths — a shortened key, path, or id denotes something other than what you
+named, so there is nothing worth keeping.
+
+When findings are refused, **the verdict, the run status, and the gate stay
+exactly what they would have been.** What was offered and could not be read is
+retained as a record of its own, carrying the reason, so nobody mistakes
+unreadable output for a check that found nothing. Too many findings, or ones
+that cannot be read, cost you the findings and never the verdict.
+
+`writeResult()` validates strictly before it writes, so a malformed finding
+fails in your own process with a field path instead of arriving as findings
+that could not be read.
+
+### Scrubbing
+
+Every string a finding carries — `title`, `detail`, every path, every id,
+every key — crosses the same trust boundary as `body`: terminal formatting
+stripped, recognized credential shapes redacted, before anything is retained.
+Redaction runs before truncation, so a secret straddling a cut cannot survive
+as an unmatched prefix. Report locations and labels; never depend on a
+credential value surviving into the artifact.
+
+A `title` may not contain any character that ends a line — CR, LF, NUL,
+U+000B, U+000C, U+0085, U+2028, U+2029 — because it is rendered as one line by
+every consumer, and a title that reshapes a digest row is incoherent whatever
+it says. A terminal escape is not refused: it is unsafe rather than
+incoherent, and the scrubber removes it.
+
+### Upgrading from `orcaops.evaluator_result/v1`
+
+The envelope literal changed, which makes this release breaking for producers.
+Four combinations, and what each looks like in practice:
+
+| Combination                           | What happens                                                                                                                                                       |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| New pack, new Orcaops                 | Runs normally, with findings when your evaluator supplies them. A valid result may have none.                                                                      |
+| **Old pack, new Orcaops**             | Every run is an `UNSUPPORTED_PROTOCOL` error naming the package, the version line, and that the pack must be rebuilt. No verdict is recorded.                      |
+| New pack, old Orcaops                 | Unsupported. The old runner strict-parses the v1 literal and rejects a v2 envelope as `ENVELOPE_INVALID` — an error run under its existing rules. Upgrade Orcaops. |
+| Retained history read by this release | Unchanged and readable. Nothing is migrated, reinterpreted, or rerun, and no finding identities are invented for output that carried none.                         |
+
+::: warning Upgrade your pack before you upgrade Orcaops
+An `UNSUPPORTED_PROTOCOL` run is an **error**, not a violation — and an error
+from a `block`-severity evaluator cannot be acknowledged, dismissed, or
+policy-excepted. Only a later successful run clears it, so a stale pack blocks
+every capture until it is rebuilt. If you are already stuck, lower the
+severity or disable the evaluator in `.orcaops/evaluators.yaml`, upgrade the
+pack, then put it back.
+:::
+
+The upgrade itself:
+
+1. Update `@orcaops/evaluator-sdk` to `0.2.x` and rebuild your pack. If you
+   use `pass()` / `violation()` / `info()`, that is the whole change.
+2. If you build the envelope JSON by hand, change
+   `"schema": "orcaops.evaluator_result/v1"` to
+   `"orcaops.evaluator_result/v2"`. That is one literal. No other field
+   changed meaning, and none was removed.
+3. Findings are optional. Add them where your check can name what it found;
+   set `key` only when a later run can name the same thing the same way, and
+   set `conclusion` only on a finding that names a plan step, an acceptance
+   criterion, a requirement, or a decision.
+4. LLM evaluators with `output_format: markdown` need no change at all.
+   Emitting a findings block is opt-in and belongs in your prompt.
 
 ## Testing an evaluator
 
@@ -218,10 +414,10 @@ expect(result.envelope.verdict).toBe('pass');
 `runLlmFixture` assembles the prompt exactly as the runner would and parses a
 response you supply. It calls no provider, so it is deterministic and free.
 
-The two things it checks are the two an author can actually get wrong, and
-neither is fixed by a better model: whether the prompt **contains the data it
+The things it checks are the ones an author can actually get wrong, and none of
+them is fixed by a better model: whether the prompt **contains the data it
 asks the model to reason over**, and whether the response shape the prompt
-documents **parses to the verdict it means**.
+documents **parses to the verdict and the findings it means**.
 
 ````typescript
 import { readFile } from 'node:fs/promises';
@@ -229,7 +425,7 @@ import { makeContext, runLlmFixture } from '@orcaops/evaluator-sdk';
 
 const promptBody = await readFile('./prompts/my-checker.prompt.md', 'utf8');
 
-const { prompt, contextBlock, verdict } = runLlmFixture({
+const { prompt, contextBlock, verdict, findings } = runLlmFixture({
   context: makeContext({
     source_plan: {
       /* … */
@@ -243,12 +439,19 @@ const { prompt, contextBlock, verdict } = runLlmFixture({
 
 expect(contextBlock).toContain('Source plan (pinned, immutable):');
 expect(verdict).toBe('violation');
+expect(findings).toEqual({ status: 'absent' });
 ````
 
 Assert on `contextBlock` for what the model would have seen — including that
 sections you did **not** declare are absent — and on `verdict` for what the
 runner would record. A response with no verdict returns `null`, matching the
 runner's `NO_VERDICT_LINE`.
+
+`findings` is `absent`, `ok` with the findings, or `unreadable` with the
+reason. Two cases are worth a test each: feed the **prompt body itself** as
+the response and assert `absent`, which is the echo a model can produce at any
+time, and feed a realistic response carrying a block and assert both the
+findings and that the verdict did not move.
 
 ### The CLI loop (end-to-end)
 
@@ -372,6 +575,58 @@ response unambiguous.
 
 A response with neither is recorded as `run_status: error` with
 `NO_VERDICT_LINE`, not as a verdict.
+
+### Reporting findings from a markdown prompt
+
+A markdown-mode evaluator may also ask for one `orcaops-findings` block,
+placed **before** the sentinel so the sentinel stays last. Its content is JSON
+carrying the same finding shapes as the envelope, so the protocol has one
+negotiation rule and one set of schemas:
+
+````markdown
+```orcaops-findings
+{
+  "schema": "orcaops.evaluator_findings/v1",
+  "findings": [{ "title": "…", "locations": [{ "kind": "plan-step", "step_id": "…" }] }]
+}
+```
+````
+
+JSON rather than a line grammar, and not by preference: a line grammar can
+emit a line that is exactly `VIOLATION`, which the fence-blind fallback tier
+would read as the verdict. Inside JSON every string is quoted and every
+newline escaped, so no line of the block can be a bare verdict token.
+
+The rules the parser applies:
+
+- A block is a **top-level** backtick fence, indented at most three columns,
+  whose info string is exactly `orcaops-findings`.
+- **Exactly one block.** Two make the findings unreadable rather than picking
+  one — an echoed example placed last would otherwise be adopted as real, and
+  an honest answer split across two blocks would lose half in silence.
+- No block at all means no findings. Absence is not malformation: every prompt
+  that never asks for a block is such a response.
+- A tilde fence, a stray backtick in the info string, an unclosed block,
+  content past the block's own size cap, a repeated JSON key, an unsupported
+  `schema` literal, or a finding that fails its shape makes the findings
+  unreadable, with the reason. Each of those would otherwise read as "no block
+  at all" and lose findings without a word. The block's cap refuses where a
+  finding's own bounds truncate, because half a JSON document does not parse.
+
+::: warning Show the example indented
+A prompt that documents the block necessarily contains an example of it, and a
+model may echo that example. **Indent your example by four spaces.** A fence
+indented four or more columns is literal code in CommonMark and opens nothing,
+so an echo of it produces no second block — the same reason a four-backtick
+wrapper hides the example above. Do not rely on last-block-wins: unlike the
+verdict sentinel, a second findings block is refused rather than preferred.
+:::
+
+Tell the model which location kinds it may use, and that it may only use ids
+and paths the context block actually shows it. A criterion id it invented
+points at nothing, and nothing downstream can tell that apart from one it
+copied. `runLlmFixture` parses a response's findings alongside its verdict, so
+both halves of that instruction are testable without a provider.
 
 ## Subprocess lifecycle
 

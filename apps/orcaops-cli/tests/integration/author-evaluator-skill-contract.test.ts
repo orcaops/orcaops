@@ -9,7 +9,7 @@ import {
   EvaluatorContextSchema,
   EvaluatorPackageSchema,
   EvaluatorPhaseSchema,
-  EvaluatorResultEnvelopeSchema,
+  EvaluatorResultEnvelopeV2Schema,
   EvaluatorSchema,
 } from '@orcaops/evaluator-protocol';
 import * as protocol from '@orcaops/evaluator-protocol';
@@ -56,6 +56,23 @@ const FLAT_BODY = BODY.replace(/\s+/g, ' ');
  * body: source is TypeScript with escapes and interpolation, so a literal
  * whole-text comparison would fail on formatting rather than drift.
  */
+/**
+ * The envelope release, in the words an author has to read to survive it: the
+ * literal they now emit, the one that stops running, and the reason a stale
+ * pack cannot simply be dismissed. Nothing else in the skill says any of it,
+ * and `eval schema` cannot — a projection shows a shape, never an upgrade.
+ */
+const ENVELOPE_ANCHORS = [
+  '`orcaops.evaluator_result/v2`',
+  'A pack built against `orcaops.evaluator_result/v1` no longer runs',
+  'Update `@orcaops/evaluator-sdk` to `0.2.x` and rebuild',
+  'Upgrade the pack BEFORE orcaops',
+  'cannot be acknowledged, dismissed, or policy-excepted',
+  '**never decide the gate**',
+  '**A key built from a timestamp, a run id, or a counter passes every check and is still wrong**',
+  '**Indent your example by four spaces.**',
+];
+
 describe('the built adapters output matches the authored source', () => {
   it('rebuild @orcaops/adapters if this fails', () => {
     // The body is a template literal, so every backtick is escaped in source.
@@ -63,6 +80,7 @@ describe('the built adapters output matches the authored source', () => {
     const guarded = [
       ...EvaluatorPhaseSchema.options.map((p) => `\`${p}\``),
       ...REFINEMENT_RULES.flatMap((r) => r.anchors),
+      ...ENVELOPE_ANCHORS,
     ];
     const drifted = guarded.filter(
       (needle) => flatSource.includes(needle) !== FLAT_BODY.includes(needle)
@@ -210,6 +228,47 @@ describe('the phase table covers every phase that exists', () => {
   });
 });
 
+describe('the envelope and findings the skill teaches', () => {
+  it('names the literal the SDK actually emits, and the one that stopped running', () => {
+    // Not restated from memory: the skill tells an author which string to put
+    // in a hand-written envelope, so a protocol change that moved the literal
+    // and left the skill behind would strand every custom pack.
+    expect(FLAT_BODY).toContain(`\`${protocol.CURRENT_RESULT_ENVELOPE_SCHEMA}\``);
+    for (const literal of protocol.SUPERSEDED_RESULT_ENVELOPE_SCHEMAS) {
+      expect(FLAT_BODY, literal).toContain(`\`${literal}\``);
+    }
+    expect(FLAT_BODY).toContain(`\`${protocol.REQUIRED_EVALUATOR_SDK_VERSION_LINE}\``);
+  });
+
+  it('teaches every conclusion and expectation location the schema accepts', () => {
+    for (const conclusion of protocol.EvaluatorFindingConclusionSchema.options) {
+      expect(FLAT_BODY, conclusion).toContain(`\`${conclusion}\``);
+    }
+    // The expectation kinds are what `conclusion` is gated on. A kind the
+    // skill omits is one an author never learns they may grade against.
+    for (const kind of protocol.EXPECTATION_LOCATION_KINDS) {
+      expect(FLAT_BODY, kind).toContain(kind);
+    }
+  });
+
+  it('states each finding bound with the number the protocol enforces', () => {
+    for (const bound of [
+      protocol.MAX_EVALUATOR_FINDINGS,
+      protocol.MAX_FINDING_TITLE_CHARS,
+      protocol.MAX_FINDING_DETAIL_CHARS,
+      protocol.MAX_FINDING_LOCATIONS,
+    ]) {
+      expect(FLAT_BODY, String(bound)).toContain(String(bound));
+    }
+  });
+
+  it('carries the release facts a projection cannot show', () => {
+    for (const anchor of ENVELOPE_ANCHORS) {
+      expect(FLAT_BODY, anchor).toContain(anchor);
+    }
+  });
+});
+
 describe('cross-field rules the emitted schema drops', () => {
   it('the valid baseline parses, so each row differs by exactly one broken rule', () => {
     expect(EvaluatorSchema.safeParse(VALID_SPEC).success).toBe(true);
@@ -257,7 +316,10 @@ describe('cross-field rules the emitted schema drops', () => {
 describe('every identifier the skill body names resolves', () => {
   const backticked = [...BODY.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]);
 
-  const schemaNames = backticked.filter((t) => /^[A-Z][A-Za-z]*Schema$/.test(t));
+  // The digit matters: the result envelope's exported name carries its version
+  // (`…V2Schema`), and a letters-only pattern would skip exactly the schema
+  // whose name moves when the protocol does.
+  const schemaNames = backticked.filter((t) => /^[A-Z][A-Za-z0-9]*Schema$/.test(t));
   const flags = backticked.filter((t) => /^--[a-z][a-z0-9-]*$/.test(t));
   const calls = backticked.filter((t) => /^[a-z][A-Za-z0-9]*\(\)$/.test(t));
   const snakeKeys = backticked.filter((t) => /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(t));
@@ -282,7 +344,7 @@ describe('every identifier the skill body names resolves', () => {
   for (const schema of [
     EvaluatorSchema,
     EvaluatorPackageSchema,
-    EvaluatorResultEnvelopeSchema,
+    EvaluatorResultEnvelopeV2Schema,
     EvaluatorContextSchema,
     FixtureFileSchema,
   ]) {

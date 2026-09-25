@@ -31,9 +31,9 @@
   "dependencies": {
     "@opentui/core": "0.1.89",
     "@opentui/react": "0.1.89",
-    "@orcaops/diff-fingerprint": "0.0.8",
-    "@orcaops/protocol": "0.0.26",
-    "@orcaops/sdk": "0.1.23",
+    "@orcaops/diff-fingerprint": "0.0.9",
+    "@orcaops/protocol": "0.0.27",
+    "@orcaops/sdk": "0.1.24",
     "better-sqlite3": "13.0.3",
     "react": "^19.0.0",
     "react-devtools-core": "^7.0.1",

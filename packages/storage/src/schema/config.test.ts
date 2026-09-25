@@ -4,8 +4,10 @@ import {
   assertConfigVersionCurrent,
   CONFIG_SCHEMA_VERSION,
   ConfigSchema,
+  configVersionForWrite,
   DEFAULT_CONFIG,
   getDefaultConfig,
+  isAcceptedConfigVersion,
   resolveConfig,
 } from './config.js';
 import { ConfigValidationError } from './validation.js';
@@ -66,39 +68,44 @@ describe('config schema — naming / bootstrap / workflow + install fields', () 
     expect(() => resolveConfig({ workflow: { hints: { keys: ['nope'], custom: [] } } })).toThrow();
   });
 
-  it('is at config schema version 7 (workflow commit guidance and routing)', () => {
-    expect(CONFIG_SCHEMA_VERSION).toBe(7);
+  it('uses config schema version 8 for knowledge processing', () => {
+    expect(CONFIG_SCHEMA_VERSION).toBe(8);
   });
 
-  it('assertConfigVersionCurrent: exactly the number 7 passes', () => {
-    expect(() => assertConfigVersionCurrent({ schema_version: 7 })).not.toThrow();
+  it('assertConfigVersionCurrent: exactly the current number passes', () => {
+    expect(() =>
+      assertConfigVersionCurrent({ schema_version: CONFIG_SCHEMA_VERSION })
+    ).not.toThrow();
   });
 
-  it('accepts version 6, whose only delta is two defaulted workflow keys', () => {
-    expect(() => assertConfigVersionCurrent({ schema_version: 6 })).not.toThrow();
-  });
-
-  it('accepts version 5, whose only delta is a fully-defaulted block', () => {
-    expect(() => assertConfigVersionCurrent({ schema_version: 5 })).not.toThrow();
-  });
+  it.each([5, 6, 7])(
+    'accepts version %i, whose only delta is fully-defaulted blocks',
+    (predecessor) => {
+      expect(() => assertConfigVersionCurrent({ schema_version: predecessor })).not.toThrow();
+      expect(isAcceptedConfigVersion(predecessor)).toBe(true);
+    }
+  );
 
   it('rejects non-current versions with regeneration guidance', () => {
     for (const v of [1, 2, 3, 4]) {
       expect(() => assertConfigVersionCurrent({ schema_version: v })).toThrow(
-        /requires 7.*orcaops init --force --reset-config/s
+        /requires 8.*orcaops init --force --reset-config/s
       );
     }
-    expect(() => assertConfigVersionCurrent({})).toThrow(/missing.*requires 7/s);
+    expect(() => assertConfigVersionCurrent({})).toThrow(/missing.*requires 8/s);
   });
 
   it('rejects a STRINGIFIED version naming the type error instead of coercing', () => {
-    expect(() => assertConfigVersionCurrent({ schema_version: '7' })).toThrow(
-      /number 7.*string "7".*--reset-config/s
+    expect(() => assertConfigVersionCurrent({ schema_version: '8' })).toThrow(
+      /number 8.*string "8".*--reset-config/s
     );
   });
 
   it('keeps the newer-orcaops message for a version ahead of this build', () => {
-    expect(() => assertConfigVersionCurrent({ schema_version: 8 })).toThrow(/Upgrade orcaops/);
+    expect(() => assertConfigVersionCurrent({ schema_version: CONFIG_SCHEMA_VERSION + 1 })).toThrow(
+      /Upgrade orcaops/
+    );
+    expect(isAcceptedConfigVersion(CONFIG_SCHEMA_VERSION + 1)).toBe(false);
   });
 
   it.each(['__proto__', 'constructor', 'prototype'])(
@@ -231,6 +238,8 @@ describe('config schema — closed nested sections', () => {
     ['workflow.extra', { workflow: { extra: true } }],
     ['workflow.hints.extra', { workflow: { hints: { extra: true } } }],
     ['workflow.routing.extra', { workflow: { routing: { extra: true } } }],
+    ['knowledge_processing.extra', { knowledge_processing: { extra: true } }],
+    ['knowledge_processing.max_concurrent', { knowledge_processing: { max_concurrent: 2 } }],
   ])('rejects %s', (path, partial) => {
     expect(() => resolveConfig(partial)).toThrowError(expect.objectContaining({ path }));
   });
@@ -238,6 +247,36 @@ describe('config schema — closed nested sections', () => {
   it('round-trips the complete current config', () => {
     const current = getDefaultConfig();
     expect(resolveConfig(current)).toEqual(current);
+  });
+
+  it('loads released workflow settings without enabling knowledge processing', () => {
+    const workflow = { commit_inside_window: false, routing: { suppress: ['digest'] } };
+    const config = resolveConfig({ schema_version: 7, workflow });
+    expect(config.workflow).toMatchObject(workflow);
+    expect(config.knowledge_processing.enabled).toBe(false);
+  });
+
+  it.each([
+    ['workflow.commit_inside_window', { commit_inside_window: false }],
+    ['workflow.routing', { routing: { suppress: ['digest'] } }],
+    ['workflow.commit_inside_window', { commit_inside_window: true }],
+    ['workflow.routing', { routing: {} }],
+  ])('stamps %s with its released version and refuses an older stamp', (field, workflow) => {
+    for (const version of [5, 6]) {
+      expect(configVersionForWrite({ workflow }, version)).toBe(7);
+      expect(() => resolveConfig({ schema_version: version, workflow })).toThrow(
+        `${field} needs schema_version 7`
+      );
+    }
+    expect(configVersionForWrite({ workflow })).toBe(7);
+    expect(configVersionForWrite({ workflow }, 8)).toBe(8);
+    expect(() => resolveConfig({ schema_version: 7, workflow })).not.toThrow();
+  });
+
+  it('keeps legacy workflow hints readable without a version increase', () => {
+    const document = { workflow: { hints: { custom: ['Check types.'] } } };
+    expect(configVersionForWrite(document, 6)).toBe(6);
+    expect(() => resolveConfig({ schema_version: 6, ...document })).not.toThrow();
   });
 });
 

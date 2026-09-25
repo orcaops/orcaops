@@ -6,6 +6,7 @@ export * from './capture-exclude.js';
 export * from './containment.js';
 export * from './context-block.js';
 export * from './verdict.js';
+export * from './findings-block.js';
 export {
   globMayMatchDescendant,
   globRequiresDirectoryTraversal,

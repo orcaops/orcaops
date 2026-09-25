@@ -1,6 +1,7 @@
+import type { KnowledgeBlock } from '@orcaops/core';
 import type { HistoryCompleteness, HistoryIssue } from '@orcaops/project-scope/history/database';
 
-export type { HistoryCompleteness, HistoryIssue };
+export type { HistoryCompleteness, HistoryIssue, KnowledgeBlock };
 
 /**
  * Liveness state. Computed by the classifier (`classifyAgent`).
@@ -139,6 +140,19 @@ export interface WatchThread {
   planDecisions: WatchDecision[];
   /** Plan-level non-goals (the exclusion text). */
   nonGoals: string[];
+  /**
+   * The continuing knowledge this thread is answerable to, read through the shared answer at the
+   * boundary its project is committed through. Null only when the project's knowledge could not be
+   * read this tick — never a shorthand for "no rules bear on this".
+   */
+  knowledge: KnowledgeBlock | null;
+  /**
+   * The code the tick's knowledge read failed with, or null when it did not fail. A pane that
+   * simply left the section out would be byte-identical to one over a project holding no
+   * continuing record at all, so a locked database or one on an older schema would read as
+   * "nothing bears on this work".
+   */
+  knowledgeUnavailable: string | null;
   /** Recent events for the drill-in, newest first; empty when idle >60m. */
   recentEvents: TickerEvent[];
   /** Events older than the retained bounded activity window. */

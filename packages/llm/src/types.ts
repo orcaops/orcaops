@@ -1,5 +1,7 @@
 import type { Operation } from 'effection';
 
+import type { JsonRepair } from './json-rescue.js';
+
 /**
  * The orcaops LLM provider interface. Implementations make one-shot evaluator
  * calls and return Effection `Operation`s; capture commands bridge into
@@ -120,6 +122,7 @@ export interface EvaluateError {
 export interface EvaluateResult {
   /** Canonical markdown body. Successful evaluations start with a verdict; errors carry diagnostics. */
   body: string;
+  jsonRepair?: JsonRepair;
   /** Model id reported by the tool, or the explicitly requested model when the tool cannot report it. */
   model: string | null;
   /**

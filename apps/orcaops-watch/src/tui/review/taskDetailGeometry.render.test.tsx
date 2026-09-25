@@ -60,6 +60,8 @@ function thread(id: string, lastWriteMs: number): WatchThread {
     startedAtMs: 0,
     planDecisions: [],
     nonGoals: [],
+    knowledge: null,
+    knowledgeUnavailable: null,
     recentEvents: [],
     omittedEvents: 0,
     activityWindowComplete: true,

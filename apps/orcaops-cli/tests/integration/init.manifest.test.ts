@@ -91,7 +91,8 @@ describe('orcaops init writes the install manifest', () => {
     const configDir = path.join(repo.path, '.orcaops');
     const configPath = path.join(configDir, 'config.json');
     const config = `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`;
-    await mkdir(configDir);
+    await mkdir(path.join(configDir, 'artifacts', 'legacy'), { recursive: true });
+    await writeFile(path.join(configDir, 'artifacts', 'legacy', 'events.ndjson'), '{}\n', 'utf8');
     await writeFile(configPath, config, 'utf8');
 
     const refused = await agent.runRaw(['init', '--json']);

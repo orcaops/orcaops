@@ -128,6 +128,94 @@ afterEach(() => {
 });
 
 describe('the gate runs before the operation', () => {
+  it('rejects a missing reviewer with structured output before the cloud handshake', async () => {
+    await expect(
+      buildProgram({ cloudBaseUrl: 'https://cloud.example' }).parseAsync([
+        'node',
+        'orcaops',
+        'plan',
+        'review',
+        'request',
+        'ext-1',
+        '--json',
+      ])
+    ).rejects.toThrow();
+    expect(cloud.pings).toBe(0);
+    expect(cloud.called).toEqual([]);
+    expect(JSON.parse(out.join(''))).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_INPUT' },
+    });
+  });
+
+  it('requires the reviewer request capability before dispatching the registered command', async () => {
+    await expect(
+      buildProgram({ cloudBaseUrl: 'https://cloud.example' }).parseAsync([
+        'node',
+        'orcaops',
+        'plan',
+        'review',
+        'request',
+        'ext-1',
+        '--reviewer',
+        'Ben',
+        '--json',
+      ])
+    ).rejects.toThrow();
+    expect(cloud.pings).toBe(1);
+    expect(cloud.called).toEqual([]);
+    expect(out.join('')).toContain('source-plan-review-request/v1');
+  });
+
+  it('dispatches repeated reviewer options when the request capability is advertised', async () => {
+    cloud.handshake = { ...FULL_HANDSHAKE, capabilities: ['source-plan-review-request/v1'] };
+    cloud.responses.reviewRequest = {
+      externalId: 'ext-1',
+      added: [{ userId: 'ben', rawTag: 'Ben' }],
+      alreadyRequested: [{ userId: 'alice', rawTag: 'Alice' }],
+      unresolved: [],
+    };
+    await buildProgram({ cloudBaseUrl: 'https://cloud.example' }).parseAsync([
+      'node',
+      'orcaops',
+      'plan',
+      'review',
+      'request',
+      'ext-1',
+      '--reviewer',
+      'Ben',
+      '--reviewer',
+      'Alice',
+      '--json',
+    ]);
+    expect(cloud.called).toEqual(['reviewRequest']);
+    expect(out.join('')).toContain('"status":"requested"');
+  });
+
+  it('carries the resend flag from the registered command into the emitted result', async () => {
+    cloud.handshake = { ...FULL_HANDSHAKE, capabilities: ['source-plan-review-request/v1'] };
+    cloud.responses.reviewRequest = {
+      externalId: 'ext-1',
+      added: [{ userId: 'ben', rawTag: 'Ben' }],
+      alreadyRequested: [],
+      unresolved: [],
+    };
+    await buildProgram({ cloudBaseUrl: 'https://cloud.example' }).parseAsync([
+      'node',
+      'orcaops',
+      'plan',
+      'review',
+      'request',
+      'ext-1',
+      '--reviewer',
+      'Ben',
+      '--resend',
+      '--json',
+    ]);
+    expect(cloud.called).toEqual(['reviewRequest']);
+    expect(JSON.parse(out.join(''))).toMatchObject({ resend: true, dispatched: true });
+  });
+
   it('routes the registered verdict command through the database and canonical client defaults', async () => {
     cloud.responses.setReviewerVerdict = {
       externalId: 'ext-1',

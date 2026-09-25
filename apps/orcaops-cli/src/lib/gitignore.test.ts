@@ -186,4 +186,28 @@ describe('reconcileGitignore ownership', () => {
       `${ORCAOPS_MANAGED_BLOCK_START}\nuser.log\n`
     );
   });
+
+  it('flags a file that held only orcaops content as emptied', async () => {
+    const gitignorePath = path.join(root, '.gitignore');
+    await writeFile(gitignorePath, block(['.orcaops/cache/']), 'utf8');
+    const onlyOrcaops = await reconcileGitignore(root, []);
+    expect(onlyOrcaops.desiredContent).toBe('');
+    expect(onlyOrcaops.emptied).toBe(true);
+
+    await writeFile(gitignorePath, `dist/\n\n${block(['.orcaops/cache/'])}`, 'utf8');
+    const withUserLines = await reconcileGitignore(root, []);
+    expect(withUserLines.desiredContent).toBe('dist/\n');
+    expect(withUserLines.emptied).toBe(false);
+  });
+
+  it('tells an absent file apart from an empty one', async () => {
+    const absent = await reconcileGitignore(root, ['.orcaops/cache/']);
+    expect(absent.exists).toBe(false);
+    expect(absent.currentContent).toBe('');
+
+    await writeFile(path.join(root, '.gitignore'), '', 'utf8');
+    const empty = await reconcileGitignore(root, ['.orcaops/cache/']);
+    expect(empty.exists).toBe(true);
+    expect(empty.currentContent).toBe('');
+  });
 });

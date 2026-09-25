@@ -2,8 +2,8 @@
 name: "Orcaops: task review"
 description: "Generate the Orcaops Task Review for a branch, anchor its reasoning to changed code, or address its comments. Select it only for an Orcaops or Task Review request, or the explicit reasoning-anchor action: \"generate the Orcaops Task Review\", \"anchor the review reasoning to code\", or \"address the open Task Review comments\"."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "547dba2772aa"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "1788e35a15f2"
 ---
 
 # When to use

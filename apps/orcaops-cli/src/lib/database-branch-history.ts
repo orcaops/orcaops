@@ -2,7 +2,11 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { Repo } from '@orcaops/core';
 import { readDatabaseHistoryContext } from '@orcaops/core/history/database-read';
-import { type HistoryFilters, HistoryScopeError } from '@orcaops/project-scope/history';
+import {
+  type HistoryFilters,
+  HistoryScopeError,
+  unavailableProjectError,
+} from '@orcaops/project-scope/history';
 import {
   collectDatabaseHistory,
   type DatabaseHistoryProject,
@@ -52,11 +56,7 @@ export function requireRepositoryScope(scope: DatabaseHistoryScope): RepositoryH
     );
   const project = scope.projects[0];
   if (!project.database || !project.authority)
-    throw new HistoryScopeError(
-      project.completeness.issues[0]?.code ?? 'HISTORY_INACCESSIBLE',
-      'Selected project history is unavailable',
-      { issues: project.completeness.issues }
-    );
+    throw unavailableProjectError(project.completeness.issues);
   if (git.repositoryInstanceId !== project.authority.repositoryInstanceId)
     throw new HistoryScopeError(
       'GIT_CONTEXT_UNAVAILABLE',

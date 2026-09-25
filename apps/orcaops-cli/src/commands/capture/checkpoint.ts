@@ -11,7 +11,7 @@ import {
   type RubricCoverage,
   rubricCoverageSentence,
 } from '@orcaops/storage';
-import { ProjectDatabaseError } from '@orcaops/storage/history/database';
+import { type EvaluatorRunEvidence, ProjectDatabaseError } from '@orcaops/storage/history/database';
 
 import { ErrorCodes, InfoCodes, OrcaopsError } from '../../io/errors.js';
 import { readPayloadInput } from '../../io/input.js';
@@ -34,6 +34,7 @@ import {
   unmergedProbeFailedWarning,
   windowOverlapWarnings,
 } from '../../lib/canonical-checkpoint-shapes.js';
+import { unreportedChangedPathsWarnings } from '../../lib/checkpoint-observed-paths.js';
 import { toSecretWarningReports } from '../../lib/cloud-secret-gate.js';
 import {
   publishDatabaseCaptureAttempts,
@@ -70,6 +71,7 @@ import {
   databaseEvaluatorContext,
   publishDatabaseLifecycleCompletion,
   readDatabaseLifecycleCompletion,
+  retainedFindings,
   runDatabaseLifecycleEvaluators,
 } from '../../lib/database-evaluators.js';
 import { stampDatabaseUsage } from '../../lib/database-usage-stamp.js';
@@ -161,6 +163,7 @@ async function captureCheckpointOpen(opts: CaptureCheckpointOptions, signal: Abo
     parse: async () =>
       CaptureCheckpointOpenInputSchema.parse(await readPayloadInput({ inputPath: opts.input })),
     signal,
+    noLlm: opts.noLlm,
   });
   const { context, input } = prepared;
   return withCheckpointCapture(
@@ -175,12 +178,18 @@ async function captureCheckpointOpen(opts: CaptureCheckpointOptions, signal: Abo
       const retained: { publication: CheckpointSnapshotPublication | null } = {
         publication: null,
       };
+      // Filled by the open gate while the draft is composed, and read when the capture input is
+      // built, so the findings settle in the transaction that retains the gate audit.
+      const gateEvidence: EvaluatorRunEvidence[] = [];
       const appended = await appendDatabaseCaptureEvents<CheckpointOpenWriteResult>({
         handle: writer,
         binding: context.binding,
+        processing: context.processing,
+        processingEnabled: context.config.knowledge_processing.enabled,
         artifactId,
         operationId,
         authoredPayload: { kind: 'checkpoint_open', input },
+        evaluatorEvidence: gateEvidence,
         secretAllow: context.config.redact.allow,
         explicitTarget: input.artifact_id !== undefined,
         operation: 'task',
@@ -246,6 +255,7 @@ async function captureCheckpointOpen(opts: CaptureCheckpointOptions, signal: Abo
                   policyExceptions: input.policy_exceptions,
                   noLlm: opts.noLlm,
                   env: getInvocationEnv(),
+                  evidence: gateEvidence,
                 }),
               snapshotCallbacks: {
                 captureOpenSnapshot: async ({ artifact_id, n }) => {
@@ -390,6 +400,7 @@ async function captureCheckpointClose(opts: CaptureCheckpointOptions, signal: Ab
     parse: async () =>
       CaptureCheckpointCloseInputSchema.parse(await readPayloadInput({ inputPath: opts.input })),
     signal,
+    noLlm: opts.noLlm,
   });
   const { context, input } = prepared;
   return withCheckpointCapture(
@@ -410,6 +421,8 @@ async function captureCheckpointClose(opts: CaptureCheckpointOptions, signal: Ab
       const appended = await appendDatabaseCaptureEvents<CheckpointCloseWriteResult>({
         handle: writer,
         binding: context.binding,
+        processing: context.processing,
+        processingEnabled: context.config.knowledge_processing.enabled,
         artifactId,
         operationId,
         authoredPayload: { kind: 'checkpoint_close', input },
@@ -608,6 +621,7 @@ async function captureCheckpointClose(opts: CaptureCheckpointOptions, signal: Ab
           : []),
         ...windowOverlapWarnings(checkpoint.n, checkpoint.window_overlap),
         ...(excludeProbeFailed ? [captureExcludeProbeFailedWarning(checkpoint.n, 'close')] : []),
+        ...(await unreportedChangedPathsWarnings(context.repo, checkpoint)),
       ];
       const usage = replayed
         ? { state: 'skipped' as const, reason: 'replay' as const }
@@ -658,6 +672,7 @@ async function captureCheckpointClose(opts: CaptureCheckpointOptions, signal: Ab
         capture_status: 'committed' as const,
         snapshot_ref: retained.publication?.fullRef ?? null,
         evaluator_results: evaluated?.evaluator_results ?? [],
+        ...retainedFindings(evaluated?.findings_retained ?? 0),
         blocking: evaluated?.blocking ?? false,
         lifecycle,
         usage,
@@ -678,6 +693,7 @@ async function captureCheckpointAbandon(opts: CaptureCheckpointOptions, signal: 
     parse: async () =>
       CaptureCheckpointAbandonInputSchema.parse(await readPayloadInput({ inputPath: opts.input })),
     signal,
+    noLlm: opts.noLlm,
   });
   const { context, input } = prepared;
   return withCheckpointCapture(
@@ -694,6 +710,8 @@ async function captureCheckpointAbandon(opts: CaptureCheckpointOptions, signal: 
       const appended = await appendDatabaseCaptureEvents<CheckpointAbandonWriteResult>({
         handle: writer,
         binding: context.binding,
+        processing: context.processing,
+        processingEnabled: context.config.knowledge_processing.enabled,
         artifactId,
         operationId,
         authoredPayload: { kind: 'checkpoint_abandon', input },

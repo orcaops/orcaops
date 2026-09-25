@@ -153,6 +153,20 @@ it('reports unavailable snapshot evidence for borrowed storage and failed closur
   });
   expect(await git(f.cwd, 'for-each-ref', '--format=%(refname)', 'refs/orcaops')).toBe('');
 });
+it('keeps the specific cause of a closure failure in the snapshot error message', async () => {
+  const f = await fixture();
+  vi.spyOn(closure, 'prepareDatabaseGitClosure').mockRejectedValueOnce(
+    new ProjectDatabaseError('HISTORY_INACCESSIBLE', 'Owned closure could not be established', {
+      cause: new Error('A required owned Git object representation changed after writeout'),
+    })
+  );
+  expect(await prepareDatabaseSnapshot(f.context, input)).toMatchObject({
+    ok: false,
+    error_reason: 'unknown',
+    error_message:
+      'Owned closure could not be established (cause: A required owned Git object representation changed after writeout)',
+  });
+});
 it('detaches authored input across asynchronous preparation and preserves pre-cancellation', async () => {
   const f = await fixture();
   await writeFile(path.join(f.cwd, 'original.txt'), 'Original selected bytes\n');

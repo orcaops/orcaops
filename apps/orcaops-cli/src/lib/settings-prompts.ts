@@ -123,8 +123,8 @@ export const scopePrompt = {
     },
     {
       value: 'global',
-      label: 'In your home directory',
-      hint: 'shared across all your repos; adds nothing to this one',
+      label: 'Skills in your home directory, settings in this repo',
+      hint: 'adds .orcaops/ and a .gitignore section here; AGENTS.md / CLAUDE.md gets a section unless you keep it hands off',
     },
     {
       value: 'personal',

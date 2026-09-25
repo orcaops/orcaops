@@ -84,7 +84,7 @@ describe('legacy conversion apply', { timeout: 180_000 }, () => {
           'utf8'
         )
       );
-      expect(database.pragma('user_version', { simple: true })).toBe(29);
+      expect(database.pragma('user_version', { simple: true })).toBe(saved.schemaVersion);
       expect(database.pragma('journal_mode', { simple: true })).toBe('wal');
       const definitions = database
         .prepare(

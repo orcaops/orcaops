@@ -68,7 +68,16 @@ export function databaseEvaluatorContext(
   };
 }
 
+/**
+ * Nothing a command prints changes unless a finding was established; then a `--json` response may
+ * say how many were retained. The finding text itself is never printed.
+ */
+export const retainedFindings = (count: number): { findings_retained?: number } =>
+  count > 0 ? { findings_retained: count } : {};
+
 export interface DatabaseLifecycleEvaluation extends RunLifecycleResult {
+  /** How many findings this pass retained, which is what a `--json` response may name. */
+  findings_retained: number;
   run_event_ids: string[];
   publication: Awaited<ReturnType<typeof appendDatabaseCaptureEvents>>['publication'];
 }
@@ -105,11 +114,19 @@ export async function runDatabaseLifecycleEvaluators(input: {
     noLlm: input.noLlm,
     dryRun: true,
   });
+  const findingsRetained = evaluated.evaluator_evidence.reduce(
+    (total, evidence) =>
+      total +
+      (evidence.findings.status === 'established' ? evidence.findings.record.findings.length : 0),
+    0
+  );
   if (!evaluated.evaluator_results.length)
-    return { ...evaluated, run_event_ids: [], publication: null };
+    return { ...evaluated, findings_retained: 0, run_event_ids: [], publication: null };
   const appended = await appendDatabaseCaptureEvents({
     handle,
     binding: input.context.binding,
+    processing: input.context.processing,
+    processingEnabled: input.context.config.knowledge_processing.enabled,
     artifactId,
     operationId: uuidv7(),
     authoredPayload: {
@@ -119,6 +136,7 @@ export async function runDatabaseLifecycleEvaluators(input: {
       checkpoint_n: input.checkpointN ?? null,
       runs: evaluated.evaluator_results,
     },
+    evaluatorEvidence: evaluated.evaluator_evidence,
     secretAllow: input.context.config.redact.allow,
     explicitTarget: input.explicitTarget,
     options: input.options,
@@ -132,6 +150,7 @@ export async function runDatabaseLifecycleEvaluators(input: {
   const log = readProjectArtifact(handle, artifactId)?.thread.evaluatorLog ?? null;
   return {
     ...evaluated,
+    findings_retained: findingsRetained,
     blocking:
       evaluated.evaluator_results.some(isBlockingEvaluatorFailure) ||
       (log !== null &&

@@ -118,7 +118,6 @@ describe('blocked summary refusal', { timeout: 60_000 }, () => {
     const git = gitClient(f.main);
     await git.add('fix.ts');
     await git.commit('remediation');
-    const headSha = (await git.revparse(['HEAD'])).trim();
 
     const cpOpenRes = await agent.runRaw([
       'capture',
@@ -146,7 +145,6 @@ describe('blocked summary refusal', { timeout: 60_000 }, () => {
           n: 1,
           summary: 'remediation work',
           files_changed: ['fix.ts'],
-          head_sha: headSha,
         })
       ),
     ]);

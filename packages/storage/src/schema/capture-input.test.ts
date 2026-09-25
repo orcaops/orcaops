@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  CaptureAcknowledgeInputSchema,
   CaptureCheckpointAbandonInputSchema,
   CaptureCheckpointCloseInputSchema,
   CaptureCheckpointOpenInputSchema,
@@ -129,25 +130,165 @@ describe('plan-time decisions input (base shape, default [])', () => {
     expect(parsed.decisions).toEqual([]);
   });
 
-  it('accepts base-shape decisions and strips a stray agent-supplied revision_n', () => {
-    const parsed = CapturePlanInputSchema.parse({
+  it('accepts base-shape decisions with alternatives and rejects an agent-supplied revision_n', () => {
+    const plan = (decision: Record<string, unknown>) => ({
       task: 't',
       label: 'a label',
       plan_steps: [{ text: 'do', label: 's1' }],
-      decisions: [
-        {
-          decision: 'use X',
-          reason: 'because Y',
-          revision_n: 7,
-          alternatives_considered: [{ option: 'Z', rejected_because: 'slower' }],
-        },
-      ],
+      decisions: [decision],
     });
-    expect(parsed.decisions).toHaveLength(1);
-    // The agent supplies the base shape; the write path owns revision_n.
-    expect('revision_n' in parsed.decisions[0]).toBe(false);
+    const parsed = CapturePlanInputSchema.parse(
+      plan({
+        decision: 'use X',
+        reason: 'because Y',
+        alternatives_considered: [{ option: 'Z', rejected_because: 'slower' }],
+      })
+    );
     expect(parsed.decisions[0].alternatives_considered).toEqual([
       { option: 'Z', rejected_because: 'slower' },
     ]);
+    const stamped = CapturePlanInputSchema.safeParse(
+      plan({ decision: 'use X', reason: 'because Y', revision_n: 7 })
+    );
+    expect(stamped.error?.issues).toMatchObject([
+      { code: 'unrecognized_keys', keys: ['revision_n'], path: ['decisions', 0] },
+    ]);
+  });
+});
+
+describe('unknown keys in capture input', () => {
+  const step = { text: 'do', label: 's1', acceptance_criteria: [{ text: 'done' }] };
+  const plan = { task: 't', label: 'a label', plan_steps: [step] };
+  const revise = {
+    artifact_id: 'a',
+    label: 'a label',
+    plan_steps: [{ ...step, step_id: 's' }],
+    rationale: 'why',
+    prior_plan_event_id: null,
+  };
+  const messages = (result: { error?: { issues: { message: string }[] } }) =>
+    (result.error?.issues ?? []).map((issue) => issue.message);
+
+  it('refuses a close whose completion claim sits under a misspelled key', () => {
+    const result = CaptureCheckpointCloseInputSchema.safeParse({
+      summary: 'done',
+      completed_steps: ['s'],
+    });
+    expect(result.success).toBe(false);
+    expect(messages(result)).toEqual([
+      'Unknown key "completed_steps" (did you mean "completed_step_ids"?)',
+    ]);
+  });
+
+  it('refuses a plan whose non-goals sit under a misspelled key', () => {
+    const result = CapturePlanInputSchema.safeParse({
+      ...plan,
+      non_goal: [{ text: 'x', rationale: 'y' }],
+    });
+    expect(messages(result)).toEqual(['Unknown key "non_goal" (did you mean "non_goals"?)']);
+  });
+
+  it('names every unknown key in one issue and omits a suggestion when nothing is close', () => {
+    const result = CaptureCheckpointCloseInputSchema.safeParse({
+      summary: 'done',
+      decision: [],
+      zzzzzzzzzzzzzzzz: 1,
+    });
+    expect(messages(result)).toEqual([
+      'Unknown keys "decision" (did you mean "decisions"?), "zzzzzzzzzzzzzzzz"',
+    ]);
+  });
+
+  it.each([
+    ['plan step', CapturePlanInputSchema, { ...plan, plan_steps: [{ ...step, lable: 'x' }] }],
+    [
+      'plan criterion',
+      CapturePlanInputSchema,
+      {
+        ...plan,
+        plan_steps: [{ ...step, acceptance_criteria: [{ text: 'd', criterion_id: 'c' }] }],
+      },
+    ],
+    [
+      'plan non-goal',
+      CapturePlanInputSchema,
+      { ...plan, non_goals: [{ text: 'x', rationale: 'y', source_ref: [] }] },
+    ],
+    [
+      'decision alternative',
+      CapturePlanInputSchema,
+      {
+        ...plan,
+        decisions: [
+          {
+            decision: 'd',
+            reason: 'r',
+            alternatives_considered: [{ option: 'o', rejected_because: 'r', why: 'w' }],
+          },
+        ],
+      },
+    ],
+    ['revise top level', CapturePlanReviseInputSchema, { ...revise, rationle: 'x' }],
+    [
+      'revise step',
+      CapturePlanReviseInputSchema,
+      { ...revise, plan_steps: [{ ...step, stepid: 's' }] },
+    ],
+    [
+      'revise criterion',
+      CapturePlanReviseInputSchema,
+      { ...revise, plan_steps: [{ ...step, acceptance_criteria: [{ text: 'd', id: 'c' }] }] },
+    ],
+    [
+      'revise non-goal',
+      CapturePlanReviseInputSchema,
+      { ...revise, non_goals: [{ text: 'x', rationale: 'y', why: 'z' }] },
+    ],
+    [
+      'revise decision',
+      CapturePlanReviseInputSchema,
+      { ...revise, decisions: [{ decision: 'd', reason: 'r', reasons: 'x' }] },
+    ],
+    [
+      'checkpoint open',
+      CaptureCheckpointOpenInputSchema,
+      { declared_step_ids: ['s'], declared_steps: ['s'] },
+    ],
+    [
+      'checkpoint open policy exception',
+      CaptureCheckpointOpenInputSchema,
+      { declared_step_ids: ['s'], policy_exceptions: [{ evaluator: 'e', reason: 'r', why: 'w' }] },
+    ],
+    [
+      'checkpoint close decision',
+      CaptureCheckpointCloseInputSchema,
+      { summary: 's', decisions: [{ decision: 'd', reason: 'r', revision_n: 1 }] },
+    ],
+    ['checkpoint abandon', CaptureCheckpointAbandonInputSchema, { n: 1, reason: 'r', reasn: 'r' }],
+    ['summary', CaptureSummaryInputSchema, { outcome: 'o', test_run: [] }],
+    [
+      'summary accepted warning',
+      CaptureSummaryInputSchema,
+      {
+        outcome: 'o',
+        accepted_warnings: [
+          { review_id: 'v', run_id: 'r', evaluator_ref: 'e', reason: 'x', note: 'n' },
+        ],
+      },
+    ],
+    [
+      'run-evaluators',
+      CaptureRunEvaluatorsInputSchema,
+      { artifact_id: 'a', fires_at: 'pre-pr', checkpoint: 1 },
+    ],
+    ['pre-pr-check', CapturePrePrCheckInputSchema, { artifactid: 'a' }],
+    [
+      'acknowledge',
+      CaptureAcknowledgeInputSchema,
+      { artifact_id: 'a', evaluator: 'e', reason: 'r', run_id: 'x' },
+    ],
+  ])('refuses an unknown key on the %s', (_, schema, input) => {
+    const result = schema.safeParse(input);
+    expect(result.error?.issues).toMatchObject([{ code: 'unrecognized_keys' }]);
   });
 });

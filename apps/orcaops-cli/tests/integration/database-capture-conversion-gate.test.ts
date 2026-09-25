@@ -56,6 +56,14 @@ function environment(r: Repository) {
 function agent(r: Repository) {
   return makeAgent({ cwd: r.main, timeoutMs: 120_000, env: environment(r) });
 }
+async function teammateClone(source: Repository): Promise<Repository> {
+  const temporary = await realpath(await mkdtemp(path.join(tmpdir(), 'gate-clone-')));
+  scratch.push(temporary);
+  const main = path.join(temporary, 'main');
+  await mkdir(path.join(temporary, 'home'), { recursive: true });
+  await git(temporary, ['clone', '-q', source.main, main]);
+  return { temporary, main, root: path.join(temporary, 'data') };
+}
 function planPayload() {
   return JSON.stringify({
     idempotency_key: `plan-${randomUUID()}`,
@@ -70,12 +78,12 @@ function planPayload() {
 }
 const capture = (r: Repository) =>
   agent(r).runRaw(['capture', 'plan', '--no-llm', '--input', inputFile(planPayload())]);
-async function runInit(r: Repository, extra: string[] = []) {
+async function runInit(r: Repository, extra: string[] = [], scope = 'personal') {
   const raw = await agent(r).runRaw([
     'init',
     '--yes',
     '--scope',
-    'personal',
+    scope,
     '--no-session-hooks',
     '--json',
     ...extra,
@@ -164,6 +172,46 @@ describe('registered database conversion gate', { timeout: 240_000 }, () => {
     // initializes nothing; the code differs from the legacy-store case.
     expect(JSON.parse(refusedMirror.stdout).error.code).toBe('HISTORY_MISSING');
     expect(await listing(path.join(mirrored.root, 'projects'))).toEqual([projectId]);
+  });
+
+  it('lets a teammate clone of a committed project-scope install start capturing', async () => {
+    const origin = await repository();
+    await runInit(origin, [], 'project');
+    await git(origin.main, ['add', '-A']);
+    await git(origin.main, ['commit', '-qm', 'Adopt orcaops']);
+    const clone = await teammateClone(origin);
+    expect(await listing(path.join(clone.main, '.orcaops'))).toEqual([
+      'config.json',
+      'install.json',
+    ]);
+    const captured = await capture(clone);
+    expect(captured.exitCode, captured.stdout + captured.stderr).toBe(0);
+    expect(JSON.parse(captured.stdout).ok).toBe(true);
+    const projects = await listing(path.join(clone.root, 'projects'));
+    expect(projects).toContain('catalog');
+    expect(projects).toHaveLength(2);
+  });
+
+  it('still refuses a teammate clone whose committed install also carries legacy history', async () => {
+    const origin = await repository();
+    await runInit(origin, [], 'project');
+    const artifactId = randomUUID();
+    const store = path.join(origin.main, '.orcaops', 'artifacts', artifactId);
+    await mkdir(store, { recursive: true });
+    await writeFile(
+      path.join(store, 'events.ndjson'),
+      `${JSON.stringify({ type: 'plan_captured', artifact_id: artifactId })}\n`,
+      'utf8'
+    );
+    await git(origin.main, ['add', '-A']);
+    await git(origin.main, ['add', '-f', '.orcaops/artifacts']);
+    await git(origin.main, ['commit', '-qm', 'Adopt orcaops']);
+    const clone = await teammateClone(origin);
+    expect(await listing(path.join(clone.main, '.orcaops'))).toContain('artifacts');
+    const refused = await capture(clone);
+    expect(refused.exitCode).toBe(1);
+    expect(JSON.parse(refused.stdout).error.code).toBe('CONVERSION_REQUIRED');
+    expect(await listing(clone.root)).toEqual([]);
   });
 
   it('re-runs init over an existing project database without touching it', async () => {

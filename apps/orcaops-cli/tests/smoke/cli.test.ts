@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -307,13 +308,16 @@ describe('orcaops CLI (smoke: real spawn)', () => {
     //                       fires regardless and produces a pass)
     //   checkpoint-close  — non-goals-info / scope-creep-detect / etc.
     //   pre-pr            — plan-conformance-pre-pr (skipped under --no-llm)
-    // Read the artifact's full evaluator runs via `orcaops show --json`.
-    const showResult = await runCli(['show', artifactId, '--json'], { cwd: repo.path });
+    const destination = path.join(repo.path, 'evaluator-export.json');
+    const showResult = await runCli(
+      ['show', artifactId, '--section', 'evaluators', '--output', destination, '--json'],
+      { cwd: repo.path }
+    );
     expect(showResult.exitCode).toBe(0);
-    const showJson = JSON.parse(showResult.stdout) as {
-      artifact?: { evaluator_log?: { runs?: Array<{ phase: string }> } };
+    const showJson = JSON.parse(await readFile(destination, 'utf8')) as {
+      content?: { runs?: Array<{ phase: string }> };
     };
-    const phases = new Set((showJson.artifact?.evaluator_log?.runs ?? []).map((r) => r.phase));
+    const phases = new Set((showJson.content?.runs ?? []).map((r) => r.phase));
     expect(phases).toContain('post-plan');
     expect(phases).toContain('checkpoint-open');
     expect(phases).toContain('checkpoint-close');

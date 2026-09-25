@@ -33,3 +33,32 @@ If any are missing:
 ```orcaops-verdict
 VIOLATION
 ```
+
+## Optional: structured findings
+
+You MAY also emit ONE `orcaops-findings` block, immediately BEFORE the
+sentinel. It is optional — emitting none is always valid — and it never
+changes the verdict or whether anything blocks. A block that cannot be read
+costs you the findings and nothing else.
+
+Emit one finding per concern you found unaddressed, so it survives outside
+this prose. `title` names the concern and what is missing, in one line;
+`detail` says where you looked.
+
+- `locations`: `{"kind":"plan-step","step_id":"<id>"}` for the listed step
+  that would have to address the concern, when one step clearly owns it. That
+  kind only, taking ids from `Plan steps` above and never inventing one; leave
+  `locations` out when no single step owns the concern.
+- Never set `conclusion`. It says whether an expectation was met, and an
+  unaddressed concern is not a judgement about a step's delivery — this check
+  fires before the work exists.
+- `key`: exactly `idempotency`, `rollback` or `test-coverage`, one per finding.
+  These three are fixed, so the same gap on a later run is recognised as the
+  same finding.
+
+The block is one JSON object. Shown indented here, which makes it inert — copy
+the shape, not this text, and start your own fence at the left margin:
+
+    ```orcaops-findings
+    {"schema":"orcaops.evaluator_findings/v1","findings":[{"key":"rollback","title":"No step says how this is reversed","detail":"<where you looked>","locations":[{"kind":"plan-step","step_id":"<id from Plan steps>"}]}]}
+    ```

@@ -7,12 +7,15 @@ description: >-
   is the audit record reviewers read against the per-revision
   `step_lineage` diff — without it, the revision history is a list of
   "what" with no "why." Severity is `block`: an empty or near-empty
-  rationale fails the revise call. Default `min_length=16` filters
-  out placeholders ("update", "fix", "wip").
+  rationale does not fail the revise call — the revision is still recorded —
+  but it leaves a blocking violation on the artifact. Default
+  `min_length=16` filters out placeholders ("update", "fix", "wip").
 on_block_message: |
-  Rewrite the revise call with a fuller `rationale` field describing
-  what scope shifted and why. Re-issue with a fresh `idempotency_key`
-  (same key + different payload is `IDEMPOTENCY_CONFLICT`).
+  The revision was committed, but its rationale is too thin. Revise
+  again with a fuller `rationale` describing what scope shifted and
+  why (a fresh `idempotency_key`; this records the next revision_n,
+  and a passing revision supersedes this violation), or dismiss it
+  with `orcaops block dismiss`.
 engine:
   kind: command
   command:

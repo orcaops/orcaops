@@ -42,12 +42,15 @@ import { syncDatabaseCapture } from '../../lib/database-capture-sync.js';
 import {
   publishDatabaseLifecycleCompletion,
   readDatabaseLifecycleCompletion,
+  retainedFindings,
   runDatabaseLifecycleEvaluators,
 } from '../../lib/database-evaluators.js';
 import { databaseSourcePlanLookup } from '../../lib/database-source-plan-resolver.js';
 import { stampDatabaseUsage } from '../../lib/database-usage-stamp.js';
 import { closeFailedHistoryRead } from '../../lib/history-reader-close.js';
 import { getInvocationCwd } from '../../lib/invocation-context.js';
+import { wakeProcessingWorker } from '../../lib/knowledge-processing-wakeup.js';
+import { readPlanEventKnowledgeUses } from '../../lib/plan-knowledge-uses.js';
 import { runCapture } from '../../lib/run-capture.js';
 import { resolveSourcePlan } from '../../lib/source-plan-resolver.js';
 import { usageStampKey } from '../../lib/usage-stamp.js';
@@ -124,6 +127,7 @@ async function captureDatabasePlanCommand(opts: CapturePlanOptions, signal: Abor
       };
     },
     signal,
+    noLlm: opts.noLlm,
   });
   const { context, raw: authored, input } = prepared;
   try {
@@ -137,6 +141,7 @@ async function captureDatabasePlanCommand(opts: CapturePlanOptions, signal: Abor
     let waiting = false;
     const options = {
       signal,
+      processing: context.processing,
       onWait: () => {
         if (waiting) return;
         waiting = true;
@@ -163,6 +168,13 @@ async function captureDatabasePlanCommand(opts: CapturePlanOptions, signal: Abor
         },
         options
       );
+      // The capture is committed by the time this runs, and the wake-up never throws.
+      if (captured.publication)
+        wakeProcessingWorker(captured.publication.admittedProcessingJobs, {
+          repoRoot: context.processing.origin.worktreeRoot,
+          authority: writer.authority,
+          enabled: context.config.knowledge_processing.enabled,
+        });
       const artifactId = captured.artifactId;
       const receipt = readProjectPlanCapture(
         writer,
@@ -183,8 +195,9 @@ async function captureDatabasePlanCommand(opts: CapturePlanOptions, signal: Abor
           ReturnType<typeof runDatabaseLifecycleEvaluators>
         >['evaluator_results'];
         blocking: boolean;
+        findings_retained: number;
         error?: ReturnType<typeof captureFailure>;
-      } = { status: 'replayed', evaluator_results: [], blocking: false };
+      } = { status: 'replayed', evaluator_results: [], blocking: false, findings_retained: 0 };
       if (!readDatabaseLifecycleCompletion(writer, artifactId, key)) {
         try {
           const evaluated = await runDatabaseLifecycleEvaluators({
@@ -212,12 +225,14 @@ async function captureDatabasePlanCommand(opts: CapturePlanOptions, signal: Abor
             status: 'complete',
             evaluator_results: evaluated.evaluator_results,
             blocking: evaluated.blocking,
+            findings_retained: evaluated.findings_retained,
           };
         } catch (cause) {
           lifecycle = {
             status: 'failed',
             evaluator_results: [],
             blocking: false,
+            findings_retained: 0,
             error: captureFailure(cause),
           };
         }
@@ -304,6 +319,10 @@ async function captureDatabasePlanCommand(opts: CapturePlanOptions, signal: Abor
         })),
         revision_n: plan.revision_n,
         plan_event_id: captured.planEventId,
+        knowledge_uses: readPlanEventKnowledgeUses(writer, {
+          planEventId: captured.planEventId,
+          projectId: writer.authority.projectId,
+        }),
         // `plan` is the CURRENT retained plan, so a replayed capture after a
         // revision reports that later revision while plan_event_id stays the
         // original capture event. Deliberate and unchanged: the coverage block
@@ -319,6 +338,7 @@ async function captureDatabasePlanCommand(opts: CapturePlanOptions, signal: Abor
         historical: captured.historical,
         warnings: captured.warnings,
         evaluator_results: lifecycle.evaluator_results,
+        ...retainedFindings(lifecycle.findings_retained),
         blocking: lifecycle.blocking,
         lifecycle: {
           status: lifecycle.status,

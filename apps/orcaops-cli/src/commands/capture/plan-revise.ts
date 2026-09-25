@@ -21,12 +21,14 @@ import {
   type DatabaseLifecycleEvaluation,
   publishDatabaseLifecycleCompletion,
   readDatabaseLifecycleCompletion,
+  retainedFindings,
   runDatabaseLifecycleEvaluators,
 } from '../../lib/database-evaluators.js';
 import { captureDatabaseExisting } from '../../lib/database-existing-capture.js';
 import { stampDatabaseUsage } from '../../lib/database-usage-stamp.js';
 import { closeFailedHistoryRead } from '../../lib/history-reader-close.js';
 import { getInvocationCwd } from '../../lib/invocation-context.js';
+import { readPlanEventKnowledgeUses } from '../../lib/plan-knowledge-uses.js';
 import { runCapture } from '../../lib/run-capture.js';
 import { lifecycleUsageStamp } from '../../lib/usage-stamp.js';
 
@@ -39,6 +41,7 @@ interface RevisionLifecycle {
   status: 'complete' | 'replayed' | 'unavailable' | 'failed';
   evaluator_results: DatabaseLifecycleEvaluation['evaluator_results'];
   blocking: boolean;
+  findings_retained: number;
   error?: ReturnType<typeof captureFailure>;
 }
 
@@ -54,7 +57,7 @@ async function evaluateRevision(
   const { context, writer, artifactId, options } = captured;
   const key = { firesAt: 'post-plan-revision' as const, cpN: plan.revision_n };
   if (readDatabaseLifecycleCompletion(writer, artifactId, key))
-    return { status: 'replayed', evaluator_results: [], blocking: false };
+    return { status: 'replayed', evaluator_results: [], blocking: false, findings_retained: 0 };
   try {
     const shared = {
       context,
@@ -88,12 +91,14 @@ async function evaluateRevision(
       status: 'complete',
       evaluator_results: [...postPlan.evaluator_results, ...priorPlan.evaluator_results],
       blocking: postPlan.blocking || priorPlan.blocking,
+      findings_retained: postPlan.findings_retained + priorPlan.findings_retained,
     };
   } catch (cause) {
     return {
       status: 'failed',
       evaluator_results: [],
       blocking: false,
+      findings_retained: 0,
       error: captureFailure(cause),
     };
   }
@@ -104,6 +109,7 @@ async function capturePlanRevision(opts: CapturePlanReviseOptions, signal: Abort
     parse: async () =>
       CapturePlanReviseInputSchema.parse(await readPayloadInput({ inputPath: opts.input })),
     signal,
+    noLlm: opts.noLlm,
   });
   const { context, input } = prepared;
   try {
@@ -123,7 +129,7 @@ async function capturePlanRevision(opts: CapturePlanReviseOptions, signal: Abort
       const latest = captured.appended.before.thread.plan;
       const lifecycle: RevisionLifecycle =
         replayed && latest && latest.revision_n !== result.plan.revision_n
-          ? { status: 'unavailable', evaluator_results: [], blocking: false }
+          ? { status: 'unavailable', evaluator_results: [], blocking: false, findings_retained: 0 }
           : await evaluateRevision(captured, result.plan, opts.noLlm);
       const usage = replayed
         ? { state: 'skipped' as const, reason: 'replay' as const }
@@ -151,10 +157,22 @@ async function capturePlanRevision(opts: CapturePlanReviseOptions, signal: Abort
       // From result.plan, not the latest retained plan: a replayed key returns
       // its own older revision, and the counts must describe that same revision.
       const reviseCoverage = rubricCoverage(result.plan);
+      // The event this revision wrote, not `priorEventId` above: a use is keyed to the plan event
+      // it was selected with, and the response has to name the one that now holds them.
+      const revisedEventId = captured.appended.events.find(
+        (event) => event.record.type === 'plan_revised'
+      )?.record.event_id;
       return {
         artifact_id: artifactId,
         revision_n: result.plan.revision_n,
         plan_event_id: result.priorEventId,
+        knowledge_uses:
+          revisedEventId === undefined
+            ? null
+            : readPlanEventKnowledgeUses(writer, {
+                planEventId: revisedEventId,
+                projectId: writer.authority.projectId,
+              }),
         idempotency_status: replayed ? ('replay' as const) : ('created' as const),
         ...(replayed
           ? {
@@ -185,6 +203,7 @@ async function capturePlanRevision(opts: CapturePlanReviseOptions, signal: Abort
         operation_id: captured.operationId,
         capture_status: 'committed' as const,
         evaluator_results: lifecycle.evaluator_results,
+        ...retainedFindings(lifecycle.findings_retained),
         blocking: lifecycle.blocking,
         lifecycle: {
           status: lifecycle.status,

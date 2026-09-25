@@ -17,6 +17,11 @@ import { queryProjectSearch } from './search.js';
 import { runProjectOperation } from './transactions.js';
 
 const derived = new Set([
+  'rationale_events',
+  'rationale_accounts',
+  'rationale_terms',
+  'rationale_pending_artifacts',
+  'rationale_index_state',
   'artifact_metadata',
   'artifact_branches',
   'artifact_search_sources',
@@ -34,6 +39,7 @@ afterEach(async () => {
 });
 async function fixture() {
   const value = await queryFixture();
+  await rebuildProjectQueryMetadata({ authority: value.authority, authorize() {} });
   return value;
 }
 const authorityRows = (rows: ReturnType<typeof querySnapshot>['rows']) =>

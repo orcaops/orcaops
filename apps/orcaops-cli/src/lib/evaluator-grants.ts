@@ -1,23 +1,8 @@
-import type { Stats } from 'node:fs';
-import {
-  chmodSync,
-  closeSync,
-  existsSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 
-import { defaultConfigDir, FileStore } from '@orcaops/core';
+import { defaultConfigDir } from '@orcaops/core';
 import type { PackSource } from '@orcaops/evaluator-protocol';
 import {
   computePackSourceFingerprint,
@@ -25,9 +10,13 @@ import {
   resolvePackSource,
   type TrustCapability,
 } from '@orcaops/evaluator-runner';
-import { resolveCanonicalPath } from '@orcaops/storage';
 
-import { ErrorCodes, OrcaopsError } from '../io/errors.js';
+import {
+  readGrantFile,
+  requireGrantStoreDir,
+  resolveGrantStoreDir,
+  withGrantFileMutation,
+} from './user-local-grant-store.js';
 
 /**
  * User-local evaluator consent (see docs/evaluator-consent.md). Repository
@@ -108,25 +97,19 @@ export function readGrants(opts: {
 }): {
   grants: EvaluatorGrant[];
 } {
-  const requestedDir = opts.configDir ?? defaultConfigDir();
-  const resolvedRepo = resolveRepositoryRoot(opts.repoRoot);
-  if (resolvedRepo === null) {
+  const resolution = resolveGrantStoreDir(opts);
+  if (!resolution.ok) {
     opts.warn?.(
-      `refusing to read evaluator grants: repository root ${JSON.stringify(opts.repoRoot)} ` +
-        `must be an existing absolute directory.`
+      resolution.reason === 'repository_root_invalid'
+        ? `refusing to read evaluator grants: repository root ${JSON.stringify(opts.repoRoot)} ` +
+            `must be an existing absolute directory.`
+        : `refusing to read evaluator grants from ${JSON.stringify(resolution.requestedDir)}: the grant store ` +
+            `must be an absolute location outside the repository (repository-controlled ` +
+            `configuration cannot mint consent).`
     );
     return { grants: [] };
   }
-  const dir = resolveGrantStoreOutsideRepository(requestedDir, resolvedRepo);
-  if (dir === null) {
-    opts.warn?.(
-      `refusing to read evaluator grants from ${JSON.stringify(requestedDir)}: the grant store ` +
-        `must be an absolute location outside the repository (repository-controlled ` +
-        `configuration cannot mint consent).`
-    );
-    return { grants: [] };
-  }
-  return readGrantsFromStore(dir, opts.warn);
+  return readGrantsFromStore(resolution.dir, opts.warn);
 }
 
 function readGrantsFromStore(
@@ -134,26 +117,22 @@ function readGrantsFromStore(
   warn?: (msg: string) => void
 ): { grants: EvaluatorGrant[] } {
   const file = grantsFilePath(dir);
-  try {
-    repairGrantState(dir, file);
-  } catch {
-    warn?.(`${file} has unsafe ownership or permissions; treating as no grants (fail closed).`);
-    return { grants: [] };
+  const read = readGrantFile(dir, file, GrantsFileSchema, 'repair');
+  switch (read.status) {
+    case 'ok':
+      return { grants: read.contents.grants };
+    case 'absent':
+      return { grants: [] };
+    case 'unsafe':
+      warn?.(`${file} has unsafe ownership or permissions; treating as no grants (fail closed).`);
+      return { grants: [] };
+    case 'unparseable':
+      warn?.(`${file} is unreadable; treating as no grants (fail closed).`);
+      return { grants: [] };
+    case 'invalid':
+      warn?.(`${file} failed validation; treating as no grants (fail closed).`);
+      return { grants: [] };
   }
-  if (!existsSync(file)) return { grants: [] };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(file, 'utf8'));
-  } catch {
-    warn?.(`${file} is unreadable; treating as no grants (fail closed).`);
-    return { grants: [] };
-  }
-  const result = GrantsFileSchema.safeParse(parsed);
-  if (!result.success) {
-    warn?.(`${file} failed validation; treating as no grants (fail closed).`);
-    return { grants: [] };
-  }
-  return { grants: result.data.grants };
 }
 
 /**
@@ -172,36 +151,28 @@ export async function withGrantMutation<Result>(
   opts: { repoRoot: string; configDir?: string },
   commit: () => Promise<Result>
 ): Promise<{ result: Result; grantChanged: boolean }> {
-  const requestedDir = opts.configDir ?? defaultConfigDir();
-  const resolvedRepo = assertRepositoryRoot(opts.repoRoot);
-  const dir = assertGrantStoreOutsideRepository(requestedDir, resolvedRepo);
-  const lock = new FileStore({ dir });
-  return lock.withRefreshLock('evaluator-grants', async () => {
-    const file = grantsFilePath(dir);
-    ensureGrantDirPrivate(dir);
-    repairGrantState(dir, file);
-    const snapshot = existsSync(file) ? readFileSync(file) : null;
-    const current = readGrantsFromStore(dir).grants;
-    const packageId = mutation.kind === 'write' ? mutation.grant.package_id : mutation.packageId;
-    const remaining = current.filter((grant) => grant.package_id !== packageId);
-    const next = mutation.kind === 'write' ? [...remaining, mutation.grant] : remaining;
-    const grantChanged = mutation.kind === 'write' || remaining.length !== current.length;
-
-    try {
-      if (grantChanged) writeGrantsDurable(dir, file, { v: 1, grants: next });
-      return { result: await commit(), grantChanged };
-    } catch (error) {
-      try {
-        restoreGrantSnapshot(dir, file, snapshot);
-      } catch (rollbackError) {
-        throw new AggregateError(
-          [error, rollbackError],
-          'Evaluator mutation failed and the grant rollback also failed.'
-        );
-      }
-      throw error;
-    }
-  });
+  const dir = requireGrantStoreDir(opts, 'evaluator grants');
+  const { planned, result } = await withGrantFileMutation(
+    {
+      dir,
+      file: grantsFilePath(dir),
+      lockName: 'evaluator-grants',
+      rollbackFailureMessage: 'Evaluator mutation failed and the grant rollback also failed.',
+    },
+    () => {
+      const current = readGrantsFromStore(dir).grants;
+      const packageId = mutation.kind === 'write' ? mutation.grant.package_id : mutation.packageId;
+      const remaining = current.filter((grant) => grant.package_id !== packageId);
+      const next = mutation.kind === 'write' ? [...remaining, mutation.grant] : remaining;
+      const grantChanged = mutation.kind === 'write' || remaining.length !== current.length;
+      return {
+        contents: grantChanged ? serializeGrants({ v: 1, grants: next }) : null,
+        planned: { grantChanged },
+      };
+    },
+    commit
+  );
+  return { result, grantChanged: planned.grantChanged };
 }
 
 /** Remove any grant for the package. Returns true when one existed. */
@@ -217,133 +188,8 @@ export async function revokeGrant(
   return grantChanged;
 }
 
-function currentUid(): number | null {
-  return process.platform !== 'win32' && typeof process.getuid === 'function'
-    ? process.getuid()
-    : null;
-}
-
-function assertOwnedByCurrentUser(observed: Stats, target: string): void {
-  const uid = currentUid();
-  if (uid !== null && observed.uid !== uid) {
-    throw new Error(`${target} is owned by uid ${observed.uid}, not the current uid ${uid}.`);
-  }
-}
-
-function ensureGrantDirPrivate(dir: string): void {
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (process.platform === 'win32') return;
-  const observed = statSync(dir);
-  assertOwnedByCurrentUser(observed, dir);
-  if ((observed.mode & 0o077) !== 0) chmodSync(dir, 0o700);
-  const repaired = statSync(dir);
-  assertOwnedByCurrentUser(repaired, dir);
-  if ((repaired.mode & 0o077) !== 0) {
-    throw new Error(`${dir} could not be tightened to mode 700.`);
-  }
-}
-
-function repairGrantState(dir: string, file: string): void {
-  let directory;
-  try {
-    directory = statSync(dir);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw err;
-  }
-  if (!directory.isDirectory()) throw new Error(`${dir} is not a directory.`);
-  assertOwnedByCurrentUser(directory, dir);
-  if (process.platform !== 'win32' && (directory.mode & 0o077) !== 0) {
-    chmodSync(dir, 0o700);
-  }
-  const repairedDirectory = statSync(dir);
-  if (!repairedDirectory.isDirectory()) throw new Error(`${dir} is not a directory.`);
-  assertOwnedByCurrentUser(repairedDirectory, dir);
-  if (process.platform !== 'win32' && (repairedDirectory.mode & 0o077) !== 0) {
-    throw new Error(`${dir} could not be tightened to mode 700.`);
-  }
-
-  let grantFile;
-  try {
-    grantFile = lstatSync(file);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw err;
-  }
-  if (!grantFile.isFile()) throw new Error(`${file} is not a regular file.`);
-  assertOwnedByCurrentUser(grantFile, file);
-  if (process.platform !== 'win32' && (grantFile.mode & 0o077) !== 0) {
-    chmodSync(file, 0o600);
-    const repaired = lstatSync(file);
-    if (!repaired.isFile()) throw new Error(`${file} is not a regular file.`);
-    assertOwnedByCurrentUser(repaired, file);
-    if ((repaired.mode & 0o077) !== 0) {
-      throw new Error(`${file} could not be tightened to mode 600.`);
-    }
-  }
-}
-
-function writeGrantsDurable(dir: string, file: string, grants: GrantsFile): void {
-  writeGrantBytesDurable(dir, file, `${JSON.stringify(grants, null, 2)}\n`);
-}
-
-function writeGrantBytesDurable(dir: string, file: string, contents: string | Uint8Array): void {
-  const tmp = `${file}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-  try {
-    const fd = openSync(tmp, 'wx', 0o600);
-    try {
-      writeFileSync(fd, contents);
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-    chmodSync(tmp, 0o600);
-    const staged = statSync(tmp);
-    assertOwnedByCurrentUser(staged, tmp);
-    if (process.platform !== 'win32' && (staged.mode & 0o777) !== 0o600) {
-      throw new Error(`${tmp} could not be restricted to mode 600.`);
-    }
-    renameSync(tmp, file);
-    fsyncDirectory(dir);
-  } catch (error) {
-    try {
-      unlinkSync(tmp);
-    } catch {
-      // The rename consumed it, or creation failed before the temp existed.
-    }
-    throw error;
-  }
-  repairGrantState(dir, file);
-}
-
-function restoreGrantSnapshot(dir: string, file: string, snapshot: Buffer | null): void {
-  if (snapshot !== null) {
-    writeGrantBytesDurable(dir, file, snapshot);
-    return;
-  }
-  try {
-    unlinkSync(file);
-    fsyncDirectory(dir);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-}
-
-function fsyncDirectory(dir: string): void {
-  if (process.platform === 'win32') return;
-  let fd: number;
-  try {
-    fd = openSync(dir, 'r');
-  } catch {
-    return;
-  }
-  try {
-    fsyncSync(fd);
-  } catch {
-    // Some filesystems do not support directory fsync.
-  } finally {
-    closeSync(fd);
-  }
+function serializeGrants(grants: GrantsFile): string {
+  return `${JSON.stringify(grants, null, 2)}\n`;
 }
 
 /** Shipped-with-the-installation trust: exact package+pack+fingerprint. */
@@ -409,53 +255,6 @@ function findTrustManifestEntry(
       entry.package === source.package &&
       entry.pack === source.pack &&
       entry.source_fingerprint === fingerprint
-  );
-}
-
-function resolveRepositoryRoot(repoRoot: string): string | null {
-  if (!path.isAbsolute(repoRoot)) return null;
-  try {
-    const resolvedRepo = realpathSync(repoRoot);
-    return statSync(resolvedRepo).isDirectory() ? resolvedRepo : null;
-  } catch {
-    return null;
-  }
-}
-
-function assertRepositoryRoot(repoRoot: string): string {
-  const resolved = resolveRepositoryRoot(repoRoot);
-  if (resolved !== null) return resolved;
-  throw new OrcaopsError(
-    ErrorCodes.INVALID_INPUT,
-    `cannot validate evaluator grants: repository root ${JSON.stringify(repoRoot)} ` +
-      `must be an existing absolute directory`
-  );
-}
-
-function resolveGrantStoreOutsideRepository(
-  configDir: string,
-  resolvedRepo: string
-): string | null {
-  if (!path.isAbsolute(configDir)) return null;
-  try {
-    const resolvedDir = resolveCanonicalPath(configDir, 'grant store');
-    const relative = path.relative(resolvedRepo, resolvedDir);
-    const inside =
-      relative === '' ||
-      (relative !== '..' && !path.isAbsolute(relative) && !relative.startsWith('..' + path.sep));
-    return inside ? null : resolvedDir;
-  } catch {
-    return null;
-  }
-}
-
-function assertGrantStoreOutsideRepository(configDir: string, resolvedRepo: string): string {
-  const resolved = resolveGrantStoreOutsideRepository(configDir, resolvedRepo);
-  if (resolved !== null) return resolved;
-  throw new OrcaopsError(
-    ErrorCodes.INVALID_INPUT,
-    `refusing to mutate evaluator grants at ${JSON.stringify(configDir)}: the grant store ` +
-      `must be an absolute location outside the repository`
   );
 }
 

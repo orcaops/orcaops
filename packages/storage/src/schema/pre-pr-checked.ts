@@ -12,6 +12,30 @@ import { z } from 'zod';
  */
 const FingerprintSchema = z.string().regex(/^[0-9a-f]{64}$/);
 
+/**
+ * What the integration authority check found, carried on the review it was made for.
+ *
+ * Identities and reasons only, never a rule's wording: this payload is authored, so the secret gate
+ * reads it before it is written, and a rule whose words look like a credential would otherwise
+ * refuse the pass outright. `revoked` is always empty on a retained marker — a pass with revoked
+ * authority refuses and mints none — and is present so the field states both halves of the check.
+ *
+ * Optional and independent of the review fields above: an event written before this check existed
+ * carries none of it, and its absence is not a claim that the check found nothing.
+ */
+const AuthorityFindingsSchema = z.object({
+  moved: z.array(
+    z.object({
+      key: z.string().min(1),
+      selected_revision_id: z.string().min(1),
+      governing_revision_ids: z.array(z.string().min(1)),
+      role: z.string().min(1),
+      effects: z.array(z.string().min(1)),
+    })
+  ),
+  revoked: z.array(z.string().min(1)),
+});
+
 export const PrePrCheckedPayloadSchema = z
   .object({
     head_sha: z.string().min(1),
@@ -20,6 +44,7 @@ export const PrePrCheckedPayloadSchema = z
     evaluator_set_fingerprint: FingerprintSchema.optional(),
     review_context_fingerprint: FingerprintSchema.optional(),
     run_ids: z.array(z.string().min(1)).optional(),
+    authority: AuthorityFindingsSchema.optional(),
   })
   .superRefine((payload, ctx) => {
     const reviewFields = [
@@ -44,12 +69,14 @@ export const PrePrCheckedPayloadSchema = z
     }
   });
 export type PrePrCheckedPayload = z.infer<typeof PrePrCheckedPayloadSchema>;
+export type PrePrCheckedAuthorityFindings = z.infer<typeof AuthorityFindingsSchema>;
 export type PrePrCheckedWritePayload = {
   head_sha: string;
   outcome: 'passed' | 'needs_attention';
   evaluator_set_fingerprint: string;
   review_context_fingerprint: string;
   run_ids: string[];
+  authority?: PrePrCheckedAuthorityFindings;
 };
 
 export function prePrCheckedOutcome(

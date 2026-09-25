@@ -7,7 +7,15 @@ import {
   resolveConfigSource,
   worktreeConfigLocation,
 } from '@orcaops/core';
-import { type Config, ConfigValidationError, resolveConfig } from '@orcaops/storage';
+import {
+  assertConfigVersionCurrent,
+  type Config,
+  ConfigValidationError,
+  configVersionForWrite,
+  getDefaultConfig,
+  type KnowledgeProcessingConfig,
+  resolveConfig,
+} from '@orcaops/storage';
 
 import { atomicWriteFile } from './atomic-write.js';
 import { readRepositoryFileOrNull } from './mutations.js';
@@ -81,6 +89,83 @@ export async function writeConfigDocument(document: ConfigDocument): Promise<voi
   );
 }
 
+export interface KnowledgeProcessingWritePlan {
+  /** The opened document carrying the edited body, ready for {@link writeConfigDocument}. */
+  document: ConfigDocument;
+  config: Config;
+  /** False when the edit leaves the file exactly as it is. */
+  changed: boolean;
+  /**
+   * Set when the write moves the file to a version older orcaops builds refuse
+   * to load. Under project scope the file is committed, so a caller must say
+   * this before writing: every teammate on an older build is locked out until
+   * they upgrade.
+   */
+  versionChange: { from: number; to: number } | null;
+}
+
+/**
+ * Plan a `knowledge_processing` edit without writing. Only the named keys are
+ * touched, and a key given as `undefined` is removed. The version stamp moves
+ * in this same document, so the first write that adds the section is also the
+ * one that makes an older build say "upgrade orcaops" instead of rejecting a
+ * key it does not know. A file without the section stays without it when the
+ * edit holds nothing but defaults: disabling what was never enabled must not
+ * move the stamp. Throws ConfigValidationError, writing nothing, when the
+ * result would not load.
+ */
+export function planKnowledgeProcessingWrite(
+  document: ConfigDocument,
+  settings: Partial<KnowledgeProcessingConfig>
+): KnowledgeProcessingWritePlan {
+  assertConfigVersionCurrent(document.raw);
+  const hasSection = Object.prototype.hasOwnProperty.call(document.raw, 'knowledge_processing');
+  const existing = document.raw.knowledge_processing;
+  const section: Record<string, unknown> = {
+    ...(typeof existing === 'object' && existing !== null && !Array.isArray(existing)
+      ? existing
+      : {}),
+  };
+  for (const [key, value] of Object.entries(settings)) {
+    if (value === undefined) delete section[key];
+    else section[key] = value;
+  }
+
+  const defaults: Record<string, unknown> = getDefaultConfig().knowledge_processing;
+  const holdsOnlyDefaults = Object.entries(section).every(
+    ([key, value]) =>
+      Object.hasOwn(defaults, key) && JSON.stringify(value) === JSON.stringify(defaults[key])
+  );
+  if (!hasSection && holdsOnlyDefaults) {
+    return {
+      document,
+      config: resolveConfig(document.raw),
+      changed: false,
+      versionChange: null,
+    };
+  }
+
+  const from = document.raw.schema_version as number;
+  const raw: Record<string, unknown> = { ...document.raw, knowledge_processing: section };
+  const to = configVersionForWrite(raw, from);
+  raw.schema_version = to;
+  return {
+    document: { ...document, raw },
+    config: resolveConfig(raw),
+    changed: JSON.stringify(raw) !== JSON.stringify(document.raw),
+    versionChange: to === from ? null : { from, to },
+  };
+}
+
+export async function writeKnowledgeProcessingSection(
+  document: ConfigDocument,
+  settings: Partial<KnowledgeProcessingConfig>
+): Promise<KnowledgeProcessingWritePlan> {
+  const plan = planKnowledgeProcessingWrite(document, settings);
+  if (plan.changed) await writeConfigDocument(plan.document);
+  return plan;
+}
+
 export function resolvePersonalConfigForAdoption(content: string, configPath: string): Config {
   let raw: unknown;
   try {
@@ -141,7 +226,19 @@ export async function trackedProjectInstallPaths(
   }
 }
 
-export function refuseTrackedPersonalTransition(tracked: readonly string[]): OrcaopsError {
+export function refuseTrackedPersonalTransition(
+  tracked: readonly string[],
+  opts: { fromResetDefault?: boolean } = {}
+): OrcaopsError {
+  if (opts.fromResetDefault) {
+    return new OrcaopsError(
+      ErrorCodes.INVALID_INPUT,
+      '--reset-config restores the personal-scope default, but this checkout carries ' +
+        `committed orcaops file(s) (${tracked.join(', ')}) that moving to personal scope would edit. ` +
+        'Re-run with `--scope project` to keep the committed project install, or run ' +
+        '`orcaops update --scope personal` to plan that removal and review the diff.'
+    );
+  }
   return new OrcaopsError(
     ErrorCodes.INVALID_INPUT,
     `this checkout carries committed orcaops file(s) (${tracked.join(', ')}), so moving it to ` +

@@ -46,3 +46,18 @@ export class HistoryScopeError extends Error {
     this.name = 'HistoryScopeError';
   }
 }
+
+export function unavailableProjectError(
+  issues: readonly HistoryIssue[],
+  fallback: { code: string; message: string } = {
+    code: 'HISTORY_INACCESSIBLE',
+    message: 'Selected project history is unavailable',
+  },
+  context: Record<string, unknown> = {}
+): HistoryScopeError {
+  const first = issues[0];
+  return new HistoryScopeError(first?.code ?? fallback.code, first?.message ?? fallback.message, {
+    ...context,
+    issues: [...issues],
+  });
+}

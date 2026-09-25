@@ -82,7 +82,9 @@ export async function summarize(
 export function parseOk(result: { exitCode: number; stdout: string; stderr: string }) {
   expect(result.exitCode, result.stderr).toBe(0);
   const parsed = JSON.parse(result.stdout);
-  expect(parsed).toMatchObject({ ok: true, schema_version: 3 });
+  // Search moved to envelope 4 when its hits gained standing; the other insight commands stay at 3.
+  expect(parsed).toMatchObject({ ok: true });
+  expect([3, 4]).toContain(parsed.schema_version);
   return parsed;
 }
 export function damageArtifact(

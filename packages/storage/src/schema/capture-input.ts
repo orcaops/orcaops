@@ -8,6 +8,7 @@ import {
 } from './checkpoint.js';
 import { DecisionBaseSchema } from './decision.js';
 import { NonGoalSchema, PlanLabelSchema, PlanStepLabelSchema } from './plan.js';
+import { strictInput } from './strict-input.js';
 import { AcceptedWarningsSchema } from './summary.js';
 import { uuidv7 } from '../ids/uuidv7.js';
 import { identifierText, proseText } from '../text/control-chars.js';
@@ -43,11 +44,12 @@ const PlanReviseAcceptanceCriterionInputSchema = z.object({
  * must be unique within the plan — uniqueness is enforced at the
  * storage write path (returns `INVALID_INPUT`).
  */
-export const CapturePlanStepInputSchema = z.object({
+const CapturePlanStepInputObject = z.object({
   text: proseText(),
   label: proseText(PlanStepLabelSchema),
   acceptance_criteria: z.array(CaptureAcceptanceCriterionInputSchema).default([]),
 });
+export const CapturePlanStepInputSchema = strictInput(CapturePlanStepInputObject);
 export type CapturePlanStepInput = z.infer<typeof CapturePlanStepInputSchema>;
 
 /**
@@ -67,6 +69,29 @@ export type CapturePlanStepInput = z.infer<typeof CapturePlanStepInputSchema>;
 const IdempotencyKeySchema = identifierText().default(() => uuidv7());
 
 /**
+ * One exact requirement or decision revision a plan says it uses, and in what role.
+ *
+ * `kind` is the contract's task-use target, which names an expectation revision and nothing else:
+ * a plan step's acceptance criterion is not a target of its own, so a criterion is named through
+ * the task-local `criterion_id` of a use whose target is the shared requirement it came from.
+ * The store derives whether a use was an original selection from the operation that wrote it, so
+ * `selection` is never authored here.
+ *
+ * `.optional()` and not `.default([])`: a request staged by an earlier build is restored by
+ * re-parsing its retained bytes and comparing the representation, and defaulting the key in would
+ * make every one of those requests unreadable.
+ */
+export const KnowledgeUseInputSchema = z.object({
+  kind: z.enum(['requirement', 'decision']),
+  entity_id: identifierText(),
+  revision_id: identifierText(),
+  role: z.enum(['implement', 'preserve', 'assess', 'background', 'propose_change']),
+  /** The recorded exception this use relies on, when it relies on one. */
+  exception_id: identifierText().nullable().optional(),
+});
+export type KnowledgeUseInput = z.infer<typeof KnowledgeUseInputSchema>;
+
+/**
  * Agent-facing input shape for `orcaops capture plan` (initial capture).
  * Each step entry carries display `text` and a short-form description
  * `label`; the runtime mints UUIDv7 `step_id`s and returns them in the
@@ -82,7 +107,7 @@ const IdempotencyKeySchema = identifierText().default(() => uuidv7());
  *   - step_lineage (empty on initial)
  *   - per-step step_id (UUIDv7 minted server-side)
  */
-export const CapturePlanInputSchema = z.object({
+const CapturePlanInputObject = z.object({
   idempotency_key: IdempotencyKeySchema,
   task: proseText(),
   /**
@@ -107,8 +132,15 @@ export const CapturePlanInputSchema = z.object({
    * unaffected.
    */
   decisions: z.array(DecisionBaseSchema).default([]),
+  /**
+   * The exact requirement and decision revisions this plan selected. They are settled inside the
+   * plan event's own operation, so the store derives `selected_with_plan` for each; a use offered
+   * here that names a revision this history does not retain refuses the whole capture.
+   */
+  knowledge_uses: z.array(KnowledgeUseInputSchema).optional(),
   agent_session_id: identifierText(z.string()).nullable().optional(),
 });
+export const CapturePlanInputSchema = strictInput(CapturePlanInputObject);
 export type CapturePlanInput = z.infer<typeof CapturePlanInputSchema>;
 
 /**
@@ -123,12 +155,13 @@ export type CapturePlanInput = z.infer<typeof CapturePlanInputSchema>;
  * The diff against the prior plan is computed server-side and emitted
  * as `step_lineage` on the `plan_revised` event payload.
  */
-export const PlanReviseStepInputSchema = z.object({
+const PlanReviseStepInputObject = z.object({
   step_id: identifierText().optional(),
   text: proseText(),
   label: proseText(PlanStepLabelSchema),
   acceptance_criteria: z.array(PlanReviseAcceptanceCriterionInputSchema).default([]),
 });
+export const PlanReviseStepInputSchema = strictInput(PlanReviseStepInputObject);
 export type PlanReviseStepInput = z.infer<typeof PlanReviseStepInputSchema>;
 
 /**
@@ -149,7 +182,7 @@ export type PlanReviseStepInput = z.infer<typeof PlanReviseStepInputSchema>;
  *     latest plan event for the artifact.
  *   - `IDEMPOTENCY_CONFLICT` on key reuse with a different payload.
  */
-export const CapturePlanReviseInputSchema = z.object({
+const CapturePlanReviseInputObject = z.object({
   idempotency_key: IdempotencyKeySchema,
   artifact_id: identifierText(),
   /**
@@ -201,15 +234,22 @@ export const CapturePlanReviseInputSchema = z.object({
    * an acknowledgement records narrowing only.
    */
   acknowledge_criteria_changes: z.array(identifierText()).default([]),
+  /**
+   * The exact revisions THIS revision selects — a complete supersede, like `plan_steps`. A use of
+   * the prior revision that this one does not name is not a use of the new plan event; it stays
+   * retained against the plan event that did select it.
+   */
+  knowledge_uses: z.array(KnowledgeUseInputSchema).optional(),
   agent_session_id: identifierText(z.string()).nullable().optional(),
 });
+export const CapturePlanReviseInputSchema = strictInput(CapturePlanReviseInputObject);
 export type CapturePlanReviseInput = z.infer<typeof CapturePlanReviseInputSchema>;
 
 /**
  * Agent-facing input for `orcaops capture checkpoint open`.
  * Runtime derives: opened_at (now), head_sha (git HEAD), n (server-assigned).
  */
-export const CaptureCheckpointOpenInputSchema = z.object({
+const CaptureCheckpointOpenInputObject = z.object({
   idempotency_key: IdempotencyKeySchema,
   // Optional: omit to autodetect the single active artifact on the branch.
   artifact_id: identifierText().optional(),
@@ -235,6 +275,7 @@ export const CaptureCheckpointOpenInputSchema = z.object({
    */
   plan_revision_id: identifierText().nullable().optional(),
 });
+export const CaptureCheckpointOpenInputSchema = strictInput(CaptureCheckpointOpenInputObject);
 export type CaptureCheckpointOpenInput = z.infer<typeof CaptureCheckpointOpenInputSchema>;
 
 /**
@@ -243,7 +284,7 @@ export type CaptureCheckpointOpenInput = z.infer<typeof CaptureCheckpointOpenInp
  *   - closed_at (now)
  *   - head_sha (git HEAD)
  */
-export const CaptureCheckpointCloseInputSchema = z.object({
+const CaptureCheckpointCloseInputObject = z.object({
   idempotency_key: IdempotencyKeySchema,
   // Optional: omit to autodetect the single active artifact on the branch.
   artifact_id: identifierText().optional(),
@@ -270,19 +311,21 @@ export const CaptureCheckpointCloseInputSchema = z.object({
    */
   completed_step_ids: z.array(identifierText()).default([]),
 });
+export const CaptureCheckpointCloseInputSchema = strictInput(CaptureCheckpointCloseInputObject);
 export type CaptureCheckpointCloseInput = z.infer<typeof CaptureCheckpointCloseInputSchema>;
 
 /**
  * Agent-facing input for `orcaops capture checkpoint abandon`. Cancels
  * an open cp without claiming work; the declared steps are released.
  */
-export const CaptureCheckpointAbandonInputSchema = z.object({
+const CaptureCheckpointAbandonInputObject = z.object({
   idempotency_key: IdempotencyKeySchema,
   // Optional: omit to autodetect the single active artifact on the branch.
   artifact_id: identifierText().optional(),
   n: z.number().int().positive(),
   reason: proseText(),
 });
+export const CaptureCheckpointAbandonInputSchema = strictInput(CaptureCheckpointAbandonInputObject);
 export type CaptureCheckpointAbandonInput = z.infer<typeof CaptureCheckpointAbandonInputSchema>;
 
 /**
@@ -291,7 +334,7 @@ export type CaptureCheckpointAbandonInput = z.infer<typeof CaptureCheckpointAban
  * supersede inherits the superseded summary's head_sha so an amendment cannot
  * widen the window it records.
  */
-export const CaptureSummaryInputSchema = z.object({
+const CaptureSummaryInputObject = z.object({
   idempotency_key: IdempotencyKeySchema,
   // Optional: omit to autodetect the single active artifact on the branch.
   artifact_id: identifierText().optional(),
@@ -306,10 +349,11 @@ export const CaptureSummaryInputSchema = z.object({
   // path as an optimistic-concurrency check; never persisted into the payload.
   prior_summary_event_id: identifierText().optional(),
 });
+export const CaptureSummaryInputSchema = strictInput(CaptureSummaryInputObject);
 export type CaptureSummaryInput = z.infer<typeof CaptureSummaryInputSchema>;
 
 /** Input for `orcaops capture run-evaluators` (explicit re-run). */
-export const CaptureRunEvaluatorsInputSchema = z.object({
+const CaptureRunEvaluatorsInputObject = z.object({
   idempotency_key: IdempotencyKeySchema,
   artifact_id: identifierText(),
   fires_at: z.enum([
@@ -322,22 +366,25 @@ export const CaptureRunEvaluatorsInputSchema = z.object({
   /** Required when fires_at is checkpoint-open or checkpoint-close. */
   checkpoint_n: z.number().int().positive().optional(),
 });
+export const CaptureRunEvaluatorsInputSchema = strictInput(CaptureRunEvaluatorsInputObject);
 export type CaptureRunEvaluatorsInput = z.infer<typeof CaptureRunEvaluatorsInputSchema>;
 
 /** Input for `orcaops capture pre-pr-check`. */
-export const CapturePrePrCheckInputSchema = z.object({
+const CapturePrePrCheckInputObject = z.object({
   idempotency_key: IdempotencyKeySchema,
   // Optional: omit to autodetect the single active artifact on the branch.
   artifact_id: identifierText().optional(),
   branch: identifierText().optional(),
 });
+export const CapturePrePrCheckInputSchema = strictInput(CapturePrePrCheckInputObject);
 export type CapturePrePrCheckInput = z.infer<typeof CapturePrePrCheckInputSchema>;
 
 /** Input for `orcaops capture acknowledge`. */
-export const CaptureAcknowledgeInputSchema = z.object({
+const CaptureAcknowledgeInputObject = z.object({
   idempotency_key: IdempotencyKeySchema,
   artifact_id: identifierText(),
   evaluator: identifierText(),
   reason: proseText(),
 });
+export const CaptureAcknowledgeInputSchema = strictInput(CaptureAcknowledgeInputObject);
 export type CaptureAcknowledgeInput = z.infer<typeof CaptureAcknowledgeInputSchema>;

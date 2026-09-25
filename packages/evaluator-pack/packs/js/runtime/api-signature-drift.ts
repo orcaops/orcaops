@@ -18,10 +18,18 @@ import * as ts from 'typescript';
 
 import {
   type EvaluatorContext,
-  type EvaluatorResultEnvelope,
+  type EvaluatorFinding,
+  type EvaluatorResultEnvelopeV2,
   matchesAnyGlob,
 } from '@orcaops/evaluator-protocol';
-import { pass, runIfDispatched, violation } from '@orcaops/evaluator-sdk';
+import {
+  fileLocation,
+  finding,
+  findingKey,
+  pass,
+  runIfDispatched,
+  violation,
+} from '@orcaops/evaluator-sdk';
 
 const execFileAsync = promisify(execFile);
 
@@ -42,7 +50,7 @@ interface FileFinding {
 
 const TS_EXT = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i;
 
-export async function check(ctx: EvaluatorContext): Promise<EvaluatorResultEnvelope> {
+export async function check(ctx: EvaluatorContext): Promise<EvaluatorResultEnvelopeV2> {
   const args = parseParams(ctx.params);
   const scopeFiles = args.scope_files ?? [];
 
@@ -107,7 +115,39 @@ export async function check(ctx: EvaluatorContext): Promise<EvaluatorResultEnvel
 
   return violation(formatViolationBody(findings), {
     raw: { scannedFiles: inScope.length, findings },
+    findings: driftFindings(findings),
   });
+}
+
+/**
+ * One finding per changed export rather than per file: the export is the
+ * thing that broke, and it is what a later run can name again. The key is
+ * `<what>/<file>/<export>`; a file or export name that cannot spell a key
+ * leaves that finding without one rather than failing the run.
+ *
+ * `revision` is deliberately absent from the locations: the "after" side is
+ * the working tree, which is not an identified input, and saying otherwise
+ * would dress an unidentified read as a snapshot-bound one.
+ */
+function driftFindings(fileFindings: FileFinding[]): EvaluatorFinding[] {
+  return fileFindings.flatMap((file) => [
+    ...file.removed.map((removed) =>
+      finding({
+        key: findingKey('removed', file.file, removed.name),
+        title: `Public export \`${removed.name}\` was removed from ${file.file}`,
+        detail: `Signature at plan.base_sha: ${removed.signature}`,
+        locations: [fileLocation(file.file)],
+      })
+    ),
+    ...file.changed.map((changed) =>
+      finding({
+        key: findingKey('changed', file.file, changed.name),
+        title: `Public export \`${changed.name}\` changed signature in ${file.file}`,
+        detail: `before: ${changed.before}\nafter: ${changed.after}`,
+        locations: [fileLocation(file.file)],
+      })
+    ),
+  ]);
 }
 
 function parseParams(raw: Record<string, unknown>): Params {

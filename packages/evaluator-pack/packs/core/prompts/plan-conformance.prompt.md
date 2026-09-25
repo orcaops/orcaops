@@ -109,3 +109,36 @@ Rubric represents <r>/<c> checkable obligation(s).
 ```orcaops-verdict
 VIOLATION
 ```
+
+## Optional: structured findings
+
+You MAY also emit ONE `orcaops-findings` block, immediately BEFORE the
+sentinel. It is optional — emitting none is always valid — and it never
+changes the verdict or whether anything blocks. A block that cannot be read
+costs you the findings and nothing else.
+
+Emit one finding per source obligation you classified as a silent gap, as
+shrunk, or as unrepresented in the rubric, so the classification survives
+outside this prose. `title` quotes the obligation and names its classification,
+in one line; `detail` carries the comparison you made. A declared exclusion is
+reported in the prose and needs no finding.
+
+- `locations`: `{"kind":"plan-step","step_id":"<id>"}` for the covering step,
+  from `Plan steps` above, and
+  `{"kind":"acceptance-criterion","criterion_id":"<id>"}` from
+  `## Acceptance criteria (recorded per step)` when a specific criterion is the
+  one that does or does not state the obligation's condition. Those two kinds
+  only, copied exactly — never invent an id, and leave `locations` out for a
+  silent gap, which by definition no step covers.
+- Never set `conclusion`. It says whether an expectation was MET, and you are
+  comparing plan text against plan text: you do not judge delivery, evidence,
+  or whether any criterion was satisfied.
+- Omit `key`. A source obligation carries no id, and two obligations can share
+  a covering step, so nothing here names the same thing the same way twice.
+
+The block is one JSON object. Shown indented here, which makes it inert — copy
+the shape, not this text, and start your own fence at the left margin:
+
+    ```orcaops-findings
+    {"schema":"orcaops.evaluator_findings/v1","findings":[{"title":"unrepresented: \"<source obligation>\"","detail":"<which step covers it and what the rubric omits>","locations":[{"kind":"plan-step","step_id":"<id from Plan steps>"}]}]}
+    ```

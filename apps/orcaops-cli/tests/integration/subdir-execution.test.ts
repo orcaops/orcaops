@@ -138,18 +138,27 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
     // bare cwd-relative target → normalized to the root-relative path and hits the cp
     const fromSub = JSON.parse((await sub().runRaw(['why', 'a.ts:1', '--json'])).stdout) as {
       target: { file: string };
-      best: { artifact_id: string } | null;
+      best: string | null;
+      results: Array<{ id: string; artifact_id: string }>;
     };
     expect(fromSub.target.file).toBe('apps/cli/src/a.ts');
     expect(fromSub.best).not.toBeNull();
-    expect(fromSub.best?.artifact_id).toBe(plan.artifact_id);
+    expect(fromSub.results.find((row) => row.id === fromSub.best)?.artifact_id).toBe(
+      plan.artifact_id
+    );
 
     // absolute target under the symlinked temp root → resolves identically
     const fromAbs = JSON.parse(
       (await sub().runRaw(['why', `${path.join(subdir, 'a.ts')}:1`, '--json'])).stdout
-    ) as { target: { file: string }; best: { artifact_id: string } | null };
+    ) as {
+      target: { file: string };
+      best: string | null;
+      results: Array<{ id: string; artifact_id: string }>;
+    };
     expect(fromAbs.target.file).toBe('apps/cli/src/a.ts');
-    expect(fromAbs.best?.artifact_id).toBe(plan.artifact_id);
+    expect(fromAbs.results.find((row) => row.id === fromAbs.best)?.artifact_id).toBe(
+      plan.artifact_id
+    );
   });
 
   it('why rejects a target outside the selected checkout', async () => {
@@ -195,10 +204,13 @@ describe('orcaops — execution from any subdirectory (git-root anchored)', () =
     // why must keep `link.ts` literal (NOT normalize to real.ts) and hit the cp
     const onLink = JSON.parse((await rootAgent.runRaw(['why', 'link.ts:1', '--json'])).stdout) as {
       target: { file: string };
-      best: { artifact_id: string } | null;
+      best: string | null;
+      results: Array<{ id: string; artifact_id: string }>;
     };
     expect(onLink.target.file).toBe('link.ts');
-    expect(onLink.best?.artifact_id).toBe(plan.artifact_id);
+    expect(onLink.results.find((row) => row.id === onLink.best)?.artifact_id).toBe(
+      plan.artifact_id
+    );
   });
 
   it('--root (appended) and ORCAOPS_ROOT resolve from outside the repo', async () => {

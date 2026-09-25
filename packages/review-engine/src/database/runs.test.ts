@@ -267,6 +267,47 @@ it('retains original run identity, bytes and pinned inputs with one settlement a
   ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
   expect((await rows(f.request.authority)).counters).toEqual(after.counters);
 });
+it('prepares the same run inputs from the same floor whatever was written in between', async () => {
+  const f = await runFixture();
+  await startDatabaseReviewRun(f.request);
+  const again = await prepareDatabaseReviewRunInputs(f.input);
+  expect(again.members).toEqual(f.pinned.members);
+  const projection = again.values['account-projection-v1.json'] as {
+    taskKnowledge: {
+      schema_version: number;
+      tasks: { knowledge: { boundary: number; mode: string } }[];
+    };
+  };
+  const db = await store.openProjectDatabase({ authority: f.input.authority, mode: 'reader' });
+  try {
+    const floor = db.read((view) =>
+      view.get<{ committed_write_sequence: number }>(
+        `SELECT o.committed_write_sequence FROM review_evidence_publications p
+           JOIN operations o ON o.operation_id = p.operation_id
+          WHERE p.publication_id = ?`,
+        f.input.expected.floorPublicationId
+      )
+    ).value!;
+    expect(projection.taskKnowledge.schema_version).toBe(1);
+    for (const task of projection.taskKnowledge.tasks)
+      expect(task.knowledge).toMatchObject({
+        boundary: floor.committed_write_sequence,
+        mode: 'historical',
+      });
+    expect(floor.committed_write_sequence).toBeLessThan(db.read(() => null).counters.writeSequence);
+  } finally {
+    db.close();
+  }
+  const second = await startDatabaseReviewRun({
+    ...f.request,
+    operationId: uuidv7(),
+    revisionId: uuidv7(),
+    publicationId: uuidv7(),
+    runBytes: bytes({ ...f.run, run_id: 'second-run-same-floor' }),
+    expected: { ...f.request.expected, currentRunId: f.run.run_id, runSelectionVersion: 1 },
+  });
+  expect(second.value).toMatchObject({ runId: 'second-run-same-floor', version: 1 });
+});
 it('refuses actual forensic input beyond the routine latency ceiling before any connection', async () => {
   const f = await runFixture({
     content: '// ' + 'review '.repeat(290_000) + '\n',

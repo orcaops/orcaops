@@ -17,6 +17,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe('canonical why action', { timeout: 30_000 }, () => {
+  it('defaults to a small candidate page without changing explicit pagination', () => {
+    expect(validateCanonicalWhy('src/a.ts').filters.limit).toBe(5);
+    expect(validateCanonicalWhy('src/a.ts', { all: true }).filters.limit).toBe(1000);
+    expect(validateCanonicalWhy('src/a.ts', { all: true, limit: 2 }).filters.limit).toBe(2);
+  });
   it('rejects malformed and retired inputs before opening project context', async () => {
     const openContext = vi.fn();
     const action = createCanonicalWhyAction({ openContext });
@@ -95,14 +100,13 @@ describe('canonical why action', { timeout: 30_000 }, () => {
     const result = JSON.parse(chunks.join(''));
     expect(result).toMatchObject({
       ok: true,
-      schema_version: 4,
-      scope: { kind: 'project', branch: { source: 'all', value: null } },
-      candidate_selection: { complete: true },
-      seed_guidance: { command: null },
+      schema_version: 8,
+      context: { project_id: f.authority.projectId },
+      diagnostics: { candidate_selection: { complete: true } },
     });
+    expect(result.diagnostics.seed_guidance).toBeUndefined();
     expect(result.results[0]).toMatchObject({
       artifact_id: id,
-      project_id: f.authority.projectId,
       confidence: 'exact',
     });
     expect(closed).toBe(1);

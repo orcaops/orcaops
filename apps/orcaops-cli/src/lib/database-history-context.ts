@@ -1,13 +1,16 @@
 import path from 'node:path';
 
-import { configFromSource, resolveConfigSource } from '@orcaops/core';
+import { configFromSource, resolveConfigSource, type ResolvedConfigSource } from '@orcaops/core';
 import {
   type HistoryProfile,
   type HistorySelector,
   validateHistorySelector,
 } from '@orcaops/project-scope/history';
-import { resolveDatabaseHistoryScope } from '@orcaops/project-scope/history/database';
-import { getDefaultConfig } from '@orcaops/storage';
+import {
+  type DatabaseHistoryScope,
+  resolveDatabaseHistoryScope,
+} from '@orcaops/project-scope/history/database';
+import { type Config, getDefaultConfig } from '@orcaops/storage';
 import { normalizeHistoryRoot } from '@orcaops/storage/history/authority';
 
 import { closeFailedHistoryRead } from './history-reader-close.js';
@@ -29,7 +32,20 @@ export interface DatabaseHistoryContextOptions {
   home?: string;
 }
 
-export async function resolveDatabaseHistoryCommandContext(options: DatabaseHistoryContextOptions) {
+export interface DatabaseHistoryCommandContext {
+  scope: DatabaseHistoryScope;
+  config: Config;
+  /**
+   * The file the configuration came from; null outside a checkout, where nothing governs it.
+   * Optional so a caller that composes a context out of a scope and a configuration alone still
+   * satisfies this shape.
+   */
+  configSource?: ResolvedConfigSource | null;
+}
+
+export async function resolveDatabaseHistoryCommandContext(
+  options: DatabaseHistoryContextOptions
+): Promise<DatabaseHistoryCommandContext> {
   const input = structuredClone(options);
   validateHistorySelector(input);
   const cwd = path.resolve(input.cwd ?? getInvocationCwd());
@@ -50,13 +66,15 @@ export async function resolveDatabaseHistoryCommandContext(options: DatabaseHist
   });
   try {
     const git = scope.gitContext;
+    // The file the configuration came from, kept beside the configuration itself: a surface that
+    // has to name where a setting is governed from would otherwise resolve it a second time.
+    const configSource = git
+      ? await resolveConfigSource(git.worktreeRoot, { commonDir: git.commonDir })
+      : null;
     return {
       scope,
-      config: git
-        ? configFromSource(
-            await resolveConfigSource(git.worktreeRoot, { commonDir: git.commonDir })
-          )
-        : getDefaultConfig(),
+      config: configSource ? configFromSource(configSource) : getDefaultConfig(),
+      configSource,
     };
   } catch (cause) {
     closeFailedHistoryRead(scope);

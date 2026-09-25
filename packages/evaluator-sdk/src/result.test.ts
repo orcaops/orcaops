@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { acceptanceCriterionLocation, finding } from './finding.js';
 import { info, pass, violation, writeResult } from './result.js';
 
 describe('envelope constructors', () => {
   it('pass() builds a pass-verdict envelope with the schema literal', () => {
     const env = pass('PASS\n\nall good');
     expect(env).toEqual({
-      schema: 'orcaops.evaluator_result/v1',
+      schema: 'orcaops.evaluator_result/v2',
       verdict: 'pass',
       body: 'PASS\n\nall good',
     });
@@ -34,6 +35,14 @@ describe('envelope constructors', () => {
     expect('raw' in env).toBe(false);
     expect('metrics' in env).toBe(false);
   });
+
+  it('carries findings under any verdict, and omits the key when none are supplied', () => {
+    const found = finding({ title: 'the criterion is met' });
+    expect('findings' in pass('PASS')).toBe(false);
+    expect(pass('PASS', { findings: [found] }).findings).toEqual([found]);
+    expect(violation('VIOLATION', { findings: [found] }).findings).toEqual([found]);
+    expect(info('INFO', { findings: [found] }).findings).toEqual([found]);
+  });
 });
 
 describe('writeResult', () => {
@@ -56,11 +65,56 @@ describe('writeResult', () => {
     writeResult(pass('PASS\n\nok'));
     expect(captured).toBe(
       JSON.stringify({
-        schema: 'orcaops.evaluator_result/v1',
+        schema: 'orcaops.evaluator_result/v2',
         verdict: 'pass',
         body: 'PASS\n\nok',
       })
     );
+  });
+
+  it('writes findings through unchanged', () => {
+    writeResult(
+      violation('VIOLATION', {
+        findings: [
+          finding({
+            key: 'criterion/c1',
+            title: 'c1 is not met by the delivered tests',
+            locations: [acceptanceCriterionLocation('c1')],
+            conclusion: 'contradicted',
+          }),
+        ],
+      })
+    );
+    expect(JSON.parse(captured).findings).toEqual([
+      {
+        key: 'criterion/c1',
+        title: 'c1 is not met by the delivered tests',
+        locations: [{ kind: 'acceptance-criterion', criterion_id: 'c1' }],
+        conclusion: 'contradicted',
+      },
+    ]);
+  });
+
+  it('refuses a malformed finding at write time, with its field path', () => {
+    // The author's own process is where this belongs: at run time the same
+    // finding would cost them the findings silently, with the verdict intact.
+    expect(() =>
+      writeResult(violation('VIOLATION', { findings: [finding({ title: 'a statement' })] }))
+    ).not.toThrow();
+    expect(() =>
+      writeResult(
+        violation('VIOLATION', {
+          findings: [finding({ title: 'a statement', conclusion: 'supported' })],
+        })
+      )
+    ).toThrow(/conclusion/);
+    expect(() =>
+      writeResult(
+        violation('VIOLATION', {
+          findings: [finding({ key: 'dup', title: 'one' }), finding({ key: 'dup', title: 'two' })],
+        })
+      )
+    ).toThrow(/duplicate finding key/);
   });
 
   it('round-trips through schema validation before writing', () => {
@@ -77,7 +131,7 @@ describe('writeResult', () => {
     // Bypass the constructor to inject a bad shape.
     expect(() =>
       writeResult({
-        schema: 'orcaops.evaluator_result/v1',
+        schema: 'orcaops.evaluator_result/v2',
 
         verdict: 'not-a-verdict' as any,
         body: 'x',

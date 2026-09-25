@@ -16,6 +16,8 @@ import {
 } from './artifact-events.js';
 import type { ProjectCounters, ProjectDatabase, ProjectReadView } from './connection.js';
 import { ProjectDatabaseError } from './errors.js';
+import type { EvaluatorRunEvidence } from './evaluator-findings-input.js';
+import { prepareEvaluatorEvidence, settleEvaluatorEvidence } from './evaluator-findings.js';
 import { prepareArtifactSearchRows, replaceArtifactSearchRows } from './search-records.js';
 import { assertSourceTimeArtifactMembership } from './source-time-membership.js';
 import {
@@ -70,6 +72,13 @@ export interface AppendProjectArtifactEvents {
   readonly eventBytes: Uint8Array;
   readonly sidecarPayloads: readonly ArtifactSidecarPayload[];
   readonly secretAllow: readonly string[];
+  /**
+   * What each evaluator run these events establish produced beside itself. It travels here rather
+   * than inside the authored payload, because the run payload and the gate audit are strict
+   * shapes re-parsed on every rebuild. Its digest joins the operation receipt, so a retry under
+   * one operation id that changed a finding is refused instead of silently dropping it.
+   */
+  readonly evaluatorEvidence?: readonly EvaluatorRunEvidence[];
 }
 export interface ArtifactAppendResult {
   artifactId: string;
@@ -344,15 +353,26 @@ function artifactAppendRequest(input: AppendProjectArtifactEvents, authored: boo
     recordHash: digest(bytes),
     sidecarHash: sidecar === null ? null : digest(sidecar),
   }));
+  const evidence = prepareEvaluatorEvidence({
+    artifactId,
+    incoming,
+    evidence: input.evaluatorEvidence ?? [],
+    secretAllow: input.secretAllow,
+    authored,
+  });
+  // The manifest stays the payload of an append that hands over nothing, so every receipt a
+  // released build wrote still identifies the same content.
+  const payload =
+    evidence === null ? manifest : { events: manifest, evaluator_evidence: evidence.digest };
   const operation = {
     operationId,
     kind: 'artifact.append',
     target: { artifactId },
-    payload: manifest,
+    payload,
     expectedState: expected === null ? null : { ...expected },
     intentChange: artifactEventsChangeIntent(incoming.map(({ event }) => event)),
   };
-  return { artifactId, operationId, expected, incoming, operation };
+  return { artifactId, operationId, expected, incoming, evidence, manifest, operation };
 }
 
 export function prepareArtifactAppendRequest(input: AppendProjectArtifactEvents) {
@@ -394,7 +414,7 @@ export async function composeArtifactAppend(input: {
   sourceSnapshot: ProjectSourceTimeMaterialized;
 }) {
   const { request, prior, sourceSnapshot } = input;
-  const { artifactId, operationId, expected, incoming } = request;
+  const { artifactId, operationId, expected, incoming, evidence } = request;
   const previous: RetainedArtifactEvent[] = prior
     ? decodeArtifactInput(prior.eventBytes, prior.sidecarPayloads, [], false)
     : [];
@@ -478,6 +498,9 @@ export async function composeArtifactAppend(input: {
       revision.byteLength,
       revision.tailEventId
     );
+    // In this transaction and no other: a replayed settlement replays the run event and what the
+    // run established beside it, or neither.
+    if (evidence) settleEvaluatorEvidence(transaction, evidence, operationId);
     replaceArtifactSearchRows(transaction, searchRows);
     replaceArtifactListingMetadata(
       transaction,

@@ -2,14 +2,48 @@ import { z } from 'zod';
 
 import {
   EvaluatorPackageSchema,
-  EvaluatorResultEnvelopeSchema,
+  EvaluatorResultEnvelopeV2Schema,
   EvaluatorSchema,
 } from '@orcaops/evaluator-protocol';
 
-import { EXAMPLE_KINDS, type ExampleKind, SCHEMA_EXAMPLES } from './schema-examples.js';
+import {
+  EXAMPLE_KINDS,
+  type ExampleKind,
+  RESULT_ENVELOPE_EXAMPLE,
+  SCHEMA_EXAMPLES,
+} from './schema-examples.js';
 import { ErrorCodes, OrcaopsError } from '../../io/errors.js';
 import { CliExit } from '../../io/exit.js';
 import { emitError, writeErrorLine, writeTerminalSafeStdout } from '../../io/output.js';
+
+interface SchemaKindEntry {
+  schema: z.ZodType;
+  /** What an author is writing when they ask for this kind. */
+  writes: string;
+  /**
+   * Prose the projection cannot express, appended to `$comment`. Only the
+   * envelope has any: it is the one kind whose optional field carries rules a
+   * reader has to know BEFORE writing one, and the one kind that cannot carry
+   * a comment of its own, being JSON.
+   */
+  note?: string;
+  /** Filled-in instances, emitted as the JSON Schema `examples` keyword. */
+  examples?: readonly unknown[];
+}
+
+/**
+ * What `findings` costs and what it cannot do. The projection shows the field
+ * and its shape; none of this is expressible there, and all of it decides
+ * whether an author reaches for the field correctly the first time.
+ */
+const RESULT_ENVELOPE_NOTE =
+  '`findings` is optional under every verdict and never decides the gate: a `pass` may carry ' +
+  "findings and a `violation` may carry none. A finding's `conclusion` requires at least one " +
+  'expectation location (`plan-step`, `acceptance-criterion`, `requirement` or `decision`) — a ' +
+  '`file` location is where the evaluator looked, not what it graded. Set `key` only when a ' +
+  'later run can name the same thing the same way; never build one from a timestamp, a run id ' +
+  'or an absolute path. Findings past the bounds are truncated with a notice, and findings that ' +
+  'cannot be read cost the findings and never the verdict.';
 
 /**
  * The author-facing shapes, keyed by the word an author types. Every file an
@@ -30,10 +64,14 @@ export const SCHEMA_KINDS = {
     writes: 'a pack manifest (`package.yaml`)',
   },
   result: {
-    schema: EvaluatorResultEnvelopeSchema,
-    writes: 'the result envelope a command engine prints on stdout',
+    schema: EvaluatorResultEnvelopeV2Schema,
+    writes:
+      'the result envelope a command engine prints on stdout, and an ' +
+      '`output_format: json` LLM evaluator returns as its whole response',
+    note: RESULT_ENVELOPE_NOTE,
+    examples: [RESULT_ENVELOPE_EXAMPLE],
   },
-} as const satisfies Record<string, { schema: z.ZodType; writes: string }>;
+} as const satisfies Record<string, SchemaKindEntry>;
 
 export type SchemaKind = keyof typeof SCHEMA_KINDS;
 
@@ -69,11 +107,19 @@ export const STRUCTURAL_PROJECTION_COMMENT =
  * authoritative.
  */
 export function schemaProjection(kind: SchemaKind): Record<string, unknown> {
-  const projected = z.toJSONSchema(SCHEMA_KINDS[kind].schema, { io: 'input' }) as Record<
-    string,
-    unknown
-  >;
-  return { ...projected, $comment: STRUCTURAL_PROJECTION_COMMENT };
+  const entry: SchemaKindEntry = SCHEMA_KINDS[kind];
+  const projected = z.toJSONSchema(entry.schema, { io: 'input' }) as Record<string, unknown>;
+  return {
+    ...projected,
+    $comment:
+      entry.note === undefined
+        ? STRUCTURAL_PROJECTION_COMMENT
+        : `${STRUCTURAL_PROJECTION_COMMENT} ${entry.note}`,
+    // `examples` rather than `--example`: the envelope is not a file anyone
+    // pastes into place, and it travels with the schema into whatever editor
+    // or generator the author pipes it through.
+    ...(entry.examples !== undefined ? { examples: entry.examples } : {}),
+  };
 }
 
 export interface EvalSchemaOptions {
@@ -115,7 +161,8 @@ export function evalSchemaAction(opts: EvalSchemaOptions): void {
           `--example has no answer for "${opts.kind}" — you never hand-write that shape. ` +
             (opts.kind === 'result'
               ? 'A result envelope is constructed by `pass()` / `violation()` / `info()` from ' +
-                '@orcaops/evaluator-sdk. '
+                '@orcaops/evaluator-sdk; `orcaops eval schema result` carries a filled-in one ' +
+                'under `examples`. '
               : '') +
             `Exemplars exist for: ${EXAMPLE_KINDS.join(', ')}.`,
           'example'

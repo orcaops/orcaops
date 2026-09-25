@@ -22,14 +22,25 @@ branch-level Task Review can consider together.
 ## Plan
 
 The intended outcome, ordered steps, acceptance criteria, boundaries, and
-decisions captured before implementation. Revisions extend the same artifact
+decisions captured before implementation. It also retains the exact requirement
+and decision revisions it says it uses. Revisions extend the same artifact
 rather than erasing the earlier plan.
+
+## Task use
+
+A record that one plan event did something with one exact requirement or
+decision revision, in a named role. A use written by that plan event's own
+operation was the plan's own selection; a use written later is a connection
+somebody found afterwards, and the store keeps the two apart because a
+connection found after the work does not show the work considered the rule.
 
 ## Checkpoint
 
 A coherent unit of implementation recorded within an artifact. Its open and
 close boundaries connect changed code with the plan steps, decisions,
-verification, uncertainty, and completion evidence reported for that work.
+verification, uncertainty, and completion evidence reported for that work. It
+inherits the task uses of the plan revision it opened against; it records none
+of its own.
 
 ## Completion check
 

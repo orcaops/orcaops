@@ -33,11 +33,24 @@ describe('plan review command registration', () => {
       'propose',
       'pull',
       'push',
+      'request',
       'reviewers',
       'status',
       'verdict',
       'view',
     ]);
+  });
+
+  it('documents reviewer requests on the group and registers validation-owned options', () => {
+    const review = sub(cloudPlanGroup(), 'review')!;
+    expect(review.description()).toContain('request reviewers');
+    const request = sub(review, 'request')!;
+    expect(request.options.map((option) => option.long)).toEqual(
+      expect.arrayContaining(['--reviewer', '--resend', '--json'])
+    );
+    const reviewer = request.options.find((option) => option.long === '--reviewer')!;
+    expect(reviewer.mandatory).toBe(false);
+    expect(reviewer.flags).toBe('--reviewer <identifier>');
   });
 
   it('pull --version conflicts with --proposal (a sealed version has no proposal side)', () => {

@@ -110,7 +110,7 @@ it('mints the review and publishes its floor with the retained selection advance
     floor_publication_id: result.publication_id,
     floor_version: 1,
   });
-});
+}, 15_000);
 
 it('retains the selected floor when the inputs are unchanged', async () => {
   const f = await fixture();

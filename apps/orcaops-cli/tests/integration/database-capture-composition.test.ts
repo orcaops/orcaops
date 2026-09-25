@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { PROCESSING_PROCESSOR_CONTRACT } from '@orcaops/core';
 import type { EvaluatorRunPayload } from '@orcaops/evaluator-protocol';
 import { SecretInPayloadError, uuidv7 } from '@orcaops/storage';
 import { readProjectArtifact, readProjectUsage } from '@orcaops/storage/history/database';
@@ -163,6 +164,12 @@ describe('shared SQLite capture composition', { timeout: 30_000 }, () => {
       const appended = await appendDatabaseCaptureEvents({
         handle: f.writer,
         binding: context.binding,
+        processing: {
+          processorContract: PROCESSING_PROCESSOR_CONTRACT,
+          withoutModel: false,
+          origin: { worktreeRoot: f.main },
+        },
+        processingEnabled: false,
         artifactId: id,
         operationId: uuidv7(),
         authoredPayload: { runs: [run] },

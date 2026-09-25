@@ -116,6 +116,70 @@ describe('orcaops eval test', () => {
     ]);
   }
 
+  async function runFixtureHuman(fixturePath: string, ref: string) {
+    return agent.runRaw(['eval', 'test', '--ref', ref, '--fixture', fixturePath, '--no-llm']);
+  }
+
+  /**
+   * Register a path-source pack with one warn-severity command evaluator whose
+   * runtime is `source`. A local pack, not a new entry in the shared test
+   * fixture pack: what these cases need is a producer that emits exactly one
+   * chosen envelope, including ones no shipped evaluator would ever produce.
+   */
+  async function addPackEmitting(packId: string, source: string): Promise<string> {
+    const packRoot = path.join(repo.path, `${packId}-pack`);
+    await mkdir(path.join(packRoot, 'evaluators'), { recursive: true });
+    await mkdir(path.join(packRoot, 'runtime'), { recursive: true });
+    await writeFile(
+      path.join(packRoot, 'package.yaml'),
+      [
+        'schema: orcaops.evaluator_package/v1',
+        'id: ' + packId,
+        'name: ' + packId + '/pack',
+        'version: 1.0.0',
+        'description: local test pack',
+        'evaluator_dir: ./evaluators',
+        'defaults:',
+        '  timeout_ms: 30000',
+        '  env:',
+        '    inherit:',
+        '      - PATH',
+        '',
+      ].join('\n'),
+      'utf8'
+    );
+    await writeFile(path.join(packRoot, 'runtime', 'emit.js'), source, 'utf8');
+    await writeFile(
+      path.join(packRoot, 'evaluators', 'emit.eval.yaml'),
+      [
+        'schema: orcaops.evaluator/v1',
+        'id: emit',
+        'phase: post-plan',
+        'severity: warn',
+        'description: emits one chosen envelope',
+        'engine:',
+        '  kind: command',
+        '  command: ["node", "./runtime/emit.js"]',
+        '',
+      ].join('\n'),
+      'utf8'
+    );
+    const added = await agent.runRaw([
+      'eval',
+      'add-pack',
+      `./${packId}-pack`,
+      packId,
+      '--yes',
+      '--json',
+    ]);
+    expect(added.exitCode).toBe(0);
+    return `${packId}/emit`;
+  }
+
+  function emitEnvelope(envelope: unknown): string {
+    return `process.stdout.write(${JSON.stringify(JSON.stringify(envelope))});\n`;
+  }
+
   it('runs pass and violation fixtures without changing the real store', async () => {
     const passingFixture = await writeFixture({ plan: fixturePlan(), fires_at: 'post-plan' });
     const storeRoot = path.join(repo.path, 'history-data');
@@ -475,7 +539,7 @@ describe('orcaops eval test', () => {
     );
     await writeFile(
       path.join(packRoot, 'runtime', 'always-info.js'),
-      "process.stdout.write(JSON.stringify({ schema: 'orcaops.evaluator_result/v1', verdict: 'info', body: 'INFO' }));\n",
+      "process.stdout.write(JSON.stringify({ schema: 'orcaops.evaluator_result/v2', verdict: 'info', body: 'INFO' }));\n",
       'utf8'
     );
     await writeFile(
@@ -542,7 +606,7 @@ describe('orcaops eval test', () => {
     );
     await writeFile(
       path.join(packRoot, 'runtime', 'always-info.js'),
-      "process.stdout.write(JSON.stringify({ schema: 'orcaops.evaluator_result/v1', verdict: 'info', body: 'INFO' }));\n",
+      "process.stdout.write(JSON.stringify({ schema: 'orcaops.evaluator_result/v2', verdict: 'info', body: 'INFO' }));\n",
       'utf8'
     );
     await writeFile(
@@ -636,5 +700,136 @@ describe('orcaops eval test', () => {
     expect(result.stdout).toContain('fixture.plan');
     expect(result.stdout).not.toContain('EVALUATOR_NOT_FOUND');
     expect(await snapshotFiles(storeRoot)).toEqual(before);
+  });
+
+  describe('what the evaluator established', () => {
+    const CRITERION_ID = '019e0000-0000-7000-8000-0000000000c1';
+
+    it('shows established findings in both renderings', async () => {
+      const ref = await addPackEmitting(
+        'established',
+        emitEnvelope({
+          schema: 'orcaops.evaluator_result/v2',
+          verdict: 'violation',
+          body: 'VIOLATION\n\nOne criterion is under-delivered.',
+          findings: [
+            {
+              key: `criterion/${CRITERION_ID}`,
+              title: 'The criterion asks for 42 fixture tests; the delivery has 2',
+              detail: 'Counted the cases under tests/expiry/.',
+              locations: [
+                { kind: 'acceptance-criterion', criterion_id: CRITERION_ID },
+                { kind: 'file', path: 'tests/expiry/session.test.ts', start_line: 1, end_line: 40 },
+              ],
+              conclusion: 'contradicted',
+            },
+          ],
+        })
+      );
+      const fixture = await writeFixture({ plan: fixturePlan(), fires_at: 'post-plan' });
+
+      const json = await runFixture(fixture, ref);
+      expect(json.exitCode).toBe(0);
+      const envelope = JSON.parse(json.stdout) as EvalTestOk & {
+        findings: { status: string; record?: { findings: { key?: string }[] } };
+      };
+      expect(envelope.run.verdict).toBe('violation');
+      expect(envelope.findings.status).toBe('established');
+      expect(envelope.findings.record?.findings[0]?.key).toBe(`criterion/${CRITERION_ID}`);
+
+      const human = await runFixtureHuman(fixture, ref);
+      expect(human.exitCode).toBe(0);
+      expect(human.stdout).toContain('findings (1):');
+      expect(human.stdout).toContain('The criterion asks for 42 fixture tests');
+      expect(human.stdout).toContain('conclusion: contradicted');
+      expect(human.stdout).toContain(`acceptance-criterion ${CRITERION_ID}`);
+      expect(human.stdout).toContain('tests/expiry/session.test.ts:1-40');
+      expect(human.stdout).toContain('Counted the cases under tests/expiry/.');
+    });
+
+    it('says findings were offered and could not be read, and keeps the verdict', async () => {
+      // A blank title is the shape the schema refuses. The author has to learn
+      // that from the output; a run that silently showed nothing would read as
+      // "my evaluator found nothing" and send them looking in the wrong place.
+      const ref = await addPackEmitting(
+        'unreadable',
+        emitEnvelope({
+          schema: 'orcaops.evaluator_result/v2',
+          verdict: 'violation',
+          body: 'VIOLATION\n\nSomething drifted.',
+          findings: [{ title: '   ' }],
+        })
+      );
+      const fixture = await writeFixture({ plan: fixturePlan(), fires_at: 'post-plan' });
+
+      const json = await runFixture(fixture, ref);
+      expect(json.exitCode).toBe(0);
+      const envelope = JSON.parse(json.stdout) as EvalTestOk & {
+        findings: { status: string; record?: { detail: string; source: string } };
+      };
+      // The verdict, the run status and the gate are untouched.
+      expect(envelope.run.verdict).toBe('violation');
+      expect(envelope.run.run_status).toBe('completed');
+      expect(envelope.blocking).toBe(false);
+      expect(envelope.findings.status).toBe('unreadable');
+      expect(envelope.findings.record?.source).toBe('envelope');
+      expect(envelope.findings.record?.detail).toContain('title');
+
+      const human = await runFixtureHuman(fixture, ref);
+      expect(human.stdout).toContain('findings: offered, but could not be read');
+      expect(human.stdout).toContain('title');
+    });
+
+    it('reports the bound that cut a producer down, without costing it the verdict', async () => {
+      const ref = await addPackEmitting(
+        'bounded',
+        [
+          'const findings = Array.from({ length: 101 }, (_, i) => ({ title: `finding ${i}` }));',
+          "process.stdout.write(JSON.stringify({ schema: 'orcaops.evaluator_result/v2', " +
+            "verdict: 'violation', body: 'VIOLATION', findings }));",
+          '',
+        ].join('\n')
+      );
+      const fixture = await writeFixture({ plan: fixturePlan(), fires_at: 'post-plan' });
+
+      const json = await runFixture(fixture, ref);
+      expect(json.exitCode).toBe(0);
+      const envelope = JSON.parse(json.stdout) as EvalTestOk & {
+        findings: {
+          status: string;
+          record?: { findings: unknown[]; notice?: { findings_dropped: number } };
+        };
+      };
+      expect(envelope.run.verdict).toBe('violation');
+      expect(envelope.findings.status).toBe('established');
+      expect(envelope.findings.record?.findings).toHaveLength(100);
+      expect(envelope.findings.record?.notice?.findings_dropped).toBe(1);
+
+      const human = await runFixtureHuman(fixture, ref);
+      expect(human.stdout).toContain('findings (100):');
+      expect(human.stdout).toContain('bounds applied: 1 finding(s) dropped');
+    });
+
+    it('says nothing at all when the evaluator offered no findings', async () => {
+      // Absence is not malformation: an evaluator that never mentions findings
+      // produces it, so it must not read as a failure or as an empty result.
+      const ref = await addPackEmitting(
+        'silent',
+        emitEnvelope({
+          schema: 'orcaops.evaluator_result/v2',
+          verdict: 'pass',
+          body: 'PASS\n\nNothing to report.',
+        })
+      );
+      const fixture = await writeFixture({ plan: fixturePlan(), fires_at: 'post-plan' });
+
+      const json = await runFixture(fixture, ref);
+      const envelope = JSON.parse(json.stdout) as EvalTestOk & { findings: { status: string } };
+      expect(envelope.findings).toEqual({ status: 'none' });
+
+      const human = await runFixtureHuman(fixture, ref);
+      expect(human.exitCode).toBe(0);
+      expect(human.stdout).not.toContain('findings');
+    });
   });
 });

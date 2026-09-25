@@ -84,10 +84,10 @@ export function gitClient(cwd: string): GitClient {
     return stdout;
   };
 
-  /** Reject on any non-zero exit, reporting whichever stream git explained itself on. */
   const runStrict = async (args: string[]): Promise<string> => {
     const { code, stdout, stderr } = await spawnGit(args);
-    if (code !== 0) throw fail(args, code, (stderr.trim() || stdout.trim()) ?? '');
+    if (code !== 0)
+      throw fail(args, code, [stderr.trim(), stdout.trim()].filter(Boolean).join('\n'));
     return stdout;
   };
 

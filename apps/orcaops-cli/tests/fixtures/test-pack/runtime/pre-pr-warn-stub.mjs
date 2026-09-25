@@ -8,7 +8,7 @@ if (contextPath) {
 }
 process.stdout.write(
   JSON.stringify({
-    schema: 'orcaops.evaluator_result/v1',
+    schema: 'orcaops.evaluator_result/v2',
     verdict: 'violation',
     body: 'VIOLATION\n\nTest-fixture stub: pre-pr-warn-stub requested review.',
     raw: { fixture: true },

@@ -2,8 +2,8 @@
 name: "Orcaops: timetravel"
 description: "Bisect, recover, or replay checkpoint boundaries. Use for \"which checkpoint broke this test?\", \"recover the abandoned attempt\", or \"replay how this came together\"."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "4006077f0bc4"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "615039087f7c"
 tags: ["orcaops", "insight", "timetravel"]
 ---
 
@@ -49,8 +49,9 @@ back per verb below, never guess.
 
 # salvage
 
-1. Find the abandoned cp + reason: `orcaops show <id> --json`
-   (`status: "abandoned"`, `abandon_reason`).
+1. Find the abandoned cp + reason: `orcaops show <id> --json`, then the
+   `artifact.checkpoints[]` entry with `status: "abandoned"`; its
+   `reason` field holds the recorded abandon reason.
 2. The abandoned window's diff:
    ```bash
    orcaops snapshots diff <n> --artifact <id> --json   # open..abandon by default

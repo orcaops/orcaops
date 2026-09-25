@@ -13,10 +13,12 @@ import {
   MANIFEST_VERSION,
   readInstallManifest,
   readLocalManifest,
+  readLocalManifestState,
   reconstructLocalManifest,
   writeInstallManifest,
   writeLocalManifest,
 } from './install-manifest.js';
+import { deleteMutation, executeMutations } from './mutations.js';
 
 const stamped = (v: string): string =>
   `---\nname: "x"\nmetadata:\n  generatedBy: "orcaops@${v}"\n---\nbody`;
@@ -312,6 +314,73 @@ describe('manifest read/write + reconstruction', () => {
     expect(local.info_exclude).toEqual(['.orcaops/', '!.orcaops/config.json']);
     await writeLocalManifest(root, local);
     expect(await readLocalManifest(root)).toEqual(local);
+  });
+
+  describe('readLocalManifestState', () => {
+    const localPath = (): string => path.join(root, '.orcaops', 'install.local.json');
+    const valid = `${JSON.stringify({ manifest_version: MANIFEST_VERSION, entries: [] }, null, 2)}\n`;
+
+    it('returns the validated manifest with the exact bytes it was read from', async () => {
+      await writeFile(localPath(), valid, 'utf8');
+      const state = await readLocalManifestState(root);
+      expect(state).toEqual({
+        kind: 'valid',
+        manifest: { manifest_version: MANIFEST_VERSION, entries: [] },
+        content: valid,
+      });
+    });
+
+    it('reports an absent file', async () => {
+      expect(await readLocalManifestState(root)).toEqual({ kind: 'absent' });
+    });
+
+    it.each([
+      ['malformed JSON', '{ not json', /malformed JSON/],
+      [
+        'a schema failure',
+        JSON.stringify({ manifest_version: MANIFEST_VERSION, entries: [], extra: true }),
+        /extra/,
+      ],
+    ])('reports %s as invalid instead of throwing', async (_label, content, reason) => {
+      await writeFile(localPath(), content, 'utf8');
+      const state = await readLocalManifestState(root);
+      expect(state.kind).toBe('invalid');
+      expect(state.kind === 'invalid' && state.reason).toMatch(reason);
+      await expect(readLocalManifest(root)).rejects.toThrow();
+    });
+
+    it('reports a non-regular file as invalid', async () => {
+      await mkdir(localPath());
+      expect(await readLocalManifestState(root)).toEqual({
+        kind: 'invalid',
+        reason: 'not a regular file',
+      });
+    });
+
+    it('refuses a symlink like the throwing reader', async () => {
+      const target = path.join(root, 'elsewhere.json');
+      await writeFile(target, valid, 'utf8');
+      await symlink(target, localPath());
+      await expect(readLocalManifestState(root)).rejects.toThrow();
+      await expect(readLocalManifest(root)).rejects.toThrow();
+    });
+
+    it('guards a deletion on the validated bytes, so a later change survives', async () => {
+      await writeFile(localPath(), valid, 'utf8');
+      const state = await readLocalManifestState(root);
+      if (state.kind !== 'valid') throw new Error('expected a valid manifest');
+      const deletion = deleteMutation(
+        root,
+        '.orcaops/install.local.json',
+        { kind: 'file', content: state.content },
+        true
+      );
+      const replacement = `${JSON.stringify({ manifest_version: MANIFEST_VERSION, entries: [], info_exclude: ['x'] })}\n`;
+      await writeFile(localPath(), replacement, 'utf8');
+
+      await expect(executeMutations([deletion], 'apply')).rejects.toThrow();
+      expect(await readFile(localPath(), 'utf8')).toBe(replacement);
+    });
   });
 
   it('install manifest round-trips through write → read', async () => {

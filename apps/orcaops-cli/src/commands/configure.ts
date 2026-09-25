@@ -7,7 +7,7 @@ import {
 } from '@orcaops/adapters';
 import { configLocationForScope, Repo, resolveConfigSource } from '@orcaops/core';
 import {
-  CONFIG_SCHEMA_VERSION,
+  configVersionForWrite,
   type HintKey,
   type SkillId,
   type SupportedAgentId,
@@ -620,7 +620,7 @@ async function applyDraft(
         };
       }
 
-      parsed.schema_version = CONFIG_SCHEMA_VERSION;
+      parsed.schema_version = configVersionForWrite(parsed, parsed.schema_version);
 
       const desired = `${JSON.stringify(parsed, null, 2)}\n`;
       const writes = [

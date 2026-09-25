@@ -74,13 +74,14 @@ report on it.
 
 ## Understand and reuse prior work
 
-| Ask your agent                                  | Skill                   | Result                                                                         |
-| ----------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------ |
-| Why does this validator exist?                  | `orcaops-why`           | Traces a file, line, symbol, or concept to its captured checkpoint and reason. |
-| Have we worked on authentication before?        | `orcaops-search`        | Searches captured artifacts across branches and registered projects.           |
-| Critique this plan against our prior decisions. | `orcaops-plan-critique` | Finds relevant prior art and stress-tests a draft before capture.              |
-| Replay how this feature came together.          | `orcaops-timetravel`    | Replays checkpoints; it can also bisect or salvage a captured attempt.         |
-| Import the existing git history.                | `orcaops-seed`          | Previews, then backfills older commits after explicit approval.                |
+| Ask your agent                                  | Skill                   | Result                                                                                                                            |
+| ----------------------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Why does this validator exist?                  | `orcaops-why`           | Traces a file, line, symbol, or concept to its captured checkpoint and reason.                                                    |
+| Have we worked on authentication before?        | `orcaops-search`        | Searches captured artifacts across branches and registered projects, and says where a match's wording stands now.                 |
+| Critique this plan against our prior decisions. | `orcaops-plan-critique` | Looks up the requirements and decisions that bear on the work, finds relevant prior art, and stress-tests a draft before capture. |
+| What rules apply to this work?                  | `orcaops-plan-critique` | Reads the adopted requirements that apply, apart from background, and records the ones the plan uses.                             |
+| Replay how this feature came together.          | `orcaops-timetravel`    | Replays checkpoints; it can also bisect or salvage a captured attempt.                                                            |
+| Import the existing git history.                | `orcaops-seed`          | Previews, then backfills older commits after explicit approval.                                                                   |
 
 If provenance or search misses an older, uncaptured area, the agent may use the
 `orcaops-seed-discovery` history-gap skill to explain the cold coverage and

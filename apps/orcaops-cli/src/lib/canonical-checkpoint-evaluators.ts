@@ -20,9 +20,15 @@ import {
   PolicyExceptionInvalidError,
   uuidv7,
 } from '@orcaops/storage';
+import type { EvaluatorRunEvidence } from '@orcaops/storage/history/database';
 
 import { toGateAuditRun } from './canonical-checkpoint-shapes.js';
-import { buildEvaluatorContext, type LifecycleEvaluatorContext } from './evaluator-bridge.js';
+import {
+  buildEvaluatorContext,
+  evaluatorRunBasis,
+  type LifecycleEvaluatorContext,
+  producerRan,
+} from './evaluator-bridge.js';
 import { computePackTrustDecisions } from './evaluator-grants.js';
 import { CLI_ROOT } from './evaluators-config.js';
 import type { OpenRejectionEnvelope } from '../io/errors.js';
@@ -35,6 +41,12 @@ export async function prepareCheckpointOpenEvaluators(input: {
   policyExceptions: PolicyException[];
   noLlm?: boolean;
   env: NodeJS.ProcessEnv;
+  /**
+   * Filled with what each gate run established beside itself. The gate dispatches while storage
+   * is composing the `checkpoint_opened` event, so the capture that settles that event reads this
+   * array afterwards rather than being handed the evidence up front.
+   */
+  evidence?: EvaluatorRunEvidence[];
 }): Promise<OpenEvaluatorContext> {
   const { ctx, artifactId, declaredStepIds, noLlm, env } = input;
   const policy_exceptions = structuredClone(input.policyExceptions);
@@ -108,7 +120,7 @@ export async function prepareCheckpointOpenEvaluators(input: {
         });
       });
       const validator = createParamsValidator();
-      const { runs } = await dispatchEvaluators({
+      const { runs, findings } = await dispatchEvaluators({
         evaluators: cpOpenEvaluators,
         context: baseContext,
         llm,
@@ -121,6 +133,19 @@ export async function prepareCheckpointOpenEvaluators(input: {
         ...r,
         checkpoint_n: proposedOpen.n,
       }));
+      // A refused open appends nothing, so the array is filled only once the gate admits: there
+      // is no run event for a blocked attempt to attach evidence to.
+      const established = runs.flatMap((runPayload, index) =>
+        producerRan(runPayload)
+          ? [
+              {
+                run_id: runPayload.run_id,
+                findings: findings[index]!,
+                basis: evaluatorRunBasis(baseContext, cpOpenEvaluators[index]!),
+              },
+            ]
+          : []
+      );
       const ts = new Date().toISOString();
       const dispositions: GateAuditDisposition[] = [];
       for (const r of stampedRuns) {
@@ -168,6 +193,7 @@ export async function prepareCheckpointOpenEvaluators(input: {
           } satisfies OpenRejectionEnvelope,
         };
       }
+      input.evidence?.push(...established);
       return { ok: true, gate_audit };
     },
   };

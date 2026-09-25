@@ -12,6 +12,7 @@ import type { ProjectInitialization } from './initialization.js';
 import { registerQueryFunctions } from './query-functions.js';
 import { copyRepositoryCreation, type RepositoryCreation } from './repository-creation.js';
 import { validateProjectSchemaDefinition } from './schema-validation.js';
+import { projectSchemaVersionRefusal } from './schema-version.js';
 import { PROJECT_DATABASE_SCHEMA, PROJECT_DATABASE_SCHEMA_VERSION } from './schema.js';
 import { registerSearchFunctions } from './search-functions.js';
 import { copyDatabaseValue } from './values.js';
@@ -194,13 +195,19 @@ export function validateProjectIdentity(
   database: Database.Database,
   authority: ProjectDatabaseAuthority
 ): void {
-  const version = database.pragma('user_version', { simple: true });
-  if (version !== PROJECT_DATABASE_SCHEMA_VERSION) {
-    throw new ProjectDatabaseError(
-      'HISTORY_FORMAT_UNSUPPORTED',
-      'This build does not support this database format; preserve it and use a build that supports the original format. No replacement was initialized'
-    );
-  }
+  const refusal = projectSchemaVersionRefusal(
+    database.pragma('user_version', { simple: true }) as number
+  );
+  if (refusal) throw refusal;
+  validateProjectStoreIdentity(database, authority);
+}
+
+// The identity and activation rows have had one shape since the first released schema, so the
+// explicit upgrade and a backup's verification ask this of a store this build cannot open.
+export function validateProjectStoreIdentity(
+  database: Database.Database,
+  authority: ProjectDatabaseAuthority
+): void {
   const row = database
     .prepare(
       `SELECT i.*, a.state FROM store_identity i
@@ -241,7 +248,7 @@ function syncDatabaseDirectory(file: string): void {
   }
 }
 
-function configureWriter(database: Database.Database): void {
+export function configureWriter(database: Database.Database): void {
   database.pragma('journal_mode = WAL');
   database.pragma('synchronous = FULL');
   database.pragma('foreign_keys = ON');
@@ -421,7 +428,7 @@ export function openProjectDatabase(input: {
   return openExistingProjectDatabase(input);
 }
 
-function databaseValidationFailure(cause: unknown): ProjectDatabaseError {
+export function databaseValidationFailure(cause: unknown): ProjectDatabaseError {
   if (cause instanceof ProjectDatabaseError) return cause;
   const code = sqliteCode(cause);
   const invalid =
@@ -719,11 +726,8 @@ export async function readProjectInitializationCandidate(input: {
         'ACTIVATION_PENDING',
         'The occupied empty database has no committed initialization; retry the original setup or use explicit repair, never initialize a replacement'
       );
-    if (schemaVersion !== PROJECT_DATABASE_SCHEMA_VERSION)
-      throw new ProjectDatabaseError(
-        'HISTORY_FORMAT_UNSUPPORTED',
-        'Initialization candidate uses an unsupported database format; preserve it and use a build that supports the original format'
-      );
+    const refusal = projectSchemaVersionRefusal(schemaVersion);
+    if (refusal) throw refusal;
     validateProjectSchemaDefinition(database, schemaVersion);
     const row = database
       .prepare(

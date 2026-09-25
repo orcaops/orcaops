@@ -1,0 +1,343 @@
+{
+  "fixture": "SYNTHETIC exact-revision and source-plan rows on top of the database the published @orcaops/cli 0.2.1 wrote",
+  "synthetic": true,
+  "statement": "No released build can write the exact-revision rows here. A released build writes source-plan rows only after it pulls from the cloud service; the same storage writers wrote these without it. Claim, decision, assessment and source-plan texts are invented and marked synthetic. The criterion lineage records are not invented: each restates a criterion the released plan events hold, byte for byte, under a lineage kind and a scope chosen for this fixture. Nothing here is released history.",
+  "writers": {
+    "commit": "a720f059eecdae4761923b0517150e1c761c7cee",
+    "exact_revision": [
+      {
+        "function": "publishProjectCriterionLineage",
+        "module": "packages/storage/src/history/database/exact-revision-records.ts",
+        "tables": ["criterion_lineage"]
+      },
+      {
+        "function": "publishProjectClaimRevision",
+        "module": "packages/storage/src/history/database/exact-revision-records.ts",
+        "tables": ["claims", "claim_revisions"]
+      },
+      {
+        "function": "publishProjectDecisionRevision",
+        "module": "packages/storage/src/history/database/exact-revision-records.ts",
+        "tables": ["decisions", "decision_revisions"]
+      },
+      {
+        "function": "publishProjectRecordRelationship",
+        "module": "packages/storage/src/history/database/exact-revision-records.ts",
+        "tables": ["record_relationships"]
+      },
+      {
+        "function": "publishProjectAdoption",
+        "module": "packages/storage/src/history/database/exact-revision-records.ts",
+        "tables": ["adoptions"]
+      },
+      {
+        "function": "publishProjectAssessment",
+        "module": "packages/storage/src/history/database/exact-revision-records.ts",
+        "tables": ["assessments"]
+      }
+    ],
+    "source_plan": [
+      {
+        "function": "publishProjectSourcePlanRecord",
+        "module": "packages/storage/src/history/database/source-plan-publication.ts",
+        "tables": [
+          "source_plan_namespaces",
+          "source_plan_records",
+          "source_plan_approved",
+          "source_plan_review_current"
+        ]
+      },
+      {
+        "function": "publishProjectSourcePlanLocator",
+        "module": "packages/storage/src/history/database/source-plan-publication.ts",
+        "tables": ["source_plan_locator_revisions", "source_plan_locator_current"]
+      }
+    ]
+  },
+  "storage_code_identity": {
+    "directory": "packages/storage/src/history/database",
+    "compared": "every .ts file except *.test.ts and fixtures/",
+    "files": 132,
+    "blob_listing_sha256": "1d91c8cb9a8871b77749d33d73a9aba1e8e30c74da263e284028d565ffeabc19",
+    "head_commit": "a720f059eecdae4761923b0517150e1c761c7cee",
+    "working_tree_matches_head": true,
+    "releases": [
+      {
+        "tag": "shipped/0.2.0",
+        "commit": "ebcf0b2599bc114002779ff287cd75101ee7bb5c",
+        "differing_files": []
+      },
+      {
+        "tag": "shipped/0.2.1",
+        "commit": "d651ba3489da4bf3afa06ff4d4cde1cd6c1cfc51",
+        "differing_files": []
+      }
+    ],
+    "writer_import_closure": {
+      "entry_points": [
+        "packages/storage/src/history/database/exact-revision-records.ts",
+        "packages/storage/src/history/database/source-plan-publication.ts",
+        "packages/storage/src/history/database/connection.ts"
+      ],
+      "files": 124,
+      "packages": ["packages/evaluator-protocol", "packages/storage"],
+      "packages_outside_the_workspace": [
+        "@orcaops/diff-fingerprint",
+        "better-sqlite3",
+        "picomatch",
+        "zod"
+      ],
+      "files_that_differ_from_a_release": [
+        {
+          "file": "packages/evaluator-protocol/src/context-block.ts",
+          "differs_from": ["shipped/0.2.0", "shipped/0.2.1"],
+          "effect_on_the_writers": "Cannot affect the rows: HEAD rewords headings that buildContextBlock renders into evaluator prompts. The closure reaches it only through the package index; no storage writer calls it or stores what it renders."
+        },
+        {
+          "file": "packages/storage/src/artifacts/errors.ts",
+          "differs_from": ["shipped/0.2.0", "shipped/0.2.1"],
+          "effect_on_the_writers": "Cannot affect the rows: HEAD adds one error class for plan capture. The closure reaches this file only through the event rebuilders, for RecoveryRefusedError, which is unchanged."
+        }
+      ]
+    }
+  },
+  "base": {
+    "released_fixture": "../released/cli-0.2.1",
+    "released_content_sha256": "3172a771f835aee77c3eaa4a61b2362c2d3d9f7000b080309b77dbc917a0b00f",
+    "tables_the_writers_changed": [
+      "adoptions",
+      "assessments",
+      "claim_revisions",
+      "claims",
+      "criterion_lineage",
+      "decision_revisions",
+      "decisions",
+      "operations",
+      "project_counters",
+      "record_relationships",
+      "source_plan_approved",
+      "source_plan_locator_current",
+      "source_plan_locator_revisions",
+      "source_plan_namespaces",
+      "source_plan_records",
+      "source_plan_review_current"
+    ],
+    "unchanged_tables": 110,
+    "released_receipts_kept_as_prefix": 132,
+    "identity_cells_restored": ["store_identity.resolved_root", "store_identity.root_key"]
+  },
+  "generation": {
+    "command": "pnpm --filter @orcaops/storage exec vitest run --config tests/synthetic-schema-29-fixture.config.ts",
+    "procedure_sha256": "ff5c14495ad2123e28a1b1417a36bbddf783168115c9502f8ff23bdcc5d96e9f",
+    "node": "v22.14.0",
+    "sqlite_driver": {
+      "package": "better-sqlite3",
+      "version": "13.0.3",
+      "sqlite_version": "3.53.4"
+    }
+  },
+  "schema": {
+    "user_version": 29,
+    "file": "../released/schema.json",
+    "objects": 530,
+    "object_kinds": {
+      "index": 53,
+      "table": 126,
+      "trigger": 351
+    },
+    "sql_sha256": "6ddee53aff2eae90328c12fb91d84b8214b8e9ee3fcac61f2b4b91c54d1f1c77",
+    "whitespace_normalized_sql_sha256": "85ecc46f5d7662a28bdb571be43a4378b49730af097442b29d2ed336f3f78a73"
+  },
+  "content": {
+    "composed_sha256": "dc01b307ba4ca35e853c0041fe6febadd2ba884ee6839ca0f72b581111f8a877",
+    "tables": {
+      "adoptions": {
+        "rows": 10,
+        "sha256": "32b356c2de7b9825dd1533f595f90819230ad0ae41351163c26059ee1c99e64f"
+      },
+      "assessments": {
+        "rows": 2,
+        "sha256": "90a5ea9cd92f4b957029d7f3317a700c3f1c944deef2481f4c75a18a8f134b02"
+      },
+      "claim_revisions": {
+        "rows": 3,
+        "sha256": "67fc9ea81cec4e9bc8ab766328eaf96a91b401d59b8b2ba761eeaaf390d9d367"
+      },
+      "claims": {
+        "rows": 2,
+        "sha256": "be4e863f03324c4470fc0e09e4a77bd8c776231ebd8b71e2a713c136750e4030"
+      },
+      "criterion_lineage": {
+        "rows": 5,
+        "sha256": "ee4ed879f8d4fe75792789ed37f6f75678fdff88efb312f25de0ec8d27cd957d"
+      },
+      "decision_revisions": {
+        "rows": 3,
+        "sha256": "e2a6b3032944b0a7339c0af5d843b8f24e761080a5bff4dacd2d106b7b97cbde"
+      },
+      "decisions": {
+        "rows": 2,
+        "sha256": "145e962780139d44cd2f4ee4ce67839643c1cd296502db3e793f97a3c0e0c78f"
+      },
+      "operations": {
+        "rows": 166,
+        "sha256": "f42d3daf70777bdaee7285b244297a47447e176c68de7bb7825c8784de9e6959"
+      },
+      "project_counters": {
+        "rows": 1,
+        "sha256": "07a1a4125afaa3707ed0f6b11690c0fc2be9f79652df313af804c5b2256a16e0"
+      },
+      "record_relationships": {
+        "rows": 8,
+        "sha256": "e0eba80292a77874ed3f62671721099debabfbb0e64301e0c657831187efdbb1"
+      },
+      "source_plan_approved": {
+        "rows": 1,
+        "sha256": "ff720a38985cb4c78f7faf345968332fff9dad915c082158aa8f9d80250fac25"
+      },
+      "source_plan_locator_current": {
+        "rows": 1,
+        "sha256": "7484fdfe9633d11b3f103c1c29ddc4bebd9d202dfa9792011c8c4767018ad7fd"
+      },
+      "source_plan_locator_revisions": {
+        "rows": 1,
+        "sha256": "c74e610ff2621ca4c342f1a36701c4cc374a394d413b37e614e0086c7e050c91"
+      },
+      "source_plan_namespaces": {
+        "rows": 1,
+        "sha256": "17982c9af8c0bfa64ececdfcd4f6bfcc0e1fe613e15c4007d075678ae623d76f"
+      },
+      "source_plan_records": {
+        "rows": 2,
+        "sha256": "130018d2379e10dda6dafe3f729d211bebd6803da574a5237509409f1f3e30d3"
+      },
+      "source_plan_review_current": {
+        "rows": 1,
+        "sha256": "547ac42ed80d895b6a893d4a3e8db7203da4c77eb1f6047bfef7dda952e1ccac"
+      }
+    },
+    "operations_by_kind": {
+      "adoption.publish": 10,
+      "artifact.append": 5,
+      "assessment.publish": 2,
+      "attempt.publish": 1,
+      "capture.append": 20,
+      "capture.retention.begin": 11,
+      "capture.retention.select": 14,
+      "claim.revision.publish": 3,
+      "criterion.lineage.publish": 5,
+      "decision.revision.publish": 3,
+      "execution.focus": 6,
+      "import.retention.begin": 3,
+      "import.retention.select": 3,
+      "lifecycle.publish": 16,
+      "plan.capture.retention.begin": 3,
+      "project.display_name": 1,
+      "record.relationship.publish": 8,
+      "review.comment.add": 1,
+      "review.comment.append": 3,
+      "review.create": 3,
+      "review.floor": 2,
+      "review.floor.admit": 2,
+      "review.run.attempt": 3,
+      "review.run.finalize": 1,
+      "review.run.inputs-served": 3,
+      "review.run.start": 2,
+      "review.semantic.submit": 1,
+      "review.workflow.append": 2,
+      "seed.bundle": 3,
+      "seed.state": 4,
+      "source_plan.locator": 1,
+      "source_plan.record": 2,
+      "usage.append": 19
+    },
+    "coverage": {
+      "criterion_lineage_by_kind_and_scope": {
+        "added:artifact": 3,
+        "carried:branch": 1,
+        "rewritten:project": 1
+      },
+      "claim_revisions_with_and_without_verification": {
+        "with": 1,
+        "without": 2
+      },
+      "decision_revisions": 3,
+      "relationships_by_relation_and_scope": {
+        "challenges:branch": 4,
+        "challenges:project": 1,
+        "supersedes:branch": 1,
+        "supersedes:project": 2
+      },
+      "relationship_still_naming_a_first_revision": {
+        "relationship_id": "01a0afa6-ba8c-7e9f-b537-c986e3465a34",
+        "to_revision_id": "01a0afa6-ba8c-7487-bdc9-d04698e991ff",
+        "later_revision_id": "01a0afa6-ba8c-728c-9674-debbbce94322"
+      },
+      "same_relationship_at_two_scopes": [
+        "01a0afa6-ba8c-7e9f-b537-c986e3465a34",
+        "01a0afa6-ba8c-7d8a-ac58-3584cc25be8c"
+      ],
+      "same_relationship_on_two_branches": [
+        "01a0afa6-ba8c-7d8a-ac58-3584cc25be8c",
+        "01a0afa6-ba8c-7bf4-ad92-204ee7da1b0e"
+      ],
+      "same_adoption_on_two_branches": {
+        "target_revision_id": "01a0afa6-ba8c-7056-89cb-8be0b0c324f5",
+        "approver": "synthetic-owner",
+        "branches": ["rate-limit", "limit-docs"]
+      },
+      "relationships_by_endpoint_kinds": {
+        "challenges:claim:decision": 4,
+        "challenges:decision:claim": 1,
+        "supersedes:claim:claim": 1,
+        "supersedes:decision:decision": 2
+      },
+      "relationships_joining_two_records": 6,
+      "adoptions_by_approver": {
+        "synthetic-owner": 9,
+        "synthetic-reviewer": 1
+      },
+      "revisions_whose_id_sorts_before_their_predecessor": [
+        "01a0afa6-ba8c-7056-89cb-8be0b0c324f5",
+        "01a0afa6-ba8c-728c-9674-debbbce94322"
+      ],
+      "tables_inserted_against_primary_key_order": ["record_relationships", "adoptions"],
+      "adoptions_by_target_and_scope": {
+        "claim:branch": 3,
+        "claim:project": 2,
+        "decision:branch": 1,
+        "decision:project": 1,
+        "relationship:branch": 2,
+        "relationship:project": 1
+      },
+      "assessment_observed_counters": [
+        {
+          "write_sequence": 139,
+          "intent_change_counter": 18
+        },
+        {
+          "write_sequence": 163,
+          "intent_change_counter": 41
+        }
+      ]
+    }
+  },
+  "covers": [
+    "A criterion lineage chain: added, carried and rewritten, at artifact, branch and project scope.",
+    "Two claims and two decisions; one of each has two revisions, and each second revision id sorts before its predecessor.",
+    "Both relations, at project scope and on two branches, across claim-to-decision, decision-to-claim, claim-to-claim and decision-to-decision endpoints, attributed to an author and to a detector.",
+    "One relationship tuple three times, differing only in scope: at project scope and on two branches. The two branch rows differ in scope value alone.",
+    "An older edge that still names a first revision after a second exists, and a supersedes edge that joins two different decisions.",
+    "Adoptions of a claim, a decision and a relationship at project and at branch scope; one target adopted at both scope kinds, one target and approver adopted on two branches, and one target adopted by two approvers.",
+    "Relationships and adoptions inserted against their primary-key order.",
+    "Two assessments stamped with the counters observed when their input was read.",
+    "One approved source plan, one candidate and one path locator in one namespace."
+  ],
+  "not_covered": [
+    "No source_plan_upload_commands rows: an upload is a remote operation with transport rows of its own.",
+    "No proposal record and no upload locator: one approved record, one candidate and one path locator only.",
+    "No artifact-scoped relationship or adoption: schema 29 admits only project and branch scope there.",
+    "No rows for review_comment_claim_links, source_time_*, execution_checkpoint_recoveries or seed_bundle_authoring. No released build can write them either, but no planned schema change rebuilds them, so there is no transformation to prove on populated rows. A change that rebuilds one of them has to add its own rows here first.",
+    "Everything else the released 0.2.1 fixture does not cover stays uncovered here."
+  ]
+}

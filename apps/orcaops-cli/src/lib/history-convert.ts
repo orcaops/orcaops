@@ -107,6 +107,14 @@ export interface HistoryConvertApply {
   };
 }
 
+const NO_LEGACY_IDENTITY = [
+  'This repository has no legacy project identity, so there is nothing to convert.',
+  'Start capturing with `orcaops capture plan`; the first capture creates a fresh project database.',
+  'If it still reports CONVERSION_REQUIRED, the checkout holds Orcaops state that is neither',
+  'configuration nor convertible history, such as unrecognized entries in .orcaops/ or refs',
+  'under refs/orcaops/; move that state aside and retry.',
+].join(' ');
+
 function refuse(code: 'INVALID_INPUT' | 'IDENTITY_CONFLICT', message: string): never {
   throw new ProjectDatabaseError(code, message);
 }
@@ -173,8 +181,7 @@ export async function previewHistoryConversion(
   options: HistoryConvertOptions
 ): Promise<HistoryConvertPreview> {
   const { preview } = await previewSources(options);
-  if (!preview.projectId)
-    refuse('INVALID_INPUT', 'This repository has no legacy project identity to convert');
+  if (!preview.projectId) refuse('INVALID_INPUT', NO_LEGACY_IDENTITY);
   return Object.freeze({
     mode: 'preview' as const,
     profile: preview.profile,
@@ -202,8 +209,7 @@ export async function applyHistoryConversion(
       'Conversion runs only in an explicit offline window; pass --offline with --apply'
     );
   const { env, preview } = await previewSources(options);
-  if (!preview.projectId)
-    refuse('INVALID_INPUT', 'This repository has no legacy project identity to convert');
+  if (!preview.projectId) refuse('INVALID_INPUT', NO_LEGACY_IDENTITY);
   const git = await gitContext(options.cwd, env);
   const root = await normalizeHistoryRoot({ root: options.root, env });
   if (options.operationId !== undefined && !isUuidV7(options.operationId))

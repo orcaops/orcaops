@@ -35,7 +35,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-it('emits an unsupported canonical database failure without writing history', async () => {
+it('emits a newer-format canonical database failure without writing history', async () => {
   const repo = await createTempRepo({ initialBranch: 'main' });
   cleanups.push(repo.cleanup);
   const dataRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-review-pane-'));
@@ -64,8 +64,8 @@ it('emits an unsupported canonical database failure without writing history', as
   expect(await runDatabaseReviewPane({ branch: 'main' }, repo.path)).toBe(1);
   expect(JSON.parse(stdout)).toMatchObject({
     ok: false,
-    code: 'HISTORY_FORMAT_UNSUPPORTED',
-    message: expect.stringContaining('does not support this database format'),
+    code: 'HISTORY_FORMAT_NEWER',
+    message: expect.stringContaining('written by a newer build'),
   });
   expect((await readFile(databasePath)).equals(beforeBytes)).toBe(true);
   expect(store.openProjectDatabase).toHaveBeenCalled();

@@ -12,6 +12,7 @@ import {
 } from '@orcaops/storage/history/database';
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
+import { readArtifactExport } from '../support/artifact-export.js';
 import { makeAgent } from '../support/test-agent.js';
 import { installTestPack, TEST_PACK_ABS_PATH } from '../support/test-helpers.js';
 
@@ -319,7 +320,7 @@ describe('two-phase checkpoint lifecycle', () => {
           };
         };
       }
-    >(await agent.runRaw(['show', plan.artifact_id, '--json']));
+    >(await readArtifactExport(agent, plan.artifact_id));
     expect(shown.artifact.evaluator_log.runs).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -471,6 +472,66 @@ describe('two-phase checkpoint lifecycle', () => {
     expect(
       status.artifacts.find((artifact) => artifact.id === plan.artifact_id)?.open_checkpoints
     ).toEqual([expect.objectContaining({ n: 1 })]);
+  });
+
+  it('refuses a close with a misspelled completion key, names the real key, and keeps the checkpoint open', async () => {
+    const plan = await capturePlan(['a']);
+    parseOk(
+      await open({
+        artifact_id: plan.artifact_id,
+        declared_step_ids: [plan.step_ids[0]],
+      })
+    );
+
+    const result = await close({
+      artifact_id: plan.artifact_id,
+      n: 1,
+      summary: 'claims completion under the wrong key',
+      completed_steps: [plan.step_ids[0]],
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(parseErr(result).error).toMatchObject({
+      code: 'INVALID_INPUT',
+      message: 'Unknown key "completed_steps" (did you mean "completed_step_ids"?)',
+    });
+    const status = parseOk<
+      OkEnvelope & {
+        artifacts: Array<{ id: string; open_checkpoints: Array<{ n: number }> }>;
+      }
+    >(await agent.runRaw(['status', '--json']));
+    expect(
+      status.artifacts.find((artifact) => artifact.id === plan.artifact_id)?.open_checkpoints
+    ).toEqual([expect.objectContaining({ n: 1 })]);
+  });
+
+  it('refuses a plan with a misspelled non-goals key and captures nothing', async () => {
+    const result = await agent.runRaw([
+      'capture',
+      'plan',
+      '--no-llm',
+      '--input',
+      inputFile(
+        JSON.stringify({
+          task: 'plan with a misspelled key',
+          label: 'misspelled non-goals',
+          plan_steps: [
+            { text: 'a', label: 'a', acceptance_criteria: [{ text: 'the step is delivered' }] },
+          ],
+          non_goal: [{ text: 'x', rationale: 'y' }],
+        })
+      ),
+    ]);
+
+    expect(result.exitCode).toBe(1);
+    expect(parseErr(result).error).toMatchObject({
+      code: 'INVALID_INPUT',
+      message: 'Unknown key "non_goal" (did you mean "non_goals"?)',
+    });
+    const status = parseOk<OkEnvelope & { artifacts: unknown[] }>(
+      await agent.runRaw(['status', '--json'])
+    );
+    expect(status.artifacts).toEqual([]);
   });
 
   it('subagent attribution: agent_session_id flows through to status surfaces', async () => {

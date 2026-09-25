@@ -1,8 +1,15 @@
 #!/usr/bin/env node
-import type { EvaluatorContext, EvaluatorResultEnvelope } from '@orcaops/evaluator-protocol';
-import { pass, runIfDispatched, violation } from '@orcaops/evaluator-sdk';
+import type { EvaluatorContext, EvaluatorResultEnvelopeV2 } from '@orcaops/evaluator-protocol';
+import {
+  finding,
+  findingKey,
+  pass,
+  planStepLocation,
+  runIfDispatched,
+  violation,
+} from '@orcaops/evaluator-sdk';
 
-export function check(ctx: EvaluatorContext): EvaluatorResultEnvelope {
+export function check(ctx: EvaluatorContext): EvaluatorResultEnvelopeV2 {
   const cp =
     ctx.current_checkpoint !== null && ctx.current_checkpoint.status === 'closed'
       ? ctx.current_checkpoint
@@ -40,8 +47,8 @@ export function check(ctx: EvaluatorContext): EvaluatorResultEnvelope {
     );
   }
 
-  const list = candidates
-    .sort((a, b) => b.ratio - a.ratio)
+  const ranked = candidates.sort((a, b) => b.ratio - a.ratio);
+  const list = ranked
     .map(
       (c) =>
         `- step ${c.n} (id ${c.step_id}): "${c.text}" (${Math.round(c.ratio * 100)}% token overlap)`
@@ -53,7 +60,23 @@ export function check(ctx: EvaluatorContext): EvaluatorResultEnvelope {
       `Re-capture this checkpoint with the relevant step_ids, or claim ` +
       `\`acknowledge_breaking_change\` if the overlap is coincidental.\n\n` +
       `## findings\n${list}`,
-    { raw: { claimed: [], plausibleSteps: candidates } }
+    {
+      raw: { claimed: [], plausibleSteps: candidates },
+      // One finding per overlapping step, keyed on the step id so a rerun
+      // against the same checkpoint names the same steps. The overlap ratio
+      // stays in `raw`, where the spec's own output_schema validates it: it is
+      // this evaluator's own measure, not a protocol-defined one. No
+      // `conclusion` — the overlap says the step went unclaimed, not that the
+      // step was or was not delivered.
+      findings: ranked.map((c) =>
+        finding({
+          key: findingKey('step', c.step_id),
+          title: `Checkpoint content overlaps plan step ${c.n} but does not claim it`,
+          detail: `"${c.text}" (${Math.round(c.ratio * 100)}% token overlap with this checkpoint's summary and evidence)`,
+          locations: [planStepLocation(c.step_id)],
+        })
+      ),
+    }
   );
 }
 

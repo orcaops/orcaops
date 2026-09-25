@@ -278,7 +278,10 @@ export const EvaluatorContextSchema = z
     open_checkpoints: z.array(CheckpointContextSchema),
     abandoned_checkpoints: z.array(CheckpointContextSchema),
     summary: SummaryContextSchema.nullable(),
+    /** The agent's self-reported `files_changed`: one checkpoint's at close, the union at pre-pr. */
     changed_files: z.array(z.string()),
+    /** Checkpoint-close only; omitted, never null, when either snapshot tree is missing. */
+    observed_changed_files: z.array(z.string()).optional(),
     params: z.record(z.string(), z.unknown()),
   })
   .strict();

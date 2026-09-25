@@ -13,9 +13,18 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
+import type {
+  KnowledgeBlock,
+  KnowledgeContextBounds,
+  KnowledgeProcessingClaim,
+} from '@orcaops/core';
 import { isValidGlobSyntax, matchesAnyGlob } from '@orcaops/evaluator-protocol';
 import { redactSecretsInUnifiedDiff } from '@orcaops/evaluator-protocol/secrets';
 import { type Citation, CITATION_KIND, DISCLOSURE_CODE, type Floor } from '@orcaops/review-core';
+import {
+  KnowledgeEquivalenceDispositionSchema,
+  KnowledgeInterpretationSchema,
+} from '@orcaops/storage';
 
 import { CLAIM_LEDGER_ENTRY_KIND, type ClaimLedgerEntry } from './claimLedger.js';
 
@@ -348,10 +357,15 @@ export const ACCOUNT_CORE_PARTITIONED: AccountCorePartition = true;
  * the ceiling can never drift from the carve-out; key order follows the const,
  * which keeps the serialization deterministic.
  */
-const protectedAccountCorpus = (core: ProjectionAccountCore): ProtectedAccountCore =>
-  Object.fromEntries(
+const protectedAccountCorpus = (
+  core: ProjectionAccountCore,
+  taskKnowledge?: DossierTaskKnowledge
+): ProtectedAccountCore & { taskKnowledge?: DossierTaskKnowledge } => ({
+  ...(Object.fromEntries(
     PROTECTED_ACCOUNT_FIELDS.map((field) => [field, core[field]])
-  ) as ProtectedAccountCore;
+  ) as ProtectedAccountCore),
+  ...(taskKnowledge === undefined ? {} : { taskKnowledge }),
+});
 
 export interface TruncationRecord {
   id: string;
@@ -422,6 +436,118 @@ export interface ProjectionAccountCore extends Omit<DossierAccountCore, 'ledger'
   ledger: ProjectionLedgerEntry[];
 }
 
+export interface DossierKnowledgeEntry {
+  /** `<kind>:<entity id>` — the continuing identity, not a capture citation. */
+  key: string;
+  placement: 'applicable' | 'background';
+  /** Copied from the shared answer. The dossier decides no standing of its own. */
+  governingRevisionIds: string[];
+  statement: string | null;
+  rationale?: string | null;
+  reason: string;
+  selectedWithPlan: number;
+  connectedLater: number;
+}
+
+/**
+ * The continuing knowledge the ACCOUNT lane receives: what stands, what this work recorded a use
+ * of, and what applies that it did not.
+ *
+ * It is capture-derived and carries no code, so it belongs to the lane that reads captures; the
+ * capture-blind forensic lane never receives it, and `ForensicInput` is byte-identical whatever
+ * these records say. It sits BESIDE `accountCore`, so the legacy singleton does not alter the
+ * protected-core partition. Each answer is bounded after placement, where background can be
+ * dropped before an applicable rule; a multi-task composition is also measured by the hard
+ * account-corpus ceiling so member count cannot evade that bound.
+ *
+ * Every field is copied from `KnowledgeBlock`. Nothing here re-derives one.
+ */
+export interface DossierKnowledge {
+  /** The write sequence the answer was read at. Every line below is an answer at that boundary. */
+  boundary: number;
+  mode: 'current' | 'historical';
+  entries: DossierKnowledgeEntry[];
+  interpretations?: KnowledgeBlock['interpretations'];
+  /** Applicable entries the plan in view records no use of; the statement says which case it is. */
+  applicableNotSelected: { key: string; revisionIds: string[] }[];
+  notSelectedStatement: string;
+  /** What the coverage claims. Never a completeness claim it has not earned. */
+  coverage: DossierKnowledgeCoverage;
+  /** What the answer did not carry and why, so nothing was cut silently. */
+  limits: string[];
+}
+
+export interface DossierTaskKnowledge {
+  schema_version: 1;
+  tasks: {
+    artifactId: string;
+    planEventId: string | null;
+    knowledge: DossierKnowledge;
+  }[];
+}
+
+/**
+ * The coverage claim as the account lane receives it: the machine-readable pair beside the words,
+ * so a lane reading this projection can tell `complete` from `not_processed` without parsing prose
+ * — and cannot read the prose as a completeness claim the answer never made.
+ */
+export interface DossierKnowledgeCoverage {
+  /** Null where nothing read the processing state — never a shorthand for "fine". */
+  claim: KnowledgeProcessingClaim | null;
+  /** The source sequence processing is complete through. Null on every claim but `complete`. */
+  completedThrough: number | null;
+  statement: string;
+}
+
+/**
+ * How much continuing knowledge one account projection carries. Smaller than a read surface's
+ * allowance: the projection has its own total budget, and the bound is spent in core after
+ * placement, so background is left out before any adopted rule that applies here.
+ */
+export const DOSSIER_KNOWLEDGE_BOUNDS: KnowledgeContextBounds = {
+  maxEntries: 20,
+  maxStatementBytes: 8_000,
+};
+
+/** The shared answer as the account lane carries it. A projection, never a second derivation. */
+export function dossierKnowledge(block: KnowledgeBlock): DossierKnowledge {
+  return {
+    boundary: block.basis.knowledge_boundary,
+    mode: block.basis.mode,
+    interpretations: block.interpretations ?? [],
+    entries: block.entries.map((entry) => ({
+      key: entry.key,
+      placement: entry.placement,
+      governingRevisionIds: [...entry.governing_revision_ids],
+      statement: entry.statement,
+      ...(entry.rationale === undefined ? {} : { rationale: entry.rationale }),
+      reason: entry.reason,
+      selectedWithPlan: entry.selected_with_plan.length,
+      connectedLater: entry.connected_later.length,
+    })),
+    applicableNotSelected: block.applicable_not_selected.entries.map((entry) => ({
+      key: entry.key,
+      revisionIds: [...entry.revision_ids],
+    })),
+    notSelectedStatement: block.applicable_not_selected.statement,
+    coverage: {
+      claim: block.coverage.processing?.claim ?? null,
+      completedThrough: block.coverage.processing?.completed_through ?? null,
+      statement: block.coverage.statement,
+    },
+    limits: block.limits.map((limit) => limit.detail),
+  };
+}
+
+/**
+ * Why this projection carries no continuing knowledge, in the words a lane prints. A `knowledge`
+ * of `null` beside no sentence reads as "no rule bears on this work", which is the one thing an
+ * unread history must never say.
+ */
+export const NO_KNOWLEDGE_READ =
+  'No project history was read for this run, so this projection carries no continuing knowledge. ' +
+  'That is not a statement that no rule bears on this work.';
+
 export interface AccountProjection {
   schema_version: typeof DOSSIER_SCHEMA_VERSION;
   branch: string;
@@ -442,6 +568,23 @@ export interface AccountProjection {
   fileInventory: string[];
   inventoryMode: InventoryMode;
   manifestSummary: ManifestSummary;
+  /**
+   * Null when no project history was read for this run — never a shorthand for "no rule bears on
+   * this work". `dossierCli` builds a projection from a floor alone and has none to read.
+   *
+   * Optional rather than required, because an archived run's retained projection bytes were
+   * written before this field existed and must still parse: a required key would make every one of
+   * them unreadable. The producer always writes it, null or otherwise.
+   */
+  knowledge?: DossierKnowledge | null;
+  /** Per-task answers for new multi-artifact runs. The legacy singleton remains unchanged. */
+  taskKnowledge?: DossierTaskKnowledge;
+  /**
+   * Why `knowledge` is null, in words, so a lane reading this projection is never left to read a
+   * bare null as "no rule bears on this work". Absent exactly when `knowledge` is present, and on
+   * a retained projection written before this field existed.
+   */
+  knowledgeStatement?: string;
 }
 
 /**
@@ -592,6 +735,69 @@ const projectionAccountCoreSchema = z.strictObject({
   ...payloadAccountCoreFields,
   ledger: z.array(projectionLedgerEntrySchema),
 });
+/**
+ * A projection retained before the claim rode beside the words carried the words alone, under this
+ * same schema version. It is lifted rather than refused: a run whose inputs no longer parse cannot
+ * be replayed, and a missing pair is exactly what "nothing read the processing state" means.
+ */
+const dossierKnowledgeCoverageSchema = z.union([
+  payloadString.transform((statement) => ({
+    claim: null,
+    completedThrough: null,
+    statement,
+  })),
+  z.strictObject({
+    claim: z
+      .enum(['complete', 'partial', 'not_processed', 'unknown'] as const)
+      .nullable() satisfies z.ZodType<KnowledgeProcessingClaim | null>,
+    completedThrough: payloadCount.nullable(),
+    statement: payloadString,
+  }),
+]);
+
+const dossierKnowledgeSchema = z.strictObject({
+  boundary: payloadCount,
+  mode: z.enum(['current', 'historical']),
+  interpretations: z
+    .array(
+      z.strictObject({
+        interpretation: KnowledgeInterpretationSchema,
+        route: z.enum(['origin_task', 'source', 'exact_target', 'project']),
+        writeSequence: payloadCount,
+        equivalenceStatus: z.enum(['proposed', 'rejected']).nullable(),
+        rejection: KnowledgeEquivalenceDispositionSchema.nullable(),
+      })
+    )
+    .optional(),
+  entries: z.array(
+    z.strictObject({
+      key: payloadString,
+      placement: z.enum(['applicable', 'background']),
+      governingRevisionIds: z.array(payloadString),
+      statement: payloadString.nullable(),
+      rationale: payloadString.nullable().optional(),
+      reason: payloadString,
+      selectedWithPlan: payloadCount,
+      connectedLater: payloadCount,
+    })
+  ),
+  applicableNotSelected: z.array(
+    z.strictObject({ key: payloadString, revisionIds: z.array(payloadString) })
+  ),
+  notSelectedStatement: payloadString,
+  coverage: dossierKnowledgeCoverageSchema,
+  limits: z.array(payloadString),
+});
+const dossierTaskKnowledgeSchema: z.ZodType<DossierTaskKnowledge> = z.strictObject({
+  schema_version: z.literal(1),
+  tasks: z.array(
+    z.strictObject({
+      artifactId: payloadString,
+      planEventId: payloadString.nullable(),
+      knowledge: dossierKnowledgeSchema,
+    })
+  ),
+});
 const fileChangeTypeSchema = z.enum([
   'added',
   'deleted',
@@ -687,6 +893,9 @@ export const accountProjectionSchema: z.ZodType<AccountProjection> = z.strictObj
       z.strictObject({ id: payloadString, file: payloadString, score: payloadCount })
     ),
   }),
+  knowledge: dossierKnowledgeSchema.nullable().optional(),
+  taskKnowledge: dossierTaskKnowledgeSchema.optional(),
+  knowledgeStatement: payloadString.optional(),
 });
 
 /** Exact runtime contract for the current forensic-lane input artifact. */
@@ -765,6 +974,13 @@ export interface BuildDossierInput {
    * agent reads, disclosed as stubs rather than silently dropped.
    */
   excludePaths?: readonly string[];
+  /**
+   * The continuing knowledge this work is answerable to, for the ACCOUNT lane only. Absent, the
+   * projection carries none and the forensic input is unchanged either way — it never receives
+   * this, whatever is passed here.
+   */
+  knowledge?: DossierKnowledge | null;
+  taskKnowledge?: DossierTaskKnowledge;
 }
 
 export interface BuildDossierResult {
@@ -1445,7 +1661,9 @@ export function buildAccountProjection(
   hunks: ScoredHunk[],
   fileIndex: DossierFileEntry[],
   implicated: Set<string>,
-  budget: DossierBudget
+  budget: DossierBudget,
+  knowledge: DossierKnowledge | null = null,
+  taskKnowledge?: DossierTaskKnowledge
 ): ProjectionBuild {
   const manifest: TruncationRecord[] = [];
   for (const h of hunks) {
@@ -1788,6 +2006,11 @@ export function buildAccountProjection(
       fileInventory: inv.lines,
       inventoryMode: inv.mode,
       manifestSummary: summarize(),
+      knowledge,
+      ...(taskKnowledge === undefined ? {} : { taskKnowledge }),
+      ...(knowledge === null && taskKnowledge === undefined
+        ? { knowledgeStatement: NO_KNOWLEDGE_READ }
+        : {}),
     };
   };
 
@@ -2184,14 +2407,16 @@ export function buildDossier(input: BuildDossierInput): BuildDossierResult {
     scored,
     fileIndex,
     implicated,
-    budget
+    budget,
+    input.knowledge ?? null,
+    input.taskKnowledge
   );
 
   // The protected corpus is measured EXACTLY as the error reports it: the
   // served (alias-stripped) bytes of the fields no stage may touch.
   const accountCeiling = input.accountCorpusCeilingBytes ?? ACCOUNT_CORPUS_CEILING_BYTES;
   const corpusBytes = Buffer.byteLength(
-    JSON.stringify(protectedAccountCorpus(projection.accountCore)),
+    JSON.stringify(protectedAccountCorpus(projection.accountCore, projection.taskKnowledge)),
     'utf8'
   );
   if (corpusBytes > accountCeiling)

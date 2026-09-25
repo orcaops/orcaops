@@ -76,6 +76,43 @@ describe('runLlmFixture', () => {
     expect(run({ response: 'I would rather not commit to a verdict.' }).verdict).toBeNull();
   });
 
+  it('reads the optional findings block a prompt may ask for', () => {
+    const response = [
+      '```orcaops-findings',
+      JSON.stringify({
+        schema: 'orcaops.evaluator_findings/v1',
+        findings: [
+          {
+            key: 'criterion/crit-1',
+            title: 'crit-1 is satisfied by the delivered tests',
+            locations: [{ kind: 'acceptance-criterion', criterion_id: 'crit-1' }],
+            conclusion: 'supported',
+          },
+        ],
+      }),
+      '```',
+      '',
+      '```orcaops-verdict',
+      'PASS',
+      '```',
+    ].join('\n');
+    const result = run({ response });
+    expect(result.verdict).toBe('pass');
+    if (result.findings.status !== 'ok') throw new Error('expected readable findings');
+    expect(result.findings.findings[0].conclusion).toBe('supported');
+  });
+
+  it('reports a response with no findings block as absent, not malformed', () => {
+    expect(run().findings).toEqual({ status: 'absent' });
+  });
+
+  it('reports a findings block that cannot be read, with the reason', () => {
+    const response = ['```orcaops-findings', '{ not json', '```', '', 'PASS'].join('\n');
+    const result = run({ response });
+    expect(result.verdict).toBe('pass');
+    expect(result.findings.status).toBe('unreadable');
+  });
+
   it('resolves an echoed example followed by the real verdict', () => {
     const response = [
       'The format asked for is:',

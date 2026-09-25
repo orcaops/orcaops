@@ -2,8 +2,8 @@
 name: "Orcaops: pre-PR check"
 description: "Manually run final pre-PR checks for inspection or repair. Normal finalization starts with finish."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "8d0d90ea3e15"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "5c484f05d165"
 ---
 
 # When to use

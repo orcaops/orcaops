@@ -2,8 +2,8 @@
 name: "Orcaops: capture checkpoint"
 description: "Open, close, or abandon a work checkpoint with scope, evidence, and verification."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "abc24eafe715"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "bf5be83a715b"
 ---
 
 # Cadence rule
@@ -96,7 +96,35 @@ returns `AMBIGUOUS_CHECKPOINT` listing the open `n`s so you pick one.
 |---|---|
 | `agent_session_id` | Subagent attribution. Surfaces in `status --json`, `resume`, and the digest. |
 | `policy_exceptions[]` | Inline pre-write block resolution. Each entry names a checkpoint-open evaluator whose spec sets `resolution.policy_exception.enabled: true` and gives a reason. The exception is recorded on the open cp; doctor surfaces persistent dismissals. |
-| `plan_revision_id` | Optimistic-concurrency token: the latest `plan_event_id` you observed (in `resume` / `status`). Pass null to skip the freshness check (lower-friction race-tolerance opt-out). With a non-null token, `STALE_PLAN_REVISION` rejects if a newer plan event has been committed since you read. |
+| `plan_revision_id` | Optimistic-concurrency token: the latest `plan_event_id` you observed (in `resume` / `status`). Pass null to skip the freshness check (lower-friction race-tolerance opt-out). With a non-null token, `STALE_PLAN_REVISION` rejects if a newer plan event has been committed since you read. It is also the **pin**: the plan revision this checkpoint opened against, and therefore the inputs it inherits — see below. |
+
+## What the checkpoint opened against
+
+A checkpoint **records no knowledge uses of its own**. It pins the plan
+revision it opened against, and the `knowledge_uses` of that plan revision
+(see the orcaops-capture skill) are the continuing requirements
+and decisions it opened against. Opening writes nothing here — there is no
+field to pass and nothing for you to re-declare.
+
+Read them back under the checkpoint, in two lists kept apart:
+
+- `orcaops show <artifact-id> --json` →
+  `artifact.checkpoints[].knowledge_uses`
+- `orcaops resume --artifact <id> --json` →
+  `artifact.open_checkpoints[].knowledge_uses`
+
+Each is `{ plan_event_id, selected_with_plan[], connected_later[] }`.
+`selected_with_plan` is what that plan revision itself selected;
+`connected_later` is what somebody connected to the same plan event
+afterwards. They are never merged: a connection found after the fact is not
+proof that the task originally considered it. (Neither list appears in the
+plain-text render; ask for JSON.)
+
+**When the plan's inputs change, revise the plan — don't re-open.** A
+`capture plan revise` supersedes `knowledge_uses` whole, and a checkpoint
+opened after it pins the new revision. A checkpoint already open keeps the
+revision it opened against, which is the record of what it actually worked
+from.
 
 ## When the open is blocked
 

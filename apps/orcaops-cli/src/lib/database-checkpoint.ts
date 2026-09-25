@@ -17,6 +17,7 @@ import {
 
 import type { DatabaseCaptureCommandContext } from './database-capture-context.js';
 import type { DatabaseCapturePublication } from './database-capture-events.js';
+import { wakeProcessingWorker } from './knowledge-processing-wakeup.js';
 import { ErrorCodes, type OpenCheckpointCandidate, OrcaopsError } from '../io/errors.js';
 
 export type CheckpointEventFamily =
@@ -124,7 +125,8 @@ export function publishDatabaseCheckpointCapture(
   options: ProjectOperationOptions = {}
 ): (capture: PendingCaptureInput) => Promise<DatabaseCapturePublication> {
   return async (capture: PendingCaptureInput) => {
-    if (!input.publication) return appendProjectExecutionCapture(handle, capture, options);
+    const runtime = { ...options, processing: context.processing };
+    if (!input.publication) return appendProjectExecutionCapture(handle, capture, runtime);
     const execution = capture.execution;
     const retention = prepareProjectGitRetention({
       operationId: capture.operationId,
@@ -159,7 +161,7 @@ export function publishDatabaseCheckpointCapture(
       handle,
       context.registered,
       { capture, retention },
-      options
+      runtime
     );
   };
 }
@@ -178,7 +180,15 @@ export async function resumeDatabaseCheckpointCapture(
   // refusal that can never settle, and resuming it would refuse forever.
   const pending = readProjectPendingCapture(handle, operationId).value;
   if (!pending || pending.retention.current.kind !== 'prepared') return false;
-  await resumeDatabaseCaptureRetention(handle, context.registered, operationId, options);
+  const resumed = await resumeDatabaseCaptureRetention(handle, context.registered, operationId, {
+    ...options,
+    processing: context.processing,
+  });
+  wakeProcessingWorker(resumed.admittedProcessingJobs, {
+    repoRoot: context.processing.origin.worktreeRoot,
+    authority: handle.authority,
+    enabled: context.config.knowledge_processing.enabled,
+  });
   return true;
 }
 

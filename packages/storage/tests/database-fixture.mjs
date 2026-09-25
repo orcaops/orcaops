@@ -31,6 +31,23 @@ export function snapshot(Database, file) {
         'SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name'
       )
       .all();
+    // A WITHOUT ROWID table has no rowid to order by; its primary key is its storage order.
+    const withoutRowid = new Set(
+      db
+        .prepare('SELECT name FROM pragma_table_list WHERE wr = 1')
+        .all()
+        .map((table) => table.name)
+    );
+    const storageOrder = (name) =>
+      withoutRowid.has(name)
+        ? db
+            .prepare(`PRAGMA table_info(${JSON.stringify(name)})`)
+            .all()
+            .filter((column) => column.pk > 0)
+            .sort((a, b) => a.pk - b.pk)
+            .map((column) => JSON.stringify(column.name))
+            .join(',')
+        : 'rowid';
     return {
       version: db.pragma('user_version', { simple: true }),
       definitions,
@@ -41,7 +58,7 @@ export function snapshot(Database, file) {
           .map(({ name }) => [
             name,
             db
-              .prepare(`SELECT * FROM ${JSON.stringify(name)} ORDER BY rowid`)
+              .prepare(`SELECT * FROM ${JSON.stringify(name)} ORDER BY ${storageOrder(name)}`)
               .all()
               .map(encode),
           ])
@@ -51,15 +68,19 @@ export function snapshot(Database, file) {
     db.close();
   }
 }
-export async function restoreFixture(candidate, fixture, expectedVersion = 29) {
+// `validateSchema` replaces the default check against the schema this checkout expects. A
+// fixture of a released schema passes its own, so it still restores after the checkout's
+// schema version has moved on.
+export async function restoreFixture(candidate, fixture, expectedVersion, options = {}) {
   const saved = JSON.parse(await readFile(fixture, 'utf8'));
-  assert.equal(saved.schemaVersion, expectedVersion);
   const current = JSON.parse(
     await readFile(
       new URL('../src/history/database/fixtures/current.json', import.meta.url),
       'utf8'
     )
   );
+  expectedVersion ??= current.schemaVersion;
+  assert.equal(saved.schemaVersion, expectedVersion);
   saved.definitions ??= current.definitions;
   saved.rows = {
     ...Object.fromEntries(
@@ -119,7 +140,8 @@ export async function restoreFixture(candidate, fixture, expectedVersion = 29) {
       db.pragma(`user_version=${expectedVersion}`);
       db.exec('COMMIT');
       db.pragma('foreign_keys=ON');
-      validateProjectSchema(db, expectedVersion);
+      if (options.validateSchema) options.validateSchema(db, saved);
+      else validateProjectSchema(db, expectedVersion);
     } finally {
       db.close();
     }

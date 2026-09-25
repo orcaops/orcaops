@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { SECRET_POSITIVES } from '@orcaops/evaluator-protocol/secret-corpus';
+import { HistoryScopeError } from '@orcaops/project-scope/history';
 import { ArtifactLockLeaseLostError } from '@orcaops/storage';
 
 import { toCloudErrorEnvelope } from './cloud-error-envelope.js';
@@ -148,6 +149,17 @@ describe('error envelopes scrub structured detail, not just the message', () => 
   );
 });
 
+describe('toErrorEnvelope — history scope errors', () => {
+  it('keeps the code and message of a history scope error instead of INTERNAL', () => {
+    const env = toErrorEnvelope(
+      new HistoryScopeError('HISTORY_MISSING', `history absent; token ${JWT}`)
+    );
+    expect(env.error.code).toBe('HISTORY_MISSING');
+    expect(env.error.message).toContain('history absent');
+    expect(env.error.message).not.toContain(JWT);
+  });
+});
+
 describe('writeErrorLine', () => {
   // Human mode is the DEFAULT output mode, so a leak here is the common case,
   // not the edge one. Both modes must leave through the same scrubber.
@@ -217,6 +229,11 @@ describe('writeErrorLine', () => {
     const out = capture(err);
     expect(out.length).toBeLessThan(5_000);
     expect(out).toContain('[truncated]');
+  });
+
+  it('prints the code of a history scope error with its own message', () => {
+    const err = new HistoryScopeError('HISTORY_MISSING', 'Run `orcaops init` in this repository');
+    expect(capture(err)).toBe('Error: [HISTORY_MISSING] Run `orcaops init` in this repository\n');
   });
 
   it('preserves an ordinary message unchanged when there is nothing to scrub', () => {

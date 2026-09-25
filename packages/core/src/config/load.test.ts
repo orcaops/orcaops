@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { CONFIG_SCHEMA_VERSION, ConfigValidationError } from '@orcaops/storage';
+import { CONFIG_SCHEMA_VERSION, ConfigValidationError, getDefaultConfig } from '@orcaops/storage';
 
 import {
   getConfigPath,
@@ -40,14 +40,42 @@ describe('loadConfig', () => {
     await expect(loadConfig(root, { allowMissing: false })).rejects.toThrow();
   });
 
-  it('loads a v5 config and never rewrites it (no churn)', async () => {
-    const raw = JSON.stringify({ schema_version: 5, install: { agents: ['codex'] } });
+  it.each([5, 6, 7])('loads a v%i config and never rewrites it (no churn)', async (version) => {
+    const raw = JSON.stringify({ schema_version: version, install: { agents: ['codex'] } });
     await writeConfig(raw);
     const cfg = await loadConfig(root);
+    expect(cfg.schema_version).toBe(CONFIG_SCHEMA_VERSION);
     expect(cfg.install.agents).toEqual(['codex']);
     expect(cfg.llm.tool).toBe('auto'); // filled from defaults in the returned value
+    expect(cfg.knowledge_processing.enabled).toBe(false);
+    expect(cfg.knowledge_processing).toEqual(getDefaultConfig().knowledge_processing);
     const after = await readFile(getConfigPath(root), 'utf8');
     expect(after).toBe(raw);
+  });
+
+  it('loads released workflow settings without rewriting the file or enabling processing', async () => {
+    const workflow = { commit_inside_window: false, routing: { suppress: ['digest'] } };
+    const raw = JSON.stringify({ schema_version: 7, workflow });
+    await writeConfig(raw);
+    const config = await loadConfig(root);
+    expect(config.workflow).toMatchObject(workflow);
+    expect(config.knowledge_processing.enabled).toBe(false);
+    expect(await readFile(getConfigPath(root), 'utf8')).toBe(raw);
+  });
+
+  it('names the file and the key when knowledge_processing is malformed', async () => {
+    const raw = JSON.stringify({
+      schema_version: CONFIG_SCHEMA_VERSION,
+      knowledge_processing: { max_calls_per_hour: 'sixty' },
+    });
+    await writeConfig(raw);
+
+    await expect(loadConfig(root)).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+      path: 'knowledge_processing.max_calls_per_hour',
+      message: expect.stringContaining(getConfigPath(root)),
+    } satisfies Partial<ConfigValidationError>);
+    expect(await readFile(getConfigPath(root), 'utf8')).toBe(raw);
   });
 
   it('rejects an unknown root key as INVALID_CONFIG and names it', async () => {
@@ -68,19 +96,24 @@ describe('loadConfig', () => {
       JSON.stringify({ schema_version: 4, install: { agents: ['codex'] } }),
     ]) {
       await writeConfig(raw);
-      await expect(loadConfig(root)).rejects.toThrow(/requires 7.*orcaops init --force/s);
+      await expect(loadConfig(root)).rejects.toThrow(/requires 8.*orcaops init --force/s);
       expect(await readFile(getConfigPath(root), 'utf8')).toBe(raw);
     }
   });
 
   it('rejects a stringified version naming the type error', async () => {
     await writeConfig(JSON.stringify({ schema_version: '7', install: { agents: ['codex'] } }));
-    await expect(loadConfig(root)).rejects.toThrow(/number 7.*string "7"/s);
+    await expect(loadConfig(root)).rejects.toThrow(/number 8.*string "7"/s);
   });
 
   it('rejects a version ahead of this build with the newer-orcaops message', async () => {
-    await writeConfig(JSON.stringify({ schema_version: 8 }));
+    const raw = JSON.stringify({
+      schema_version: CONFIG_SCHEMA_VERSION + 1,
+      knowledge_processing: { enabled: true },
+    });
+    await writeConfig(raw);
     await expect(loadConfig(root)).rejects.toThrow(/Upgrade orcaops/);
+    expect(await readFile(getConfigPath(root), 'utf8')).toBe(raw);
   });
 
   it('throws a clear error on invalid JSON', async () => {
@@ -204,7 +237,7 @@ describe('loadReadOnlyProjectConfig', () => {
   it('leaves strict operational config loading unchanged', async () => {
     await writeConfig({ schema_version: 4, llm: { default_timeout_ms: 30_000 } });
 
-    await expect(loadConfig(root)).rejects.toThrow(/requires 7/);
+    await expect(loadConfig(root)).rejects.toThrow(/requires 8/);
     await expect(loadReadOnlyProjectConfig(root)).resolves.toMatchObject({
       schema_version: CONFIG_SCHEMA_VERSION,
     });

@@ -46,6 +46,10 @@
     "./history/database-push": {
       "types": "./dist/history/database-push-api.d.ts",
       "default": "./dist/history/database-push-api.js"
+    },
+    "./knowledge/interpretation/evaluation": {
+      "types": "./dist/knowledge/interpretation/evaluation/index.d.ts",
+      "default": "./dist/knowledge/interpretation/evaluation/index.js"
     }
   },
   "files": [
@@ -64,9 +68,10 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
-    "@orcaops/diff-fingerprint": "0.0.8",
-    "@orcaops/protocol": "0.0.26",
-    "@orcaops/sdk": "0.1.23",
+    "@orcaops/diff-fingerprint": "0.0.9",
+    "@orcaops/llm": "workspace:*",
+    "@orcaops/protocol": "0.0.27",
+    "@orcaops/sdk": "0.1.24",
     "@orcaops/storage": "workspace:*",
     "conventional-commits-parser": "^7.1.2",
     "zod": "^4.0.17"

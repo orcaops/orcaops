@@ -9,6 +9,7 @@ import { runReviewComment } from '../../src/commands/plan/review/comment.js';
 import { runReviewDecline } from '../../src/commands/plan/review/decline.js';
 import { runReviewPropose } from '../../src/commands/plan/review/propose.js';
 import { runReviewPush } from '../../src/commands/plan/review/push.js';
+import { runReviewRequest } from '../../src/commands/plan/review/request.js';
 import { runReviewVerdict } from '../../src/commands/plan/review/verdict.js';
 import { runReviewFeedbackReply } from '../../src/commands/review/reply.js';
 import { toCloudErrorEnvelope } from '../../src/io/cloud-error-envelope.js';
@@ -257,6 +258,27 @@ const DRIVERS: Record<string, GatedVerbDriver> = {
             note: at(ctx, 'note', 'reads fine to me'),
           }),
         escaped: () => setReviewerVerdict.mock.calls.length,
+      };
+    },
+  },
+
+  'sourcePlan.reviewRequest': {
+    fields: ['reviewer[0]'],
+    drive: (ctx) => {
+      const reviewRequest = vi.fn(async () => ({
+        externalId: EXTERNAL_ID,
+        added: [],
+        alreadyRequested: [],
+        unresolved: [],
+      }));
+      return {
+        run: () =>
+          runReviewRequest({
+            client: { sourcePlan: { reviewRequest } },
+            externalId: at(ctx, 'external_id', EXTERNAL_ID),
+            reviewers: [at(ctx, 'reviewer[0]', 'ben@example.test')],
+          }),
+        escaped: () => reviewRequest.mock.calls.length,
       };
     },
   },

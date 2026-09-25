@@ -4,7 +4,10 @@ import { CLOUD_HIDDEN_COMMANDS } from '@orcaops/adapters';
 import { DEFAULT_CLOUD_BASE_URL } from '@orcaops/core';
 
 import { buildProgram, makeCaptureFlagAdapter } from './program.js';
+import { finishAction } from '../commands/finish.js';
 import { runInInvocationContext } from '../lib/invocation-context.js';
+
+vi.mock('../commands/finish.js', () => ({ finishAction: vi.fn(async () => undefined) }));
 
 /**
  * Build the program with the gate forced, inside the invocation frame the gate
@@ -73,10 +76,138 @@ describe('orcaops CLI program', () => {
     expect(digest.helpInformation()).not.toContain('in addition to stdout');
   });
 
+  it('lets an agent name itself on every knowledge command that records or stamps who acted', () => {
+    const knowledge = buildOfficialProgram().commands.find(
+      (command) => command.name() === 'knowledge'
+    )!;
+    const at = (...names: string[]) =>
+      names.reduce(
+        (command, name) => command.commands.find((child) => child.name() === name)!,
+        knowledge
+      );
+    for (const names of [
+      ['pause'],
+      ['resume'],
+      ['retry'],
+      ['reopen'],
+      ['reconsider', 'open'],
+      ['reconsider', 'dispose'],
+      ['assignment', 'open'],
+      ['assignment', 'revoke'],
+    ]) {
+      expect([names.join(' '), at(...names).options.map((option) => option.long)]).toEqual([
+        names.join(' '),
+        expect.arrayContaining(['--invoked-by-agent']),
+      ]);
+    }
+  });
+
   it('does not register the retired archive surface', () => {
     const program = buildOfficialProgram();
 
     expect(program.commands.some((command) => command.name() === 'archive')).toBe(false);
+  });
+
+  it('registers the history family with its four verbs, and previews by default', () => {
+    const history = buildOfficialProgram().commands.find((command) => command.name() === 'history');
+    expect(history).toBeDefined();
+    expect(history!.commands.map((command) => command.name()).sort()).toEqual([
+      'backups',
+      'convert',
+      'restore',
+      'upgrade',
+    ]);
+
+    // Nothing here changes a database without the explicit flag, so every verb that can must
+    // carry it and the read-only one must not.
+    for (const [name, mutating] of [
+      ['upgrade', true],
+      ['restore', true],
+      ['backups', false],
+    ] as const) {
+      const verb = history!.commands.find((command) => command.name() === name)!;
+      expect([name, verb.options.some((option) => option.long === '--apply')]).toEqual([
+        name,
+        mutating,
+      ]);
+      expect([name, verb.options.some((option) => option.long === '--json')]).toEqual([name, true]);
+    }
+  });
+
+  it('registers the knowledge processing family with every verb it offers and hides its worker', () => {
+    const knowledge = buildOfficialProgram().commands.find(
+      (command) => command.name() === 'knowledge'
+    );
+    expect(knowledge).toBeDefined();
+    expect(knowledge!.commands.map((command) => command.name()).sort()).toEqual([
+      'assess',
+      'assignment',
+      'consequences',
+      'disable',
+      'enable',
+      'equivalence',
+      'lookup',
+      'observe',
+      'pause',
+      'reconsider',
+      'reopen',
+      'resume',
+      'retry',
+      'revoke',
+      'show',
+      'status',
+      'worker',
+    ]);
+    const equivalence = knowledge!.commands.find((command) => command.name() === 'equivalence')!;
+    expect(equivalence.commands.map((command) => command.name())).toEqual(['reject']);
+    const reconsider = knowledge!.commands.find((command) => command.name() === 'reconsider')!;
+    expect(reconsider.commands.map((command) => command.name()).sort()).toEqual([
+      'dispose',
+      'list',
+      'open',
+    ]);
+    const assignment = knowledge!.commands.find((command) => command.name() === 'assignment')!;
+    expect(assignment.commands.map((command) => command.name()).sort()).toEqual([
+      'list',
+      'open',
+      'revoke',
+    ]);
+    // Ending a delegation says why: a revocation with no reason records nothing.
+    expect(
+      assignment.commands
+        .find((command) => command.name() === 'revoke')!
+        .options.some((option) => option.long === '--reason' && option.required)
+    ).toBe(true);
+    const pause = knowledge!.commands.find((command) => command.name() === 'pause')!;
+    expect(pause.options.some((option) => option.long === '--reason' && option.required)).toBe(
+      true
+    );
+
+    // The worker spends money under a recorded grant and is started by orcaops
+    // itself; offering it in help would invite it to be typed.
+    const visible = buildOfficialProgram()
+      .createHelp()
+      .visibleCommands(knowledge!)
+      .map((command) => command.name());
+    expect(visible).not.toContain('worker');
+
+    const enable = knowledge!.commands.find((command) => command.name() === 'enable')!;
+    const help = enable.helpInformation().replace(/\s+/g, ' ');
+    expect(help).toContain('typed confirmation at a terminal');
+    expect(help).toContain('the grant covers captures from now on');
+  });
+
+  it('offers no flag that would grant processing consent without a person', () => {
+    const knowledge = buildOfficialProgram().commands.find(
+      (command) => command.name() === 'knowledge'
+    )!;
+    const flags = knowledge.commands.flatMap((command) =>
+      command.options.map((option) => option.long)
+    );
+
+    for (const bypass of ['--yes', '--force', '--non-interactive', '--no-confirm']) {
+      expect(flags, bypass).not.toContain(bypass);
+    }
   });
 
   it('documents ranked provenance, result limits, and JSON detail expansion', () => {
@@ -86,8 +217,12 @@ describe('orcaops CLI program', () => {
     expect(help).toContain('Find ranked provenance for <file>');
     expect(help).toContain('attribute <file>:<line>');
     expect(help).toContain('--all Default to 1,000 results; processing budgets still apply');
-    expect(help).toContain('--details Include full JSON candidate evidence');
-    expect(help).toContain('may be large; no effect without --json');
+    expect(help).toContain(
+      '--details Inspect one exact candidate under a 16 KiB response allowance'
+    );
+    expect(help).toContain(
+      '--view <view> rationale: show explanations under a 32 KiB response allowance'
+    );
   });
 
   it('has no public cloud-target selector', () => {
@@ -140,16 +275,25 @@ describe('orcaops CLI program', () => {
   });
 
   describe('the cloud surface gate', () => {
+    // The knowledge worker is hidden whatever the cloud gate says: it is
+    // started by orcaops, never typed, and its visibility has nothing to do
+    // with credentials.
+    const ALWAYS_HIDDEN = ['knowledge worker'];
+
     it('hides exactly the shared hidden-command list without credentials', async () => {
       const hidden = commandPaths(await programWithCloud(false))
         .filter((c) => c.hidden)
         .map((c) => c.path)
         .sort();
-      expect(hidden).toEqual([...CLOUD_HIDDEN_COMMANDS].sort());
+      expect(hidden).toEqual([...CLOUD_HIDDEN_COMMANDS, ...ALWAYS_HIDDEN].sort());
     });
 
-    it('hides nothing with credentials', async () => {
-      expect(commandPaths(await programWithCloud(true)).filter((c) => c.hidden)).toEqual([]);
+    it('hides only the worker with credentials', async () => {
+      expect(
+        commandPaths(await programWithCloud(true))
+          .filter((c) => c.hidden)
+          .map((c) => c.path)
+      ).toEqual(ALWAYS_HIDDEN);
     });
 
     it('keeps login visible either way — it is how you reach the cloud', async () => {
@@ -164,9 +308,11 @@ describe('orcaops CLI program', () => {
       // A `--help` disagreeing with `skills list` in one run is incoherent.
       const outer = { ...process.env, ORCAOPS_CLOUD_FEATURES: '1' };
       const hidden = await runInInvocationContext({ cwd: process.cwd(), env: outer }, () =>
-        commandPaths(buildProgram({ cloudBaseUrl: DEFAULT_CLOUD_BASE_URL })).filter((c) => c.hidden)
+        commandPaths(buildProgram({ cloudBaseUrl: DEFAULT_CLOUD_BASE_URL }))
+          .filter((c) => c.hidden)
+          .map((c) => c.path)
       );
-      expect(hidden).toEqual([]);
+      expect(hidden).toEqual(ALWAYS_HIDDEN);
     });
   });
 
@@ -203,6 +349,16 @@ describe('orcaops CLI program', () => {
     const help = open!.helpInformation();
     expect(help).toMatch(/Skip LLM evaluators without executing a provider/);
     expect(help).not.toMatch(/LLM evaluators to PASS/);
+  });
+
+  it('offers --no-llm on capture summary', () => {
+    const capture = buildOfficialProgram().commands.find((command) => command.name() === 'capture');
+    const summary = capture?.commands.find((command) => command.name() === 'summary');
+
+    expect(summary).toBeDefined();
+    expect(summary!.helpInformation().replace(/\s+/g, ' ')).toContain(
+      '--no-llm Do not use an LLM to process this captured summary'
+    );
   });
 });
 
@@ -247,6 +403,22 @@ describe('makeCaptureFlagAdapter', () => {
     });
     await adapter({ input: '/tmp/x.json', llm: false });
     expect(calls[0]).toEqual({ input: '/tmp/x.json', noLlm: true });
+  });
+});
+
+describe('finish --no-llm wiring', () => {
+  it('passes noLlm: true to the finish action when --no-llm is given', async () => {
+    vi.mocked(finishAction).mockClear();
+    await buildOfficialProgram().parseAsync(['finish', '--no-llm', '--input', '-'], {
+      from: 'user',
+    });
+    expect(finishAction).toHaveBeenCalledWith({ input: '-', noLlm: true });
+  });
+
+  it('passes noLlm: false to the finish action without the flag', async () => {
+    vi.mocked(finishAction).mockClear();
+    await buildOfficialProgram().parseAsync(['finish', '--input', '-'], { from: 'user' });
+    expect(finishAction).toHaveBeenCalledWith({ input: '-', noLlm: false });
   });
 });
 

@@ -256,6 +256,17 @@ describe('CheckpointContextSchema', () => {
 });
 
 describe('EvaluatorContextSchema', () => {
+  it('accepts observed_changed_files beside changed_files and keeps it optional', () => {
+    expect('observed_changed_files' in EvaluatorContextSchema.parse(minimalContext)).toBe(false);
+    const out = EvaluatorContextSchema.parse({
+      ...minimalContext,
+      phase: 'checkpoint-close',
+      changed_files: ['README.md'],
+      observed_changed_files: ['README.md', 'scripts/camera/free_camera.gd'],
+    });
+    expect(out.observed_changed_files).toEqual(['README.md', 'scripts/camera/free_camera.gd']);
+  });
+
   it('accepts a minimal context', () => {
     const out = EvaluatorContextSchema.parse(minimalContext);
     expect(out.phase).toBe('post-plan');

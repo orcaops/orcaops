@@ -131,6 +131,12 @@ export interface DigestSourcePlan {
  *   - `error` — run_status:error (the engine failed; verdict is null)
  *   - `skipped` — run_status:skipped (filter excluded the evaluator)
  */
+export interface DigestLatestError {
+  checkpoint_n?: number;
+  body: string;
+  ts: string;
+}
+
 export type DigestEvaluatorStatus =
   | 'pass'
   | 'info'
@@ -147,10 +153,14 @@ export interface DigestEvaluatorRow {
   phase: 'post-plan' | 'post-plan-revision' | 'checkpoint-open' | 'checkpoint-close' | 'pre-pr';
   severity: 'info' | 'warn' | 'block';
   status: DigestEvaluatorStatus;
-  /** Latest run's body. */
+  /** Body of the run the status comes from. */
   body: string;
-  /** ISO timestamp of the latest run (NOT the disposition). */
+  /** ISO timestamp of the run the status comes from (NOT the disposition). */
   ts: string;
+  /** A later checkpoint's pass does not clear an earlier checkpoint's violation. */
+  violation_checkpoints?: number[];
+  /** The evaluator's latest run, when it errored after the violation the status comes from. */
+  latest_error?: DigestLatestError;
   /** When status maps to a disposition, the disposition reason. */
   ackReason?: string;
   /**
@@ -829,7 +839,8 @@ export function demoteBodyHeadings(body: string, levels: number): string {
 
 /**
  * Reduce the materialized projection into one row per evaluator_ref
- * (latest by order_key). Synthesizes an effective DigestEvaluatorStatus
+ * (latest by order_key, unless a checkpoint's latest run is an unresolved
+ * violation). Synthesizes an effective DigestEvaluatorStatus
  * from the run's run_status / verdict / disposition triplet. When the
  * row carries a disposition, attaches the
  * disposition reason + the underlying violation body so reviewers see
@@ -862,7 +873,17 @@ function collapseEvaluatorRuns(
 
   const rows: DigestEvaluatorRow[] = [];
   for (const [ref, list] of runsByRef) {
-    const latest = list[list.length - 1];
+    const latestPerCheckpoint = new Map<number, MaterializedEvaluatorRun>();
+    for (const r of list) {
+      if (r.checkpoint_n !== undefined) latestPerCheckpoint.set(r.checkpoint_n, r);
+    }
+    const unresolvedCheckpointViolations = [...latestPerCheckpoint.values()]
+      .filter((r) => synthesizeStatus(r) === 'violation')
+      .sort(orderKeyAsc);
+    const latest =
+      unresolvedCheckpointViolations.length > 0
+        ? unresolvedCheckpointViolations[unresolvedCheckpointViolations.length - 1]
+        : list[list.length - 1];
     const status = synthesizeStatus(latest);
     let ackReason: string | undefined;
     let originalViolationBody: string | undefined;
@@ -881,6 +902,19 @@ function collapseEvaluatorRuns(
       body: latest.body,
       ts: latest.ts,
     };
+    if (unresolvedCheckpointViolations.length > 0) {
+      row.violation_checkpoints = unresolvedCheckpointViolations
+        .map((r) => r.checkpoint_n as number)
+        .sort((a, b) => a - b);
+      const newest = list[list.length - 1];
+      if (newest !== latest && synthesizeStatus(newest) === 'error') {
+        row.latest_error = {
+          ...(newest.checkpoint_n === undefined ? {} : { checkpoint_n: newest.checkpoint_n }),
+          body: newest.body,
+          ts: newest.ts,
+        };
+      }
+    }
     if (ackReason !== undefined) row.ackReason = ackReason;
     if (originalViolationBody !== undefined) row.originalViolationBody = originalViolationBody;
     const desc = descriptions?.get(ref);
@@ -896,8 +930,8 @@ function collapseEvaluatorRuns(
         'policy-excepted',
       ]);
       const priorResolved: MaterializedEvaluatorDisposition[] = [];
-      for (let i = 0; i < list.length - 1; i++) {
-        const prior = list[i];
+      for (const prior of list) {
+        if (prior === latest) break;
         const dispo = dispositionByRunId.get(prior.run_id);
         if (dispo && RESOLVED.has(dispo.disposition)) {
           priorResolved.push(dispo);
@@ -1105,9 +1139,10 @@ function renderDigestMarkdown(d: DigestData): string {
     if (d.plan_conformance === null) {
       lines.push(
         '⚠ A source plan is pinned, but `plan-conformance` did not run — ' +
-          'plan-level conformance is unverified for this artifact. The usual ' +
-          'cause is that the evaluator is disabled: check ' +
-          '`core/plan-conformance-*` in `.orcaops/evaluators.yaml`.'
+          'plan-level conformance is unverified for this artifact. Either no ' +
+          'evaluator pack is installed (add one with ' +
+          '`orcaops eval add-pack @orcaops/evaluator-pack core`), or ' +
+          '`core/plan-conformance-*` is disabled in `.orcaops/evaluators.yaml`.'
       );
     } else if (d.plan_conformance.status === 'skipped') {
       const rawReason = d.plan_conformance.body
@@ -1415,13 +1450,16 @@ function renderDigestMarkdown(d: DigestData): string {
     lines.push('| evaluator | phase | severity | status |');
     lines.push('|---|---|---|---|');
     for (const r of d.release_checks) {
-      lines.push(`| ${r.evaluator_ref} | ${r.phase} | ${r.severity} | ${r.status} |`);
+      lines.push(
+        `| ${r.evaluator_ref} | ${r.phase} | ${r.severity} | ${evaluatorStatusLabel(r)} |`
+      );
     }
     lines.push('');
     const nonPass = d.release_checks.filter((r) => r.status !== 'pass');
     for (const r of nonPass) {
       lines.push(`### ${r.evaluator_ref} (${r.status})`);
       lines.push('');
+      pushViolationCheckpointsNote(lines, r);
       if (r.ackReason) {
         lines.push(`**${capitalize(r.status)}:** ${r.ackReason}`);
         lines.push('');
@@ -1439,6 +1477,7 @@ function renderDigestMarkdown(d: DigestData): string {
         lines.push(renderPriorResolvedFootnote(r.prior_resolved));
         lines.push('');
       }
+      pushLatestError(lines, r);
     }
   }
 
@@ -1450,19 +1489,26 @@ function renderDigestMarkdown(d: DigestData): string {
     lines.push('_No process checks ran._');
     lines.push('');
   } else {
+    const total = d.process_notes.length;
     const passes = d.process_notes.filter((r) => r.status === 'pass');
-    const nonPass = d.process_notes.filter((r) => r.status !== 'pass');
-    if (nonPass.length === 0) {
-      lines.push(`_All ${passes.length} process check${passes.length === 1 ? '' : 's'} passed._`);
+    const skipped = d.process_notes.filter((r) => r.status === 'skipped');
+    const concerns = d.process_notes.filter((r) => r.status !== 'pass' && r.status !== 'skipped');
+    if (concerns.length === 0) {
+      lines.push(
+        skipped.length === 0
+          ? `_All ${passes.length} process check${passes.length === 1 ? '' : 's'} passed._`
+          : `_${passes.length} of ${total} process check${total === 1 ? '' : 's'} passed; ${skipped.length} skipped._`
+      );
       lines.push('');
     } else {
       lines.push(
-        `⚠ ${nonPass.length} of ${d.process_notes.length} process check${d.process_notes.length === 1 ? '' : 's'} flagged a concern.`
+        `⚠ ${concerns.length} of ${total} process check${total === 1 ? '' : 's'} flagged a concern.`
       );
       lines.push('');
-      for (const r of nonPass) {
+      for (const r of concerns) {
         lines.push(`### ${r.evaluator_ref} (${r.status}, ${r.phase})`);
         lines.push('');
+        pushViolationCheckpointsNote(lines, r);
         if (r.description) {
           lines.push(`_${r.description}_`);
           lines.push('');
@@ -1484,6 +1530,7 @@ function renderDigestMarkdown(d: DigestData): string {
           lines.push(renderPriorResolvedFootnote(r.prior_resolved));
           lines.push('');
         }
+        pushLatestError(lines, r);
       }
       if (passes.length > 0) {
         const tally = passes
@@ -1492,6 +1539,20 @@ function renderDigestMarkdown(d: DigestData): string {
         lines.push(`_Passed: ${tally}._`);
         lines.push('');
       }
+    }
+    if (skipped.length > 0) {
+      const tally = skipped
+        .map((r) => {
+          const reason = r.body
+            .replace(/^SKIPPED\s*/i, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/[.]+$/, '');
+          return `${r.evaluator_ref} (${r.phase})${reason ? ` — ${reason}` : ''}`;
+        })
+        .join('; ');
+      lines.push(`_Skipped (did not run): ${tally}._`);
+      lines.push('');
     }
   }
 
@@ -1563,6 +1624,41 @@ function renderDigestMarkdown(d: DigestData): string {
   lines.push('');
 
   return lines.join('\n');
+}
+
+export function evaluatorStatusLabel(
+  row: Pick<DigestEvaluatorRow, 'status' | 'violation_checkpoints' | 'latest_error'>
+): string {
+  const checkpoints = row.violation_checkpoints ?? [];
+  const noun = checkpoints.length === 1 ? 'checkpoint' : 'checkpoints';
+  const label =
+    checkpoints.length === 0 ? row.status : `${row.status} at ${noun} ${checkpoints.join(', ')}`;
+  if (row.latest_error === undefined) return label;
+  const errored =
+    row.latest_error.checkpoint_n === undefined
+      ? 'latest run errored'
+      : `error at checkpoint ${row.latest_error.checkpoint_n}`;
+  return `${label}; ${errored}`;
+}
+
+export function latestErrorHeading(error: DigestLatestError): string {
+  return error.checkpoint_n === undefined
+    ? 'Latest run errored'
+    : `Latest run errored at checkpoint ${error.checkpoint_n}`;
+}
+
+function pushViolationCheckpointsNote(lines: string[], row: DigestEvaluatorRow): void {
+  if (row.violation_checkpoints === undefined) return;
+  lines.push(`_Unresolved ${evaluatorStatusLabel(row)}._`);
+  lines.push('');
+}
+
+function pushLatestError(lines: string[], row: DigestEvaluatorRow): void {
+  if (row.latest_error === undefined) return;
+  lines.push(`**${latestErrorHeading(row.latest_error)}:**`);
+  lines.push('');
+  lines.push(demoteBodyHeadings(row.latest_error.body.trim(), 2));
+  lines.push('');
 }
 
 function capitalize(s: string): string {

@@ -1,7 +1,11 @@
 import { run } from 'effection';
 import { readFile } from 'node:fs/promises';
 
-import { isBlockingEvaluatorFailure } from '@orcaops/evaluator-protocol';
+import {
+  type EvaluatorFindingLocation,
+  type EvaluatorRunFindingsOutcome,
+  isBlockingEvaluatorFailure,
+} from '@orcaops/evaluator-protocol';
 import { createParamsValidator, dispatchOne } from '@orcaops/evaluator-runner';
 import { buildLLMClient } from '@orcaops/llm';
 import {
@@ -266,7 +270,7 @@ export async function evalTestAction(opts: EvalTestOptions): Promise<void> {
     });
 
     const validator = createParamsValidator();
-    const runPayload = await dispatchOne(
+    const { run: runPayload, findings } = await dispatchOne(
       evaluator,
       baseContext,
       llm,
@@ -283,6 +287,9 @@ export async function evalTestAction(opts: EvalTestOptions): Promise<void> {
       evaluator_ref: evaluator.ref,
       fixture: fixturePath,
       run: runPayload,
+      // Beside the run, never inside it: `run` is the strict shape a capture
+      // retains, so a finding must not read as one of its fields here either.
+      findings,
       blocking,
     };
     if (opts.json) {
@@ -297,12 +304,87 @@ export async function evalTestAction(opts: EvalTestOptions): Promise<void> {
           : `error: ${runPayload.error?.code ?? 'unknown'}`;
     writeTerminalSafeStdout(
       `${runPayload.evaluator_ref}: ${statusLine} (${runPayload.severity})\n\n${runPayload.body}\n` +
+        formatFindings(findings) +
         (blocking ? '\n** BLOCKING **\n' : '')
     );
   } catch (err) {
     if (opts.json) emitError(err);
     writeErrorLine(err);
     throw new CliExit(1);
+  }
+}
+
+/**
+ * Render what the evaluator established beside its verdict.
+ *
+ * Three outcomes, three renderings, and the middle one is why this exists: a
+ * run that offered findings and had them refused must not look like a run that
+ * found nothing. It says so, with the reason, while the verdict above it stays
+ * exactly what the evaluator stated.
+ *
+ * `none` prints nothing at all. Absence is not malformation — it is what every
+ * evaluator that never mentions findings produces.
+ */
+function formatFindings(outcome: EvaluatorRunFindingsOutcome): string {
+  if (outcome.status === 'none') return '';
+  if (outcome.status === 'unreadable') {
+    return `\nfindings: offered, but could not be read — ${outcome.record.detail}\n`;
+  }
+
+  const lines = [`\nfindings (${outcome.record.findings.length}):`];
+  for (const finding of outcome.record.findings) {
+    lines.push(`  - ${finding.title}`);
+    const tags = [
+      ...(finding.conclusion !== undefined ? [`conclusion: ${finding.conclusion}`] : []),
+      ...(finding.key !== undefined ? [`key: ${finding.key}`] : []),
+    ];
+    if (tags.length > 0) lines.push(`    ${tags.join('  ')}`);
+    if (finding.locations !== undefined) {
+      lines.push(`    at: ${finding.locations.map(formatFindingLocation).join(', ')}`);
+    }
+    if (finding.detail !== undefined) {
+      for (const line of finding.detail.split('\n')) lines.push(`    ${line}`);
+    }
+  }
+
+  const notice = outcome.record.notice;
+  if (notice !== undefined) {
+    const cuts = [
+      [notice.findings_dropped, 'finding(s) dropped'],
+      [notice.locations_dropped, 'location(s) dropped'],
+      [notice.titles_shortened, 'title(s) shortened'],
+      [notice.details_shortened, 'detail(s) shortened'],
+    ] as const;
+    lines.push(
+      `  bounds applied: ${cuts
+        .filter(([count]) => count > 0)
+        .map(([count, what]) => `${count} ${what}`)
+        .join(', ')}`
+    );
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function formatFindingLocation(location: EvaluatorFindingLocation): string {
+  switch (location.kind) {
+    case 'file': {
+      const range =
+        location.start_line === undefined
+          ? ''
+          : `:${location.start_line}${location.end_line !== undefined ? `-${location.end_line}` : ''}`;
+      // The revision is printed in full: a shortened object id names something
+      // other than what the producer read.
+      const revision = location.revision !== undefined ? `@${location.revision}` : '';
+      return `${location.path}${range}${revision}`;
+    }
+    case 'plan-step':
+      return `plan-step ${location.step_id}`;
+    case 'acceptance-criterion':
+      return `acceptance-criterion ${location.criterion_id}`;
+    case 'requirement':
+      return `requirement ${location.revision_id}`;
+    case 'decision':
+      return `decision ${location.revision_id}`;
   }
 }
 

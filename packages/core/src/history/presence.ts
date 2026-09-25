@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { realpath } from 'node:fs/promises';
+import { readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
@@ -12,6 +12,7 @@ import {
 
 import { readGitAdministrativeText, runHistoryGit } from './git-context.js';
 import { BOOTSTRAP_CHECKOUT_LOCATIONS } from './presence-locations.js';
+import { PROJECT_CONFIGURATION_PATHS } from '../config/source.js';
 
 export { BOOTSTRAP_CHECKOUT_LOCATIONS } from './presence-locations.js';
 
@@ -28,6 +29,46 @@ export interface BootstrapPresenceCheck {
    * the evidence trail and never forces the conversion path on its own.
    */
   kind: 'history' | 'configuration';
+}
+
+const CHECKOUT_STORE = '.orcaops';
+const PROJECT_CONFIGURATION_ENTRIES = new Set(
+  PROJECT_CONFIGURATION_PATHS.map((relative) => path.basename(relative))
+);
+
+// An unknown entry counts as history so the gate fails closed; payloads are never opened.
+async function classifyCheckoutStore(
+  worktreeRoot: string,
+  contextId: string
+): Promise<BootstrapPresenceCheck> {
+  const store = path.join(worktreeRoot, CHECKOUT_STORE);
+  const check = { context_id: contextId, relative_location: CHECKOUT_STORE };
+  try {
+    const info = await inspectHistoryPath(worktreeRoot, store);
+    if (!info) return { ...check, state: 'absent', kind: 'history' };
+    if (!info.isDirectory()) return { ...check, state: 'present', kind: 'history' };
+    const entries = await readdir(store);
+    if (entries.some((entry) => !PROJECT_CONFIGURATION_ENTRIES.has(entry)))
+      return { ...check, state: 'present', kind: 'history' };
+    for (const entry of entries) {
+      let reason: string | null = null;
+      try {
+        const entryInfo = await inspectHistoryPath(worktreeRoot, path.join(store, entry));
+        if (!entryInfo?.isFile()) reason = `Configuration entry ${entry} is not a regular file`;
+      } catch (cause) {
+        reason = cause instanceof Error ? cause.message : String(cause);
+      }
+      if (reason !== null) return { ...check, state: 'unclassified', reason, kind: 'history' };
+    }
+    return { ...check, state: 'present', kind: 'configuration' };
+  } catch (cause) {
+    return {
+      ...check,
+      state: 'inaccessible',
+      reason: cause instanceof Error ? cause.message : String(cause),
+      kind: 'history',
+    };
+  }
 }
 
 interface PresenceInventory {
@@ -116,7 +157,7 @@ export async function inspectBootstrapInventory<T extends PresenceInventory>(
     root: string,
     relative: string,
     contextId: string,
-    expected: 'file' | 'directory' | 'any' = 'directory',
+    expected: 'file' | 'directory' = 'directory',
     kind: BootstrapPresenceCheck['kind'] = 'configuration'
   ) => {
     try {
@@ -144,15 +185,11 @@ export async function inspectBootstrapInventory<T extends PresenceInventory>(
   };
   for (const context of inventory.contexts) {
     // The generated skills and commands are install output; `.orcaops` is the legacy
-    // artifact store and is the only checkout location that is history.
+    // artifact store and is the only checkout location that can be history.
     for (const relative of BOOTSTRAP_CHECKOUT_LOCATIONS)
-      await probe(
-        context.worktreeRoot,
-        relative,
-        context.gitDir,
-        relative === '.orcaops' ? 'any' : 'file',
-        relative === '.orcaops' ? 'history' : 'configuration'
-      );
+      if (relative === CHECKOUT_STORE)
+        add(await classifyCheckoutStore(context.worktreeRoot, context.gitDir));
+      else await probe(context.worktreeRoot, relative, context.gitDir, 'file');
     // `.git/orcaops` holds the configuration and the install lock directory.
     await probe(context.gitDir, 'orcaops', context.gitDir);
   }

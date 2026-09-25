@@ -1,7 +1,7 @@
 schema: orcaops.evaluator_package/v1
 id: demo
 name: orcaops/demo
-version: 1.0.0
+version: 2.0.0
 description: >-
   Explicitly installed example content for pack authors: a command-engine
   PASS, an llm-engine info, and a deliberately always-blocking command-engine

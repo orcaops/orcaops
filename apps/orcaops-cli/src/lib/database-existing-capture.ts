@@ -1,3 +1,4 @@
+import type { RetainedAuthorityFindings } from '@orcaops/core';
 import {
   type ArtifactDraftSemantics,
   type CaptureAgentId,
@@ -5,6 +6,7 @@ import {
   type CaptureSummaryInput,
   normalizeAcceptedWarnings,
   type PlanReviseWriteResult,
+  PrePrCheckedPayloadSchema,
   type SummaryInput,
   type SummaryWriteResult,
 } from '@orcaops/storage';
@@ -33,6 +35,7 @@ import {
   retainStaleCaptureRefusal,
   STALE_CAPTURE_REFUSAL,
 } from './database-capture-refusal.js';
+import { assertIntegrationPublication } from './integration-authority-gate.js';
 import { extractSummaryReplayShape, summaryReplayPayload } from './summary-replay-shape.js';
 import { writeTerminalSafeStderr } from '../io/output.js';
 
@@ -95,7 +98,8 @@ export async function captureDatabaseExisting<K extends ExistingCaptureKind>(
   kind: K,
   prepared: PreparedDatabaseCapture<CaptureInput<K>, CaptureInput<K>>,
   signal: AbortSignal,
-  preselectedArtifactId?: string
+  preselectedArtifactId?: string,
+  prePrReviewId?: string
 ): Promise<DatabaseExistingCapture<K>> {
   const { context, input } = prepared;
   if (signal.aborted)
@@ -134,9 +138,13 @@ export async function captureDatabaseExisting<K extends ExistingCaptureKind>(
     if (!headSha) throw new ProjectDatabaseError('INVALID_INPUT', 'Capture requires a Git commit');
     const ts = new Date().toISOString();
     const agent = context.invokingAgent.agent;
+    let summaryAlreadyExists = false;
+    let reviewedAuthority: RetainedAuthorityFindings | undefined;
     const appended = await appendDatabaseCaptureEvents<CaptureResult<K>>({
       handle: writer,
       binding: context.binding,
+      processing: context.processing,
+      processingEnabled: context.config.knowledge_processing.enabled,
       artifactId,
       operationId,
       authoredPayload: { kind, input },
@@ -146,6 +154,7 @@ export async function captureDatabaseExisting<K extends ExistingCaptureKind>(
       // did, so a same-key retry with a different payload still resolves as a conflict.
       ...(kind === 'plan_revision'
         ? {
+            knowledgeUses: (input as CapturePlanReviseInput).knowledge_uses ?? [],
             idempotencyBlocks: retainedAttemptBlocks(writer, artifactId),
             settleAttempts: (
               changes: ArtifactAttemptChanges,
@@ -171,8 +180,23 @@ export async function captureDatabaseExisting<K extends ExistingCaptureKind>(
         readProjectExecution(writer, artifactId)?.state.lifecycle === 'completed'
           ? ('summary_amendment' as const)
           : ('task' as const),
-      options,
-      evaluate: async (semantics: ArtifactDraftSemantics) => {
+      options: {
+        ...options,
+        ...(kind === 'summary'
+          ? {
+              assertPublication: (view) => {
+                if (summaryAlreadyExists) return;
+                assertIntegrationPublication(view, {
+                  projectId: context.project.projectId,
+                  artifactId,
+                  command: 'capture summary',
+                  ...(reviewedAuthority === undefined ? {} : { expected: reviewedAuthority }),
+                });
+              },
+            }
+          : {}),
+      },
+      evaluate: async (semantics: ArtifactDraftSemantics, thread) => {
         if (kind === 'plan_revision') {
           const revise = input as CapturePlanReviseInput;
           return (await semantics.revisePlan(
@@ -181,6 +205,22 @@ export async function captureDatabaseExisting<K extends ExistingCaptureKind>(
           )) as CaptureResult<K>;
         }
         const summary = input as CaptureSummaryInput;
+        summaryAlreadyExists = thread.summary !== null;
+        const reviewId = prePrReviewId ?? summary.accepted_warnings?.[0]?.review_id;
+        if (reviewId !== undefined && !summaryAlreadyExists) {
+          const review = thread.events.find(
+            (event) => event.record.type === 'pre_pr_checked' && event.record.event_id === reviewId
+          );
+          if (!review)
+            throw new ProjectDatabaseError(
+              'INVALID_INPUT',
+              'The pre-PR review is missing. Re-run finish.'
+            );
+          reviewedAuthority = PrePrCheckedPayloadSchema.parse(review.payload).authority ?? {
+            moved: [],
+            revoked: [],
+          };
+        }
         return (await semantics.writeSummary(
           summaryInput(summary, artifactId, agent, headSha, ts),
           {

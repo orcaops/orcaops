@@ -19,6 +19,7 @@ CREATE TABLE pending_capture_requests (
   head_oid TEXT,
   created_at TEXT,
   explicit_target INTEGER CHECK (explicit_target IN (0, 1)),
+  without_model INTEGER NOT NULL DEFAULT 0 CHECK (without_model IN (0, 1)),
   FOREIGN KEY (original_operation_id, repository_instance_id) REFERENCES git_retention_operations(original_operation_id, repository_instance_id),
   CHECK ((capture_kind = 'create') = (created_at IS NOT NULL)),
   CHECK ((capture_kind = 'create') = (explicit_target IS NULL)),

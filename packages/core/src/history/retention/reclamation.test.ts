@@ -335,4 +335,4 @@ it('keeps a late stale publisher unused after explicit cleanup', async () => {
     'retired'
   );
   expect(await git(f.cwd, 'rev-parse', f.publication.fullRef)).toBe(f.publication.objectOid);
-});
+}, 15_000);

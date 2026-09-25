@@ -29,15 +29,38 @@ const RepoRelativePathSchema = z.string().superRefine((value, ctx) => {
  * `assertConfigVersionCurrent` gates the load on that same set. A future shape
  * change must bump this constant and define its own version transition.
  */
-export const CONFIG_SCHEMA_VERSION = 7;
+export const CONFIG_SCHEMA_VERSION = 8;
+export const KNOWLEDGE_PROCESSING_CONFIG_VERSION = 8;
+export const KNOWLEDGE_PROCESSING_TOOL_ACCESS_CONFIG_VERSION = 8;
 
 /**
  * Versions this build still loads besides the current one.
  *
- * v6 and v5 differ from v7 only by fully-defaulted blocks. A predecessor
- * belongs here only while the delta is purely additive and defaulted.
+ * v7 differs from v8 by the absence of `knowledge_processing`, v6 additionally
+ * lacks workflow commit guidance and routing, and v5 additionally lacks
+ * `capture` and `redact`. Every one of those
+ * blocks is fully defaulted — so every accepted file loads to the current shape.
+ * Accepting them avoids repeating the v4-to-v5 break, which had no migration
+ * path and sent every existing checkout through `init --force --reset-config`,
+ * discarding whatever else that config held. A predecessor belongs here only
+ * while the delta is purely additive and defaulted; a removed or retyped field
+ * must still break loudly.
  */
-const ACCEPTED_PREDECESSOR_VERSIONS: readonly number[] = [5, 6];
+const ACCEPTED_PREDECESSOR_VERSIONS: readonly number[] = [5, 6, 7];
+
+/**
+ * Fields a file stamped with an older version may not carry, with the
+ * version that introduced each. A released build that meets such a key under
+ * its own version reports a misleading "invalid at <key>"; under the newer
+ * version it reports the honest "upgrade orcaops". `capture` and `redact` are
+ * deliberately absent: released builds already load a v5 file that carries
+ * them, and refusing one now would break a file that loads today.
+ */
+const CONFIG_FIELD_INTRODUCED_AT: Readonly<Record<string, number>> = {
+  knowledge_processing: KNOWLEDGE_PROCESSING_CONFIG_VERSION,
+  'workflow.commit_inside_window': 7,
+  'workflow.routing': 7,
+};
 
 /**
  * Whether `version` is a schema version this build loads — the current one or
@@ -53,14 +76,66 @@ export function isAcceptedConfigVersion(version: unknown): boolean {
 }
 
 /**
- * The configuration must carry the literal NUMBER 6, or one of
- * {@link ACCEPTED_PREDECESSOR_VERSIONS}. Unversioned files are not loadable,
- * and a stringified version is rejected rather than coerced so the on-disk
- * contract stays exact. Deliberately path-neutral: personal scope stores this
- * file in the git common directory, so only the loader knows which one it read
- * — it prefixes the resolved path. A version ahead of 6 keeps the newer-orcaops message. Throws
- * ConfigValidationError so the CLI boundary renders the INVALID_CONFIG
- * envelope.
+ * The version a new file starts from. Every released build that loads this
+ * version reads every field except those in {@link CONFIG_FIELD_INTRODUCED_AT},
+ * so stamping the current version on a file that needs nothing from it would
+ * lock teammates on a released build out of a committed config before anyone
+ * used the newer key. 5 is still loaded but never written: builds that stop at
+ * 5 do not know `capture` or `redact`.
+ */
+export const FRESH_CONFIG_FILE_VERSION = 6;
+
+/**
+ * The version a writer stamps on `document`: the oldest one whose builds can
+ * read everything in it. A fresh file (no `existingVersion`) starts from
+ * {@link FRESH_CONFIG_FILE_VERSION} and an existing file from the version it
+ * already carries, so a write that touches an unrelated key never locks out
+ * teammates on an older build; either moves up only in the same write that
+ * first adds a key the older version cannot read. An existing version this
+ * build does not load throws, so no caller can stamp over a newer file.
+ *
+ * Only the on-disk stamp is conservative. A loaded `Config.schema_version` is
+ * always {@link CONFIG_SCHEMA_VERSION}, because every file loads to the current
+ * shape, so a writer must take the stamp from here and never from a `Config`.
+ */
+export function configVersionForWrite(
+  document: Readonly<Record<string, unknown>>,
+  existingVersion?: unknown
+): number {
+  if (existingVersion !== undefined) {
+    assertConfigVersionCurrent({ schema_version: existingVersion });
+  }
+  const startingVersion =
+    existingVersion === undefined ? FRESH_CONFIG_FILE_VERSION : (existingVersion as number);
+  return Math.max(startingVersion, ...introducedFields(document).map(([, version]) => version));
+}
+
+function introducedFields(document: Readonly<Record<string, unknown>>): [string, number][] {
+  return Object.entries(CONFIG_FIELD_INTRODUCED_AT).filter(([field]) => {
+    let value: unknown = document;
+    for (const key of field.split('.')) {
+      if (
+        typeof value !== 'object' ||
+        value === null ||
+        Array.isArray(value) ||
+        !Object.prototype.hasOwnProperty.call(value, key)
+      )
+        return false;
+      value = (value as Record<string, unknown>)[key];
+    }
+    return true;
+  });
+}
+
+/**
+ * The configuration must carry the literal NUMBER {@link CONFIG_SCHEMA_VERSION},
+ * or one of {@link ACCEPTED_PREDECESSOR_VERSIONS}. Unversioned files are not
+ * loadable, and a stringified version is rejected rather than coerced so the
+ * on-disk contract stays exact. Deliberately path-neutral: personal scope
+ * stores this file in the git common directory, so only the loader knows which
+ * one it read — it prefixes the resolved path. A version ahead of the current
+ * one keeps the newer-orcaops message. Throws ConfigValidationError so the CLI
+ * boundary renders the INVALID_CONFIG envelope.
  */
 export function assertConfigVersionCurrent(raw: unknown): void {
   const v =
@@ -191,6 +266,129 @@ export const SKILL_IDS = [
 ] as const;
 export type SkillId = (typeof SKILL_IDS)[number];
 
+export const LLM_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/**
+ * The providers `knowledge_processing.provider` may name. Storage cannot import
+ * the llm package, so the list is restated here and a core test holds it equal
+ * to the providers the llm capability surface declares.
+ */
+export const KNOWLEDGE_PROCESSING_PROVIDERS = ['claude', 'codex'] as const;
+
+const MILLISECONDS_PER_HOUR = 3_600_000;
+const EIGHT_MEBIBYTES = 8 * 1024 * 1024;
+
+/**
+ * The shortest deadline a call may be given. The no-tool call spends part of
+ * its deadline, about 1.6 seconds, on stopping the provider: a deadline inside
+ * that reserve is refused as an invalid request, and one a few seconds above it
+ * starts a paid call only to kill it. A core test holds this floor above what
+ * the llm call accepts.
+ */
+export const KNOWLEDGE_PROCESSING_MIN_TIMEOUT_MS = 10_000;
+
+const CallTimeoutMsSchema = z
+  .number()
+  .int()
+  .min(KNOWLEDGE_PROCESSING_MIN_TIMEOUT_MS)
+  .max(MILLISECONDS_PER_HOUR);
+
+/** A value below one second is almost always seconds typed where milliseconds belong. */
+const IdleExitMsSchema = z.number().int().min(1_000).max(MILLISECONDS_PER_HOUR);
+
+const BoundedByteCountSchema = z.number().int().min(1_024).max(EIGHT_MEBIBYTES);
+
+/** `inherit` carries `llm.model`; `provider_default` sends no model at all. */
+export const PROCESSING_MODEL_SETTING_WORDS = ['inherit', 'provider_default'] as const;
+
+const WORDS_MISTAKEN_FOR_A_MODEL_SETTING = ['none', 'default', 'auto'];
+
+/**
+ * A model id is sent to the provider exactly as written, so a misspelt setting
+ * word would load, be sent as a model, and fail every paid attempt.
+ */
+const ProcessingModelSchema = z
+  .string()
+  .min(1)
+  .superRefine((value, ctx) => {
+    const refuse = (message: string): void => ctx.addIssue({ code: 'custom', message });
+    const lowered = value.toLowerCase();
+    if (value.trim() !== value) {
+      refuse('must not start or end with whitespace');
+    } else if (
+      (PROCESSING_MODEL_SETTING_WORDS as readonly string[]).includes(lowered) &&
+      value !== lowered
+    ) {
+      refuse(
+        `"${value}" would be sent to the provider as a model id; write "${lowered}" in lowercase`
+      );
+    } else if (WORDS_MISTAKEN_FOR_A_MODEL_SETTING.includes(lowered)) {
+      refuse(
+        `"${value}" is not a model id; write "inherit" to use llm.model, "provider_default" to ` +
+          'let the provider choose, or name a model'
+      );
+    }
+  });
+
+/**
+ * Background knowledge processing. Off by default, and `enabled: true` is not
+ * consent: a user-local grant outside the repository is required as well.
+ *
+ * `inherit`, `none` and an explicit value are three different words on purpose.
+ * `null` is refused for this block before the default merge (see
+ * `resolveConfig`), which would otherwise turn a `null` someone wrote to mean
+ * "no cap" into the inherited cap without a word.
+ *
+ * Only well-formedness is judged here. Whether the selected provider can honor
+ * a well-formed request is the workload's own validation, so an unsupported
+ * combination pauses processing and never fails a capture.
+ *
+ * There is deliberately no concurrency setting: one call runs at a time per
+ * project database, and a knob the worker ignored would be a false promise.
+ *
+ * Dollar amounts carry no upper bound. A larger cap only moves toward the
+ * legal `none`, so no bound would separate a typo from a choice.
+ */
+const KnowledgeProcessingSchema = z.strictObject({
+  enabled: z.boolean().default(false),
+  tool_access: z.enum(['none', 'codex_restricted']).default('none'),
+  provider: z.enum(['inherit', ...KNOWLEDGE_PROCESSING_PROVIDERS]).default('inherit'),
+  /** `inherit`, `provider_default`, or a model id used exactly as written. */
+  model: ProcessingModelSchema.default('inherit'),
+  effort: z.enum(['inherit', ...LLM_EFFORT_LEVELS]).default('inherit'),
+  timeout_ms: CallTimeoutMsSchema.default(300_000),
+  /** Every attempt can be a paid call, hence the low ceiling. */
+  max_attempts: z.number().int().min(1).max(10).default(3),
+  /** One call runs at a time, so more than one per second cannot happen. */
+  max_calls_per_hour: z.number().int().min(1).max(3_600).default(60),
+  max_input_bytes: BoundedByteCountSchema.default(131_072),
+  max_output_bytes: BoundedByteCountSchema.default(65_536),
+  max_output_tokens: z.number().int().min(1).max(1_000_000).optional(),
+  /** `inherit` carries `llm.default_max_cost_usd`; `none` asks for no per-call amount at all. */
+  max_cost_usd_per_call: z
+    .union([z.literal('inherit'), z.literal('none'), z.number().positive()])
+    .default('inherit'),
+  max_cost_usd_per_day: z.number().positive().optional(),
+  idle_exit_ms: IdleExitMsSchema.default(30_000),
+});
+
+export type KnowledgeProcessingConfig = z.infer<typeof KnowledgeProcessingSchema>;
+
+const KNOWLEDGE_PROCESSING_DEFAULTS: KnowledgeProcessingConfig = {
+  enabled: false,
+  tool_access: 'none',
+  provider: 'inherit',
+  model: 'inherit',
+  effort: 'inherit',
+  timeout_ms: 300_000,
+  max_attempts: 3,
+  max_calls_per_hour: 60,
+  max_input_bytes: 131_072,
+  max_output_bytes: 65_536,
+  max_cost_usd_per_call: 'inherit',
+  idle_exit_ms: 30_000,
+};
+
 // The root contract is closed: adding or removing a root field requires a
 // CONFIG_SCHEMA_VERSION bump and an explicit compatibility decision.
 export const ConfigSchema = z.strictObject({
@@ -230,7 +428,7 @@ export const ConfigSchema = z.strictObject({
   llm: z.strictObject({
     tool: z.enum(['auto', 'claude', 'codex', 'none']),
     model: z.string().min(1).nullable(),
-    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']),
+    effort: z.enum(LLM_EFFORT_LEVELS),
     default_max_cost_usd: z.number().positive(),
   }),
   artifacts: z.strictObject({
@@ -532,6 +730,7 @@ export const ConfigSchema = z.strictObject({
       commit_inside_window: true,
       routing: { suppress: [] },
     }),
+  knowledge_processing: KnowledgeProcessingSchema.default(KNOWLEDGE_PROCESSING_DEFAULTS),
 });
 
 const RetiredArchiveConfigSchema = z.strictObject({
@@ -629,6 +828,7 @@ export const DEFAULT_CONFIG: Config = {
       suppress: [],
     },
   },
+  knowledge_processing: { ...KNOWLEDGE_PROCESSING_DEFAULTS },
 };
 
 /**
@@ -648,6 +848,10 @@ export function resolveConfig(partial: unknown): Config {
       if (!Object.prototype.hasOwnProperty.call(partial, key)) continue;
       throw new ConfigValidationError(`Unknown root configuration key "${key}".`, key);
     }
+  }
+  if (typeof partial === 'object' && partial !== null && !Array.isArray(partial)) {
+    assertVersionCoversFields(partial as Record<string, unknown>);
+    assertNoNullKnowledgeProcessingValue(partial as Record<string, unknown>);
   }
   // An accepted predecessor loads to the CURRENT shape — its delta is purely
   // additive and defaulted. Normalize before the merge, which would otherwise
@@ -695,6 +899,44 @@ export function resolveConfig(partial: unknown): Config {
   throw new ConfigValidationError(
     `orcaops configuration is invalid at ${issuePath}: ${issue?.message ?? 'invalid value'}.`,
     issuePath
+  );
+}
+
+function assertVersionCoversFields(document: Record<string, unknown>): void {
+  const stamped = document.schema_version;
+  if (typeof stamped !== 'number' || !ACCEPTED_PREDECESSOR_VERSIONS.includes(stamped)) return;
+  for (const [key, introducedAt] of introducedFields(document)) {
+    if (introducedAt <= stamped) continue;
+    throw new ConfigValidationError(
+      `orcaops configuration: ${key} needs schema_version ${introducedAt}, but the file says ` +
+        `${stamped}. Set schema_version to ${introducedAt}, so an older orcaops asks to be ` +
+        `upgraded instead of reporting ${key} as invalid.`,
+      'schema_version'
+    );
+  }
+}
+
+/**
+ * The default merge reads `null` as "use the default", which here would turn a
+ * `null` written to mean "no cap" into the inherited cap without a word.
+ */
+function assertNoNullKnowledgeProcessingValue(document: Record<string, unknown>): void {
+  if (!Object.prototype.hasOwnProperty.call(document, 'knowledge_processing')) return;
+  const section = document.knowledge_processing;
+  const nullPath =
+    section === null
+      ? 'knowledge_processing'
+      : typeof section === 'object' && !Array.isArray(section)
+        ? Object.entries(section as Record<string, unknown>)
+            .filter(([, value]) => value === null)
+            .map(([key]) => `knowledge_processing.${key}`)[0]
+        : undefined;
+  if (nullPath === undefined) return;
+  throw new ConfigValidationError(
+    `orcaops configuration is invalid at ${nullPath}: null is not a setting here. Remove the ` +
+      'key to use its default, or write the value out: "inherit" and "none" are different ' +
+      'settings where a key accepts them.',
+    nullPath
   );
 }
 

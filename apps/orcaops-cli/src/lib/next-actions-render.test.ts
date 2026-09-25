@@ -3,6 +3,7 @@ import { parse as parseYaml } from 'yaml';
 
 import { SKILL_TEMPLATES } from '@orcaops/adapters';
 import type { SemanticAction } from '@orcaops/core';
+import { CaptureCheckpointCloseInputSchema } from '@orcaops/storage';
 
 import { renderNextActions } from './next-actions-render.js';
 
@@ -105,6 +106,61 @@ describe('renderNextActions', () => {
     expect(typeof body.summary).toBe('string');
   });
 
+  it('checkpoint-close emits a done_criteria entry per criterion id and a verification stub', () => {
+    const r = render1({
+      verb: 'checkpoint-close',
+      artifact_id: 'A',
+      checkpoint_n: 1,
+      step_ids: ['s1'],
+      criterion_ids: ['c1', 'c2'],
+      effect: 'e',
+    });
+    const body = parseYaml(heredocBody(r.command)) as Record<string, unknown>;
+    expect(body.files_changed).toEqual([]);
+    expect(body.done_criteria).toEqual([
+      { criterion_id: 'c1', evidence: expect.any(String) },
+      { criterion_id: 'c2', evidence: expect.any(String) },
+    ]);
+    const verification = body.verification as Record<string, unknown>[];
+    expect(verification).toHaveLength(1);
+    expect(Object.keys(verification[0])).toEqual(expect.arrayContaining(['command', 'exit_code']));
+  });
+
+  it('checkpoint-close template fails validation unedited and passes once placeholders are filled', () => {
+    const r = render1({
+      verb: 'checkpoint-close',
+      artifact_id: 'A',
+      checkpoint_n: 1,
+      step_ids: ['s1'],
+      criterion_ids: ['c1'],
+      effect: 'e',
+    });
+    const body = heredocBody(r.command);
+    expect(CaptureCheckpointCloseInputSchema.safeParse(parseYaml(body)).success).toBe(false);
+    const filled = body
+      .replace(/<exit-code>/g, '0')
+      .replace(/<[^>\n]+>/g, 'filled in by the agent');
+    expect(CaptureCheckpointCloseInputSchema.parse(parseYaml(filled))).toMatchObject({
+      completed_step_ids: ['s1'],
+      done_criteria: [{ criterion_id: 'c1' }],
+      verification: [{ exit_code: 0 }],
+    });
+  });
+
+  it('checkpoint-close with no completed steps emits no done_criteria or verification', () => {
+    const r = render1({
+      verb: 'checkpoint-close',
+      artifact_id: 'A',
+      checkpoint_n: 1,
+      step_ids: [],
+      criterion_ids: [],
+      effect: 'e',
+    });
+    const body = parseYaml(heredocBody(r.command)) as Record<string, unknown>;
+    expect(body).not.toHaveProperty('done_criteria');
+    expect(body).not.toHaveProperty('verification');
+  });
+
   it('digest renders the flag form', () => {
     expect(render1({ verb: 'digest', artifact_id: 'A', effect: 'e' }).command).toBe(
       'orcaops digest --artifact A'
@@ -183,5 +239,38 @@ describe('renderNextActions', () => {
         effect: 'e',
       }).command
     ).toContain('capture checkpoint close --input -');
+  });
+
+  it('checkpoint-close body keys match the adapters skill close example', () => {
+    const skillClose = skillBody('checkpoint').match(
+      /capture checkpoint close --input -[^\n]*<<'EOF'\n([\s\S]*?)\nEOF/
+    );
+    if (!skillClose) throw new Error('checkpoint skill has no close heredoc');
+    const skill = parseYaml(skillClose[1]) as Record<string, Record<string, unknown>[]>;
+    const rendered = parseYaml(
+      heredocBody(
+        render1({
+          verb: 'checkpoint-close',
+          artifact_id: 'A',
+          checkpoint_n: 1,
+          step_ids: ['s'],
+          criterion_ids: ['c'],
+          effect: 'e',
+        }).command
+      )
+    ) as Record<string, Record<string, unknown>[]>;
+    for (const key of ['files_changed', 'completed_step_ids', 'done_criteria', 'verification']) {
+      expect(Object.keys(rendered)).toContain(key);
+      expect(Object.keys(skill)).toContain(key);
+    }
+    expect(Object.keys(skill)).toEqual(
+      expect.arrayContaining(Object.keys(rendered).filter((key) => key !== 'n'))
+    );
+    expect(Object.keys(rendered.done_criteria[0]).sort()).toEqual(
+      Object.keys(skill.done_criteria[0]).sort()
+    );
+    expect(Object.keys(rendered.verification[0]).sort()).toEqual(
+      Object.keys(skill.verification[0]).sort()
+    );
   });
 });

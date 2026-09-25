@@ -761,6 +761,31 @@ describe('orcaops uninstall', () => {
     expect(await exists(p('.orcaops'))).toBe(false);
   });
 
+  it('says a purge keeps canonical history in the data directory and names it', async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), 'orcaops-purge-history-'));
+    try {
+      const a = makeAgent({ cwd: repo.path, env: { ORCAOPS_DATA_DIR: dataDir } });
+      expect((await a.runRaw(['init', '--scope', 'project', '--no-llm'])).exitCode).toBe(0);
+
+      const res = await a.runRaw(['uninstall', '--purge-data']);
+      expect(res.exitCode, res.stdout + res.stderr).toBe(0);
+      expect(res.stdout).not.toContain('captured artifacts');
+      expect(res.stdout).toContain('Canonical project history is kept');
+      expect(res.stdout).toContain(path.basename(dataDir));
+      expect(await exists(p('.orcaops'))).toBe(false);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeping data without --purge-data does not claim .orcaops holds captured artifacts', async () => {
+    await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
+    const res = await agent.runRaw(['uninstall']);
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).not.toContain('captured artifacts');
+    expect(res.stdout).toContain('--purge-data');
+  });
+
   it('refuses purge before local mutation when global ownership belongs to another version', async () => {
     const globalRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-uninstall-version-'));
     try {
@@ -1219,14 +1244,14 @@ describe('orcaops uninstall — personal (invisible) scope round-trip', () => {
     expect(await readFile(excludePath, 'utf8')).toBe(userLines);
   });
 
-  it('refuses the global release entirely on a CLI version mismatch: no files, no refs', async () => {
+  it('refuses the global release entirely when the CLI versions cannot be ordered: no files, no refs', async () => {
     await agent.runRaw(['init', '--personal', '--json', '--no-llm']);
     const manifestPath = path.join(globalRoot, 'install.local.json');
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
       materialized_by: string;
       entries: Array<{ refs: string[] }>;
     };
-    manifest.materialized_by = '0.0.0-other';
+    manifest.materialized_by = 'dev';
     const seeded = `${JSON.stringify(manifest, null, 2)}\n`;
     await writeFile(manifestPath, seeded, 'utf8');
     const skill = path.join(globalRoot, 'claude-code', 'skills', 'orcaops-capture', 'SKILL.md');
@@ -1236,7 +1261,7 @@ describe('orcaops uninstall — personal (invisible) scope round-trip', () => {
     // A refusal leaves ownership state byte-untouched: no files removed, no
     // refs dropped. --force (covered below) is the deliberate escape.
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toMatch(/materialized by CLI v0\.0\.0-other/);
+    expect(result.stderr).toMatch(/materialized by CLI vdev/);
     expect(result.stderr).toMatch(/pass --force/);
     expect(await exists(skill)).toBe(true);
     expect(await readFile(manifestPath, 'utf8')).toBe(seeded);
@@ -1248,7 +1273,7 @@ describe('orcaops uninstall — personal (invisible) scope round-trip', () => {
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
       materialized_by: string;
     };
-    manifest.materialized_by = '0.0.0-other';
+    manifest.materialized_by = 'dev';
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
     const skill = path.join(globalRoot, 'claude-code', 'skills', 'orcaops-capture', 'SKILL.md');
 

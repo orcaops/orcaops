@@ -1890,6 +1890,7 @@ export async function diffSnapshotStats(opts: {
       [
         'diff',
         '--numstat',
+        '-z',
         '--no-renames',
         '--no-color',
         '--no-ext-diff',
@@ -1906,12 +1907,16 @@ export async function diffSnapshotStats(opts: {
   if (result.killedByCap || (result.code !== 0 && result.code !== 1)) return { ok: false };
 
   const entries: DiffStatEntry[] = [];
-  for (const line of result.stdout.toString('utf8').split('\n')) {
-    if (line.length === 0) continue;
-    // `<added>\t<deleted>\t<path>` — binary rows are `-\t-\t<path>`.
-    const [added, deleted, ...pathParts] = line.split('\t');
-    const filePath = pathParts.join('\t');
-    if (added === undefined || deleted === undefined || filePath.length === 0) continue;
+  // Without `-z`, git C-quotes non-ASCII and quote-bearing paths.
+  for (const record of result.stdout.toString('utf8').split('\0')) {
+    if (record.length === 0) continue;
+    const firstTab = record.indexOf('\t');
+    const secondTab = firstTab < 0 ? -1 : record.indexOf('\t', firstTab + 1);
+    if (secondTab < 0) continue;
+    const added = record.slice(0, firstTab);
+    const deleted = record.slice(firstTab + 1, secondTab);
+    const filePath = record.slice(secondTab + 1);
+    if (filePath.length === 0) continue;
     entries.push({
       path: filePath,
       added: added === '-' ? null : Number.parseInt(added, 10),

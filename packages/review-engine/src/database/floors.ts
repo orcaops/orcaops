@@ -266,6 +266,7 @@ export async function hydrateDatabaseReviewFloor(
   return {
     value: {
       publicationId: publication.publication_id,
+      publicationOperationId: publication.operation_id,
       membershipRevisionId: publication.membership_revision_id,
       sourceWriteSequence,
       floor: floor.value,

@@ -1180,6 +1180,7 @@ describe('orcaops doctor', () => {
       commit_inside_window: false,
       hints: { keys: ['commit-on-checkpoint-close'], custom: [] },
     };
+    cfg.schema_version = 7;
     await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
 
     // The redundant pair must stay a report, not a load failure: doctor is the
@@ -1310,8 +1311,9 @@ describe('orcaops doctor', () => {
     // `digest` is suppressed too: it is routed AND named by the lifecycle, so
     // its ref must still be expected in the block.
     cfg.workflow = { routing: { suppress: ['plan-critique', 'digest'] } };
+    cfg.schema_version = 7;
     await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
-    await agent.runRaw(['update', '--json']);
+    expect((await agent.runRaw(['update', '--json'])).exitCode).toBe(0);
 
     const agentsMd = await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8');
     expect(agentsMd).not.toContain('orcaops-plan-critique');
@@ -1374,7 +1376,7 @@ describe('orcaops doctor', () => {
       );
       await writeFile(
         path.join(packDir, 'runtime', 'stub.mjs'),
-        `process.stdout.write(JSON.stringify({ schema: 'orcaops.evaluator_result/v1', verdict: 'pass', body: 'PASS' }));\n`,
+        `process.stdout.write(JSON.stringify({ schema: 'orcaops.evaluator_result/v2', verdict: 'pass', body: 'PASS' }));\n`,
         'utf8'
       );
       await writeFile(

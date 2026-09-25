@@ -1,19 +1,31 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { uuidv7 } from '@orcaops/storage';
 import {
+  findProjectEvaluatorFindingRecurrence,
   readProjectArtifact,
+  readProjectEvaluatorRunFindings,
   readProjectLifecycleCompletions,
   readProjectUsage,
 } from '@orcaops/storage/history/database';
 import { inputFile } from '@orcaops/test-harness';
 
-import { fixture } from '../helpers/database-history.js';
+import type { TrustCapability } from '../../src/lib/evaluator-grants.js';
+import { fixture, grantEvaluatorPack } from '../helpers/database-history.js';
 import { makeAgent } from '../support/test-agent.js';
 
+const TEST_PACK = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../fixtures/test-pack'
+);
+const CORE_PACK = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../../../packages/evaluator-pack/dist/packs/core'
+);
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
 /** A minimal coding-agent transcript, so the usage source has something real to read. */
@@ -177,4 +189,102 @@ describe('registered database evaluator passes', { timeout: 120_000 }, () => {
     // A fresh discriminator per invocation, so a repeated pass never freezes usage.
     expect(readProjectUsage(f.writer)!.events.length).toBe(2);
   });
+
+  it('retains what a producer found beside the run the pass appended', async () => {
+    const f = await fixture();
+    const id = await f.capture();
+    await grantEvaluatorPack(f, {
+      packageId: 'test-pack',
+      packRoot: TEST_PACK,
+      enable: { 'test-pack/pass-fixture': true },
+    });
+    const agent = await usageAgent(f);
+    const raw = await agent.runRaw([
+      'capture',
+      'run-evaluators',
+      '--no-llm',
+      '--invoked-by-agent',
+      'claude-code',
+      '--input',
+      inputFile(JSON.stringify({ artifact_id: id, fires_at: 'post-plan' })),
+    ]);
+    expect(raw.exitCode, raw.stdout + raw.stderr).toBe(0);
+    const parsed = JSON.parse(raw.stdout);
+    // The count is the only thing the response gains, and no finding text is in it.
+    expect(parsed.findings_retained).toBe(2);
+    expect(raw.stdout).not.toContain('The captured plan states every step');
+
+    const run = parsed.evaluator_results.find(
+      (entry: { evaluator_ref: string }) => entry.evaluator_ref === 'test-pack/pass-fixture'
+    );
+    const retained = readProjectEvaluatorRunFindings(f.writer, run.run_id);
+    expect(retained.status).toBe('established');
+    if (retained.status !== 'established') throw new Error(retained.status);
+    expect(retained.findings.map((finding) => finding.key)).toEqual(['fixture/plan-covered', null]);
+    expect(retained.findings[0]!.title).toBe(
+      'The captured plan states every step the fixture expects'
+    );
+    expect(retained.basis).toMatchObject({
+      artifactId: id,
+      evaluatorRef: 'test-pack/pass-fixture',
+      evaluatorVersion: null,
+      producerPayload: null,
+    });
+    expect(
+      findProjectEvaluatorFindingRecurrence(f.writer, {
+        artifactId: id,
+        evaluatorRef: 'test-pack/pass-fixture',
+        key: 'fixture/plan-covered',
+      }).map((finding) => finding.runId)
+    ).toEqual([run.run_id]);
+  });
+
+  it.each([
+    ['a pack granted without the capability it needs', ['command_evaluators_present']],
+    [
+      'a filter this plan does not satisfy',
+      ['command_evaluators_present', 'llm_evaluators_present'],
+    ],
+  ] as [string, TrustCapability[]][])(
+    'retains nothing for a run whose producer was never asked: %s',
+    async (_case, capabilities) => {
+      const f = await fixture();
+      const id = await f.capture();
+      // `core/sensitive-scope-flag` is an LLM evaluator behind a scope filter the fixture plan does
+      // not satisfy, so it is refused by consent under the narrower grant and skipped by its filter
+      // under the wider one. Neither ever reaches a producer.
+      await grantEvaluatorPack(f, {
+        packageId: 'core',
+        packRoot: CORE_PACK,
+        enable: { 'core/sensitive-scope-flag': true },
+        capabilities,
+      });
+      const agent = await usageAgent(f);
+      const raw = await agent.runRaw([
+        'capture',
+        'run-evaluators',
+        '--no-llm',
+        '--invoked-by-agent',
+        'claude-code',
+        '--input',
+        inputFile(JSON.stringify({ artifact_id: id, fires_at: 'post-plan' })),
+      ]);
+      expect(raw.exitCode, raw.stdout + raw.stderr).toBe(0);
+      const parsed = JSON.parse(raw.stdout);
+      expect(parsed.findings_retained).toBeUndefined();
+
+      const unasked = parsed.evaluator_results.find(
+        (entry: { evaluator_ref: string }) => entry.evaluator_ref === 'core/sensitive-scope-flag'
+      );
+      expect(
+        unasked.run_status === 'skipped' || unasked.error?.code === 'CONSENT_DENIED',
+        JSON.stringify(unasked)
+      ).toBe(true);
+      // Nothing ran, so there is no basis to name and nothing was handed over: the run reads as
+      // one nothing was retained for, and its own run status keeps saying why.
+      expect(readProjectEvaluatorRunFindings(f.writer, unasked.run_id)).toEqual({
+        status: 'not-retained',
+      });
+    }
+  );
 });

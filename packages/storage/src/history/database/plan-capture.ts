@@ -266,3 +266,19 @@ export function preparePlanCaptureInsertion(
     },
   };
 }
+
+export function composePlanCaptureOperation(
+  capture: ReturnType<typeof prepareExecutionCaptureRequest>,
+  plan: ReturnType<typeof preparePlanCaptureInsertion>,
+  useHashes: readonly string[]
+) {
+  return {
+    ...capture.operation,
+    kind: 'plan.capture.append',
+    payload: {
+      capture: capture.operation.payload,
+      command: plan.payload,
+      ...(useHashes.length > 0 ? { knowledge_uses: [...useHashes] } : {}),
+    },
+  };
+}

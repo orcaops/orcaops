@@ -18,6 +18,7 @@ import {
   openProjectDatabase,
   type ProjectDatabase,
   projectDatabasePath,
+  type ProjectReadView,
 } from './connection.js';
 import {
   appendProjectExecutionCapture,
@@ -222,6 +223,28 @@ it('rolls back artifact rows and search indexes when execution publication fails
   await expect(appendProjectExecutionCapture(handle, original)).resolves.toMatchObject({
     replayed: false,
   });
+});
+it('checks publication under the transaction and leaves no capture when the check refuses', async () => {
+  const { handle, original } = await captured();
+  const before = handle.read(() => null).counters;
+  const checked = vi.fn((view: ProjectReadView) => {
+    expect(
+      view.get('SELECT artifact_id FROM artifacts WHERE artifact_id=?', original.artifactId)
+    ).toBeNull();
+    throw new ProjectDatabaseError('STALE_CONTEXT', 'Authority changed');
+  });
+  await expect(
+    appendProjectExecutionCapture(handle, original, { assertPublication: checked })
+  ).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
+  expect(checked).toHaveBeenCalledOnce();
+  expect(readProjectArtifact(handle, original.artifactId)).toBeNull();
+  expect(handle.read(() => null).counters).toEqual(before);
+  await appendProjectExecutionCapture(handle, original);
+  checked.mockClear();
+  await expect(
+    appendProjectExecutionCapture(handle, original, { assertPublication: checked })
+  ).resolves.toMatchObject({ replayed: true });
+  expect(checked).not.toHaveBeenCalled();
 });
 it('attributes a real checkpoint in its event transaction and replays after later history without re-preparing', async () => {
   const { handle, original } = await captured();

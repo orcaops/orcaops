@@ -2,8 +2,8 @@
 name: "orcaops:digest"
 description: "Render a reviewer-facing digest for one artifact or a whole branch."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "05259e78994d"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "2350a75deb78"
 tags: ["orcaops", "read-only"]
 ---
 

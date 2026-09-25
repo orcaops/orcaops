@@ -42,25 +42,32 @@ export async function readRepositoryRegistration(input: {
   const commonDir = input.commonDir;
   const requestedRoot = input.requestedRoot && { ...input.requestedRoot };
   await validateRegistrationRoot(commonDir, true);
-  const bytes = await readRegistrationBytes(
-    commonDir,
-    path.join(commonDir, 'orcaops', 'registration.json')
-  );
+  const file = path.join(commonDir, 'orcaops', 'registration.json');
+  const bytes = await readRegistrationBytes(commonDir, file);
   if (!bytes) return null;
   const value = decodeRegistration(bytes, repositoryRegistrationSchema, 'Repository registration');
-  const normalized = await normalizeHistoryRoot({ root: value.authority.resolved_root });
-  if (
-    normalized.resolvedRoot !== value.authority.resolved_root ||
-    normalized.rootKey !== value.authority.root_key ||
-    (requestedRoot &&
-      (requestedRoot.resolvedRoot !== normalized.resolvedRoot ||
-        requestedRoot.rootKey !== normalized.rootKey))
-  ) {
+  const registered = value.authority.resolved_root;
+  const normalized = await normalizeHistoryRoot({ root: registered });
+  if (normalized.resolvedRoot !== registered || normalized.rootKey !== value.authority.root_key)
     throw new HistoryError(
       'AUTHORITY_MISMATCH',
-      'Select the registered data root; a marker candidate never authorizes relocation'
+      `This repository is registered to data root ${registered} (${file}), which no longer resolves to itself; it was moved or replaced and needs explicit repair. Nothing was changed.`,
+      { registered_root: registered, registration: file }
     );
-  }
+  if (
+    requestedRoot &&
+    (requestedRoot.resolvedRoot !== normalized.resolvedRoot ||
+      requestedRoot.rootKey !== normalized.rootKey)
+  )
+    throw new HistoryError(
+      'AUTHORITY_MISMATCH',
+      `This repository is registered to data root ${registered} (${file}), not ${requestedRoot.resolvedRoot}. Set ORCAOPS_DATA_DIR to the registered root, or use a separate clone for a different root. Nothing was changed.`,
+      {
+        registered_root: registered,
+        requested_root: requestedRoot.resolvedRoot,
+        registration: file,
+      }
+    );
   return value;
 }
 

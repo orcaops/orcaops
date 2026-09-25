@@ -15,6 +15,15 @@ import { Repo } from '../git/repo.js';
 export const CONFIG_RELATIVE_PATH = path.join('.orcaops', 'config.json');
 /** `.orcaops/evaluators.yaml`, relative to a worktree root. */
 export const EVALUATORS_RELATIVE_PATH = path.join('.orcaops', 'evaluators.yaml');
+export const INSTALL_MANIFEST_RELATIVE_PATH = path.join('.orcaops', 'install.json');
+export const LOCAL_INSTALL_MANIFEST_RELATIVE_PATH = path.join('.orcaops', 'install.local.json');
+// A file init writes into `.orcaops/` that is not listed here sends teammate clones to conversion.
+export const PROJECT_CONFIGURATION_PATHS: readonly string[] = [
+  CONFIG_RELATIVE_PATH,
+  EVALUATORS_RELATIVE_PATH,
+  INSTALL_MANIFEST_RELATIVE_PATH,
+  LOCAL_INSTALL_MANIFEST_RELATIVE_PATH,
+];
 
 /**
  * The Orcaops directory inside the git common dir — already home to the

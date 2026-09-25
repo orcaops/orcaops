@@ -1,7 +1,7 @@
 import path from 'node:path';
 
 import { configLocationForScope, Repo, resolveConfigSource } from '@orcaops/core';
-import { CONFIG_SCHEMA_VERSION, resolveConfig } from '@orcaops/storage';
+import { configVersionForWrite, resolveConfig } from '@orcaops/storage';
 
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 import { CliExit } from '../io/exit.js';
@@ -20,7 +20,12 @@ import {
   withGlobalInstallLock,
 } from '../lib/global-install.js';
 import { derivedIgnoreGlobs } from '../lib/install-agents.js';
-import { INSTALL_MANIFEST_REL, readInstallManifest } from '../lib/install-manifest.js';
+import {
+  INSTALL_MANIFEST_REL,
+  LOCAL_MANIFEST_REL,
+  readInstallManifest,
+  readLocalManifestState,
+} from '../lib/install-manifest.js';
 import {
   assertInvisiblePlan,
   planInstallMutations,
@@ -31,6 +36,7 @@ import { getInvocationCwd } from '../lib/invocation-context.js';
 import {
   deleteMutation,
   executeMutations,
+  type ExecuteResult,
   type MutationMode,
   planManagedGitHookRefreshMutations,
   type PlannedMutation,
@@ -175,12 +181,12 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
             'installs register hooks at the machine level only (`orcaops session-hooks install`).'
         );
       }
-      // Leaving project scope edits tracked files (pruned trees, stripped
-      // .gitignore, deleted install.json) — legitimate, but committing them
-      // de-adopts the repo for the whole team, so say so once.
-      if (effectiveScope === 'personal' && priorScope === 'project') {
+      // Leaving project or global scope edits tracked files (pruned trees,
+      // stripped .gitignore, deleted config and install.json) — legitimate,
+      // but committing them de-adopts the repo for the whole team, so say so once.
+      if (effectiveScope === 'personal' && priorScope !== 'personal') {
         personalWarnings.push(
-          'scope changed project → personal: committed orcaops files were modified or ' +
+          `scope changed ${priorScope} → personal: committed orcaops files were modified or ` +
             'removed in the worktree — review `git status`; committing those changes ' +
             'de-adopts the repo for everyone sharing it.'
         );
@@ -292,7 +298,7 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
           };
           ctx.config.session_hooks.entries = opts.sessionHookEntries as 'project' | 'none';
         }
-        parsed.schema_version = CONFIG_SCHEMA_VERSION;
+        parsed.schema_version = configVersionForWrite(parsed, parsed.schema_version);
 
         const desired = `${JSON.stringify(parsed, null, 2)}\n`;
         const priorDestination = movingSource
@@ -395,13 +401,24 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
       // or the derived globs on an ignore->commit switch).
       if (effectiveScope !== 'personal' || scopeTransition) {
         const giPlan = await reconcileGitignore(repoRoot, desiredGitignore);
-        if (giPlan.desiredContent !== null) {
+        if (giPlan.emptied && !(await ctx.repo.isTracked('.gitignore'))) {
+          // Round an untracked file back to absent instead of leaving it
+          // empty. A tracked one may predate orcaops, so it stays.
+          mutations.push(
+            deleteMutation(
+              repoRoot,
+              '.gitignore',
+              { kind: 'file', content: giPlan.currentContent },
+              true
+            )
+          );
+        } else if (giPlan.desiredContent !== null) {
           mutations.push(
             writeMutation(
               repoRoot,
               '.gitignore',
               giPlan.desiredContent,
-              giPlan.currentContent,
+              giPlan.exists ? giPlan.currentContent : null,
               true
             )
           );
@@ -409,15 +426,6 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
       }
       // info/exclude (personal add + scope-exit strip) rides the shared
       // planner (planInstallMutations) — no separate write path here.
-
-      // Never-touch enforcement for STEADY-STATE personal runs (already
-      // invisible: no committed manifest, no scope flag this run). Scope
-      // TRANSITIONS legitimately edit tracked files — pruning trees,
-      // stripping .gitignore, removing install.json — and git surfaces
-      // those to commit, so they are exempt.
-      if (effectiveScope === 'personal' && !scopeTransition && prevInstall === null) {
-        await assertInvisiblePlan(repoRoot, mutations, plan.sessionHooks);
-      }
 
       const removeInstallManifest = effectiveScope === 'personal' && prevInstall !== null;
       if (removeInstallManifest) {
@@ -432,6 +440,48 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
             true
           )
         );
+      }
+
+      // Personal keeps its local manifest in the git common dir, so a worktree
+      // one is a leftover from project or global scope. Only bytes that
+      // validate as an orcaops manifest are removed, guarded on those bytes.
+      if (effectiveScope === 'personal') {
+        const leftover = await readLocalManifestState(repoRoot);
+        if (leftover.kind === 'invalid') {
+          personalWarnings.push(
+            `left ${LOCAL_MANIFEST_REL} in place: it is not a valid orcaops install manifest ` +
+              `(${leftover.reason}) — remove it by hand if it is not yours`
+          );
+        } else if (leftover.kind === 'valid') {
+          if (
+            scopeTransition ||
+            prevInstall !== null ||
+            !(await ctx.repo.isTracked(LOCAL_MANIFEST_REL))
+          ) {
+            mutations.push(
+              deleteMutation(
+                repoRoot,
+                LOCAL_MANIFEST_REL,
+                { kind: 'file', content: leftover.content },
+                true
+              )
+            );
+          } else {
+            personalWarnings.push(
+              `left ${LOCAL_MANIFEST_REL} in place: git tracks it, so removing it would change ` +
+                'a committed file — remove it with git if it is no longer needed'
+            );
+          }
+        }
+      }
+
+      // Never-touch enforcement for STEADY-STATE personal runs (already
+      // invisible: no committed manifest, no scope flag this run), over the
+      // complete batch. Scope TRANSITIONS legitimately edit tracked files —
+      // pruning trees, stripping .gitignore, removing install.json — and git
+      // surfaces those to commit, so they are exempt.
+      if (effectiveScope === 'personal' && !scopeTransition && prevInstall === null) {
+        await assertInvisiblePlan(repoRoot, mutations, plan.sessionHooks);
       }
 
       // Eager identity: update covers repos without a minted id (the
@@ -501,6 +551,7 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
 
       const mode: MutationMode = opts.dryRun ? 'preview' : 'apply';
       let global: GlobalInstallResult | null;
+      let executed: ExecuteResult;
       // Read (and validate) the global manifest BEFORE any project mutation
       // executes: a corrupt global file must fail the run while the worktree
       // is untouched, not strand a half-done update.
@@ -512,18 +563,18 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
           globalManifest?.entries.some((entry) => entry.refs.includes(repoId)) === true);
       if (mode === 'preview') {
         global = await planGlobalPhase('preview', globalManifest);
-        await executeMutations(publishInstallManifestsLast(mutations), mode);
+        executed = await executeMutations(publishInstallManifestsLast(mutations), mode);
       } else if (needsGlobalWrite) {
-        global = await withGlobalInstallLock(async (scope) => {
+        ({ global, executed } = await withGlobalInstallLock(async (scope) => {
           await planGlobalPhase('preview', scope.manifest);
           await installLease.verify();
-          await executeMutations(publishInstallManifestsLast(mutations), mode);
+          const batch = await executeMutations(publishInstallManifestsLast(mutations), mode);
           await installLease.verify();
-          return planGlobalPhase('apply', scope.manifest, scope);
-        });
+          return { global: await planGlobalPhase('apply', scope.manifest, scope), executed: batch };
+        }));
       } else {
         await installLease.verify();
-        await executeMutations(publishInstallManifestsLast(mutations), mode);
+        executed = await executeMutations(publishInstallManifestsLast(mutations), mode);
         global = null;
       }
 
@@ -557,6 +608,40 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
         );
       }
 
+      const touchedAgentsMd = agentsMd.filter((m) => m.action !== 'unchanged');
+      const touchedSessionHooks = plan.sessionHooks.filter(
+        (h) => h.action === 'created' || h.action === 'updated' || h.action === 'removed'
+      );
+      // Everything the batch wrote that no dedicated section below reports:
+      // config, .gitignore, manifests, info/exclude, git hooks. Derived from
+      // the executed batch so a new kind of write can never go unreported.
+      const reportedPaths = new Set([
+        ...result.installed,
+        ...result.refreshed,
+        ...touchedAgentsMd.map((m) => m.path),
+        ...touchedSessionHooks.map((h) => h.path),
+        ...prune.deleted,
+      ]);
+      const otherChanges = executed.changed
+        .filter(
+          (m) =>
+            !reportedPaths.has(m.path) &&
+            (m.kind === 'delete' || m.desiredContent !== m.currentContent)
+        )
+        .map((m) => ({
+          path: m.path,
+          action: m.kind === 'delete' ? 'removed' : m.kind === 'create' ? 'created' : 'updated',
+        }));
+      const scopeChanged = scopeTransition ? { from: priorScope, to: effectiveScope } : null;
+      // Leaving project scope excises these blocks in the planner; the prune
+      // pass still sees their manifest entries and would call them preserved.
+      const excisedBlocks = new Set(
+        agentsMd.filter((m) => m.action === 'removed').map((m) => m.path)
+      );
+      const preservedOrphans = prune.preserved.filter(
+        (p) => !(p.reason === 'managed-block' && excisedBlocks.has(p.path))
+      );
+
       if (opts.json) {
         emitOk({
           orcaops_version: CLI_VERSION,
@@ -575,8 +660,10 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
             stamped_version: p.stampedVersion,
           })),
           pruned: prune.deleted,
-          preserved_orphans: prune.preserved,
+          preserved_orphans: preservedOrphans,
           removed_install_manifest: removedInstallManifest,
+          scope_changed: scopeChanged,
+          other_changes: otherChanges,
           removed_dirs: removedDirs,
           prefix_changed: renamed ? { from: oldPrefix, to: newPrefix } : null,
           global: global
@@ -602,6 +689,10 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
         `orcaops update — agents: ${installAgents.join(', ') || 'none'}, scope: ${effectiveScope}, version: ${CLI_VERSION}`
       );
       lines.push('');
+      if (scopeChanged) {
+        lines.push(`Scope changed: ${scopeChanged.from} → ${scopeChanged.to}`);
+        lines.push('');
+      }
       if (global) {
         if (global.skippedVersionMismatch) {
           lines.push(
@@ -646,7 +737,6 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
         lines.push(`Unchanged (${result.unchanged.length})`);
         lines.push('');
       }
-      const touchedAgentsMd = agentsMd.filter((m) => m.action !== 'unchanged');
       if (touchedAgentsMd.length > 0) {
         lines.push(`Bootstrap section (${touchedAgentsMd.length}):`);
         for (const m of touchedAgentsMd) {
@@ -663,9 +753,6 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
         }
         lines.push('');
       }
-      const touchedSessionHooks = plan.sessionHooks.filter(
-        (h) => h.action === 'created' || h.action === 'updated' || h.action === 'removed'
-      );
       if (touchedSessionHooks.length > 0) {
         lines.push(`Session hooks (${touchedSessionHooks.length}):`);
         for (const h of touchedSessionHooks) {
@@ -680,20 +767,30 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
         for (const p of prune.deleted) lines.push(`  - ${p}`);
         lines.push('');
       }
-      if (prune.preserved.length > 0) {
-        lines.push(`Preserved orphans (${prune.preserved.length}):`);
-        for (const p of prune.preserved) lines.push(`  · ${p.path} (${p.reason})`);
+      if (preservedOrphans.length > 0) {
+        lines.push(`Preserved orphans (${preservedOrphans.length}):`);
+        for (const p of preservedOrphans) lines.push(`  · ${p.path} (${p.reason})`);
+        lines.push('');
+      }
+      if (otherChanges.length > 0) {
+        lines.push(`Other files (${otherChanges.length}):`);
+        for (const c of otherChanges) {
+          const sym = c.action === 'created' ? '+' : c.action === 'removed' ? '-' : '~';
+          lines.push(`  ${sym} ${c.path}`);
+        }
         lines.push('');
       }
       for (const w of warnings) lines.push(`! ${w}`);
       if (warnings.length > 0) lines.push('');
       if (
+        scopeChanged === null &&
+        otherChanges.length === 0 &&
         result.installed.length === 0 &&
         result.refreshed.length === 0 &&
         touchedAgentsMd.length === 0 &&
         touchedSessionHooks.length === 0 &&
         prune.deleted.length === 0 &&
-        prune.preserved.length === 0
+        preservedOrphans.length === 0
       ) {
         const aheadCount = plan.preservedAhead.length + prune.preservedAhead.length;
         if (aheadCount > 0) {
@@ -705,8 +802,7 @@ export async function updateAction(opts: UpdateOptions = {}): Promise<void> {
           !globalPlanningSkipped &&
           (global?.changed.length ?? 0) === 0 &&
           (global?.removed.length ?? 0) === 0 &&
-          !global?.ownershipChanged &&
-          !removeInstallManifest
+          !global?.ownershipChanged
         ) {
           // A skipped global rewrite is NOT up to date — the SKIPPED line
           // above already named the directional remedy.

@@ -1,3 +1,4 @@
+import type { KnowledgeProcessingCoverage, ResolvedConfigSource } from '@orcaops/core';
 import {
   type HistorySearchProject,
   normalizeSearchQuery,
@@ -20,6 +21,17 @@ import {
   queryProjectSearch,
 } from '@orcaops/storage/history/database';
 
+import { processingCoverageOf } from './knowledge-processing-coverage.js';
+import { readProjectProcessingHistory } from './knowledge-processing-queue.js';
+import {
+  knowledgeForSearchHits,
+  SEARCH_KNOWLEDGE_IDENTITIES_PER_HIT,
+  searchKnowledgeBudget,
+  type SearchKnowledgeGroup,
+  type SearchKnowledgeProject,
+  type SearchKnowledgeRecord,
+} from './knowledge-search-context.js';
+
 export interface CanonicalSearchOptions {
   scope?: HistorySelector['scope'];
   project?: string;
@@ -29,11 +41,14 @@ export interface CanonicalSearchOptions {
   type?: string;
   limit?: number;
   offset?: number;
+  knowledgeBytes?: number;
   json?: boolean;
 }
 export interface CanonicalSearchContext {
   scope: DatabaseHistoryScope;
-  config: Pick<Config, 'digest'>;
+  config: Pick<Config, 'digest' | 'knowledge_processing'>;
+  /** The file the configuration came from; null outside a checkout, where nothing governs it. */
+  configSource?: ResolvedConfigSource | null;
 }
 
 export function validateCanonicalSearch(query: string, input: CanonicalSearchOptions = {}) {
@@ -46,6 +61,7 @@ export function validateCanonicalSearch(query: string, input: CanonicalSearchOpt
     'type',
     'limit',
     'offset',
+    'knowledgeBytes',
     'json',
   ];
   if (Object.keys(input).some((key) => !allowed.includes(key)))
@@ -72,11 +88,21 @@ export function validateCanonicalSearch(query: string, input: CanonicalSearchOpt
       'INVALID_INPUT',
       'Search offset must be a nonnegative integer within the supported page range'
     );
+  // The default is the page limit times a fixed per-entry allowance, so asking for more results
+  // buys room for their knowledge too; zero is a page that reports every entry incomplete rather
+  // than one that quietly drops them.
+  const knowledgeBytes = input.knowledgeBytes ?? searchKnowledgeBudget(limit);
+  if (!Number.isSafeInteger(knowledgeBytes) || knowledgeBytes < 0)
+    throw new HistoryScopeError(
+      'INVALID_INPUT',
+      'Search knowledge budget must be a nonnegative integer number of bytes'
+    );
   return {
     selector,
     filters,
     limit,
     offset,
+    knowledgeBytes,
     sourceKinds:
       input.type === undefined ? undefined : [input.type as (typeof SEARCH_SOURCE_KINDS)[number]],
   };
@@ -224,8 +250,17 @@ export async function readCanonicalSearch(
     result.page.truncated = true;
     result.origin_counts.matching = { captured: null, imported: null };
   }
+  const readable = scope.projects.flatMap((project) =>
+    project.database === null ? [] : [{ projectId: project.projectId, database: project.database }]
+  );
+  const knowledge = knowledgeForSearchHits({
+    hits: result.results,
+    projects: readable,
+    budgetBytes: options.knowledgeBytes,
+    maxIdentitiesPerEvent: SEARCH_KNOWLEDGE_IDENTITIES_PER_HIT,
+  });
   const output = {
-    schema_version: 3 as const,
+    schema_version: 4 as const,
     scope: {
       kind: scope.kind,
       selection: scope.selection,
@@ -243,7 +278,22 @@ export async function readCanonicalSearch(
     filters: { ...options.filters, type: input.type ?? null },
     ...result,
     count: result.results.length,
-    results: result.results.map((row) => ({ ...row, project: row.project_id })),
+    results: result.results.map((row, index) => ({
+      ...row,
+      project: row.project_id,
+      knowledge: knowledge.byHit.get(index) ?? null,
+    })),
+    knowledge: {
+      boundaries: knowledge.boundaries,
+      coverage: { processing: processingCoverage(scope, context, readable) },
+      groups: knowledge.groups,
+      budget: {
+        bytes: options.knowledgeBytes,
+        spent: knowledge.spentBytes,
+        entries_omitted: knowledge.omitted.length,
+      },
+      limits: knowledge.limits,
+    },
     completeness: { complete, issues },
     sources,
     integrity: { source_observation: 'read-transaction' as const },
@@ -251,9 +301,67 @@ export async function readCanonicalSearch(
   return redact ? redactSecretsInObject(output) : output;
 }
 
-export function formatCanonicalSearch(
-  result: Awaited<ReturnType<typeof readCanonicalSearch>>
+/**
+ * What background processing has interpreted here, through the one function that derives the
+ * claim. It is read only when this search reads exactly one project from inside a checkout, for
+ * two reasons: reading several at once crosses repositories whose configuration this command never
+ * loaded, and outside a checkout no configuration governs the answer at all. Anywhere else it is
+ * `null` — nothing knows, which is never a shorthand for "processed".
+ *
+ * Search resolves no provider, so it names no pause reason and evaluates no consent: probing for
+ * providers would spawn subprocesses on a passive read, and neither input can change the claim.
+ */
+function processingCoverage(
+  scope: DatabaseHistoryScope,
+  context: CanonicalSearchContext,
+  readable: readonly SearchKnowledgeProject[]
+): KnowledgeProcessingCoverage | null {
+  const only = readable.length === 1 ? readable[0]! : null;
+  if (only === null || scope.gitContext === null) return null;
+  const history = readProjectProcessingHistory(only.database);
+  return processingCoverageOf({
+    enabled: context.config.knowledge_processing.enabled,
+    source: {
+      kind: context.configSource?.kind ?? 'none',
+      path: context.configSource?.configPath ?? '',
+    },
+    history,
+    consent: null,
+    boundary: history.boundary,
+  });
+}
+
+type CanonicalSearchResult = Awaited<ReturnType<typeof readCanonicalSearch>>;
+
+const quoted = (statement: string | null) =>
+  statement === null ? 'wording this store does not hold' : `"${statement}"`;
+
+/** What stands for a group now, as the composer answered it — never as this line decides it. */
+export function knowledgeStandingLine(
+  record: SearchKnowledgeRecord,
+  groups: readonly SearchKnowledgeGroup[]
 ): string {
+  const group = groups.find((entry) => entry.key === record.group);
+  const standing = group?.revisions.filter((revision) =>
+    group.governing.includes(revision.revision_id)
+  );
+  const stands =
+    standing === undefined || standing.length === 0
+      ? null
+      : standing.map((revision) => quoted(revision.statement)).join('; ');
+  if (record.wording === 'stands') return `${record.group}: stands`;
+  if (record.wording === 'background')
+    return `${record.group}: background, not a rule this work has to meet; what stands: ${stands ?? 'nothing'}`;
+  if (record.wording === 'superseded')
+    return `${record.group}: superseded by ${stands ?? 'a revision this read cannot state'}`;
+  // Withdrawn is about THIS wording. Another revision of the same identity may be adopted, and a
+  // line that said nothing stands would send a reader away from the rule that does.
+  if (record.wording === 'withdrawn')
+    return `${record.group}: withdrawn; what stands: ${stands ?? 'nothing'}`;
+  return `${record.group}: wording not tied to a revision; what stands: ${stands ?? 'nothing'}`;
+}
+
+export function formatCanonicalSearch(result: CanonicalSearchResult): string {
   const lines = [`search: "${result.query}" (${result.scope.kind})`, ''];
   if (result.results.length === 0)
     lines.push(
@@ -265,7 +373,12 @@ export function formatCanonicalSearch(
     lines.push(
       `  [${row.project}] ${row.artifact_id} [${row.origin}] [${row.match_class}] [${row.source_kind}] @ ${row.evidence_time ?? 'time unknown'}`
     );
-    lines.push(`    ${row.snippet}`, '');
+    lines.push(`    ${row.snippet}`);
+    for (const record of row.knowledge?.records ?? [])
+      lines.push(`    ${knowledgeStandingLine(record, result.knowledge.groups)}`);
+    for (const missing of row.knowledge?.incomplete ?? [])
+      lines.push(`    ${missing.identity}: incomplete entry. ${missing.reason}`);
+    lines.push('');
   }
   const counts = result.origin_counts;
   lines.push(
@@ -278,7 +391,20 @@ export function formatCanonicalSearch(
   );
   if (!result.page.ranking_complete)
     lines.push('Results are incomplete; missing history may change the order.');
-  for (const issue of result.completeness.issues) lines.push(`${issue.code}: ${issue.message}`);
+  const budget = result.knowledge.budget;
+  if (budget.entries_omitted > 0)
+    lines.push(
+      `${budget.entries_omitted} knowledge entr(y/ies) did not fit the ${budget.bytes}-byte ` +
+        'budget and are marked incomplete above; raise --knowledge-bytes or narrow --limit.'
+    );
+  const processing = result.knowledge.coverage.processing;
+  lines.push(
+    processing === null
+      ? 'Processing coverage: unread here, so nothing is claimed about interpreted knowledge.'
+      : `Processing coverage: ${processing.claim}. ${processing.statement}`
+  );
+  for (const issue of result.completeness.issues)
+    lines.push(`${issue.project_id ?? 'scope'}: ${issue.code}: ${issue.message}`);
   if (result.page.next_offset !== null)
     lines.push(`Next page: --offset ${result.page.next_offset}`);
   return lines.join('\n') + '\n';

@@ -53,6 +53,7 @@ describe('revision-non-goals-stable (runFixture)', () => {
     expect(r.exitCode).toBe(0);
     expect(r.envelope.verdict).toBe('pass');
     expect(r.envelope.body).toMatch(/Non-goals unchanged across revision/);
+    expect(r.envelope.findings).toBeUndefined();
   });
 
   it('violation: revision removes a non-goal', async () => {
@@ -74,5 +75,14 @@ describe('revision-non-goals-stable (runFixture)', () => {
     expect(r.exitCode).toBe(0);
     expect(r.envelope.verdict).toBe('violation');
     expect(r.envelope.body).toMatch(/removed 1 non-goal/);
+    // A non-goal has no id and its wording is all that distinguishes it, so
+    // the finding carries no key: an identity built out of text is one the
+    // protocol refuses to invent.
+    expect(r.envelope.findings).toEqual([
+      {
+        title: 'Revision n=1 removed the non-goal "no schema migration"',
+        detail: 'The prior plan declared it out of scope; this revision does not.',
+      },
+    ]);
   });
 });

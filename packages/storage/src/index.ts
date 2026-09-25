@@ -17,6 +17,7 @@ export * from './usage/index.js';
 export * from './schema/capture-exclude.js';
 export * from './text/control-chars.js';
 export * from './text/secret-guard.js';
+export * from './text/interpretation-preparation.js';
 export {
   prepareArtifactDraft,
   type ArtifactDraftInput,

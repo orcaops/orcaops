@@ -66,6 +66,8 @@ function watchThread(index: number, now: number): WatchThread {
     startedAtMs: now - 60_000,
     planDecisions: [],
     nonGoals: [],
+    knowledge: null,
+    knowledgeUnavailable: null,
     recentEvents: [],
     omittedEvents: 0,
     activityWindowComplete: true,

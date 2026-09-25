@@ -8,9 +8,9 @@ import {
 } from './provenance-output.js';
 
 export const PROVENANCE_FOLLOW_UP = [
-  'Inspect artifact history: orcaops show <artifact_id> --project <project_id> --json',
-  'Explain a line: orcaops why <file>:<line> --json --details --limit 1; read best when present.',
-  'Inspect full candidate evidence: repeat this query with --json --details (may produce large responses).',
+  'Explain a target: orcaops why <file> --json --view rationale --limit 5.',
+  'Inspect one candidate: repeat why with --details --candidate <returned-id> --anchor <inspection.anchor> --json, preserving target and scope.',
+  'Only for missing broader chronology: orcaops show <artifact_id> --project <project_id> --json.',
   'show inspects artifact history; it does not reproduce an exact historical candidate view.',
 ] as const;
 
@@ -54,6 +54,7 @@ export function projectProvenanceJson(
       next_offset: result.pagination.has_more ? result.pagination.offset + returned : null,
     },
     candidate_selection: result.candidate_selection,
+    knowledge: result.knowledge,
     project_coverage: {
       ...result.project_coverage,
       issues: details

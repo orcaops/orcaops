@@ -62,8 +62,9 @@ back per verb below, never guess.
 
 # salvage
 
-1. Find the abandoned cp + reason: \`orcaops show <id> --json\`
-   (\`status: "abandoned"\`, \`abandon_reason\`).
+1. Find the abandoned cp + reason: \`orcaops show <id> --json\`, then the
+   \`artifact.checkpoints[]\` entry with \`status: "abandoned"\`; its
+   \`reason\` field holds the recorded abandon reason.
 2. The abandoned window's diff:
    \`\`\`bash
    orcaops snapshots diff <n> --artifact <id> --json   # open..abandon by default

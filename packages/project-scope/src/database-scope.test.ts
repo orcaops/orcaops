@@ -237,6 +237,9 @@ it('validates registration before opening another root and never replaces missin
   expect(wrong.completeness.issues).toContainEqual(
     expect.objectContaining({ code: 'AUTHORITY_MISMATCH', project_id: f.authority.projectId })
   );
+  const mismatch = wrong.completeness.issues.find((entry) => entry.code === 'AUTHORITY_MISMATCH');
+  expect(mismatch?.message).toContain(f.authority.resolvedRoot);
+  expect(mismatch?.message).toContain('ORCAOPS_DATA_DIR');
   await expect(readdir(other)).rejects.toMatchObject({ code: 'ENOENT' });
   f.writer.close();
   writers.delete(f.writer);

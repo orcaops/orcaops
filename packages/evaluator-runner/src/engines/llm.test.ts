@@ -152,7 +152,7 @@ describe('runLlmEngine — markdown mode', () => {
   }
 
   it('reports LLM_UNAVAILABLE instead of parsing a synthetic verdict', async () => {
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({
         prompt_file: 'prompts/not-read.md',
         package_root: tmpRoot,
@@ -178,7 +178,7 @@ describe('runLlmEngine — markdown mode', () => {
       costUsd: 0.001,
     });
 
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
       context: makeContext(),
       run_id: RUN_ID,
@@ -199,6 +199,133 @@ describe('runLlmEngine — markdown mode', () => {
     expect(out.checkpoint_n).toBe(2);
   });
 
+  it('reads an optional findings block beside the verdict', async () => {
+    const prompt = await writePrompt('task');
+    const client = makeStubClient({
+      body: [
+        'Criterion c1 is satisfied.',
+        '',
+        '```orcaops-findings',
+        JSON.stringify({
+          schema: 'orcaops.evaluator_findings/v1',
+          findings: [
+            {
+              key: 'criterion/c1',
+              title: 'Criterion c1 is satisfied by the delivered tests',
+              locations: [{ kind: 'acceptance-criterion', criterion_id: 'c1' }],
+              conclusion: 'supported',
+            },
+          ],
+        }),
+        '```',
+        '',
+        '```orcaops-verdict',
+        'PASS',
+        '```',
+      ].join('\n'),
+      model: 'claude',
+      sessionId: 'sess',
+      durationMs: 100,
+    });
+
+    const out = await runLlmEngine({
+      evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
+      context: makeContext(),
+      run_id: RUN_ID,
+      llm: client,
+    });
+
+    expect(out.run.run_status).toBe('completed');
+    expect(out.run.verdict).toBe('pass');
+    if (out.findings.status !== 'established') throw new Error('expected established findings');
+    expect(out.findings.record.findings).toEqual([
+      {
+        key: 'criterion/c1',
+        title: 'Criterion c1 is satisfied by the delivered tests',
+        locations: [{ kind: 'acceptance-criterion', criterion_id: 'c1' }],
+        conclusion: 'supported',
+      },
+    ]);
+    expect(Object.hasOwn(out.run, 'findings')).toBe(false);
+  });
+
+  it('hands over no findings when the response carries no block', async () => {
+    const prompt = await writePrompt('task');
+    const client = makeStubClient({
+      body: 'PASS\n\nNothing to report.',
+      model: 'claude',
+      sessionId: 'sess',
+      durationMs: 100,
+    });
+    const out = await runLlmEngine({
+      evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
+      context: makeContext(),
+      run_id: RUN_ID,
+      llm: client,
+    });
+    expect(out.run.verdict).toBe('pass');
+    expect(out.findings).toEqual({ status: 'none' });
+  });
+
+  it('keeps the verdict when the findings block cannot be read', async () => {
+    const prompt = await writePrompt('task');
+    const block = [
+      '```orcaops-findings',
+      JSON.stringify({ schema: 'orcaops.evaluator_findings/v1', findings: [] }),
+      '```',
+    ].join('\n');
+    const client = makeStubClient({
+      // Two top-level blocks: refusing to guess costs the findings, never the
+      // verdict the model stated and the runner understood.
+      body: ['VIOLATION', '', block, '', block].join('\n'),
+      model: 'claude',
+      sessionId: 'sess',
+      durationMs: 100,
+    });
+
+    const out = await runLlmEngine({
+      evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
+      context: makeContext(),
+      run_id: RUN_ID,
+      llm: client,
+    });
+
+    expect(out.run.run_status).toBe('completed');
+    expect(out.run.verdict).toBe('violation');
+    expect(out.run.error).toBeUndefined();
+    if (out.findings.status !== 'unreadable') throw new Error('expected unreadable findings');
+    expect(out.findings.record.source).toBe('markdown-block');
+    expect(out.findings.record.detail).toMatch(/more than one/);
+  });
+
+  it('hands over no findings from a response that carried no verdict', async () => {
+    // An error run established nothing, whatever the response also offered.
+    const prompt = await writePrompt('task');
+    const client = makeStubClient({
+      body: [
+        'I am not going to commit to a verdict.',
+        '```orcaops-findings',
+        JSON.stringify({
+          schema: 'orcaops.evaluator_findings/v1',
+          findings: [{ title: 'something I noticed' }],
+        }),
+        '```',
+      ].join('\n'),
+      model: 'claude',
+      sessionId: 'sess',
+      durationMs: 50,
+    });
+    const out = await runLlmEngine({
+      evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
+      context: makeContext(),
+      run_id: RUN_ID,
+      llm: client,
+    });
+    expect(out.run.run_status).toBe('error');
+    expect(out.run.error?.code).toBe('NO_VERDICT_LINE');
+    expect(out.findings).toEqual({ status: 'none' });
+  });
+
   it('returns NO_VERDICT_LINE when the response lacks a standalone verdict', async () => {
     const prompt = await writePrompt('task');
     const client = makeStubClient({
@@ -207,7 +334,7 @@ describe('runLlmEngine — markdown mode', () => {
       sessionId: 'sess',
       durationMs: 50,
     });
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
       context: makeContext(),
       run_id: RUN_ID,
@@ -226,7 +353,7 @@ describe('runLlmEngine — markdown mode', () => {
       durationMs: 5000,
       error: { code: 'TIMEOUT', message: 'timed out after 5s' },
     });
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
       context: makeContext(),
       run_id: RUN_ID,
@@ -248,7 +375,7 @@ describe('runLlmEngine — markdown mode', () => {
       error: { code: 'TOOL_ERROR', message: `upstream echoed ${secret}` },
     });
 
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
       context: makeContext(),
       run_id: RUN_ID,
@@ -273,7 +400,7 @@ describe('runLlmEngine — markdown mode', () => {
       durationMs: 50,
     });
 
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
       context: makeContext(),
       run_id: RUN_ID,
@@ -362,7 +489,7 @@ describe('runLlmEngine — markdown mode', () => {
       sessionId: 'sess',
       durationMs: 100,
     });
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
       context: makeContext(),
       run_id: RUN_ID,
@@ -406,7 +533,7 @@ describe('runLlmEngine — markdown mode', () => {
       sessionId: 'sess',
       durationMs: 100,
     });
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
       context: makeContext(),
       run_id: RUN_ID,
@@ -428,7 +555,7 @@ describe('runLlmEngine — markdown mode', () => {
       durationMs: 100,
     });
 
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
       context: makeContext(),
       run_id: RUN_ID,
@@ -442,7 +569,7 @@ describe('runLlmEngine — markdown mode', () => {
   });
 
   it('returns LLM_ERROR when the prompt_file cannot be read', async () => {
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({
         prompt_file: '/this/path/does/not/exist',
         package_root: tmpRoot,
@@ -468,7 +595,7 @@ describe('runLlmEngine — markdown mode', () => {
       durationMs: 1,
     });
 
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({ prompt_file: link, package_root: tmpRoot }),
       context: makeContext(),
       run_id: RUN_ID,
@@ -506,7 +633,7 @@ describe('runLlmEngine — json mode', () => {
     const split = `${secret.slice(0, 20)}${String.fromCharCode(0x1b)}${secret.slice(20)}`;
     const client = makeStubClient({
       body: JSON.stringify({
-        schema: 'orcaops.evaluator_result/v1',
+        schema: 'orcaops.evaluator_result/v2',
         verdict: 'violation',
         body: 'VIOLATION\n\nfindings...',
         raw: { constructor: 'poison', count: 3, detail: secret },
@@ -516,7 +643,7 @@ describe('runLlmEngine — json mode', () => {
       sessionId: 'sess',
       durationMs: 150,
     });
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({
         prompt_file: prompt,
         package_root: tmpRoot,
@@ -538,13 +665,156 @@ describe('runLlmEngine — json mode', () => {
     expect(out.metrics).toEqual({ files_scanned: 12, '[REDACTED_SECRET]': 13 });
   });
 
+  it('hands over the envelope findings without touching the run payload', async () => {
+    const prompt = await writePrompt();
+    const client = makeStubClient({
+      body: JSON.stringify({
+        schema: 'orcaops.evaluator_result/v2',
+        verdict: 'violation',
+        body: 'VIOLATION',
+        findings: [{ key: 'rule/one', title: 'the first thing it found' }],
+      }),
+      model: 'claude',
+      sessionId: 's',
+      durationMs: 50,
+    });
+    const out = await runLlmEngine({
+      evaluator: makeLlmEvaluator({
+        prompt_file: prompt,
+        package_root: tmpRoot,
+        output_format: 'json',
+      }),
+      context: makeContext(),
+      run_id: RUN_ID,
+      llm: client,
+    });
+    expect(out.run.verdict).toBe('violation');
+    if (out.findings.status !== 'established') throw new Error('expected established findings');
+    expect(out.findings.record.findings).toEqual([
+      { key: 'rule/one', title: 'the first thing it found' },
+    ]);
+    expect(JSON.stringify(out.run)).not.toContain('the first thing it found');
+  });
+
+  it('keeps the verdict when the envelope findings fail on their own', async () => {
+    const prompt = await writePrompt();
+    const client = makeStubClient({
+      body: JSON.stringify({
+        schema: 'orcaops.evaluator_result/v2',
+        verdict: 'violation',
+        body: 'VIOLATION',
+        findings: [{ title: 'a statement', locations: [{ kind: 'file' }] }],
+      }),
+      model: 'claude',
+      sessionId: 's',
+      durationMs: 50,
+    });
+    const out = await runLlmEngine({
+      evaluator: makeLlmEvaluator({
+        prompt_file: prompt,
+        package_root: tmpRoot,
+        output_format: 'json',
+      }),
+      context: makeContext(),
+      run_id: RUN_ID,
+      llm: client,
+    });
+    // One attempt: bad findings are not a malformed envelope, so there is
+    // nothing for a retry to fix and nothing for the gate to notice.
+    expect(client.calls).toHaveLength(1);
+    expect(out.run.run_status).toBe('completed');
+    expect(out.run.verdict).toBe('violation');
+    expect(out.findings.status).toBe('unreadable');
+  });
+
+  it('does not spend the retry on a superseded protocol version', async () => {
+    // A nudge cannot change which protocol version a pack was built against,
+    // so a second call is a paid call that cannot succeed.
+    const prompt = await writePrompt();
+    const client = makeStubClient({
+      body: JSON.stringify({
+        schema: 'orcaops.evaluator_result/v1',
+        verdict: 'pass',
+        body: 'PASS',
+      }),
+      model: 'claude',
+      sessionId: 's',
+      durationMs: 50,
+    });
+    const { run: out } = await runLlmEngine({
+      evaluator: makeLlmEvaluator({
+        prompt_file: prompt,
+        package_root: tmpRoot,
+        output_format: 'json',
+      }),
+      context: makeContext(),
+      run_id: RUN_ID,
+      llm: client,
+    });
+    expect(client.calls).toHaveLength(1);
+    expect(out.run_status).toBe('error');
+    expect(out.error?.code).toBe('UNSUPPORTED_PROTOCOL');
+    expect(out.error?.message).toContain('@orcaops/evaluator-sdk');
+  });
+
+  it('does not spend the retry on an unrecognised protocol version', async () => {
+    const prompt = await writePrompt();
+    const client = makeStubClient({
+      body: JSON.stringify({ schema: 'acme.result/v9', verdict: 'pass', body: 'PASS' }),
+      model: 'claude',
+      sessionId: 's',
+      durationMs: 50,
+    });
+    const { run: out } = await runLlmEngine({
+      evaluator: makeLlmEvaluator({
+        prompt_file: prompt,
+        package_root: tmpRoot,
+        output_format: 'json',
+      }),
+      context: makeContext(),
+      run_id: RUN_ID,
+      llm: client,
+    });
+    expect(client.calls).toHaveLength(1);
+    expect(out.error?.code).toBe('UNSUPPORTED_PROTOCOL');
+    expect(out.error?.message).toContain('acme.result/v9');
+  });
+
+  it('names the current envelope literal in the retry nudge', async () => {
+    const prompt = await writePrompt();
+    const client = makeStubClient(
+      { body: 'not json at all', model: 'claude', sessionId: 's', durationMs: 50 },
+      {
+        body: JSON.stringify({
+          schema: 'orcaops.evaluator_result/v2',
+          verdict: 'info',
+          body: 'INFO',
+        }),
+        model: 'claude',
+        sessionId: 's',
+        durationMs: 50,
+      }
+    );
+    await runLlmEngine({
+      evaluator: makeLlmEvaluator({
+        prompt_file: prompt,
+        package_root: tmpRoot,
+        output_format: 'json',
+      }),
+      context: makeContext(),
+      run_id: RUN_ID,
+      llm: client,
+    });
+    expect(client.calls[1].prompt).toContain('orcaops.evaluator_result/v2');
+  });
+
   it('does NOT install the markdown system prompt in json mode', async () => {
     // It asks for markdown prose and a fenced sentinel, which would fight the
     // structured-output contract json mode is built on.
     const prompt = await writePrompt();
     const client = makeStubClient({
       body: JSON.stringify({
-        schema: 'orcaops.evaluator_result/v1',
+        schema: 'orcaops.evaluator_result/v2',
         verdict: 'pass',
         body: 'PASS',
       }),
@@ -573,7 +843,7 @@ describe('runLlmEngine — json mode', () => {
       // second attempt: valid envelope
       {
         body: JSON.stringify({
-          schema: 'orcaops.evaluator_result/v1',
+          schema: 'orcaops.evaluator_result/v2',
           verdict: 'info',
           body: 'INFO\n\nrecovered',
         }),
@@ -582,7 +852,7 @@ describe('runLlmEngine — json mode', () => {
         durationMs: 50,
       }
     );
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({
         prompt_file: prompt,
         package_root: tmpRoot,
@@ -604,7 +874,7 @@ describe('runLlmEngine — json mode', () => {
       { body: 'garbage', model: 'claude', sessionId: 's', durationMs: 50 },
       { body: 'still garbage', model: 'claude', sessionId: 's', durationMs: 50 }
     );
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({
         prompt_file: prompt,
         package_root: tmpRoot,
@@ -635,7 +905,7 @@ describe('runLlmEngine — json mode', () => {
         durationMs: 50,
       }
     );
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({
         prompt_file: prompt,
         package_root: tmpRoot,
@@ -652,7 +922,7 @@ describe('runLlmEngine — json mode', () => {
   it('returns RAW_SCHEMA_INVALID when raw fails the injected validator on every attempt', async () => {
     const prompt = await writePrompt();
     const envelope = {
-      schema: 'orcaops.evaluator_result/v1',
+      schema: 'orcaops.evaluator_result/v2',
       verdict: 'violation',
       body: 'VIOLATION',
       raw: { count: 'not-a-number' },
@@ -661,7 +931,7 @@ describe('runLlmEngine — json mode', () => {
       { body: JSON.stringify(envelope), model: 'claude', sessionId: 's', durationMs: 50 },
       { body: JSON.stringify(envelope), model: 'claude', sessionId: 's', durationMs: 50 }
     );
-    const out = await runLlmEngine({
+    const { run: out } = await runLlmEngine({
       evaluator: makeLlmEvaluator({
         prompt_file: prompt,
         package_root: tmpRoot,
@@ -688,7 +958,7 @@ describe('runLlmEngine — json mode', () => {
       sessionId: 's',
       durationMs: 50,
     });
-    const run = await runLlmEngine({
+    const { run: run } = await runLlmEngine({
       evaluator: {
         ...makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
         engine: {
@@ -720,7 +990,7 @@ describe('runLlmEngine — json mode', () => {
   it('omits an unknown model instead of writing the provider name', async () => {
     const prompt = await writePrompt();
     const client = makeStubClient({ body: 'PASS', model: null, sessionId: 's', durationMs: 50 });
-    const run = await runLlmEngine({
+    const { run: run } = await runLlmEngine({
       evaluator: makeLlmEvaluator({ prompt_file: prompt, package_root: tmpRoot }),
       context: makeContext(),
       run_id: RUN_ID,

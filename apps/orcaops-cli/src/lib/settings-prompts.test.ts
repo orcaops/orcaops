@@ -7,9 +7,17 @@ import {
 } from '@orcaops/adapters';
 import type { HintKey } from '@orcaops/storage';
 
-import { blockPrompt, hintsPrompt, sessionHooksPrompt } from './settings-prompts.js';
+import { blockPrompt, hintsPrompt, scopePrompt, sessionHooksPrompt } from './settings-prompts.js';
 
 describe('settings prompt copy', () => {
+  it('says what global scope still writes to the repo', () => {
+    const global = scopePrompt.options.find((option) => option.value === 'global')!;
+    expect(global.hint).toContain('.orcaops/');
+    expect(global.hint).toContain('.gitignore');
+    expect(global.hint).toContain('unless you keep it hands off');
+    expect(global.hint).not.toContain('adds nothing');
+  });
+
   it('names the repository instruction files — personal scope has none to offer', () => {
     const prompt = blockPrompt();
     expect(prompt.message).toContain('AGENTS.md / CLAUDE.md');

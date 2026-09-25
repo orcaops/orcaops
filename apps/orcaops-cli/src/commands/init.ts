@@ -308,6 +308,7 @@ interface InitResult {
   gitignore_added: string[];
   llm_tool: 'auto' | 'claude' | 'codex' | 'none';
   detected_llm_tool: 'claude' | 'codex' | null;
+  prefix: string;
   /** Primary install agent (first of `install_agents`); null when none. */
   agent_tool: ToolId | null;
   /** The full install set. */
@@ -873,7 +874,12 @@ async function runInit(
       path.relative(repoRoot, existingSource.configPath),
       INSTALL_MANIFEST_REL,
     ]);
-    if (tracked.length > 0) throw refuseTrackedPersonalTransition(tracked);
+    if (tracked.length > 0) {
+      throw refuseTrackedPersonalTransition(tracked, {
+        fromResetDefault:
+          opts.resetConfig === true && opts.scope === undefined && opts.personal !== true,
+      });
+    }
   }
   const priorDestination = movingSource
     ? await readRepositoryFileOrNull(
@@ -900,7 +906,10 @@ async function runInit(
   // writes ~10 lines (portable across CLI versions), and a preserving
   // --force re-init re-minimizes — `config` was seeded from the on-disk
   // JSON, so every effective non-default survives the round-trip.
-  const desiredConfig = JSON.stringify(buildConfigDelta(config), null, 2) + '\n';
+  const preservedVersion = preservingConfig
+    ? (rawCurrent as Record<string, unknown>).schema_version
+    : undefined;
+  const desiredConfig = JSON.stringify(buildConfigDelta(config, preservedVersion), null, 2) + '\n';
   const configMut = writeMutation(
     repoRoot,
     path.relative(repoRoot, destination.configPath),
@@ -911,7 +920,12 @@ async function runInit(
     destination.configPath
   );
   mutations.push(configMut);
-  if (configMut.changed && !created.includes(configRel)) {
+  // --force marks identical bytes as changed; only a content change counts as created.
+  if (
+    configMut.changed &&
+    configMut.desiredContent !== configMut.currentContent &&
+    !created.includes(configRel)
+  ) {
     created.push(configRel);
   }
   // An untracked worktree config left behind after publishing the shared one
@@ -983,9 +997,14 @@ async function runInit(
   const installedChanged = [...plan.generate.installed, ...plan.generate.refreshed];
   const skillsInstalled = installedChanged.filter((p) => p.includes('/skills/'));
   const commandsInstalled = installedChanged.filter((p) => !p.includes('/skills/'));
+  const identicalRewrites = new Set(
+    plan.mutations
+      .filter((m) => m.desiredContent !== null && m.desiredContent === m.currentContent)
+      .map((m) => m.path)
+  );
   const agentsMdResults: AgentsMdResult[] = plan.agentsMd.map((m) => ({
     path: m.path,
-    action: m.action,
+    action: m.action === 'replaced' && identicalRewrites.has(m.path) ? 'unchanged' : m.action,
   }));
   const warnings = [...personalWarnings, ...plan.warnings];
 
@@ -1235,6 +1254,7 @@ async function runInit(
     gitignore_added: gitignoreAdded,
     llm_tool: config.llm.tool,
     detected_llm_tool: null,
+    prefix: config.naming.prefix,
     agent_tool: config.install.agents[0] ?? null,
     install_agents: config.install.agents,
     scope: config.install.scope,
@@ -1377,7 +1397,7 @@ function formatHumanInitResult(r: InitResult | WorktreeInitResult): string {
     // Group installed paths by surface root (.claude/skills, .agents/skills,
     // …) so every agent's tree is named, not just the first agent's.
     for (const [root, count] of countByRoot(r.agent_skills_installed, 2)) {
-      lines.push(`  ${count} skill(s) at ${root}/orcaops-*/SKILL.md`);
+      lines.push(`  ${count} skill(s) at ${root}/${r.prefix}-*/SKILL.md`);
     }
     for (const [root, count] of countByRoot(r.agent_commands_installed, 1)) {
       lines.push(`  ${count} slash command(s) at ${root}/*.md`);
@@ -1387,7 +1407,7 @@ function formatHumanInitResult(r: InitResult | WorktreeInitResult): string {
   if (r.global?.skipped_version_mismatch) {
     lines.push(
       `Global install: SKIPPED filesystem changes (CLI v${CLI_VERSION} vs ` +
-        `manifest v${r.global.materialized_by}); refs updated.`,
+        `manifest v${r.global.materialized_by}); references unchanged.`,
       ''
     );
   } else if (r.global) {
@@ -1524,12 +1544,7 @@ function formatHumanInitResult(r: InitResult | WorktreeInitResult): string {
     lines.push('');
   }
   if (r.llm_tool === 'none') {
-    if (r.detected_llm_tool === null) {
-      lines.push('LLM tool: none (no `claude` or `codex` found on PATH).');
-      lines.push('LLM evaluators will be skipped until a provider CLI is installed.');
-    } else {
-      lines.push('LLM disabled via --no-llm. Evaluators will run in deterministic-only mode.');
-    }
+    lines.push('LLM tool: none (llm.tool is "none"). Evaluators run in deterministic-only mode.');
   } else {
     lines.push(`LLM tool: ${r.llm_tool} (piggybacks on your local subscription — no API key).`);
   }

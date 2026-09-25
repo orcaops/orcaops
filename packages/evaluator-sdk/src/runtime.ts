@@ -1,4 +1,4 @@
-import type { EvaluatorContext, EvaluatorResultEnvelope } from '@orcaops/evaluator-protocol';
+import type { EvaluatorContext, EvaluatorResultEnvelopeV2 } from '@orcaops/evaluator-protocol';
 
 import { ORCAOPS_CONTEXT_PATH_ENV, readEvaluatorContext } from './context.js';
 import { safeExecute } from './errors.js';
@@ -19,7 +19,7 @@ import { writeResult } from './result.js';
  * Any thrown error becomes a non-zero process exit via `safeExecute`.
  */
 export function runIfDispatched(
-  check: (ctx: EvaluatorContext) => EvaluatorResultEnvelope | Promise<EvaluatorResultEnvelope>
+  check: (ctx: EvaluatorContext) => EvaluatorResultEnvelopeV2 | Promise<EvaluatorResultEnvelopeV2>
 ): void {
   if (!process.env[ORCAOPS_CONTEXT_PATH_ENV]) return;
   safeExecute(async () => {

@@ -20,6 +20,7 @@ export const REMOTE_TRANSPORT_METHODS = [
   'sourcePlan.attachPin',
   'sourcePlan.create',
   'sourcePlan.reviewPush',
+  'sourcePlan.reviewRequest',
   'sourcePlan.reviewPropose',
   'sourcePlan.reviewComment',
   'sourcePlan.setReviewerVerdict',

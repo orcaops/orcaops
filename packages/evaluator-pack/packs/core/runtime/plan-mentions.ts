@@ -1,6 +1,18 @@
 #!/usr/bin/env node
-import type { EvaluatorContext, EvaluatorResultEnvelope } from '@orcaops/evaluator-protocol';
-import { pass, runIfDispatched, violation } from '@orcaops/evaluator-sdk';
+import type {
+  EvaluatorContext,
+  EvaluatorFinding,
+  EvaluatorResultEnvelopeV2,
+} from '@orcaops/evaluator-protocol';
+import {
+  acceptanceCriterionLocation,
+  finding,
+  findingKey,
+  pass,
+  planStepLocation,
+  runIfDispatched,
+  violation,
+} from '@orcaops/evaluator-sdk';
 
 interface Params {
   tokens: string[];
@@ -10,6 +22,8 @@ interface Params {
 interface EvidenceSource {
   stepIndex: number;
   criterionIndex: number | null;
+  stepId: string;
+  criterionId: string | null;
   stepText: string;
   text: string;
 }
@@ -35,7 +49,7 @@ const SUFFIX_NEGATIONS = [
   /^\s+(?:won't|will not|shouldn't|should not|mustn't|must not)\s+(?:be\s+)?(?:run|executed|added|updated)\b/u,
 ];
 
-export function check(ctx: EvaluatorContext): EvaluatorResultEnvelope {
+export function check(ctx: EvaluatorContext): EvaluatorResultEnvelopeV2 {
   const args = parseParams(ctx.params);
   const sources = evidenceSources(ctx);
   const available = inspectedCounts(sources);
@@ -92,6 +106,13 @@ export function check(ctx: EvaluatorContext): EvaluatorResultEnvelope {
     const list = matches.map(formatMatch).join('\n');
     return pass(`PASS\n\n## findings\n${list}`, {
       raw: { matches: matches.map(rawMatch), inspected: inspectedCounts(sources) },
+      findings: matches.map((match) =>
+        matchFinding(
+          match,
+          `Test intent \`${match.matched}\` is stated in ${locationLabel(match)}`,
+          match.text
+        )
+      ),
     });
   }
 
@@ -112,8 +133,47 @@ export function check(ctx: EvaluatorContext): EvaluatorResultEnvelope {
         inspected,
         negatedMatches: negatedMatches.map(rawMatch),
       },
+      // Only the negated evidence is a finding here: it is the per-item result
+      // this evaluator computes, and each entry names the step or criterion
+      // whose wording turned a mention into a non-mention. The absence of any
+      // positive match is the verdict, not a finding about a named thing.
+      findings: negatedMatches.map((match) =>
+        matchFinding(
+          match,
+          `Mention of \`${match.matched}\` in ${locationLabel(match)} is negated, so it is not test intent`,
+          match.text
+        )
+      ),
     }
   );
+}
+
+/**
+ * A finding about one evidence source. Keyed on the criterion or step id —
+ * the identity the context already carries — so a later run naming the same
+ * id is naming the same thing.
+ */
+function matchFinding(match: EvidenceMatch, title: string, detail: string): EvaluatorFinding {
+  const location =
+    match.criterionId !== null
+      ? acceptanceCriterionLocation(match.criterionId)
+      : planStepLocation(match.stepId);
+  return finding({
+    key: findingKey(
+      match.criterionId !== null ? 'criterion' : 'step',
+      match.criterionId ?? match.stepId,
+      match.matched
+    ),
+    title,
+    detail,
+    locations: [location],
+  });
+}
+
+function locationLabel(match: EvidenceMatch): string {
+  return match.criterionIndex === null
+    ? `plan step ${match.stepIndex + 1}`
+    : `plan step ${match.stepIndex + 1}, criterion ${match.criterionIndex + 1}`;
 }
 
 function evidenceSources(ctx: EvaluatorContext): EvidenceSource[] {
@@ -121,12 +181,16 @@ function evidenceSources(ctx: EvaluatorContext): EvidenceSource[] {
     {
       stepIndex,
       criterionIndex: null,
+      stepId: step.step_id,
+      criterionId: null,
       stepText: step.text,
       text: step.text,
     },
     ...step.acceptance_criteria.map((criterion, criterionIndex) => ({
       stepIndex,
       criterionIndex,
+      stepId: step.step_id,
+      criterionId: criterion.criterion_id,
       stepText: step.text,
       text: criterion.text,
     })),
@@ -192,11 +256,7 @@ function inspectedCounts(sources: EvidenceSource[]): { steps: number; criteria: 
 }
 
 function formatMatch(match: EvidenceMatch): string {
-  const location =
-    match.criterionIndex === null
-      ? `step ${match.stepIndex + 1}`
-      : `step ${match.stepIndex + 1}, criterion ${match.criterionIndex + 1}`;
-  return `- \`${match.matched}\` in ${location}: ${match.text}`;
+  return `- \`${match.matched}\` in ${locationLabel(match)}: ${match.text}`;
 }
 
 function rawMatch(match: EvidenceMatch): Record<string, unknown> {

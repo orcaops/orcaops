@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import type { EvaluatorContext, EvaluatorResultEnvelope } from '@orcaops/evaluator-protocol';
-import { pass, runIfDispatched, violation } from '@orcaops/evaluator-sdk';
+import type { EvaluatorContext, EvaluatorResultEnvelopeV2 } from '@orcaops/evaluator-protocol';
+import { finding, pass, runIfDispatched, violation } from '@orcaops/evaluator-sdk';
 
-export function check(ctx: EvaluatorContext): EvaluatorResultEnvelope {
+export function check(ctx: EvaluatorContext): EvaluatorResultEnvelopeV2 {
   if (ctx.plan.revision_n === 0) {
     return pass('PASS\n\nInitial plan capture has no prior revision to compare.', {
       raw: { revision_n: 0 },
@@ -40,7 +40,19 @@ export function check(ctx: EvaluatorContext): EvaluatorResultEnvelope {
       `${list}\n\nNon-goals are intentional out-of-scope boundaries; relaxing them silently is a ` +
       `scope-creep signal. If the removal is intentional, capture the rationale clearly so ` +
       `reviewers see what changed.`,
-    { raw: { revision_n: ctx.plan.revision_n, added, removed } }
+    {
+      raw: { revision_n: ctx.plan.revision_n, added, removed },
+      // One finding per removed non-goal. No key: a non-goal has no id, and
+      // its text is the only thing that distinguishes it — an identity built
+      // out of wording is exactly what the protocol refuses to invent. No
+      // location either: no location kind points at a non-goal.
+      findings: removed.map((text) =>
+        finding({
+          title: `Revision n=${ctx.plan.revision_n} removed the non-goal "${text}"`,
+          detail: `The prior plan declared it out of scope; this revision does not.`,
+        })
+      ),
+    }
   );
 }
 

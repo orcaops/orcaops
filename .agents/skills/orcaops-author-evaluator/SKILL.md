@@ -3,8 +3,8 @@ name: "Orcaops: author an evaluator"
 description: "Create and test an Orcaops evaluator. Use for \"write an evaluator that blocks X\" or \"add a check for Y at checkpoint close\"."
 disable-model-invocation: true
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "91f98f621f20"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "ad76ea846df5"
 ---
 
 # When to use
@@ -113,6 +113,15 @@ it: at `checkpoint-close` it is that checkpoint's **declared**
 It is the agent's claim about what it touched, not a diff orcaops
 computed — so a path filter trusts that claim.
 
+At `checkpoint-close` only, the context also carries
+`observed_changed_files`: every path git saw change between the
+checkpoint's open and close, reported or not. It is absent at every other
+phase and whenever orcaops recorded no tree for either end of the
+checkpoint, so read a missing field as unknown, never as "nothing
+changed". Filters still match `changed_files`; judge against
+`observed_changed_files` in your prompt or script when what actually
+changed matters.
+
 # 3. Pick the severity — and mean it
 
 - `info` — recorded, never surfaces as a problem.
@@ -192,7 +201,92 @@ delivered work against each step's rubric, so it declares all three of
 trips an extra consent class at install, so consumers see that the
 evaluator reads files.
 
-# 7. The rules the emitted schema does not carry
+# 7. What your evaluator answers with
+
+One envelope, whatever the engine: `orcaops.evaluator_result/v2`. A
+command engine prints it on stdout; an `output_format: json` LLM
+evaluator returns it as its whole response. Build it with `pass()` /
+`violation()` / `info()` and emit it with `writeResult()`, and the
+literal is never yours to type. `orcaops eval schema result` prints
+the field reference, a filled-in example, and the rules the shape
+cannot state.
+
+**A pack built against `orcaops.evaluator_result/v1` no longer runs.**
+Every run becomes an `UNSUPPORTED_PROTOCOL` error naming the package
+and the version line. Update `@orcaops/evaluator-sdk` to `0.2.x` and
+rebuild; if you build the JSON by hand, change that one literal to
+`orcaops.evaluator_result/v2`. Nothing else changed meaning and
+nothing was removed. Upgrade the pack BEFORE orcaops: an error from a
+`block`-severity evaluator cannot be acknowledged, dismissed, or
+policy-excepted, so a stale pack stops the human's next capture until
+it is rebuilt.
+
+## Findings — the part a consumer can act on
+
+`body` is your statement for a person to read. `findings` is the same
+statement in a shape orcaops can retain, point at a file or a
+criterion, and recognise again on a later run. Build each one with
+`finding()` and its locations with `fileLocation()`,
+`planStepLocation()`, `acceptanceCriterionLocation()`.
+
+Findings are OPTIONAL under every verdict and **never decide the
+gate**: a `pass` may carry findings, a `violation` may carry none, and
+blocking still reads only severity, the run's status, and the verdict.
+
+- `title` is the statement as one line; `detail` is the elaboration.
+- `locations` is what it points at, and pointing at nothing is a real
+  answer — "the rationale does not explain the trade-off" is a
+  legitimate finding about no particular file.
+- `conclusion` — `supported`, `contradicted`, `unresolved` — is
+  allowed ONLY on a finding carrying an expectation location:
+  `plan-step`, `acceptance-criterion`, `requirement` or `decision`. A
+  `file` location is where you looked, not what you graded. Say
+  `supported` when you verified something holds; nothing may read that
+  out of the absence of a finding.
+- `key` is cross-run identity, recognised per artifact and evaluator.
+  Set it only when a later run can name the same thing the same way —
+  a rule id, a path, a `step_id`, a `criterion_id`. Omit it otherwise;
+  nothing invents one, and nothing hashes your title into one. **A key
+  built from a timestamp, a run id, or a counter passes every check
+  and is still wrong**: it mints a fresh identity every run.
+  `findingKey()` joins segments and returns `undefined` rather than
+  sanitising, because a key with characters dropped names something
+  else.
+
+Two rules act on findings and they cut in opposite directions:
+
+- **Bounds truncate** — 100 findings, a 500-character title, a
+  4096-character detail, 10 locations. Crossing one shortens the
+  content and records what was cut. It never refuses, because a
+  length that turned a violation into an error run would be a count
+  deciding a gate.
+- **Shape refuses** — an unknown key, a bad location, a duplicate key,
+  a `conclusion` with no expectation. The verdict, the run's status,
+  and the gate stay exactly what they would have been, and what could
+  not be read is recorded separately with the reason.
+
+`writeResult()` validates strictly before writing, so a malformed
+finding fails in YOUR process with a field path instead of arriving as
+findings nobody can read.
+
+## Markdown prompts: the optional findings block
+
+A markdown-mode prompt can ask for one `orcaops-findings` block
+BEFORE the verdict sentinel — JSON, so no line of it can be a bare
+verdict token the fence-blind fallback would read. Exactly one block;
+two make the findings unreadable rather than picking one.
+
+**Indent your example by four spaces.** A fence indented four or more
+columns is literal code in CommonMark and opens nothing, so a model
+echoing your example produces no second block. Unlike the sentinel,
+last-block-wins does not save you here.
+
+Tell the model which location kinds it may use and that it may only
+use ids and paths the context block actually shows it. An invented
+`criterion_id` points at nothing, and nothing downstream can tell it
+apart from one that was copied.
+
+# 8. The rules the emitted schema does not carry
 
 `orcaops eval schema spec` gives you the structural shape. It is a
 projection, and it is generated: orcaops states these five rules as
@@ -235,7 +329,7 @@ Run `orcaops eval test` before you believe a spec is valid. It is
 authoritative; the projection is a map, and neither the projection nor
 the parser sees everything the resolver enforces.
 
-# 8. The test loop, in this order
+# 9. The test loop, in this order
 
 **First — the SDK loop.** An ordinary vitest run: no CLI, no repository,
 no provider. Build the context with `makeContext()` and
@@ -258,7 +352,10 @@ under test. Never hand-roll one.
   runner would and parses a response you supply, calling no provider.
   Assert on the context block for what the model would have seen —
   **including that sections you did not declare are absent** — and on the
-  verdict for what the runner would record.
+  verdict for what the runner would record. If your prompt asks for a
+  findings block, feed it the PROMPT BODY as the response and assert
+  the findings come back absent: that is the echo, and it is the one
+  failure a better model will not save you from.
 
 **Second — the CLI loop**, which exercises discovery, config, trust, and
 context building:
@@ -281,7 +378,7 @@ that.** It exists for one thing the fixture loop structurally cannot
 detect: a model that ignores the sentinel instruction. If the prompt is
 unchanged since the last real run, skip it.
 
-# 9. Where each shape comes from
+# 10. Where each shape comes from
 
 Do not copy a shape out of documentation. Every one is reachable.
 
@@ -297,14 +394,16 @@ also carries the directory layout, which no schema can express.
 | a manifest, and the pack layout | `orcaops eval schema manifest --example` |
 | the spec field reference | `orcaops eval schema spec` |
 | the manifest field reference | `orcaops eval schema manifest` |
-| the result envelope | `orcaops eval schema result` |
+| the result envelope, with an example | `orcaops eval schema result` |
 | the evaluator context | `makeContext()`, which parses through the real schema |
 | a plan step | `makePlanStep()` |
 | a result | `pass()` / `violation()` / `info()`, or `writeResult()` |
+| a finding and its locations | `finding()`, `fileLocation()`, `planStepLocation()`, `acceptanceCriterionLocation()` |
+| a recurrence key | `findingKey()` |
 | the test fixture file | `orcaops eval test --print-example-fixture` |
 
 The Zod schemas are public API too — `EvaluatorSchema`,
-`EvaluatorPackageSchema`, and `EvaluatorResultEnvelopeSchema` are
+`EvaluatorPackageSchema`, and `EvaluatorResultEnvelopeV2Schema` are
 exported from `@orcaops/evaluator-protocol` if you want to validate in
 your own tests. `orcaops eval schema` is a structural view of those;
 orcaops parsing is what actually decides.
@@ -315,7 +414,7 @@ your pure-function tests import the file without writing output or
 changing the exit status. Unexpected errors are diagnostics, not
 findings — let them throw rather than returning a violation.
 
-# 10. Stop here
+# 11. Stop here
 
 Register the pack against the working tree and hand back:
 

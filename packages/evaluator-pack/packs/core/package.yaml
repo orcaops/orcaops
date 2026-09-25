@@ -1,7 +1,7 @@
 schema: orcaops.evaluator_package/v1
 id: core
 name: orcaops/core
-version: 1.0.0
+version: 2.0.0
 description: >-
   First-party deterministic + LLM evaluators that cover the orcaops
   capture lifecycle: plan quality, plan-revision discipline, checkpoint

@@ -11,6 +11,7 @@ import type { EvaluateResult } from './types.js';
 
 const PUBLIC_RESULT_KEYS = [
   'body',
+  'jsonRepair',
   'model',
   'tokens',
   'costUsd',

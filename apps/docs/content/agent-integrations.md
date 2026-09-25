@@ -46,6 +46,9 @@ skills-only: the Copilot CLI and VS Code surface installed skills as
   Personal scope writes no instruction file and no repository settings entries —
   guidance comes from global skills and, with consent, machine-level session
   hooks. `git status` stays clean, diffs stay empty, and teammates see nothing.
+  Which agent invoked a command is received as that agent's assertion and never
+  authenticated; [What Orcaops enforces, and what it only observes](./local-data.md#what-orcaops-enforces-and-what-it-only-observes)
+  says so beside every other authority and consent check.
   Orcaops never edits a tracked file under personal scope (enforced at runtime:
   every planned installation write must land in the common dir's `orcaops/` files or
   `info/exclude`, git's hooks dir, or this worktree's `.orcaops/` working directory, never

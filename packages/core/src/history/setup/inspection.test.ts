@@ -417,6 +417,7 @@ describe('bounded setup discovery', () => {
   it('uses frozen installer presence and protects symlinked administration', async () => {
     const f = await fixture();
     await mkdir(path.join(f.cwd, '.orcaops'));
+    await writeFile(path.join(f.cwd, '.orcaops', 'index.sqlite'), '');
     await expect(
       inspectDatabaseSetup({ cwd: f.cwd, root: f.root.resolvedRoot })
     ).rejects.toMatchObject({ code: 'CONVERSION_REQUIRED' });

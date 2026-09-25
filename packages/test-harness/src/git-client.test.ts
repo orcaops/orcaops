@@ -32,12 +32,10 @@ describe('gitClient', () => {
     await git.commit('main');
   }
 
-  it('rejects a conflicted merge instead of reporting success', async () => {
+  it.each(['false', 'true'])('reports merge conflicts with rerere enabled=%s', async (enabled) => {
     const r = await repo();
+    await gitClient(r.path).addConfig('rerere.enabled', enabled);
     await diverge(r.path);
-    // git announces a conflict on STDOUT with an exit code and an empty stderr,
-    // so a stderr-keyed failure rule would call this a success and hand the
-    // caller a repo stuck mid-merge.
     await expect(gitClient(r.path).merge(['feat'])).rejects.toThrow(/CONFLICT/);
   });
 

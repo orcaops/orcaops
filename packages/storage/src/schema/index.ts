@@ -14,3 +14,6 @@ export * from './validation.js';
 export * from './diff-fingerprint.js';
 export * from './origin.js';
 export * from './git-import-enrichment.js';
+export * from './knowledge-contract.js';
+export * from './knowledge-processing-contract.js';
+export * from './knowledge-resolution.js';

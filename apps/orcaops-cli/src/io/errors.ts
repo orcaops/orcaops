@@ -518,6 +518,29 @@ export const ErrorCodes = {
    * scripts and the review-feedback skill branch on, not a cloud failure.
    */
   REVIEW_WATCH_TIMEOUT: 'REVIEW_WATCH_TIMEOUT',
+  /**
+   * `task uses record` was asked to record a use of a requirement or decision without saying who
+   * found the connection and when. The contract's own refusal: a use recorded outside the plan
+   * event's own operation is a connection found after the task, and a later connection is no
+   * proof that the task selected or considered the rule. The remedy is
+   * `--discovered-at`/`--discovered-by`, never dropping the distinction.
+   */
+  DISCOVERY_REQUIRED: 'DISCOVERY_REQUIRED',
+  /**
+   * `task uses record` was given a discoverer's name it cannot state a basis for: the process
+   * cannot read the account it runs as, and nothing local authenticates a name, so recording one
+   * would assert more than this command knows. Raised before the database is opened for writing,
+   * like `DISCOVERY_REQUIRED`. The remedy is an unknown actor through `--input`.
+   */
+  DISCOVERER_NOT_ATTRIBUTABLE: 'DISCOVERER_NOT_ATTRIBUTABLE',
+  /**
+   * The pre-PR pass refused because an act this task published rests on an authorization or an
+   * assignment that no longer stands: a revocation names it, or a delegation's validity no longer
+   * covers it. The message names each act, what it rested on, who revoked it and when, and what
+   * lifts it. Nothing is written by the refusal — the acts, what they rest on and the revocations
+   * are exactly as retained — and no pre-PR marker is minted.
+   */
+  AUTHORITY_REVOKED: 'AUTHORITY_REVOKED',
   INTERNAL: 'INTERNAL',
 } as const;
 

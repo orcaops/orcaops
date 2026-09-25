@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { CONFIG_SCHEMA_VERSION } from '@orcaops/storage';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -502,6 +501,38 @@ describe('orcaops configure (mocked TTY + clack)', () => {
     expect((after.session_hooks as { payload: string }).payload).toBe('state-aware');
   });
 
+  it('apply leaves a version 6 config on version 6', async () => {
+    await agent.runRaw([
+      'init',
+      '--scope',
+      'project',
+      '--yes',
+      '--json',
+      '--no-llm',
+      '--session-hooks',
+      '--agents',
+      'claude-code',
+    ]);
+    const cfgPath = await effectiveConfigPath(repo.path);
+    const parsed = JSON.parse(await configJson()) as Record<string, unknown>;
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(
+      cfgPath,
+      `${JSON.stringify({ ...parsed, schema_version: 6 }, null, 2)}\n`,
+      'utf8'
+    );
+
+    const m = await mocks();
+    prime(m.select, 'discard', 'session-hooks', 'state-aware', 'project', 'apply');
+    prime(m.confirm, false, true);
+
+    const r = await agent.runRaw(['configure']);
+    expect(r.exitCode).toBe(0);
+    const after = JSON.parse(await configJson()) as Record<string, unknown>;
+    expect(after.schema_version).toBe(6);
+    expect((after.session_hooks as { payload: string }).payload).toBe('state-aware');
+  });
+
   it('submenu: a plumbing change stars the group row; cancel there is Back, draft intact', async () => {
     await agent.runRaw(['init', '--yes', '--json', '--no-llm', '--agents', 'claude-code']);
     const m = await mocks();
@@ -742,7 +773,7 @@ describe('orcaops configure (mocked TTY + clack)', () => {
     expect(after.workflow).toEqual({ commit_inside_window: false });
   });
 
-  it('pins the current schema version when it rewrites the config', async () => {
+  it('raises the schema version only to the version the new workflow setting needs', async () => {
     await agent.runRaw([
       'init',
       '--scope',
@@ -772,7 +803,7 @@ describe('orcaops configure (mocked TTY + clack)', () => {
       schema_version: number;
       workflow: Record<string, unknown>;
     };
-    expect(after.schema_version).toBe(CONFIG_SCHEMA_VERSION);
+    expect(after.schema_version).toBe(7);
     expect(after.workflow).toEqual({ commit_inside_window: false });
   });
 

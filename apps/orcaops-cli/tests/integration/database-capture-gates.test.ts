@@ -3,7 +3,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { readProjectArtifact } from '@orcaops/storage/history/database';
+import {
+  readProjectArtifact,
+  readProjectEvaluatorRunFindings,
+} from '@orcaops/storage/history/database';
 import { inputFile } from '@orcaops/test-harness';
 
 import { fixture, grantEvaluatorPack } from '../helpers/database-history.js';
@@ -241,5 +244,56 @@ describe('registered database checkpoint-open gate', { timeout: 180_000 }, () =>
     );
     expect(nonGoals).toMatchObject({ phase: 'post-plan-revision', verdict: 'violation' });
     expect(nonGoals.body).toContain('No converter work');
+  });
+
+  it('retains what the gate found with the open it admitted, and nothing for one it refused', async () => {
+    const f = await fixture();
+    await grantEvaluatorPack(f, {
+      packageId: 'test-pack',
+      packRoot: TEST_PACK,
+      enable: { 'test-pack/scope-density-stub': true },
+    });
+    const { artifactId, steps } = await planWithSteps(f, 2);
+
+    const blocked = await open(f, {
+      idempotency_key: `open-${randomUUID()}`,
+      artifact_id: artifactId,
+      declared_step_ids: [steps[0]],
+    });
+    expect(blocked.result).toMatchObject({ status: 'blocked' });
+    // A refused open appends no run, so there is nothing for a finding to belong to.
+    for (const refused of blocked.result.evaluator_results as { run_id: string }[])
+      expect(readProjectEvaluatorRunFindings(f.writer, refused.run_id)).toEqual({
+        status: 'not-retained',
+      });
+
+    const excepted = await open(f, {
+      idempotency_key: `open-${randomUUID()}`,
+      artifact_id: artifactId,
+      declared_step_ids: [steps[0]],
+      policy_exceptions: [
+        {
+          evaluator: 'test-pack/scope-density-stub',
+          reason: 'the fixture stub always violates; the scope is deliberate',
+        },
+      ],
+    });
+    expect(excepted.raw.exitCode, excepted.raw.stdout + excepted.raw.stderr).toBe(0);
+
+    const admitted = readProjectArtifact(f.writer, artifactId)!.thread.evaluatorLog!.runs.find(
+      (entry) => entry.evaluator_ref === 'test-pack/scope-density-stub'
+    )!;
+    const retained = readProjectEvaluatorRunFindings(f.writer, admitted.run_id);
+    expect(retained.status).toBe('established');
+    if (retained.status !== 'established') throw new Error(retained.status);
+    expect(retained.findings.map((finding) => finding.key)).toEqual(['fixture/scope-density']);
+    expect(retained.basis.evaluatorRef).toBe('test-pack/scope-density-stub');
+    // An open that publishes a boundary ref is admitted first and settled from what the
+    // admission retained, so the handover is retained with the request.
+    expect(
+      f.writer.read((view) =>
+        view.get<{ n: number }>('SELECT count(*) AS n FROM pending_capture_evaluator_evidence')
+      ).value
+    ).toEqual({ n: 1 });
   });
 });

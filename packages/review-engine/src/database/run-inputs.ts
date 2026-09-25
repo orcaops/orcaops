@@ -2,12 +2,16 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 
+import { knowledgeBlock } from '@orcaops/core';
 import { ATTRIBUTION_RUNG, coverageItemSchema, coverageSummarySchema } from '@orcaops/review-core';
-import { canonicalJson } from '@orcaops/storage';
+import { canonicalJson, type EventWithPayload } from '@orcaops/storage';
 import {
   type ArtifactRevision,
+  type KnowledgeBoundary,
   type ProjectDatabase,
+  projectTaskKnowledgeContext,
   readProjectArtifact,
+  writeSequencesOf,
 } from '@orcaops/storage/history/database';
 
 import { buildClaimLedger, type CheckpointClaims } from '../claimLedger.js';
@@ -15,6 +19,9 @@ import {
   ACCOUNT_CORPUS_CEILING_BYTES,
   buildDossier,
   DOSSIER_BUDGET_V1,
+  DOSSIER_KNOWLEDGE_BOUNDS,
+  dossierKnowledge,
+  type DossierTaskKnowledge,
   FORENSIC_TRANSPORT_CEILING_BYTES,
 } from '../dossier.js';
 import { floorSelectionSchema, requireFloorSelection } from './floor-preparation.js';
@@ -177,6 +184,84 @@ export async function prepareDatabaseReviewRunInputs(
     prepareRunInputsWithDatabase(database, input, options)
   );
 }
+function lastPlanEventId(events: readonly EventWithPayload[]): string | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const { record } = events[i]!;
+    if (record.type === 'plan_captured' || record.type === 'plan_revised') return record.event_id;
+  }
+  return null;
+}
+
+/** A review member as the run retains it: its thread at the exact revision the floor pinned. */
+export interface ReviewKnowledgeMember {
+  readonly artifactId: string;
+  readonly events: readonly EventWithPayload[];
+}
+
+export interface ReviewKnowledgeAt {
+  readonly members: readonly ReviewKnowledgeMember[];
+  /**
+   * The write sequence the floor publication committed at, or `'now'` for a read no floor pins.
+   * A run's inputs are compared byte for byte against a re-preparation from its retained floor,
+   * so the knowledge they carry has to be a function of that floor: the current boundary moves
+   * with every write, the floor's does not.
+   */
+  readonly boundary: KnowledgeBoundary;
+}
+
+/**
+ * What continuing knowledge the reviewed work is answerable to, for the account lane.
+ *
+ * Each member is resolved independently in artifact scope, against the plan retained in that
+ * member revision. Combining them into one project-scoped answer would let one task's local rule
+ * govern another and could compare every rule against only one member's plan.
+ *
+ * The processing coverage is null: this path resolves no provider and evaluates no consent grant,
+ * so it claims no completeness and the block's coverage statement says exactly that.
+ */
+export function reviewKnowledge(
+  database: ProjectDatabase,
+  at: ReviewKnowledgeAt
+): DossierTaskKnowledge {
+  const projectId = database.authority.projectId;
+  const tasks = database.read((view) =>
+    at.members.map((member) => {
+      const retainedPlanEventId = lastPlanEventId(member.events);
+      const task = projectTaskKnowledgeContext(view, {
+        projectId,
+        artifactId: member.artifactId,
+        boundary: at.boundary,
+        plan:
+          retainedPlanEventId === null
+            ? { kind: 'latest_visible' }
+            : { kind: 'exact', planEventId: retainedPlanEventId },
+      });
+      const planEventId = task.selectedPlan?.planEventId ?? null;
+      return {
+        artifactId: member.artifactId,
+        planEventId,
+        knowledge: dossierKnowledge(
+          knowledgeBlock(task.knowledge, {
+            plan: planEventId === null ? null : { artifactId: member.artifactId, planEventId },
+            bounds: DOSSIER_KNOWLEDGE_BOUNDS,
+          })
+        ),
+      };
+    })
+  ).value;
+  return { schema_version: 1, tasks };
+}
+
+/** The write sequence the floor publication committed at: the boundary every run on it reads at. */
+function floorBoundary(database: ProjectDatabase, publicationOperationId: string): number {
+  const sequence = database.read(
+    (view) => writeSequencesOf(view, [publicationOperationId]).get(publicationOperationId) ?? null
+  ).value;
+  if (sequence === null)
+    integrity('The floor publication operation is missing; preserve history for explicit repair');
+  return sequence;
+}
+
 export async function prepareRunInputsWithDatabase(
   database: ProjectDatabase,
   input: PrepareDatabaseReviewRunInputs,
@@ -206,6 +291,7 @@ export async function prepareRunInputsWithDatabase(
   )
     stale('The floor does not retain this exact membership; prepare a new floor before the run');
   const claims: CheckpointClaims[] = [];
+  const threads: ReviewKnowledgeMember[] = [];
   for (const member of review.value.membership.members) {
     cancelled(options.signal);
     const revision = database.read((view) =>
@@ -219,6 +305,7 @@ export async function prepareRunInputsWithDatabase(
       integrity('Retained run member revision is missing; preserve history for repair');
     const artifact = readProjectArtifact(database, member.artifactId, revision);
     if (!artifact) integrity('Retained run member history is missing; preserve history for repair');
+    threads.push({ artifactId: member.artifactId, events: artifact.thread.events });
     for (const checkpoint of artifact.thread.checkpoints)
       claims.push({
         artifact: member.artifactId,
@@ -249,6 +336,10 @@ export async function prepareRunInputsWithDatabase(
     branch: floor.scope.branch,
     baseSha: floor.scope.base_sha,
     generatedAt: input.generatedAt,
+    taskKnowledge: reviewKnowledge(database, {
+      members: threads,
+      boundary: floorBoundary(database, retained.value.publicationOperationId),
+    }),
     ...input.policy,
   });
   cancelled(options.signal);

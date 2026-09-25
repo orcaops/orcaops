@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+    # ready_for_review runs the legs a draft skipped.
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -14,8 +16,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      compile-runner: ${{ steps.gate.outputs.compile-runner }}
+      smoke-matrix: ${{ steps.gate.outputs.smoke-matrix }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: '.nvmrc'
+      - name: Decide the release matrix
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Read live, not from the event payload: a re-run replays the payload
+          # it started with, so a label added afterwards would never be seen.
+          if [ -n "$PR_NUMBER" ]; then
+            PR_LABELS="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '[.labels[].name]')"
+            export PR_LABELS
+          fi
+          node scripts/ci-gate.mjs
+
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: corepack enable
@@ -50,6 +87,7 @@ jobs:
 
   typecheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: corepack enable
@@ -75,7 +113,9 @@ jobs:
         run: pnpm typecheck:tests
 
   test:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: corepack enable
@@ -112,7 +152,9 @@ jobs:
         run: pnpm exec turbo run perf:review-cap --filter=@orcaops/watch
 
   test-heavy:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -143,7 +185,9 @@ jobs:
         run: pnpm test --only=@orcaops/${{ matrix.package }}
 
   test-cli:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -181,6 +225,7 @@ jobs:
   coverage:
     needs: test-cli
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: corepack enable
@@ -204,9 +249,13 @@ jobs:
       - name: Enforce merged CLI coverage thresholds
         run: pnpm --filter @orcaops/cli exec vitest --merge-reports --coverage
 
-  # Darwin signing and Bun executable cross-compilation require a Mac.
+  # Bun cross-compiles every platform from any host, but Darwin executables are
+  # re-signed only on a Mac, so the macOS runner is used only when the release
+  # matrix includes macOS legs.
   watch-compile:
-    runs-on: macos-15
+    needs: changes
+    runs-on: ${{ needs.changes.outputs.compile-runner }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: corepack enable
@@ -222,7 +271,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.bun/install/cache
-          key: bun-targets-${{ hashFiles('.bun-version') }}
+          key: bun-targets-${{ runner.os }}-${{ hashFiles('.bun-version') }}
       - run: pnpm install --frozen-lockfile
       - name: Build
         run: pnpm build
@@ -243,18 +292,12 @@ jobs:
   # The release as a user gets it: installed through a registry of the packed
   # artifacts, on hosts that never heard of Bun, on both Node lines.
   install-smoke:
-    needs: watch-compile
+    needs: [changes, watch-compile]
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15]
-        node: [22, 24]
-        include:
-          - os: ubuntu-24.04-arm
-            node: 22
-          - os: macos-15-intel
-            node: 22
+      matrix: ${{ fromJSON(needs.changes.outputs.smoke-matrix) }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: corepack enable
@@ -269,6 +312,7 @@ jobs:
 
   audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -316,12 +360,26 @@ jobs:
 
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs:
-      [lint, typecheck, test, test-heavy, test-cli, coverage, watch-compile, install-smoke, audit]
-    if: always()
+      [
+        changes,
+        lint,
+        typecheck,
+        test,
+        test-heavy,
+        test-cli,
+        coverage,
+        watch-compile,
+        install-smoke,
+        audit,
+      ]
+    # A draft skips the expensive legs, so there is nothing to certify yet.
+    if: ${{ always() && !github.event.pull_request.draft }}
     steps:
       - name: Verify all CI legs succeeded
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           TYPECHECK_RESULT: ${{ needs.typecheck.result }}
           TEST_RESULT: ${{ needs.test.result }}
@@ -333,8 +391,8 @@ jobs:
           AUDIT_RESULT: ${{ needs.audit.result }}
         run: |
           set -euo pipefail
-          echo "lint=$LINT_RESULT typecheck=$TYPECHECK_RESULT test=$TEST_RESULT test-heavy=$HEAVY_TEST_RESULT test-cli=$CLI_TEST_RESULT coverage=$COVERAGE_RESULT watch-compile=$WATCH_COMPILE_RESULT install-smoke=$INSTALL_SMOKE_RESULT audit=$AUDIT_RESULT"
-          if [ "$LINT_RESULT" != "success" ] || [ "$TYPECHECK_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ] || [ "$HEAVY_TEST_RESULT" != "success" ] || [ "$CLI_TEST_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$WATCH_COMPILE_RESULT" != "success" ] || [ "$INSTALL_SMOKE_RESULT" != "success" ] || [ "$AUDIT_RESULT" != "success" ]; then
+          echo "changes=$CHANGES_RESULT lint=$LINT_RESULT typecheck=$TYPECHECK_RESULT test=$TEST_RESULT test-heavy=$HEAVY_TEST_RESULT test-cli=$CLI_TEST_RESULT coverage=$COVERAGE_RESULT watch-compile=$WATCH_COMPILE_RESULT install-smoke=$INSTALL_SMOKE_RESULT audit=$AUDIT_RESULT"
+          if [ "$CHANGES_RESULT" != "success" ] || [ "$LINT_RESULT" != "success" ] || [ "$TYPECHECK_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ] || [ "$HEAVY_TEST_RESULT" != "success" ] || [ "$CLI_TEST_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$WATCH_COMPILE_RESULT" != "success" ] || [ "$INSTALL_SMOKE_RESULT" != "success" ] || [ "$AUDIT_RESULT" != "success" ]; then
             echo "::error::one or more CI legs failed"
             exit 1
           fi

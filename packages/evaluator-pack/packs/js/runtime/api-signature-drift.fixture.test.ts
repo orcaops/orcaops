@@ -66,6 +66,7 @@ describe('api-signature-drift (runFixture)', () => {
     expect(r.exitCode).toBe(0);
     expect(r.envelope.verdict).toBe('pass');
     expect(r.envelope.body).toMatch(/No TS\/JS files in scope changed/);
+    expect(r.envelope.findings).toBeUndefined();
   }, 60_000);
 
   it('violation: removed export shows up as a signature change', async () => {
@@ -95,5 +96,16 @@ describe('api-signature-drift (runFixture)', () => {
     expect(r.exitCode).toBe(0);
     expect(r.envelope.verdict).toBe('violation');
     expect(r.envelope.body).toMatch(/beta/);
+    // One finding per changed export, pointing at the file it was found in.
+    // No `revision`: the "after" side is the working tree, which is not an
+    // identified input.
+    expect(r.envelope.findings).toEqual([
+      {
+        key: 'removed/src/api.ts/beta',
+        title: 'Public export `beta` was removed from src/api.ts',
+        detail: expect.stringContaining('function beta'),
+        locations: [{ kind: 'file', path: 'src/api.ts' }],
+      },
+    ]);
   }, 60_000);
 });

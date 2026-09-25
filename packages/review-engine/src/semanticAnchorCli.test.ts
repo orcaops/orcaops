@@ -9,6 +9,7 @@ import * as store from '@orcaops/storage/history/database';
 
 import { readDatabaseReview } from './database/reviews.js';
 import { readDatabaseReviewFinalization } from './database/run-finalization-read.js';
+import { prepareDatabaseReviewRunInputs } from './database/run-inputs.js';
 import { type StartDatabaseReviewRun, startDatabaseReviewRun } from './database/runs.js';
 import { executeDatabaseSemanticCommand } from './database/semantic-command.js';
 import { prepareDatabaseSemanticGeneration } from './database/semantic-preparation.js';
@@ -405,16 +406,32 @@ describe('semantic submission through canonical review history', () => {
     const selected = (
       await readDatabaseReview({ authority: f.authority, reviewId: f.original.reviewId })
     ).value!.selection;
+    // A new run prepares its own inputs from the retained floor, as the command does; the
+    // recorded run's pinned inputs predate the knowledge the projection now carries.
+    const run = JSON.parse(Buffer.from(original.runBytes).toString()) as {
+      created_at: string;
+    };
+    const {
+      currentRunId: _run,
+      runSelectionVersion: _version,
+      ...floorExpected
+    } = original.expected;
+    const fresh = await prepareDatabaseReviewRunInputs({
+      authority: f.authority,
+      reviewId: original.reviewId,
+      expected: floorExpected,
+      policy: original.policy,
+      generatedAt: run.created_at,
+      secretAllow: original.secretAllow,
+    });
     await startDatabaseReviewRun({
       ...original,
       authority: f.authority,
       operationId: uuidv7(),
       revisionId: uuidv7(),
       publicationId: uuidv7(),
-      runBytes: bytes({
-        ...JSON.parse(Buffer.from(original.runBytes).toString()),
-        run_id: 'unfinalized-run',
-      }),
+      runBytes: bytes({ ...run, run_id: 'unfinalized-run', input_shas: fresh.inputShas }),
+      inputs: fresh.members,
       expected: {
         ...original.expected,
         currentRunId: selected.current_run_id,

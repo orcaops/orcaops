@@ -38,8 +38,36 @@ import { fingerprintDeriveAction, fingerprintShowAction } from '../commands/fing
 import { finishAction } from '../commands/finish.js';
 import { gcAction } from '../commands/gc.js';
 import { createHistoryConvertAction } from '../commands/history-convert.js';
+import {
+  createHistoryBackupsAction,
+  createHistoryRestoreAction,
+  createHistoryUpgradeAction,
+} from '../commands/history-upgrade.js';
 import { type HookAgent, hookSessionStartAction } from '../commands/hook-session-start.js';
 import { initAction } from '../commands/init.js';
+import { knowledgeAssessAction } from '../commands/knowledge/assess.js';
+import {
+  knowledgeAssignmentListAction,
+  knowledgeAssignmentOpenAction,
+  knowledgeAssignmentRevokeAction,
+} from '../commands/knowledge/assignment.js';
+import { knowledgeConsequencesAction } from '../commands/knowledge/consequences.js';
+import { knowledgeDisableAction } from '../commands/knowledge/disable.js';
+import { knowledgeEnableAction } from '../commands/knowledge/enable.js';
+import { knowledgeEquivalenceRejectAction } from '../commands/knowledge/equivalence.js';
+import { knowledgeLookupAction } from '../commands/knowledge/lookup.js';
+import { knowledgeObserveAction } from '../commands/knowledge/observe.js';
+import { knowledgePauseAction, knowledgeResumeAction } from '../commands/knowledge/pause.js';
+import {
+  knowledgeReconsiderDisposeAction,
+  knowledgeReconsiderListAction,
+  knowledgeReconsiderOpenAction,
+} from '../commands/knowledge/reconsider.js';
+import { knowledgeReopenAction } from '../commands/knowledge/reopen.js';
+import { knowledgeRetryAction } from '../commands/knowledge/retry.js';
+import { knowledgeRevokeAction } from '../commands/knowledge/revoke.js';
+import { knowledgeShowAction } from '../commands/knowledge/show.js';
+import { knowledgeStatusAction } from '../commands/knowledge/status.js';
 import { lineageAction } from '../commands/lineage.js';
 import { linkAction } from '../commands/link.js';
 import { listAction } from '../commands/list.js';
@@ -56,6 +84,7 @@ import { reviewListAction } from '../commands/plan/review/list.js';
 import { reviewProposeAction } from '../commands/plan/review/propose.js';
 import { reviewPullAction } from '../commands/plan/review/pull.js';
 import { reviewPushAction } from '../commands/plan/review/push.js';
+import { reviewRequestAction } from '../commands/plan/review/request.js';
 import { reviewersAction } from '../commands/plan/review/reviewers.js';
 import { reviewStatusAction } from '../commands/plan/review/status.js';
 import { reviewVerdictAction } from '../commands/plan/review/verdict.js';
@@ -91,6 +120,7 @@ import {
 import { statsAction } from '../commands/stats.js';
 import { statusAction } from '../commands/status.js';
 import { stepBriefAction } from '../commands/step.js';
+import { taskUsesListAction, taskUsesRecordAction } from '../commands/task-uses.js';
 import { uninstallAction } from '../commands/uninstall.js';
 import { updateAction } from '../commands/update.js';
 import { usageAction } from '../commands/usage.js';
@@ -99,7 +129,9 @@ import { whoamiAction } from '../commands/whoami.js';
 import { whyAction } from '../commands/why.js';
 import { CliExit } from '../io/exit.js';
 import { writeTerminalSafeStderr, writeTerminalSafeStdout } from '../io/output.js';
+import { knowledgeWorkerAction } from '../knowledge-worker/command.js';
 import { CLI_VERSION } from '../lib/cli-version.js';
+import { writeInspectionParseError } from '../lib/inspection-output.js';
 import { detectInstallIncompleteness, formatIncompletenessNudge } from '../lib/install-drift.js';
 import {
   getInvocationCwd,
@@ -176,20 +208,33 @@ export const makeCaptureFlagAdapter =
     });
 
 /**
- * Add the canonical `--input` capture-payload option to a capture
- * subcommand — `-` for stdin or a file path, wire format auto-detected
+ * Add the canonical `--input` payload option to a subcommand that takes an
+ * authored record — `-` for stdin or a file path, wire format auto-detected
  * (YAML is a superset of JSON). `readPayloadInput` owns stdin/file
  * resolution. Returns the command for fluent chaining.
  */
-function addCaptureInputOptions(cmd: Command): Command {
+function addCaptureInputOptions(cmd: Command, what = 'Capture payload'): Command {
   return cmd
-    .option('--input <value>', "Capture payload: '-' for stdin, or a file path (YAML or JSON)")
-    .option(
-      '--invoked-by-agent <id>',
-      'Attribute this capture to the invoking coding agent ' +
-        '(claude-code|cursor|codex|opencode|aider|github-copilot|antigravity-cli|other); ' +
-        'also via ORCAOPS_INVOKED_BY_AGENT, else auto-detected from the environment'
+    .option('--input <value>', `${what}: '-' for stdin, or a file path (YAML or JSON)`)
+    .addOption(
+      invokedByAgentOption(
+        'Attribute this capture to the invoking coding agent',
+        ' A record that names who acted keeps its own attribution instead'
+      )
     );
+}
+
+/** The preAction hook reads the value into the invocation frame; no action handles it. */
+function invokedByAgentOption(
+  what = 'Attribute this act to the invoking coding agent',
+  more = ''
+): Option {
+  return new Option(
+    '--invoked-by-agent <id>',
+    `${what} ` +
+      '(claude-code|cursor|codex|opencode|aider|github-copilot|antigravity-cli|other); ' +
+      `also via ORCAOPS_INVOKED_BY_AGENT, else auto-detected from the environment.${more}`
+  );
 }
 
 export interface BuildProgramOptions {
@@ -468,7 +513,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .option('--force', 'Also remove confirm-gated, unverifiable managed entries without prompting')
     .option(
       '--purge-data',
-      'Also delete the entire .orcaops/ directory (config + captured artifacts) for a full pre-init round-trip'
+      'Also delete the worktree .orcaops/ directory; canonical history in the orcaops data directory is kept'
     )
     .option('--dry-run', 'Plan and print the changes without writing anything')
     .option('--json', 'Emit JSON')
@@ -860,9 +905,10 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .action(seedStatusAction);
 
   // ── history ─────────────────────────────────────────────────────────────
-  program
+  const historyCmd = program
     .command('history')
-    .description('Work with retained legacy project history')
+    .description('Work with retained legacy project history');
+  historyCmd
     .command('convert')
     .description(
       'Convert a frozen 0.2.0-rc.2 legacy repository into its project database. ' +
@@ -881,6 +927,36 @@ export function buildProgram(options: BuildProgramOptions): Command {
     )
     .option('--json', 'Emit JSON')
     .action(createHistoryConvertAction());
+  historyCmd
+    .command('upgrade')
+    .description(
+      'Upgrade this project database to the schema this build writes. Without --apply this ' +
+        'previews the state, the versions, the tables that would be rebuilt with their row ' +
+        'counts, where the backup would be written and which retained references could not be ' +
+        'found, and changes nothing.'
+    )
+    .option(
+      '--apply',
+      'Perform the upgrade: take and verify a backup, then make the whole transition in one ' +
+        'transaction'
+    )
+    .option('--json', 'Emit JSON')
+    .action(createHistoryUpgradeAction());
+  historyCmd
+    .command('backups')
+    .description('List the verified backups taken before an upgrade of this project database')
+    .option('--json', 'Emit JSON')
+    .action(createHistoryBackupsAction());
+  historyCmd
+    .command('restore <backup>')
+    .description(
+      'Replace this project database with one of its upgrade backups. Without --apply this ' +
+        'previews what would be replaced, what the backup does not bring back and where the ' +
+        'database now in place would be kept, and changes nothing.'
+    )
+    .option('--apply', 'Perform the restore: verify the backup, then put it in place')
+    .option('--json', 'Emit JSON')
+    .action(createHistoryRestoreAction());
 
   // ── status / list / show ────────────────────────────────────────────────
   program
@@ -1031,6 +1107,340 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .option('--json', 'Emit JSON')
     .action(statsAction);
 
+  // ── task uses ────────────────────────────────────────────────────────────
+  // What a task did with an exact requirement or decision revision. `record`
+  // always runs in an operation of its own, so what it writes is always a
+  // connection found after the plan, and it says who found it and when.
+  const taskCmd = program
+    .command('task')
+    .description('Inspect and record what a task did with exact requirement or decision revisions');
+  const usesCmd = taskCmd
+    .command('uses')
+    .description('The requirement and decision revisions a plan event used');
+  usesCmd
+    .command('list')
+    .description(
+      'A plan event’s uses in two groups: selected with the plan, and connected later with ' +
+        'who found each connection and when'
+    )
+    .option('--plan-event <id>', 'The plan event to read')
+    .option('--artifact <id>', 'Every plan event of this artifact')
+    .option('--at-boundary <n>', 'Read at this write sequence instead of the committed one')
+    .option('--json', 'Emit JSON')
+    .action(
+      (opts: { planEvent?: string; artifact?: string; atBoundary?: string; json?: boolean }) =>
+        taskUsesListAction(opts)
+    );
+  usesCmd
+    .command('record')
+    .description(
+      'Record a use of an exact revision. It runs outside the plan event’s own operation, so ' +
+        'it needs --discovered-at and --discovered-by and is recorded as connected later'
+    )
+    .option('--input <path>', 'A JSON or YAML payload of uses and a discovery block; - for stdin')
+    .option('--artifact <id>', 'The artifact the plan event belongs to')
+    .option('--plan-event <id>', 'The plan event the use is keyed to')
+    .option('--identity <ref>', 'The identity used, as <kind>:<id>')
+    .option('--revision <id>', 'The exact revision used')
+    .option('--role <role>', 'implement, preserve, assess, background or propose_change')
+    .option('--step <id>', 'The local step the use relates to')
+    .option('--criterion <id>', 'The local criterion the use relates to')
+    .option('--exception <id>', 'An exception the use rests on')
+    .option('--discovered-at <instant>', 'When the connection was found')
+    .option('--discovered-by <name>', 'Who found the connection')
+    .option('--json', 'Emit JSON')
+    .action((opts: Record<string, unknown>) => taskUsesRecordAction(opts));
+
+  // ── knowledge ────────────────────────────────────────────────────────────
+  // Enablement and consent are two separate acts on two separate files, and
+  // the group keeps them separate: `enable`/`disable` edit configuration,
+  // `revoke` edits the user-local grant store, and neither stands in for the
+  // other. There is no non-interactive way to consent.
+  const knowledgeCmd = program
+    .command('knowledge')
+    .description(
+      'Record observations and assessments, and turn background knowledge processing on or off'
+    );
+  addCaptureInputOptions(
+    knowledgeCmd
+      .command('observe')
+      .description(
+        'Record what somebody saw: a human observation, or a command an agent ran and its ' +
+          'result. It can never claim a runner established which inputs a process consumed'
+      )
+      .option('--json', 'Emit JSON'),
+    'The observation'
+  ).action((opts: { input?: string; json?: boolean }) => knowledgeObserveAction(opts));
+  addCaptureInputOptions(
+    knowledgeCmd
+      .command('assess')
+      .description(
+        'Assess a selected release or build against exact expectation revisions, with no task. ' +
+          'With no software identified it concludes unresolved or not assessed, never supported'
+      )
+      .option('--json', 'Emit JSON'),
+    'The assessment'
+  ).action((opts: { input?: string; json?: boolean }) => knowledgeAssessAction(opts));
+  knowledgeCmd
+    .command('status')
+    .description(
+      'Show what configuration enables, what it resolves to, and whether consent covers it'
+    )
+    .option('--limit <n>', 'How many jobs that gave up to list (default 5)', strictIntOrNaN)
+    .option('--json', 'Emit JSON')
+    .action((opts: { limit?: number; json?: boolean }) => knowledgeStatusAction(opts));
+  // A passive read: it asks nothing, writes nothing and starts no worker, so a person or an agent
+  // can look knowledge up before planning without spending anything.
+  knowledgeCmd
+    .command('lookup')
+    .description(
+      'What continuing knowledge bears on some work, at a knowledge boundary the answer names'
+    )
+    .argument('[text]', 'Words to look the record up by')
+    .option(
+      '--adopted',
+      'Every adopted requirement and decision this project holds, whatever this work is about'
+    )
+    .option('--subject <id>', 'Requirements whose revisions name this subject')
+    .option(
+      '--identity <ref>',
+      'An exact identity as <kind>:<id>; repeatable',
+      (value: string, held: string[] = []) => [...held, value]
+    )
+    .option('--touching <path>', 'Affected code (refused: this history indexes no such link)')
+    .option('--at-boundary <n>', 'Read at this write sequence instead of the committed one')
+    .option('--scope <scope>', 'project (default) or artifact:<id>')
+    .option('--limit <n>', 'How many continuing identities the answer carries')
+    .option(
+      '--software <ref>',
+      'The software the question is about, as <kind>:<identity>; repeatable. Without it the ' +
+        'answer names no software and no assessment applies',
+      (value: string, held: string[] = []) => [...held, value]
+    )
+    .option('--environment <name>', 'The conditions the question is about, with --software')
+    .option('--json', 'Emit JSON')
+    .action((text: string | undefined, opts: Record<string, unknown>) =>
+      knowledgeLookupAction({ ...opts, ...(text === undefined ? {} : { text }) })
+    );
+  knowledgeCmd
+    .command('show <reference>')
+    .configureOutput({ writeErr: writeInspectionParseError })
+    .description('Inspect a recorded account and its current qualification status')
+    .option('--project <id>', 'Select this project')
+    .option('--scope <scope>', 'Qualification scope: project or artifact:<id> (default project)')
+    .option('--details', 'Allow up to 32 KiB of complete inspection content (default 16 KiB)')
+    .option('--context', 'Include full qualifying identities instead of their status summary')
+    .option('--limit <n>', 'Qualifying identities per page (1–8, default 5)')
+    .option('--cursor <reference>', 'Continue the qualifying-context index at the same observation')
+    .option(
+      '--output <file>',
+      'Export retained content to a new private file; stdout contains a receipt'
+    )
+    .option('--json', 'Emit JSON')
+    .action(knowledgeShowAction);
+  knowledgeCmd
+    .command('equivalence')
+    .description('Inspectable proposed matches, never automatic merges')
+    .command('reject')
+    .description('Reject a proposed match while retaining its wording and evidence')
+    .option('--input <path>', 'Rejection record as JSON or YAML; use - for stdin')
+    .option('--json', 'Emit JSON')
+    .action((opts: { input?: string; json?: boolean }) => knowledgeEquivalenceRejectAction(opts));
+  // Also passive: it traverses what the record links and names what it could not reach. It opens
+  // no defect, assigns no remediation and never claims complete impact coverage.
+  knowledgeCmd
+    .command('consequences')
+    .description(
+      'What else this history records reaching from one change, with the reason and the full ' +
+        'path for each affected item'
+    )
+    .option('--identity <ref>', 'The identity that changed, as <kind>:<id>')
+    .option('--revision <ref>', 'The exact revision that changed, as <kind>:<id>@<revision>')
+    .option('--touching <path>', 'A repository path, or a glob over one, whose code changed')
+    .option('--since <n>', 'Traverse every identity whose standing moved after this write sequence')
+    .option('--at-boundary <n>', 'Read at this write sequence instead of the committed one')
+    .option('--depth <n>', 'How many links from the change the traversal follows')
+    .option('--limit <n>', 'How many items the answer carries')
+    .option('--json', 'Emit JSON')
+    .action((opts: Record<string, unknown>) => knowledgeConsequencesAction(opts));
+  knowledgeCmd
+    .command('enable')
+    .description(
+      'Show what would be sent to the provider and, on a typed confirmation at a terminal, ' +
+        'record consent and turn the setting on'
+    )
+    .option(
+      '--include-backlog',
+      'Also cover captures already admitted; without it the grant covers captures from now on'
+    )
+    .option('--json', 'Emit JSON (the terms and the question still go to the terminal)')
+    .action((opts: { includeBacklog?: boolean; json?: boolean }) => knowledgeEnableAction(opts));
+  knowledgeCmd
+    .command('disable')
+    .description('Turn the setting off; the consent grant is left on record')
+    .option('--json', 'Emit JSON')
+    .action((opts: { json?: boolean }) => knowledgeDisableAction(opts));
+  knowledgeCmd
+    .command('pause')
+    .description('Stop claiming for this project; every admitted job is left exactly as it is')
+    .requiredOption('--reason <text>', 'Why processing is paused, recorded with the pause')
+    .addOption(invokedByAgentOption())
+    .option('--json', 'Emit JSON')
+    .action((opts: { reason?: string; json?: boolean }) => knowledgePauseAction(opts));
+  knowledgeCmd
+    .command('resume')
+    .description(
+      'Let claiming start again for this project; with --model, allow a model for a job ' +
+        'captured without one, on a typed confirmation at a terminal'
+    )
+    .argument('[job]', 'With --model: the processing job to allow a model for')
+    .option(
+      '--model',
+      'Lift the no-model choice an invocation made, for <job> or for --all, instead of the ' +
+        'project pause'
+    )
+    .option('--all', 'With --model: every job this project admitted without a model')
+    .addOption(invokedByAgentOption())
+    .option('--json', 'Emit JSON')
+    .action((job: string | undefined, opts: { model?: boolean; all?: boolean; json?: boolean }) =>
+      knowledgeResumeAction({ job, ...opts })
+    );
+  knowledgeCmd
+    .command('retry')
+    .description(
+      'Make a waiting job, or every waiting job, due now. No attempt allowance is reset and ' +
+        'no finished job is reopened; `knowledge reopen` reopens a job that gave up'
+    )
+    .argument('[job]', 'The processing job to make due; omitted, every waiting job is')
+    .addOption(invokedByAgentOption())
+    .option('--json', 'Emit JSON')
+    .action((job: string | undefined, opts: { json?: boolean }) =>
+      knowledgeRetryAction({ job, ...opts })
+    );
+  knowledgeCmd
+    .command('reopen')
+    .description(
+      'Give one job that gave up a fresh attempt allowance, on a typed confirmation at a ' +
+        'terminal, after showing why it gave up and the terms it would run under'
+    )
+    .argument('<job>', 'The processing job that gave up')
+    .addOption(invokedByAgentOption())
+    .option('--json', 'Emit JSON')
+    .action((job: string, opts: { json?: boolean }) => knowledgeReopenAction({ job, ...opts }));
+  knowledgeCmd
+    .command('revoke')
+    .description('Withdraw this project’s consent; configuration is left as it is')
+    .addOption(
+      new Option('--provider <name>', 'Withdraw only the grants naming this provider').choices([
+        'claude',
+        'codex',
+      ])
+    )
+    .option('--json', 'Emit JSON')
+    .action((opts: { provider?: 'claude' | 'codex'; json?: boolean }) =>
+      knowledgeRevokeAction(opts)
+    );
+  // The worker's own process. Hidden because orcaops starts it after a capture
+  // and nobody types it: it takes the project's processing lease, spends money
+  // under the recorded grant, and writes to its log rather than to a terminal.
+  knowledgeCmd
+    .command('worker', { hidden: true })
+    .description('Run the background knowledge processing worker for this project')
+    .action(async () => {
+      await knowledgeWorkerAction();
+    });
+
+  // ── knowledge reconsider ─────────────────────────────────────────────────
+  // The one writer of reconsideration items anywhere. Nothing else opens one:
+  // a correction and the worker's publication may not start a cascade, so a
+  // person or a skill asks, and `open` writes items and nothing else.
+  const reconsiderCmd = knowledgeCmd
+    .command('reconsider')
+    .description(
+      'Retain what a change leaves worth another look, and what somebody decided about it'
+    );
+  reconsiderCmd
+    .command('open')
+    .description(
+      'Traverse one change and retain one item per affected item and cause. It opens no ' +
+        'defect, revises no requirement and assigns no remediation'
+    )
+    .option('--identity <ref>', 'The identity that changed, as <kind>:<id>')
+    .option('--revision <ref>', 'The exact revision that changed, as <kind>:<id>@<revision>')
+    .option('--touching <path>', 'A repository path, or a glob over one, whose code changed')
+    .option('--since <n>', 'Traverse every identity whose standing moved after this write sequence')
+    .option('--at-boundary <n>', 'Read at this write sequence instead of the committed one')
+    .option('--depth <n>', 'How many links from the change the traversal follows')
+    .option('--limit <n>', 'How many items the traversal carries')
+    .addOption(invokedByAgentOption())
+    .option('--json', 'Emit JSON')
+    .action((opts: Record<string, unknown>) => knowledgeReconsiderOpenAction(opts));
+  reconsiderCmd
+    .command('list')
+    .description('Show the items with their cause, path, owner and latest disposition')
+    .option('--identity <ref>', 'Only the items about this identity, as <kind>:<id>')
+    .option('--open', 'Only the items nobody has disposed of, which is the default')
+    .option('--all', 'Include items somebody has already disposed of')
+    .option('--at-boundary <n>', 'Read at this write sequence instead of the committed one')
+    .option('--limit <n>', 'How many items the answer carries')
+    .option('--json', 'Emit JSON')
+    .action((opts: Record<string, unknown>) => knowledgeReconsiderListAction(opts));
+  reconsiderCmd
+    .command('dispose')
+    .description('Append what somebody decided. The item’s own facts are left exactly as they are')
+    .argument('<item>', 'The reconsideration item')
+    .option('--acknowledge', 'Somebody has seen it; the item stays open')
+    .option('--reconsidered <outcome>', 'unchanged, revision:<id> or assessment:<id>')
+    .option('--decline <reason>', 'Why this item will not be acted on')
+    .option('--superseded-by <item>', 'The item that replaces this one')
+    .option('--at <instant>', 'When it was decided; by default, now')
+    .addOption(invokedByAgentOption())
+    .option('--json', 'Emit JSON')
+    .action((item: string, opts: Record<string, unknown>) =>
+      knowledgeReconsiderDisposeAction(item, opts)
+    );
+
+  // ── knowledge assignment ─────────────────────────────────────────────────
+  // `knowledge revoke` already means withdrawing this project's consent, so
+  // delegation is one family of its own rather than a second `assign`/`revoke`
+  // pair beside it.
+  const assignmentCmd = knowledgeCmd
+    .command('assignment')
+    .description('Record who may decide what on somebody else’s behalf, and end a delegation');
+  addCaptureInputOptions(
+    assignmentCmd
+      .command('open')
+      .description(
+        'Retain one assignment: its objective, the obligations it inherits, the footprint it ' +
+          'delegates, who is responsible and how long it lasts. It writes nothing else'
+      ),
+    'Assignment payload'
+  )
+    .option('--json', 'Emit JSON')
+    .action((opts: Record<string, unknown>) => knowledgeAssignmentOpenAction(opts));
+  assignmentCmd
+    .command('list')
+    .description('Show the assignments with what each delegates and how it stood at a boundary')
+    .option('--identity <ref>', 'Only the assignments naming this identity, as <kind>:<id>')
+    .option('--responsible <name>', 'Only the assignments made to this party')
+    .option('--at-boundary <n>', 'Read at this write sequence instead of the committed one')
+    .option('--limit <n>', 'How many assignments the answer carries')
+    .option('--json', 'Emit JSON')
+    .action((opts: Record<string, unknown>) => knowledgeAssignmentListAction(opts));
+  assignmentCmd
+    .command('revoke')
+    .description(
+      'End a delegation from now on. Every later act under it is refused; what was published ' +
+        'under it before stays exactly as it was retained'
+    )
+    .argument('<assignment>', 'The assignment to end')
+    .requiredOption('--reason <text>', 'Why the delegation is ending')
+    .addOption(invokedByAgentOption())
+    .option('--json', 'Emit JSON')
+    .action((assignment: string, opts: Record<string, unknown>) =>
+      knowledgeAssignmentRevokeAction(assignment, opts)
+    );
+
   // ── skills ───────────────────────────────────────────────────────────────
   // Enable/disable persists a `skills.enabled[id]` override in config.json;
   // materialization happens on the next `orcaops update` (same group shape
@@ -1056,8 +1466,24 @@ export function buildProgram(options: BuildProgramOptions): Command {
 
   program
     .command('show <artifactId>')
-    .description('Render a single retained artifact thread')
+    .configureOutput({ writeErr: writeInspectionParseError })
+    .description('Inspect a bounded artifact digest or export complete retained evidence')
     .option('--project <id>', 'Select the project containing the artifact')
+    .option('--checkpoint <n>', 'Inspect one exact checkpoint', strictIntOrNaN)
+    .option('--decision <n>', 'Inspect one plan decision (one-based)', strictIntOrNaN)
+    .option(
+      '--section <name>',
+      'Inspect plan, knowledge, summary, evaluators, usage, or repository'
+    )
+    .option('--limit <n>', 'Checkpoint index page size (default: 5, maximum: 20)', strictIntOrNaN)
+    .option('--cursor <reference>', 'Continue the checkpoint index at its original observation')
+    .option('--anchor <reference>', 'Require the original artifact and knowledge observation')
+    .option('--output <file>', 'Export the complete selected evidence to a new file')
+    .option(
+      '--at-boundary <n>',
+      'Read continuing knowledge as it stood at this write sequence (default: now)',
+      strictIntOrNaN
+    )
     .option('--json', 'Emit JSON')
     .action(showAction);
 
@@ -1085,6 +1511,11 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .option('--type <kind>', SEARCH_SOURCE_KINDS.join(' | '))
     .option('--limit <n>', 'Max results (default 25)', strictIntOrNaN)
     .option('--offset <n>', 'Skip this many matching results', strictIntOrNaN)
+    .option(
+      '--knowledge-bytes <n>',
+      'Bytes of continuing-knowledge entries this page may carry (default 2048 per result)',
+      strictIntOrNaN
+    )
     .option('--json', 'Emit JSON')
     .action(searchAction);
 
@@ -1103,19 +1534,52 @@ export function buildProgram(options: BuildProgramOptions): Command {
   // ── why ────────────────────────────────────────────────────────────────
   program
     .command('why <target>')
+    .configureOutput({ writeErr: writeInspectionParseError })
     .description('Find ranked provenance for <file> or attribute <file>:<line>')
     .option('--all', 'Default to 1,000 results; processing budgets still apply')
+    .option('--view <view>', 'rationale: show explanations under a 32 KiB response allowance')
+    .option('--details', 'Inspect one exact candidate under a 16 KiB response allowance')
     .option(
-      '--details',
-      'Include full JSON candidate evidence (may be large; no effect without --json)'
+      '--candidate <id>',
+      'Select a returned historical candidate id, independently of pagination'
     )
+    .option('--anchor <token>', 'Use the inspection anchor returned by the same target and scope')
+    .option(
+      '--section <name>',
+      'Inspect an anchored candidate section; index lists available sections'
+    )
+    .option(
+      '--decision <n>',
+      'Select one complete decision in a candidate decision section',
+      strictIntOrNaN
+    )
+    .option(
+      '--section-offset <n>',
+      'Skip entries in the selected candidate section',
+      strictIntOrNaN
+    )
+    .option(
+      '--section-limit <n>',
+      'Candidate section page size (default 5, maximum 20)',
+      strictIntOrNaN
+    )
+    .option(
+      '--audit',
+      'With --details: explicitly compare a candidate page under a 64 KiB allowance'
+    )
+    .option('--output <file>', 'Export the complete exact candidate to a new file')
     .option('--scope <scope>', 'worktree | project')
     .option('--project <id>', 'Select one registered project by identity')
     .option('--branch <name>', 'Restrict to one literal branch')
     .option('--origin <origin>', 'captured | imported | all')
     .option('--touching <glob>', 'Restrict to artifacts whose touched paths match')
     .option('--at <revision>', 'Resolve the code target at an exact Git revision')
-    .option('--limit <n>', 'Max results (default 25)', strictIntOrNaN)
+    .option(
+      '--at-boundary <n>',
+      'Read continuing knowledge as it stood at this write sequence (default: now)',
+      strictIntOrNaN
+    )
+    .option('--limit <n>', 'Max results (default 5)', strictIntOrNaN)
     .option('--offset <n>', 'Skip this many matching results', strictIntOrNaN)
     .option('--json', 'Emit JSON')
     .action(
@@ -1124,12 +1588,22 @@ export function buildProgram(options: BuildProgramOptions): Command {
         opts: {
           all?: boolean;
           details?: boolean;
+          view?: 'rationale';
+          candidate?: string;
+          anchor?: string;
+          section?: string;
+          decision?: number;
+          sectionOffset?: number;
+          sectionLimit?: number;
+          audit?: boolean;
+          output?: string;
           scope?: 'worktree' | 'project';
           project?: string;
           branch?: string;
           origin?: 'captured' | 'imported' | 'all';
           touching?: string;
           at?: string;
+          atBoundary?: number;
           limit?: number;
           offset?: number;
           json?: boolean;
@@ -1148,6 +1622,11 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .option('--base <ref>', 'Base ref for --branch-wide (defaults to the repository default)')
     .option('--primary-artifact <id>', 'Title source override for --branch-wide')
     .option('--out <file>', 'Write the rendered digest to this file and print a confirmation')
+    .option(
+      '--at-boundary <n>',
+      'Read continuing knowledge as it stood at this write sequence (default: now)',
+      strictIntOrNaN
+    )
     .option('--format <fmt>', 'Output format: md (default) or json', 'md')
     .option('--json', 'Shorthand for --format json')
     .action(
@@ -1163,6 +1642,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
           branchWide?: boolean;
           base?: string;
           primaryArtifact?: string;
+          atBoundary?: number;
         }
       ) =>
         digestAction({
@@ -1176,6 +1656,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
           branchWide: opts.branchWide,
           base: opts.base,
           primaryArtifact: opts.primaryArtifact,
+          ...(opts.atBoundary === undefined ? {} : { atBoundary: opts.atBoundary }),
         })
     );
 
@@ -1183,8 +1664,8 @@ export function buildProgram(options: BuildProgramOptions): Command {
     program.command('finish').description('Run pre-PR checks and finalize a clean artifact')
   )
     .option('--no-llm', 'Skip LLM evaluators without executing a provider')
-    .action((opts: { input?: string; noLlm?: boolean }) =>
-      finishAction({ input: opts.input, noLlm: opts.noLlm })
+    .action((opts: { input?: string; llm?: boolean }) =>
+      finishAction({ input: opts.input, noLlm: opts.llm === false })
     );
 
   // ── capture ────────────────────────────────────────────────────────────
@@ -1275,7 +1756,9 @@ export function buildProgram(options: BuildProgramOptions): Command {
     captureCmd
       .command('summary')
       .description('Capture the final summary and close the artifact thread')
-  ).action((opts: { input?: string }) => captureSummaryAction({ input: opts.input }));
+  )
+    .option('--no-llm', 'Do not use an LLM to process this captured summary')
+    .action(captureFlagAdapter(captureSummaryAction));
 
   addCaptureInputOptions(
     captureCmd
@@ -1747,7 +2230,7 @@ export function buildProgram(options: BuildProgramOptions): Command {
   const reviewGroup = planGroup
     .command('review')
     .description(
-      'Review track: view/list/status the review state; pull, propose, push (author), or comment'
+      'Review track: view/list/status the review state; pull, propose, push or request reviewers (author), or comment'
     );
   reviewGroup
     .command('pull <ref>')
@@ -1951,6 +2434,22 @@ export function buildProgram(options: BuildProgramOptions): Command {
     .option('--json', 'Emit JSON')
     .action((opts: { json?: boolean }) =>
       reviewStatusAction({ baseUrl: cloudBaseUrl, json: opts.json })
+    );
+  reviewGroup
+    .command('request <ref>')
+    .description('Add reviewers to an existing plan without publishing a body version')
+    .option(
+      '--reviewer <identifier>',
+      'Reviewer email or unique name (repeatable)',
+      (value: string, reviewers: string[] = []) => [...reviewers, value]
+    )
+    .option(
+      '--resend',
+      'Send the request again even when an identical one was already journalled (re-add a reviewer removed on the web, or retry an identifier that was unresolved while the member was pending)'
+    )
+    .option('--json', 'Emit JSON')
+    .action((ref: string, opts: { reviewer: string[]; resend?: boolean; json?: boolean }) =>
+      reviewRequestAction(ref, { ...opts, baseUrl: cloudBaseUrl })
     );
   reviewGroup
     .command('reviewers')

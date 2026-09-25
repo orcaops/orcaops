@@ -92,8 +92,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/core
       '@orcaops/diff-fingerprint':
-        specifier: 0.0.8
-        version: 0.0.8
+        specifier: 0.0.9
+        version: 0.0.9
       '@orcaops/evaluator-pack':
         specifier: workspace:*
         version: link:../../packages/evaluator-pack
@@ -113,14 +113,14 @@ importers:
         specifier: workspace:*
         version: link:../../packages/project-scope
       '@orcaops/protocol':
-        specifier: 0.0.26
-        version: 0.0.26
+        specifier: 0.0.27
+        version: 0.0.27
       '@orcaops/review-engine':
         specifier: workspace:*
         version: link:../../packages/review-engine
       '@orcaops/sdk':
-        specifier: 0.1.23
-        version: 0.1.23
+        specifier: 0.1.24
+        version: 0.1.24
       '@orcaops/storage':
         specifier: workspace:*
         version: link:../../packages/storage
@@ -189,14 +189,14 @@ importers:
         specifier: 0.1.89
         version: 0.1.89(react-devtools-core@7.0.1)(react@19.2.7)(stage-js@1.0.2)(typescript@5.9.2)(web-tree-sitter@0.25.10)(ws@8.21.0)
       '@orcaops/diff-fingerprint':
-        specifier: 0.0.8
-        version: 0.0.8
+        specifier: 0.0.9
+        version: 0.0.9
       '@orcaops/protocol':
-        specifier: 0.0.26
-        version: 0.0.26
+        specifier: 0.0.27
+        version: 0.0.27
       '@orcaops/sdk':
-        specifier: 0.1.23
-        version: 0.1.23
+        specifier: 0.1.24
+        version: 0.1.24
       better-sqlite3:
         specifier: 13.0.3
         version: 13.0.3
@@ -324,14 +324,17 @@ importers:
   packages/core:
     dependencies:
       '@orcaops/diff-fingerprint':
-        specifier: 0.0.8
-        version: 0.0.8
+        specifier: 0.0.9
+        version: 0.0.9
+      '@orcaops/llm':
+        specifier: workspace:*
+        version: link:../llm
       '@orcaops/protocol':
-        specifier: 0.0.26
-        version: 0.0.26
+        specifier: 0.0.27
+        version: 0.0.27
       '@orcaops/sdk':
-        specifier: 0.1.23
-        version: 0.1.23
+        specifier: 0.1.24
+        version: 0.1.24
       '@orcaops/storage':
         specifier: workspace:*
         version: link:../storage
@@ -546,8 +549,8 @@ importers:
   packages/history-convert:
     dependencies:
       '@orcaops/diff-fingerprint':
-        specifier: 0.0.8
-        version: 0.0.8
+        specifier: 0.0.9
+        version: 0.0.9
       '@orcaops/storage':
         specifier: workspace:*
         version: link:../storage
@@ -653,8 +656,8 @@ importers:
   packages/review-core:
     dependencies:
       '@orcaops/diff-fingerprint':
-        specifier: 0.0.8
-        version: 0.0.8
+        specifier: 0.0.9
+        version: 0.0.9
       zod:
         specifier: ^4.0.17
         version: 4.3.6
@@ -721,8 +724,8 @@ importers:
   packages/storage:
     dependencies:
       '@orcaops/diff-fingerprint':
-        specifier: 0.0.8
-        version: 0.0.8
+        specifier: 0.0.9
+        version: 0.0.9
       '@orcaops/evaluator-protocol':
         specifier: workspace:*
         version: link:../evaluator-protocol
@@ -787,6 +790,9 @@ importers:
       '@orcaops/agent-activity':
         specifier: workspace:*
         version: link:../agent-activity
+      '@orcaops/core':
+        specifier: workspace:*
+        version: link:../core
       '@orcaops/project-scope':
         specifier: workspace:*
         version: link:../project-scope
@@ -800,9 +806,6 @@ importers:
         specifier: workspace:*
         version: link:../storage
     devDependencies:
-      '@orcaops/core':
-        specifier: workspace:*
-        version: link:../core
       '@orcaops/eslint-config':
         specifier: workspace:*
         version: link:../eslint-config
@@ -1622,16 +1625,16 @@ packages:
       react-devtools-core: ^7.0.1
       ws: ^8.18.0
 
-  '@orcaops/diff-fingerprint@0.0.8':
-    resolution: {integrity: sha512-ua3zt9vU2g2TWRieVrOR19wPMQnfdUOOhFFM9sZFX6AfUytBHJ12KcyVuPC/Ovn0qgIp5MZOnuXzvPLT4rDYfQ==}
+  '@orcaops/diff-fingerprint@0.0.9':
+    resolution: {integrity: sha512-VwJRRANcSQu/a6caqkl2h8bCn8IHFWzWZcQQmIynra8yIVvaC1vuRVr4ROr0BWspZD+APwCCv5ir0g0RrylWyQ==}
     engines: {node: '>=20.19'}
 
-  '@orcaops/protocol@0.0.26':
-    resolution: {integrity: sha512-aabywroQH6QMYAhmV/b6RWdRCDCHtmzy1rSAjL0iHnKd4Mq7BKL5ytUkj8zl+/jVEYJHzI/qU6ZSRrazElUc3A==}
+  '@orcaops/protocol@0.0.27':
+    resolution: {integrity: sha512-MzmBdmABHZTaiFJuCTPcE4MDo9gmHZkzDp2I8Mi006uSOR1HRyd1CJYFM5G2QGF2Q8vhK9UwHmOO0/CFWoLzpA==}
     engines: {node: '>=20.19'}
 
-  '@orcaops/sdk@0.1.23':
-    resolution: {integrity: sha512-4cX/7HBt+gA6l1t5uQTa2FoTSgVUZZY2bCUH2vx/dFcxtWhs2mamYzpg6ssvBbA4hCJHYX1vRErn2tzBvbspUQ==}
+  '@orcaops/sdk@0.1.24':
+    resolution: {integrity: sha512-SGnfLOZxCplyGNovjKyWc/MNzBEaKP17FM6/W0JAPhy9JAUKxtvbGR3zXBrG0CQui+e6lMTfFwYpn4GvuA8C+Q==}
     engines: {node: '>=20.19'}
 
   '@oxc-project/types@0.127.0':
@@ -5453,20 +5456,20 @@ snapshots:
       - typescript
       - web-tree-sitter
 
-  '@orcaops/diff-fingerprint@0.0.8':
+  '@orcaops/diff-fingerprint@0.0.9':
     dependencies:
-      '@orcaops/protocol': 0.0.26
+      '@orcaops/protocol': 0.0.27
       canonicalize: 3.0.0
       hash-wasm: 4.12.0
       zod: 4.3.6
 
-  '@orcaops/protocol@0.0.26':
+  '@orcaops/protocol@0.0.27':
     dependencies:
       zod: 4.3.6
 
-  '@orcaops/sdk@0.1.23':
+  '@orcaops/sdk@0.1.24':
     dependencies:
-      '@orcaops/protocol': 0.0.26
+      '@orcaops/protocol': 0.0.27
       zod: 4.3.6
 
   '@oxc-project/types@0.127.0': {}

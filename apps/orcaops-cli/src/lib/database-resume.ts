@@ -1,7 +1,11 @@
 import { isDeepStrictEqual } from 'node:util';
 
 import { buildResumeFromSnapshot } from '@orcaops/core';
-import { HistoryScopeError, validateHistorySelector } from '@orcaops/project-scope/history';
+import {
+  HistoryScopeError,
+  unavailableProjectError,
+  validateHistorySelector,
+} from '@orcaops/project-scope/history';
 import { resolveDatabaseHistoryOverview } from '@orcaops/project-scope/history/database';
 import { ProjectDatabaseError } from '@orcaops/storage/history/database';
 import {
@@ -13,7 +17,11 @@ import { historyMetadataDetails } from '@orcaops/storage/history/metadata-row';
 
 import type { resolveDatabaseHistoryCommandContext } from './database-history-context.js';
 import { readDatabaseShowTarget } from './database-show.js';
-import { databaseTaskActions, inspectDatabaseTasks } from './database-task-context.js';
+import {
+  databaseTaskActions,
+  inspectDatabaseTasks,
+  openCheckpointCriterionIds,
+} from './database-task-context.js';
 
 export interface DatabaseResumeOptions {
   artifact?: string;
@@ -78,11 +86,10 @@ export async function readDatabaseResume(
   } | null = null;
   if (requested === undefined) {
     if (scope.projects.length !== 1 || !scope.projects[0].authority)
-      throw new HistoryScopeError(
-        scope.completeness.issues[0]?.code ?? 'PROJECT_REQUIRED',
-        'Implicit resume requires one available original project',
-        { issues: scope.completeness.issues }
-      );
+      throw unavailableProjectError(scope.completeness.issues, {
+        code: 'PROJECT_REQUIRED',
+        message: 'Implicit resume requires one available original project',
+      });
     const taskScope = {
       ...scope,
       branch:
@@ -136,7 +143,7 @@ export async function readDatabaseResume(
       writeSequence: snapshot!.counters.writeSequence,
     };
   }
-  const target = resolveDatabaseHistoryOverview(scope, requested);
+  const target = resolveDatabaseHistoryOverview(scope, requested, { boundary: 'now' });
   if (selected) {
     const row = selected.row;
     const revision = {
@@ -179,7 +186,8 @@ export async function readDatabaseResume(
     thread.checkpoints.length,
     details,
     scope.gitContext?.headOid ?? '',
-    acknowledgeByRef
+    acknowledgeByRef,
+    openCheckpointCriterionIds(thread)
   );
   const shown = await readDatabaseShowTarget(context, target);
   return {
@@ -201,6 +209,16 @@ export async function readDatabaseResume(
     digest_cache: { state: 'unavailable' as const },
     artifact: {
       ...rendered.data,
+      knowledge_uses: shown.artifact.knowledge_uses,
+      knowledge: shown.artifact.knowledge,
+      // An open checkpoint inherits the uses of the plan revision it pinned at open; it recorded
+      // none of its own, and reading them anywhere else would answer a different question.
+      open_checkpoints: rendered.data.open_checkpoints.map((checkpoint) => ({
+        ...checkpoint,
+        knowledge_uses:
+          shown.artifact.checkpoints.find((held) => held.n === checkpoint.n)?.knowledge_uses ??
+          null,
+      })),
       origin: shown.artifact.origin,
       source_plan: shown.artifact.source_plan,
       repo_state: shown.artifact.repo_state,

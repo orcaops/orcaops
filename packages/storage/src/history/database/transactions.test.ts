@@ -425,7 +425,7 @@ describe('connection protection', () => {
     raw.pragma('user_version = 99');
     const callback = vi.fn(() => null);
     await expect(runProjectOperation(handle, operation, callback)).rejects.toMatchObject({
-      code: 'HISTORY_FORMAT_UNSUPPORTED',
+      code: 'HISTORY_FORMAT_NEWER',
     });
     expect(callback).not.toHaveBeenCalled();
     expect(raw.prepare('SELECT * FROM operations').all()).toEqual([]);

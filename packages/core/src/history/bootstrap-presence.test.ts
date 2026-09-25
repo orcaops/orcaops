@@ -202,6 +202,108 @@ describe('bounded bootstrap presence', () => {
     }
   );
 
+  it('classifies a checkout .orcaops holding only project configuration as configuration', async () => {
+    const f = await fixture(false);
+    const store = path.join(f.main, '.orcaops');
+    await fs.mkdir(store);
+    const entries = ['config.json', 'evaluators.yaml', 'install.json', 'install.local.json'];
+    for (const entry of entries) await fs.writeFile(path.join(store, entry), 'not decoded');
+    const original = (await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises'))
+      .open;
+    vi.spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      if (String(args[0]).startsWith(store)) throw new Error('Configuration payload opened');
+      return original(...args);
+    });
+    const result = await inspect(f);
+    expect(result.checked).toContainEqual(
+      expect.objectContaining({
+        relative_location: '.orcaops',
+        state: 'present',
+        kind: 'configuration',
+      })
+    );
+    expect(result.history_fresh).toBe(true);
+    expect(result.fresh).toBe(false);
+  });
+
+  it('treats an empty checkout .orcaops as configuration', async () => {
+    const f = await fixture(false);
+    await fs.mkdir(path.join(f.main, '.orcaops'));
+    expect((await inspect(f)).history_fresh).toBe(true);
+  });
+
+  it.each([
+    ['artifacts', 'directory'],
+    ['cache', 'directory'],
+    ['index.sqlite', 'file'],
+    ['events.ndjson', 'file'],
+    ['unrecognized.txt', 'file'],
+  ] as const)(
+    'counts a checkout .orcaops holding %s beside configuration as history',
+    async (entry, type) => {
+      const f = await fixture(false);
+      const store = path.join(f.main, '.orcaops');
+      await fs.mkdir(store);
+      await fs.writeFile(path.join(store, 'config.json'), '{}');
+      if (type === 'directory') await fs.mkdir(path.join(store, entry));
+      else await fs.writeFile(path.join(store, entry), 'legacy');
+      const result = await inspect(f);
+      expect(result.checked).toContainEqual(
+        expect.objectContaining({
+          relative_location: '.orcaops',
+          state: 'present',
+          kind: 'history',
+        })
+      );
+      expect(result.history_fresh).toBe(false);
+    }
+  );
+
+  it('counts a checkout .orcaops that is a file as history', async () => {
+    const f = await fixture(false);
+    await fs.writeFile(path.join(f.main, '.orcaops'), 'legacy');
+    const result = await inspect(f);
+    expect(result.checked).toContainEqual(
+      expect.objectContaining({ relative_location: '.orcaops', state: 'present', kind: 'history' })
+    );
+    expect(result.history_fresh).toBe(false);
+  });
+
+  it.each(['symlink', 'directory'] as const)(
+    'leaves a configuration name that is a %s unclassified',
+    async (shape) => {
+      const f = await fixture(false);
+      const store = path.join(f.main, '.orcaops');
+      await fs.mkdir(store);
+      const target = path.join(f.temporary, 'elsewhere.json');
+      await fs.writeFile(target, '{}');
+      if (shape === 'symlink') await fs.symlink(target, path.join(store, 'config.json'));
+      else await fs.mkdir(path.join(store, 'config.json'));
+      const result = await inspect(f);
+      expect(result.unresolved).toContainEqual(
+        expect.objectContaining({ relative_location: '.orcaops', state: 'unclassified' })
+      );
+      expect(result.history_fresh).toBe(false);
+    }
+  );
+
+  it('leaves an unreadable checkout .orcaops unclassified', async () => {
+    const f = await fixture(false);
+    const store = path.join(f.main, '.orcaops');
+    await fs.mkdir(store);
+    await fs.writeFile(path.join(store, 'config.json'), '{}');
+    await fs.chmod(store, 0o000);
+    try {
+      const result = await inspect(f);
+      expect(result.unresolved).toContainEqual(
+        expect.objectContaining({ relative_location: '.orcaops' })
+      );
+      expect(result.history_fresh).toBe(false);
+    } finally {
+      await fs.chmod(store, 0o700);
+    }
+  });
+
   it('does not associate an unrelated catalog entry or tolerate a malformed catalog', async () => {
     const f = await fixture(false);
     await fs.mkdir(f.root.resolvedRoot);

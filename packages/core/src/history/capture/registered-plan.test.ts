@@ -347,7 +347,9 @@ it('retains a degraded plan without claiming a baseline for a borrowed object st
   const before = state(f.handle);
   const result = await captureDatabasePlan(f.handle, f.context, input(true));
   expect(result.warnings).toEqual([
-    'Plan baseline snapshot is unavailable; empty-fence seed recovery has no baseline.',
+    expect.stringMatching(
+      /^Plan baseline snapshot is unavailable \(.*self-contained.*\); empty-fence seed recovery has no baseline\.$/u
+    ),
   ]);
   expect(
     readProjectArtifact(f.handle, result.artifactId)?.thread.artifactJson?.baseline_seed_tree_sha

@@ -68,6 +68,12 @@ const target: RemoteTarget = {
 function cloud(): SourcePlanReviewMutationCloudClient {
   return {
     sourcePlan: {
+      reviewRequest: vi.fn(async (input) => ({
+        externalId: input.external_id,
+        added: [{ userId: 'ben', rawTag: 'Ben' }],
+        alreadyRequested: [],
+        unresolved: [],
+      })),
       reviewPush: vi.fn(async (input) => ({
         status: 'published' as const,
         externalId: input.external_id,
@@ -661,4 +667,105 @@ it('resumes a conflict proposal from the retained base after cancellation and ca
   expect(await records.readProposal('source-plan-id', 'proposal-one')).toMatchObject({
     pulled_at: '2026-09-09T02:00:00Z',
   });
+});
+
+const reviewerRequest = { schema_version: 1 as const, external_id: 'plan', reviewers: ['Ben'] };
+
+it('replays an acknowledged reviewer request without resending or publishing a candidate', async () => {
+  const f = await fixture();
+  const remote = cloud();
+  const command = { verb: 'request', reviewers: ['Ben'] };
+  const first = client(f, remote, command);
+  const result = await first.sourcePlan.reviewRequest(reviewerRequest);
+  expect(first.publicationAdmission()).toBeNull();
+  expect(await client(f, remote, command).sourcePlan.reviewRequest(reviewerRequest)).toEqual(
+    result
+  );
+  expect(remote.sourcePlan.reviewRequest).toHaveBeenCalledTimes(1);
+  expect(remote.sourcePlan.reviewPush).not.toHaveBeenCalled();
+});
+
+it('preserves unknown reviewer response fields through live dispatch and replay', async () => {
+  const f = await fixture();
+  const remote = cloud();
+  vi.mocked(remote.sourcePlan.reviewRequest).mockResolvedValueOnce({
+    externalId: 'plan',
+    added: [{ userId: 'ben', rawTag: 'Ben' }],
+    alreadyRequested: [],
+    unresolved: [],
+    futureField: { retained: true },
+  } as never);
+  const command = { verb: 'request', reviewers: ['Ben'] };
+  const live = await client(f, remote, command).sourcePlan.reviewRequest(reviewerRequest);
+  const replay = await client(f, remote, command).sourcePlan.reviewRequest(reviewerRequest);
+  expect(live).toMatchObject({ futureField: { retained: true } });
+  expect(replay).toEqual(live);
+  expect(remote.sourcePlan.reviewRequest).toHaveBeenCalledTimes(1);
+});
+
+it('retains an unknown reviewer request outcome and refuses blind replay', async () => {
+  const f = await fixture();
+  const remote = cloud();
+  vi.mocked(remote.sourcePlan.reviewRequest).mockRejectedValue(new Error('connection lost'));
+  const command = { verb: 'request', reviewers: ['Ben'] };
+  await expect(
+    client(f, remote, command).sourcePlan.reviewRequest(reviewerRequest)
+  ).rejects.toThrow(/not acknowledged/);
+  await expect(
+    client(f, remote, command).sourcePlan.reviewRequest(reviewerRequest)
+  ).rejects.toThrow(/not acknowledged/);
+  expect(remote.sourcePlan.reviewRequest).toHaveBeenCalledTimes(1);
+});
+
+it('sends a resent reviewer request again after an acknowledged outcome', async () => {
+  const f = await fixture();
+  const remote = cloud();
+  const plain = { verb: 'request', reviewers: ['Ben'] };
+  const first = await client(f, remote, plain).sourcePlan.reviewRequest(reviewerRequest);
+  expect(await client(f, remote, plain).sourcePlan.reviewRequest(reviewerRequest)).toEqual(first);
+  expect(remote.sourcePlan.reviewRequest).toHaveBeenCalledTimes(1);
+
+  // A fresh resend marker is a different command, so it keys a new journal row.
+  for (const token of ['nonce-1', 'nonce-2']) {
+    await client(f, remote, { ...plain, resend: token }).sourcePlan.reviewRequest(reviewerRequest);
+  }
+  expect(remote.sourcePlan.reviewRequest).toHaveBeenCalledTimes(3);
+});
+
+it('sends a resent reviewer request after an unknown outcome the plain path refuses', async () => {
+  const f = await fixture();
+  const remote = cloud();
+  const plain = { verb: 'request', reviewers: ['Ben'] };
+  vi.mocked(remote.sourcePlan.reviewRequest).mockRejectedValueOnce(new Error('connection lost'));
+  await expect(client(f, remote, plain).sourcePlan.reviewRequest(reviewerRequest)).rejects.toThrow(
+    /not acknowledged/
+  );
+  await expect(client(f, remote, plain).sourcePlan.reviewRequest(reviewerRequest)).rejects.toThrow(
+    /not acknowledged/
+  );
+
+  const resent = await client(f, remote, {
+    ...plain,
+    resend: 'nonce-1',
+  }).sourcePlan.reviewRequest(reviewerRequest);
+  expect(resent.externalId).toBe(reviewerRequest.external_id);
+  expect(remote.sourcePlan.reviewRequest).toHaveBeenCalledTimes(2);
+
+  // The refused key keeps its retained unknown outcome; the resend does not erase it.
+  await expect(client(f, remote, plain).sourcePlan.reviewRequest(reviewerRequest)).rejects.toThrow(
+    /not acknowledged/
+  );
+});
+
+it('cancels a reviewer request before sending it', async () => {
+  const f = await fixture();
+  const remote = cloud();
+  const controller = new AbortController();
+  controller.abort();
+  await expect(
+    client(f, remote, { verb: 'request' }, { signal: controller.signal }).sourcePlan.reviewRequest(
+      reviewerRequest
+    )
+  ).rejects.toMatchObject({ code: 'CANCELLED' });
+  expect(remote.sourcePlan.reviewRequest).not.toHaveBeenCalled();
 });

@@ -19,6 +19,7 @@ import { runCapture } from '../../lib/run-capture.js';
 
 export interface CaptureSummaryOptions {
   input?: string;
+  noLlm?: boolean;
 }
 
 /** Storage gates surface as the public codes the file era used; storage does not know the CLI registry. */
@@ -40,6 +41,7 @@ export async function captureSummary(
     parse: async () =>
       CaptureSummaryInputSchema.parse(await readPayloadInput({ inputPath: opts.input })),
     signal,
+    noLlm: opts.noLlm,
   });
   const { context, input } = prepared;
   try {

@@ -1,3 +1,4 @@
+import { prepareRationaleIndex, replaceRationaleIndex } from './rationale-index.js';
 import type { ProjectSettlement } from './transactions.js';
 import type { ArtifactThread } from '../../events/artifact-thread.js';
 import { SEARCH_FIELD_MAP_VERSION } from '../search-content/fields.js';
@@ -12,6 +13,7 @@ export interface ArtifactSearchRows {
   generation: number;
   sources: SearchProjectionSource[];
   touchedFiles: string[];
+  rationale: ReturnType<typeof prepareRationaleIndex>;
 }
 
 export function prepareArtifactSearchRows(
@@ -23,6 +25,7 @@ export function prepareArtifactSearchRows(
   return {
     artifactId: thread.artifactId,
     generation,
+    rationale: prepareRationaleIndex(thread),
     sources: projectArtifactSearchSources({
       projectId,
       thread,
@@ -43,6 +46,7 @@ export function replaceArtifactSearchRows(
   transaction: Pick<ProjectSettlement, 'run'>,
   prepared: ArtifactSearchRows
 ): void {
+  replaceRationaleIndex(transaction, prepared.artifactId, prepared.rationale);
   transaction.run('DELETE FROM artifact_search_sources WHERE artifact_id = ?', prepared.artifactId);
   for (const row of prepared.sources) {
     transaction.run(

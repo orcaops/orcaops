@@ -38,8 +38,7 @@ afterEach(async () => {
 async function store() {
   const restored = await restoreFixture(
     candidate,
-    path.join(candidate, 'packages/storage/src/history/database/fixtures/artifact-records.json'),
-    29
+    path.join(candidate, 'packages/storage/src/history/database/fixtures/artifact-records.json')
   );
   opened.push(restored);
   const handle = await openProjectDatabase({ authority: restored.authority, mode: 'writer' });
@@ -428,6 +427,10 @@ it('stays private to storage rather than reaching a package barrel', async () =>
     'publishProjectRecordRelationship',
     'publishProjectAdoption',
     'publishProjectAssessment',
+    // A runner-established execution is reachable only from the runner and the settlement beside
+    // it; a barrel export would make it something any caller can state about a process nothing ran.
+    'publishProjectObservedRun',
+    'insertObservation',
     'readProjectClaim',
     'readProjectDecision',
     'readProjectCriterionLineage',

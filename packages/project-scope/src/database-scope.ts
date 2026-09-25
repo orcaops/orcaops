@@ -189,7 +189,7 @@ async function openProject(
       if (authority.resolvedRoot !== root.resolvedRoot || authority.rootKey !== root.rootKey)
         throw new ProjectDatabaseError(
           'AUTHORITY_MISMATCH',
-          'Select the registered data root; a project read never relocates history'
+          `This repository is registered to data root ${authority.resolvedRoot}, not ${root.resolvedRoot}. Set ORCAOPS_DATA_DIR to the registered root, or use a separate clone for a different root; a project read never relocates history.`
         );
     }
     const catalog = await readProjectCatalogEntry({ root, projectId });

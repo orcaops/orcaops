@@ -3,19 +3,28 @@ import type { CommandTemplate } from '../types.js';
 
 export const showCommand: CommandTemplate = {
   id: 'show',
-  description: 'Render a single artifact thread — plan, checkpoints, summary, evaluator runs.',
+  description:
+    'Inspect a bounded artifact digest, checkpoint, or section; export complete evidence explicitly.',
   tags: ['orcaops', 'read-only'],
   body: (
     prefix: string
-  ) => `Render the full artifact thread for one captured task. You typically pass
+  ) => `Inspect a captured task without dumping its full history. You typically pass
 the id from \`/${commandRef('list', prefix)}\` or \`/${commandRef('status', prefix)}\`:
 
 \`\`\`bash
-orcaops show <artifact-id>             # human-friendly markdown
-orcaops show <artifact-id> --json      # machine-readable; includes evaluator log
+orcaops show <artifact-id> --json
+orcaops show <artifact-id> --checkpoint 2 --json
+orcaops show <artifact-id> --section knowledge --json
 \`\`\`
 
-Useful for spot-checking what was captured, reading prior decisions, or
-debugging an evaluator that fired unexpectedly.
+The digest contains a bounded checkpoint index. Follow its next-page command to
+discover omitted checkpoints; use its anchor when inspecting a selected checkpoint
+or decision. A changed observation requires a fresh selection.
+
+Ordinary output is limited to 16 KiB. An oversized complete unit is marked omitted,
+not clipped. Use \`--output <new-file>\` only when complete selected evidence is needed;
+stdout then contains a small export receipt, not the file's contents. Read only the
+needed part of an export. Full artifact exports omit the old duplicated results body.
+See https://docs.orcaops.ai/provenance-json for schema-4 migration details.
 `,
 };

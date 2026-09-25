@@ -47,13 +47,29 @@ it('initializes the complete supported schema with the retained table, index and
       );
     expect(normalized(actual)).toEqual(normalized(expected));
     expect(database.pragma('user_version', { simple: true })).toBe(PROJECT_DATABASE_SCHEMA_VERSION);
-    expect(PROJECT_DATABASE_SCHEMA_VERSION).toBe(29);
+    expect(PROJECT_DATABASE_SCHEMA_VERSION).toBe(33);
     expect(PROJECT_DATABASE_SCHEMA.match(/PRAGMA user_version/g)).toHaveLength(1);
     expect(PROJECT_DATABASE_SCHEMA).not.toMatch(/ALTER TABLE/);
     expect(database.pragma('foreign_key_check')).toEqual([]);
     expect(database.pragma('table_info(reviews)')).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'branch', notnull: 0 })])
     );
+  } finally {
+    database.close();
+  }
+});
+
+it('gives every schema object a name no other object shares', () => {
+  // SQLite lets a trigger and an index share a name, and the open path keys observed objects by
+  // name, so with a shared name one of the two never matches and every open is refused.
+  const database = new Database(':memory:');
+  try {
+    database.exec(PROJECT_DATABASE_SCHEMA);
+    const names = (
+      database.prepare('SELECT name FROM sqlite_schema').all() as { name: string }[]
+    ).map((object) => object.name);
+    const shared = names.filter((name, index) => names.indexOf(name) !== index);
+    expect(shared).toEqual([]);
   } finally {
     database.close();
   }
@@ -113,37 +129,58 @@ it('reopens populated current history and replays original receipts without chan
   expect(snapshot(Database, fixture.file)).toEqual(before);
 });
 
-it.each([...Array.from({ length: 28 }, (_, i) => i + 1), 0, 99])(
-  'refuses unsupported schema %s for reads, writes, discovery and initialization without replacing history',
-  async (version) => {
+// A passive open never migrates. It tells the released predecessor, which has an explicit
+// upgrade, apart from a development version that never shipped and from a format a newer build
+// wrote, and it says so without reading anything else from the file.
+const READ_OUTCOMES = [
+  ...Array.from(
+    { length: 29 },
+    (_, version) => [version, 'HISTORY_FORMAT_UNSUPPORTED'] as [number, string]
+  ),
+  [29, 'HISTORY_UPGRADE_REQUIRED'] as [number, string],
+  [30, 'HISTORY_FORMAT_UNSUPPORTED'] as [number, string],
+  [31, 'HISTORY_FORMAT_UNSUPPORTED'] as [number, string],
+  [32, 'HISTORY_FORMAT_UNSUPPORTED'] as [number, string],
+  [99, 'HISTORY_FORMAT_NEWER'] as [number, string],
+];
+
+it.each(READ_OUTCOMES)(
+  'answers schema %s with %s for reads, writes, discovery and initialization without replacing history',
+  async (version, code) => {
     const fixture = await populated();
     const raw = new Database(fixture.file);
     raw.pragma(`user_version = ${version}`);
     raw.close();
     const before = snapshot(Database, fixture.file);
     const bytes = await readFile(fixture.file);
+    const identity = before.rows.store_identity[0];
+    const refused: unknown[] = [];
     for (const mode of ['reader', 'writer'] as const) {
-      await expect(
-        openProjectDatabase({ authority: fixture.authority, mode })
-      ).rejects.toMatchObject({
-        code: 'HISTORY_FORMAT_UNSUPPORTED',
-      });
+      refused.push(
+        await openProjectDatabase({ authority: fixture.authority, mode }).catch((cause) => cause)
+      );
     }
-    await expect(
-      readProjectInitializationCandidate({
+    refused.push(
+      await readProjectInitializationCandidate({
         root: fixture.authority.resolvedRoot,
         projectId: fixture.authority.projectId,
-      })
-    ).rejects.toMatchObject({ code: 'HISTORY_FORMAT_UNSUPPORTED' });
-    const identity = before.rows.store_identity[0];
-    await expect(
-      initializeProjectDatabase({
+      }).catch((cause) => cause)
+    );
+    refused.push(
+      await initializeProjectDatabase({
         authority: fixture.authority,
         initializationOperationId: identity.initialization_operation_id as string,
         initializedAt: before.rows.activation[0].initialized_at as string,
         authorize() {},
-      })
-    ).rejects.toMatchObject({ code: 'HISTORY_FORMAT_UNSUPPORTED' });
+      }).catch((cause) => cause)
+    );
+    for (const outcome of refused) {
+      expect(outcome).toMatchObject({ code });
+      const message = (outcome as Error).message;
+      expect(message).toMatch(new RegExp(`\\b${version}\\b`));
+      expect(message).not.toMatch(/rebuild|reinitializ|re-initializ|delete/i);
+      if (code === 'HISTORY_UPGRADE_REQUIRED') expect(message).toContain('orcaops history upgrade');
+    }
     expect(snapshot(Database, fixture.file)).toEqual(before);
     expect(await readFile(fixture.file)).toEqual(bytes);
   },

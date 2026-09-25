@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
+import { readArtifactExport } from '../support/artifact-export.js';
 import { makeAgent } from '../support/test-agent.js';
 import { doneCriteriaFor } from '../support/test-helpers.js';
 
@@ -47,7 +48,7 @@ describe('current writer through a strict rebuild', () => {
     ]);
     expect(plan.exitCode).toBe(0);
     const artifactId = (JSON.parse(plan.stdout) as { artifact_id: string }).artifact_id;
-    const shown = JSON.parse((await agent.runRaw(['show', artifactId, '--json'])).stdout) as {
+    const shown = JSON.parse((await readArtifactExport(agent, artifactId)).stdout) as {
       artifact: {
         plan: {
           plan_steps: Array<{
@@ -133,7 +134,7 @@ describe('current writer through a strict rebuild', () => {
     expect(digestBefore.exitCode).toBe(0);
 
     const listBefore = (await agent.runRaw(['list', '--json'])).stdout;
-    const showBefore = (await agent.runRaw(['show', artifactId, '--json'])).stdout;
+    const showBefore = (await readArtifactExport(agent, artifactId)).stdout;
 
     const rebuild = await agent.runRaw(['rebuild', '--json']);
     expect(rebuild.exitCode).toBe(0);
@@ -141,7 +142,7 @@ describe('current writer through a strict rebuild', () => {
     expect(env.skipped_artifacts).toBe(0);
 
     expect((await agent.runRaw(['list', '--json'])).stdout).toBe(listBefore);
-    expect((await agent.runRaw(['show', artifactId, '--json'])).stdout).toBe(showBefore);
+    expect((await readArtifactExport(agent, artifactId)).stdout).toBe(showBefore);
     const digestAfter = await agent.runRaw(['digest', '--artifact', artifactId]);
     expect(digestAfter.exitCode).toBe(0);
     expect(digestAfter.stdout).toBe(digestBefore.stdout);

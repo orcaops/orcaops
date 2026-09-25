@@ -3,7 +3,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { CONFIG_SCHEMA_VERSION } from '@orcaops/storage';
+import { FRESH_CONFIG_FILE_VERSION } from '@orcaops/storage';
 import { createRepoTemplate, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -103,7 +103,7 @@ describe('orcaops update — pre-consolidation prune', () => {
     local.entries.push(...localEntries);
     await writeFile(localPath, JSON.stringify(local, null, 2) + '\n', 'utf8');
 
-    // The config stays at the current version because pruning keys off the
+    // The config keeps the version init stamped because pruning keys off the
     // install manifests alone.
     const update = await agent.runRaw(['update', '--json']);
     expect(update.exitCode).toBe(0);
@@ -129,11 +129,11 @@ describe('orcaops update — pre-consolidation prune', () => {
     expect(block).not.toContain('orcaops-plan-review');
     expect(block).toContain('orcaops-recap');
 
-    // The init-written current config is untouched by the prune.
+    // The init-written config is untouched by the prune.
     const after = JSON.parse(await readFile(p('.orcaops', 'config.json'), 'utf8')) as {
       schema_version: number;
     };
-    expect(after.schema_version).toBe(CONFIG_SCHEMA_VERSION);
+    expect(after.schema_version).toBe(FRESH_CONFIG_FILE_VERSION);
 
     const doctor = await agent.runRaw(['doctor', '--json']);
     expect(doctor.exitCode).toBe(0);

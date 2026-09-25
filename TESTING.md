@@ -65,6 +65,24 @@ pnpm --filter @orcaops/cli test:coverage
 pnpm typecheck:tests                   # typecheck test files, mirrors CI
 ```
 
+## Measurements
+
+`apps/orcaops-cli/tests/measurements/` holds tests that record numbers rather than assert them.
+They live in the `cli` project and run with it, except that the recording half is gated:
+`capture-latency.measurement.test.ts` does nothing without `RUN_MEASUREMENTS=1`, and says so.
+Timing the machine is what it does, so run it alone, on an idle machine, and expect about five
+minutes:
+
+```bash
+RUN_MEASUREMENTS=1 pnpm --filter @orcaops/cli exec vitest run --project cli \
+  tests/measurements/capture-latency.measurement.test.ts
+```
+
+It writes its numbers to standard output and to a file whose path it prints. The always-on
+`capture-latency.invariant.test.ts` beside it asserts the structural rule those numbers illustrate,
+with no timing threshold of its own. A number recorded on one machine is that machine's; re-record
+deliberately rather than editing it.
+
 ## Adding or moving a test
 
 A test outside `src/` is only covered if both of these see it — a green

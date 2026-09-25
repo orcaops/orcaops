@@ -327,7 +327,7 @@ export function pinRefOf(externalId: string, approvedVersionNumber: number | nul
   return approvedVersionNumber === null ? null : `cloud:${externalId}@${approvedVersionNumber}`;
 }
 
-export type ReviewCommand = 'push' | 'propose' | 'comment' | 'verdict' | 'decline';
+export type ReviewCommand = 'push' | 'propose' | 'comment' | 'verdict' | 'decline' | 'request';
 
 /**
  * Remap a cloud authz / status rejection into a friendly `OrcaopsError`, to be
@@ -350,6 +350,13 @@ export function mapReviewAuthzError(
 ): unknown {
   const inputPath = `plan-review-${ctx.command}`;
   if (isForbiddenError(err)) {
+    if (ctx.command === 'request') {
+      return new OrcaopsError(
+        ErrorCodes.CLOUD_ERROR,
+        'Only the plan author can request reviewers.',
+        inputPath
+      );
+    }
     if (ctx.command === 'push') {
       return new OrcaopsError(
         ErrorCodes.CLOUD_ERROR,

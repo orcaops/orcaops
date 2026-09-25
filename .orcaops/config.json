@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 8,
   "install": {
     "agents": [
       "claude-code",
@@ -13,6 +13,12 @@
     "model": null,
     "effort": "medium",
     "default_max_cost_usd": 0.5
+  },
+  "knowledge_processing": {
+    "enabled": true,
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "effort": "high"
   },
   "artifacts": {
     "path": ".orcaops/artifacts",

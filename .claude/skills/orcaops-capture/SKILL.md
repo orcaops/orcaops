@@ -2,8 +2,8 @@
 name: "Orcaops: capture plan"
 description: "Capture or revise a coding-task plan, minting stable step IDs and running plan checks."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "ee2f43088754"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "650331ac4691"
 tags: ["orcaops", "capture"]
 ---
 
@@ -43,11 +43,19 @@ already has an active artifact.
 # Pre-step: prior-art sweep (plan-critique)
 
 If the `orcaops-plan-critique` skill is installed, invoke
-it BEFORE drafting a non-trivial plan. It searches canonical captured history
-and can include every catalogued project when the task calls for it.
-Relevant decisions, rejected alternatives, non-goals, and unresolved
-uncertainty slot directly into the fields below. Skip it for trivial tasks
-or when the skill is not installed.
+it BEFORE drafting a non-trivial plan. It runs `orcaops knowledge lookup`
+first — the continuing requirements and decisions that bear on this work, with
+their exact revision ids — and then searches canonical captured history, which
+can include every catalogued project when the task calls for it. The applicable
+revisions become this plan's `knowledge_uses`; relevant decisions, rejected
+alternatives, non-goals, and unresolved uncertainty slot directly into the
+fields below. Skip it for trivial tasks or when the skill is not installed.
+
+If `conflicts` or `unresolved` leave consequential product scope ambiguous,
+ask one useful planning clarification and record its answer in the plan. Do not
+repeat the question test by test or ask again about routine choices within
+agreed scope. A user's scope clarification does not itself waive a recorded
+requirement or grant authority to change it.
 
 # Initial capture (`orcaops capture plan`)
 
@@ -156,16 +164,57 @@ as the `plan_revision_id` optimistic-concurrency token on cp-open.
 
 | Field | Notes |
 |---|---|
-| `idempotency_key` | **Optional — auto-minted (UUIDv7) when omitted**, so you normally don't pass it. Supply one explicitly only for replay-safe retries: reusing the same key makes a retried call dedup as a replay instead of minting a new artifact. **On initial capture the match is key-only**: a reused key replays the FIRST artifact and silently ignores the plan you just sent, even if it is completely different. It never raises `IDEMPOTENCY_CONFLICT`. If you are retrying with an EDITED plan, mint a fresh key, or capture once and use `plan revise`. |
+| `idempotency_key` | **Optional — auto-minted (UUIDv7) when omitted**, so you normally don't pass it. Supply one explicitly only for replay-safe retries: reusing the same key makes a retried call dedup as a replay instead of minting a new artifact. **On initial capture the plan body matches key-only**: a reused key replays the FIRST artifact and silently ignores the plan you just sent, even if it is completely different. The one exception is `knowledge_uses`: a reused key carrying a different selection is an `IDEMPOTENCY_CONFLICT`, because the selection is part of the retained request. If you are retrying with an EDITED plan, mint a fresh key, or capture once and use `plan revise`. |
 | `task` | One-sentence description of the work |
 | `label` | **Plan-level short headline** — 1-line human-readable name for the whole capture thread (1–70 chars, no newlines/tabs, trimmed). Distinct from the longer `task`. Surfaces in lists, digests, and downstream PR titles. The `plan-label-quality` evaluator (severity: warn) flags labels that are too short, generic ("fix", "wip", "cleanup", etc.), or just the leading slice of `task`. |
 | `plan_steps` | Ordered list of step objects (~3-7 entries), each `{ text, label, acceptance_criteria }`. The runtime mints stable UUIDv7 step_ids per entry. `label` is a short-form description (1-line TL;DR per step); see the `label` notes below. **`acceptance_criteria`** is **required on every step you author** — a list of `{ text }` rubric items, each naming an observable condition that proves the step is done. Capture is rejected with `PLAN_ACCEPTANCE_CRITERIA_REQUIRED` when a step declares none, and the error prints the nested YAML shape to add. The runtime mints a stable `criterion_id` per entry and returns them in the response; key `done_criteria` to those ids at checkpoint-close. Only steps already retained from before this contract (and Git imports) may carry an empty rubric, and their absent criteria are reported, never treated as approved. |
 | `touched_scope` | Tags like `auth`, `payments`, `pii`, `refactor`, `docs`. Used to filter evaluators. Empty array is fine. |
 | `non_goals` | Things this plan is intentionally **not** going to do — **structured** `{ text, rationale, source_refs? }`. `text` (the exclusion) and `rationale` (the *why*) are both required and non-blank; `source_refs` is optional (free-form strings naming the source-plan item(s) you're excluding, e.g. `"section 2.3"`). Surfaces in plan / resume / digest; checked at checkpoint-close by `non-goals-violated`. |
 | `decisions` | **Optional** plan-time decisions — the load-bearing architectural choices made up front, **structured** `{ decision, reason, alternatives_considered? }` (where `alternatives_considered` is a list of `{ option, rejected_because }`). Capture **a choice where you rejected a viable alternative**, **a divergence from the source plan**, or **adopting an existing pattern over building new** (that still counts). The runtime stamps each with the plan `revision_n`; surfaces in plan.md / digest / resume / `why`. Append-only across revisions — a `revise` supplies only the NEW decisions. |
+| `knowledge_uses` | **Optional** — the exact continuing requirement and decision revisions this plan uses, from the prior-art sweep. Each entry is `{ kind, entity_id, revision_id, role, exception_id? }`. Omit the field entirely when the sweep found nothing applicable; never invent an id. See the section below. |
 
 Optional: `branch` (defaults to current git branch), `agent_session_id`,
 and the `--source-plan <path>` **flag** (not a JSON field) — see above.
+
+### What the plan uses (`knowledge_uses`)
+
+A plan records the exact revisions it was drafted against, so a later reader can
+tell what this task actually selected from what somebody connected afterwards.
+Take the ids from `orcaops knowledge lookup` (the `orcaops-plan-critique`
+sweep runs it first):
+
+```yaml
+knowledge_uses:
+  - kind: requirement
+    entity_id: <requirement or decision id from knowledge lookup>
+    revision_id: <the exact revision the lookup returned>
+    role: implement
+```
+
+- `kind` is `requirement` or `decision` — the only two things a task use can
+  name. A plan step's acceptance criterion is **not** one of them: a task-local
+  criterion is recorded against the shared requirement it came from, never as a
+  target of its own.
+- `role` is one of `implement`, `preserve`, `assess`, `background`,
+  `propose_change`.
+- `exception_id` is optional and names a recorded exception the use rests on.
+- Name the **exact revision**, not the identity. A plan that names a
+  predecessor of the revision that now governs is reported as drift rather than
+  as covered.
+
+These settle inside the plan event's own operation, so the store derives
+`selected_with_plan` for each of them itself — nothing you pass can make a
+connection found later read as an original selection. A use naming a revision
+this history does not retain refuses the **whole** capture with
+`HISTORY_MISSING` and captures nothing; re-read the lookup rather than
+retrying the same ids. Reusing a `capture plan` idempotency key with a
+different selection is an `IDEMPOTENCY_CONFLICT`, because the selection is
+part of the retained request.
+
+Leaving an applicable revision out is a normal choice, not a way to make it go
+away: `orcaops knowledge lookup` and `orcaops status --json` both list it
+under `applicable_not_selected`, with any other revision of the same identity
+this plan did select named beside it.
 
 ### Three different things, deliberately kept apart
 
@@ -297,6 +346,7 @@ initial capture and immutable thereafter.)
 | `touched_scope` | New touched_scope set. Adding a sensitive tag triggers `revision-touched-scope-stable` warn. |
 | `non_goals` | New non-goals set — **structured** `{ text, rationale, source_refs? }` (same shape as initial capture; `text` + `rationale` required non-blank). Removing a non-goal triggers `revision-non-goals-stable` warn. |
 | `decisions` | **Append-only**: supply only the NEW plan-time decisions this revision adds (base shape `{ decision, reason, alternatives_considered? }`, no `revision_n` — the write path stamps it and cumulates onto the prior set, so the latest plan holds the full history). Unlike `plan_steps` / `non_goals` (full-supersede), a decision is never erased by a later revision — a reversal is a NEW decision that references the change. |
+| `knowledge_uses` | **Optional, and a FULL SUPERSEDE** — like `plan_steps`, not like `decisions`. Restate every use this revision selects, carried-forward ones included; omitting the field selects none. A use the prior revision named and this one does not is simply not a use of the new plan event: it stays recorded against the plan event that did select it and is never rewritten, and if it still applies it reappears under `applicable_not_selected`. Re-run the lookup when the scope changed rather than restating stale revision ids. |
 
 ## Optional fields (revise)
 
@@ -342,6 +392,15 @@ envelope shape:
     { "step_id": "01HX...", "idx": 1, "text": "implement Redis sliding-window middleware in Express", "label": "Redis sliding-window middleware" },
     ...
   ],
+  "knowledge_uses": {
+    "plan_event_id": "01HX...",
+    "selected_with_plan": [
+      { "artifact_id": "a3b1f0c2", "plan_event_id": "01HX...",
+        "target": { "kind": "requirement", "entity_id": "...", "revision_id": "..." },
+        "role": "implement", "standing": "adopted", "discovered_at": null, ... }
+    ],
+    "connected_later": []
+  },
   "evaluator_results": [
     { "evaluator_ref": "core/plan-mentions-tests", "severity": "warn",
       "run_status": "completed", "verdict": "pass", ... },
@@ -355,6 +414,17 @@ envelope shape:
 `revision_n` is the new revision counter (0 on initial; 1+ on
 revisions). The top-level `plan_event_id` is the latest plan event_id, suitable
 for passing forward as `plan_revision_id` on the next cp-open.
+
+`knowledge_uses` is read back **from the store**, so it says what was
+recorded rather than echoing what you sent, and it reports each use's current
+`standing`. `selected_with_plan` is this plan event's own selection;
+`connected_later` is what somebody connected to the same plan event
+afterwards, and the store derives which from the operation that wrote it — the
+two are never shown as one. `knowledge_uses.plan_event_id` names the plan
+event the uses are keyed to, so a `revise` reports the revision it just wrote.
+It is `null` on a replayed `revise`, which wrote no new plan event. Checkpoints
+inherit these uses through the plan revision they pin; see the
+orcaops-checkpoint skill.
 
 For each completed `evaluator_result` with `verdict: "violation"`:
 - **severity: warn** — address the concern, then either retry or
@@ -379,13 +449,14 @@ When `blocking: true` is set, do **not** start the work until resolved.
 | `UNINITIALIZED` | Repo isn't set up; the user needs to run `orcaops init`. |
 | `NOT_A_REPO` | Cwd isn't a git repo. |
 | `UNKNOWN_ARTIFACT` | (revise only) wrong `artifact_id`. Check `orcaops status --json`. |
-| `IDEMPOTENCY_CONFLICT` | Same `idempotency_key` was used by a prior call with a different payload. Mint a fresh key. Raised by `plan revise` and by the artifact-scoped writes (checkpoint, summary, evaluator-run, block) — **not** by initial `capture plan`, which matches on the key alone and replays instead (see `idempotency_key` above). |
+| `IDEMPOTENCY_CONFLICT` | Same `idempotency_key` was used by a prior call with a different payload. Mint a fresh key. Raised by `plan revise`, by the artifact-scoped writes (checkpoint, summary, evaluator-run, block), and by initial `capture plan` when the reused key carries a different `knowledge_uses` selection. The rest of an initial `capture plan` payload matches on the key alone and replays instead (see `idempotency_key` above). |
 | `ARTIFACT_FINALIZED` | (revise only) `summary_captured` already fired — the PLAN is frozen post-summary. Running pre-pr-check does NOT finalize; revise freely before summary. Start a fresh artifact. (The summary itself is not frozen — amend it via `capture summary` with a `prior_summary_event_id` token; see the summary skill.) |
 | `STALE_PLAN_REVISION` | (revise only) `prior_plan_event_id` is no longer the latest plan event. Re-read resume/status, retry with the fresh token. |
 | `PLAN_REVISION_OPEN_CP_CONFLICT` | (revise only) you're dropping a step_id an open cp declares. Abandon the cp first, or revise without dropping that step_id (text-only rewrites are fine). |
 | `PLAN_REVISION_UNACKNOWLEDGED_DROPS` | (revise only) you're dropping a step_id that a closed cp claimed without listing it in `acknowledge_drops_completed_steps`. Add the explicit acknowledgement and retry. |
 | `PLAN_REVISION_UNACKNOWLEDGED_CRITERIA_CHANGES` | (revise only) you're removing or rewriting an acceptance criterion on a step with an OPEN checkpoint without listing its `criterion_id` in `acknowledge_criteria_changes`. Add the acknowledgement (you're changing the rubric under active work) and retry. |
 | `PLAN_REVISION_INPUT_INVALID` | (revise only) duplicate step_ids or duplicate labels in input, or step_id absent from prior plan. Fix the JSON. |
+| `HISTORY_MISSING` | A `knowledge_uses` entry names a revision this project history does not retain. The whole capture is refused and nothing is written. Re-read `orcaops knowledge lookup` for the ids that exist rather than retrying the same ones. |
 | `INTERNAL` | Log it to the user; don't retry blindly. |
 
 

@@ -1,12 +1,15 @@
 import type { ProjectDatabase } from './connection.js';
 import { ProjectDatabaseError } from './errors.js';
 import {
+  type CaptureOperationOptions,
   prepareExecutionCaptureRequest,
   prepareExecutionCaptureSettlement,
+  type ProjectCaptureResult,
   restoreExecutionCaptureRequest,
 } from './execution-capture.js';
 import { translateExecutionFailure } from './execution-errors.js';
 import { prepareProjectImportedArtifactSettlement } from './imported-artifact.js';
+import { settleProjectTaskUses } from './knowledge-task-uses.js';
 import {
   assertCaptureRetentionInput,
   captureRetentionOperation,
@@ -29,18 +32,14 @@ import {
   staleRetention,
 } from './retention-targets.js';
 import { isSourceTimeSnapshotChanged } from './source-time-records.js';
-import {
-  type ProjectOperationOptions,
-  type ProjectOperationResult,
-  runProjectOperation,
-} from './transactions.js';
+import { type ProjectOperationOptions, runProjectOperation } from './transactions.js';
 import type { DatabaseJson } from './values.js';
 import { canonicalJson } from '../../events/canonical-json.js';
 
 async function beginCaptureRetention(
   handle: ProjectDatabase,
   input: { capture: PendingCaptureInput; retention: PreparedProjectGitRetention },
-  options: ProjectOperationOptions = {},
+  options: CaptureOperationOptions = {},
   command?: PreparedPlanCaptureCommand,
   mode: 'capture' | 'import' = 'capture'
 ) {
@@ -105,7 +104,7 @@ async function beginCaptureRetention(
         assertRetentionTarget(tx, retention);
         plan?.settle(tx);
         insertRetentionRecords(tx, retention);
-        insertPendingCapture(tx, capture);
+        insertPendingCapture(tx, capture, options.processing?.withoutModel === true);
         return {
           originalOperationId: retention.operationId,
           transitionId: retention.preparedTransitionId,
@@ -122,7 +121,7 @@ async function beginCaptureRetention(
 export function beginProjectCaptureRetention(
   handle: ProjectDatabase,
   input: { capture: PendingCaptureInput; retention: PreparedProjectGitRetention },
-  options: ProjectOperationOptions = {}
+  options: CaptureOperationOptions = {}
 ) {
   return beginCaptureRetention(handle, input, options);
 }
@@ -142,7 +141,7 @@ export function beginProjectPlanCaptureRetention(
     retention: PreparedProjectGitRetention;
     command: PreparedPlanCaptureCommand;
   },
-  options: ProjectOperationOptions = {}
+  options: CaptureOperationOptions = {}
 ) {
   return beginCaptureRetention(handle, input, options, input.command);
 }
@@ -176,25 +175,25 @@ type ImportedRetentionResult = RetentionResult & ArtifactResult;
 function settleCaptureRetention(
   handle: ProjectDatabase,
   input: RetentionSelection,
-  options?: ProjectOperationOptions,
+  options?: CaptureOperationOptions,
   mode?: 'capture'
-): Promise<ProjectOperationResult<CaptureRetentionResult>>;
+): Promise<ProjectCaptureResult<CaptureRetentionResult>>;
 function settleCaptureRetention(
   handle: ProjectDatabase,
   input: RetentionSelection,
-  options: ProjectOperationOptions | undefined,
+  options: CaptureOperationOptions | undefined,
   mode: 'import'
-): Promise<ProjectOperationResult<ImportedRetentionResult>>;
+): Promise<ProjectCaptureResult<ImportedRetentionResult>>;
 function settleCaptureRetention(
   handle: ProjectDatabase,
   input: RetentionSelection,
-  options: ProjectOperationOptions | undefined,
+  options: CaptureOperationOptions | undefined,
   mode: 'capture' | 'import'
-): Promise<ProjectOperationResult<CaptureRetentionResult | ImportedRetentionResult>>;
+): Promise<ProjectCaptureResult<CaptureRetentionResult | ImportedRetentionResult>>;
 async function settleCaptureRetention(
   handle: ProjectDatabase,
   input: RetentionSelection,
-  options: ProjectOperationOptions = {},
+  options: CaptureOperationOptions = {},
   mode: 'capture' | 'import' = 'capture'
 ) {
   const runtime = { signal: options.signal, onWait: options.onWait };
@@ -218,12 +217,26 @@ async function settleCaptureRetention(
       );
     const capture = restoreExecutionCaptureRequest(handle, original.capture);
     const retention = original.retention.input;
+    // The staging invocation's no-model choice governs, never the one settling:
+    // a capture resumed by a later invocation must not become a paid call
+    // because that invocation left the flag off, nor lose a model the capture
+    // was made with because it passed one.
+    const processing =
+      options.processing === undefined
+        ? undefined
+        : { ...options.processing, withoutModel: original.withoutModel };
+    const planUses = original.planUses;
     const operation = {
       operationId: originalOperationId,
       kind: `${mode}.retention.select`,
       target: { originalOperationId, artifactId: capture.request.artifactId },
       payload: JSON.parse(
-        canonicalJson({ retention, capture: capture.operation.payload, selectedTransitionId })
+        canonicalJson({
+          retention,
+          capture: capture.operation.payload,
+          selectedTransitionId,
+          ...(planUses === null ? {} : { knowledge_uses: [...planUses.authoredSha256] }),
+        })
       ) as DatabaseJson,
       expectedState: JSON.parse(
         canonicalJson({ target: retention.target, transitionId: expectedTransitionId })
@@ -243,12 +256,12 @@ async function settleCaptureRetention(
         ? null
         : mode === 'import'
           ? await prepareProjectImportedArtifactSettlement(handle, original.capture)
-          : await prepareExecutionCaptureSettlement(handle, capture);
+          : await prepareExecutionCaptureSettlement(handle, capture, processing);
       try {
-        return await runProjectOperation(
+        const result = await runProjectOperation(
           handle,
           operation,
-          (tx) => {
+          (tx, settling) => {
             const current = readRetentionRecords(tx, originalOperationId);
             if (!current || !settlement)
               throw new ProjectDatabaseError(
@@ -267,6 +280,10 @@ async function settleCaptureRetention(
               );
             assertRetentionTarget(tx, retention);
             const artifact = settlement.settle(tx);
+            // This is the operation that writes the plan event, so it is the only one whose
+            // settlement can record the uses the plan selected: written at the admission instead,
+            // they would be a later connection nobody found.
+            if (planUses) settleProjectTaskUses(tx, settling, planUses, null);
             const artifactResult = JSON.parse(canonicalJson(artifact)) as Record<
               string,
               DatabaseJson
@@ -290,6 +307,11 @@ async function settleCaptureRetention(
           },
           runtime
         );
+        return {
+          ...result,
+          admittedProcessingJobs:
+            settlement && 'admitted' in settlement ? [...settlement.admitted] : [],
+        };
       } catch (cause) {
         if (attempt !== 0 || !isSourceTimeSnapshotChanged(cause)) throw cause;
       }
@@ -302,7 +324,7 @@ async function settleCaptureRetention(
 export function settleProjectCaptureRetention(
   handle: ProjectDatabase,
   input: RetentionSelection,
-  options: ProjectOperationOptions = {}
+  options: CaptureOperationOptions = {}
 ) {
   return settleCaptureRetention(handle, input, options);
 }

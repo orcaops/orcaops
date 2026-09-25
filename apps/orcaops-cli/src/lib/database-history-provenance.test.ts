@@ -42,22 +42,32 @@ describe('database provenance reads', { timeout: 30_000 }, () => {
         const result = await readDatabaseCanonicalWhy(
           context,
           path.join(f.main, 'budget.ts'),
-          { details, all: true, limit: 1 },
+          { details, audit: details, all: true, limit: 1 },
           { maxArtifacts: 1 }
         );
         expect(result).toMatchObject({
           conclusion: 'incomplete',
           best: null,
-          candidate_selection: { indexed: 2, materialized: 1, omitted: 1, complete: false },
+          diagnostics: {
+            candidate_selection: { omitted: 1, complete: false },
+            completeness: { complete: true },
+          },
           pagination: {
             total: 1,
             returned: 1,
             next_offset: null,
             total_basis: 'evaluated_matches',
           },
-          completeness: { complete: true },
-          detail_omissions: { results: !details },
+          representation: details ? 'details' : 'compact',
+          output: { omitted_provenance: 0 },
         });
+        if (!('diagnostics' in result)) throw new Error('Expected a rationale response');
+        if (details)
+          expect(result.diagnostics.candidate_selection).toMatchObject({
+            indexed: 2,
+            materialized: 1,
+          });
+        else expect(result.diagnostics.candidate_selection.materialized).toBeUndefined();
       }
     } finally {
       context.scope.close();

@@ -1,8 +1,13 @@
-import { lstat, readFile, readlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, readFile, readlink } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 
 import type { PlannedFile } from '@orcaops/adapters';
+import {
+  INSTALL_MANIFEST_RELATIVE_PATH,
+  LOCAL_INSTALL_MANIFEST_RELATIVE_PATH,
+} from '@orcaops/core';
 import {
   assertCanonicalRelativePath,
   assertResolvedWithin,
@@ -29,8 +34,8 @@ import { ErrorCodes, OrcaopsError } from '../io/errors.js';
  *     it is never committed; prune/uninstall reconstruct it when absent.
  */
 export const MANIFEST_VERSION = 1;
-export const INSTALL_MANIFEST_REL = path.join('.orcaops', 'install.json');
-export const LOCAL_MANIFEST_REL = path.join('.orcaops', 'install.local.json');
+export const INSTALL_MANIFEST_REL = INSTALL_MANIFEST_RELATIVE_PATH;
+export const LOCAL_MANIFEST_REL = LOCAL_INSTALL_MANIFEST_RELATIVE_PATH;
 
 export type OwnershipKind = 'generated-file' | 'injected-block' | 'gitignore-entry';
 export type Provenance = 'created' | 'adopted' | 'pre-existing';
@@ -529,17 +534,72 @@ async function readValidated<T>(
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw err;
   }
+  const parsed = parseValidated(raw, schema);
+  if (!parsed.ok) throw manifestReadError(relPath, label, parsed.reason);
+  return parsed.value;
+}
+
+function parseValidated<T>(
+  raw: string,
+  schema: z.ZodType<T>
+): { ok: true; value: T } | { ok: false; reason: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    throw manifestReadError(relPath, label, `malformed JSON (${(err as Error).message})`);
+    return { ok: false, reason: `malformed JSON (${(err as Error).message})` };
   }
   const result = schema.safeParse(parsed);
-  if (!result.success) {
-    throw manifestReadError(relPath, label, formatIssues(result.error));
+  return result.success
+    ? { ok: true, value: result.data }
+    : { ok: false, reason: formatIssues(result.error) };
+}
+
+export type LocalManifestState =
+  | { kind: 'absent' }
+  | { kind: 'valid'; manifest: LocalManifest; content: string }
+  | { kind: 'invalid'; reason: string };
+
+/**
+ * The worktree local manifest from ONE read: `content` is exactly the bytes
+ * `manifest` was validated from, so a deletion guarded on it can only remove
+ * what passed validation. Containment and filesystem failures still throw;
+ * a present file that is not a valid manifest comes back `invalid`.
+ */
+export async function readLocalManifestState(repoRoot: string): Promise<LocalManifestState> {
+  const label = 'local install manifest';
+  let safePath: string;
+  try {
+    safePath = assertResolvedWithin(path.join(repoRoot, LOCAL_MANIFEST_REL), repoRoot, label, {
+      rejectSymlinks: true,
+    });
+  } catch (err) {
+    if (err instanceof PathContainmentError) {
+      throw manifestReadError(LOCAL_MANIFEST_REL, label, err.message);
+    }
+    throw err;
   }
-  return result.data;
+  // Checked before opening: opening a FIFO for reading would block.
+  let stats;
+  try {
+    stats = await lstat(safePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' };
+    throw err;
+  }
+  if (!stats.isFile()) return { kind: 'invalid', reason: 'not a regular file' };
+  let content: string;
+  const handle = await open(safePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    if (!(await handle.stat()).isFile()) return { kind: 'invalid', reason: 'not a regular file' };
+    content = await handle.readFile('utf8');
+  } finally {
+    await handle.close();
+  }
+  const parsed = parseValidated(content, localManifestSchema);
+  return parsed.ok
+    ? { kind: 'valid', manifest: parsed.value, content }
+    : { kind: 'invalid', reason: parsed.reason };
 }
 
 export async function readInstallManifest(repoRoot: string): Promise<InstallManifest | null> {

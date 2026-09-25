@@ -5,5 +5,6 @@ export * from './config.js';
 export * from './context.js';
 export * from './run.js';
 export * from './disposition.js';
+export * from './finding.js';
 export * from './result-envelope.js';
 export * from './gate-audit.js';

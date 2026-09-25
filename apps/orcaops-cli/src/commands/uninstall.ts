@@ -670,6 +670,7 @@ export async function uninstallAction(opts: UninstallOptions = {}): Promise<void
             dryRun: !!opts.dryRun,
             purgeData: !!opts.purgeData,
             canonicalDataPreserved: purgeResult?.preservedRoots ?? [],
+            canonicalHistoryRoots: protectedHistoryRoots,
             removed,
             removedUnverified,
             removedDirs,
@@ -1053,6 +1054,7 @@ function formatHuman(r: {
   dryRun: boolean;
   purgeData: boolean;
   canonicalDataPreserved: string[];
+  canonicalHistoryRoots: readonly string[];
   removed: string[];
   removedUnverified: { path: string; kind: OwnershipKind }[];
   removedDirs: string[];
@@ -1148,8 +1150,12 @@ function formatHuman(r: {
     r.purgeData
       ? r.canonicalDataPreserved.length > 0
         ? 'Removed noncanonical .orcaops data and preserved canonical history.'
-        : 'Removed the .orcaops directory (config + captured artifacts).'
-      : 'Kept .orcaops/ (config + captured artifacts). Re-run with --purge-data to remove it.'
+        : `Removed the .orcaops directory. Canonical project history is kept in ${
+            r.canonicalHistoryRoots.length > 0
+              ? r.canonicalHistoryRoots.join(', ')
+              : 'the orcaops data directory'
+          }.`
+      : 'Kept .orcaops/ (config and worktree data). Re-run with --purge-data to remove it.'
   );
   lines.push('');
   return lines.join('\n');

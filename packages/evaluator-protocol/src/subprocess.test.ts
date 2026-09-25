@@ -628,3 +628,40 @@ describe('escalation ordering around spawn', () => {
     15_000
   );
 });
+
+describe('runBoundedSubprocess — reporting what was spawned', () => {
+  it('reports the child pid once, while the child is still running', async () => {
+    const seen: number[] = [];
+    const result = await runBoundedSubprocess({
+      ...baseRequest(['bash', '-c', 'echo started']),
+      onSpawn: (pid) => seen.push(pid),
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBeGreaterThan(0);
+    expect(result.exit_code).toBe(0);
+  });
+
+  it('reports nothing for a spawn that never happened', async () => {
+    const seen: number[] = [];
+    const result = await runBoundedSubprocess({
+      ...baseRequest([path.join(scratch, 'not-a-program')]),
+      onSpawn: (pid) => seen.push(pid),
+    });
+
+    expect(result.spawn_error).not.toBeNull();
+    expect(seen).toEqual([]);
+  });
+
+  it('does not let a caller’s own failure derail the run', async () => {
+    const result = await runBoundedSubprocess({
+      ...baseRequest(['bash', '-c', 'echo still ran']),
+      onSpawn: () => {
+        throw new Error('the caller could not record it');
+      },
+    });
+
+    expect(result.exit_code).toBe(0);
+    expect(result.stdout.trim()).toBe('still ran');
+  });
+});

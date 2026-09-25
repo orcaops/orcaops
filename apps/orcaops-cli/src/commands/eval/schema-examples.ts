@@ -1,5 +1,7 @@
+import type { EvaluatorResultEnvelopeV2 } from '@orcaops/evaluator-protocol';
+
 /**
- * Hand-written exemplars for the two files an evaluator author types by hand.
+ * Hand-written exemplars for the shapes an evaluator author produces.
  *
  * Hand-written on purpose, exactly like `eval test --print-example-fixture`:
  * a JSON Schema answers "is this valid", never "what do I write", and a
@@ -13,8 +15,11 @@
  * public docs site, and neither package carries it — so the CLI is the only
  * surface that travels with the tool.
  *
- * YAML, not JSON: these files are YAML on disk, so an author can paste the
- * output straight into place.
+ * The two `--example` exemplars are YAML, because those files are YAML on disk
+ * and an author pastes the output straight into place. The envelope is not a
+ * file anyone pastes, so it rides the projection's `examples` keyword instead
+ * of `--example`; JSON carries no comments, so its reasoning lives in the
+ * projection's `$comment` prose.
  */
 
 /**
@@ -105,4 +110,39 @@ export type ExampleKind = (typeof EXAMPLE_KINDS)[number];
 export const SCHEMA_EXAMPLES: Record<ExampleKind, string> = {
   spec: SPEC_EXAMPLE,
   manifest: MANIFEST_EXAMPLE,
+};
+
+/**
+ * A filled-in result envelope, attached to the `result` projection as its JSON
+ * Schema `examples` entry.
+ *
+ * Deliberately not the minimum. It shows the two findings an author has to
+ * tell apart: one that names an expectation, carries a `conclusion` about it,
+ * and sets a `key` a later run can repeat — and one that is a plain
+ * observation, pointing at nothing and claiming no identity. The projection
+ * says both are legal; only an example says which is which.
+ */
+export const RESULT_ENVELOPE_EXAMPLE: EvaluatorResultEnvelopeV2 = {
+  schema: 'orcaops.evaluator_result/v2',
+  verdict: 'violation',
+  body: 'VIOLATION\n\nThe rubric asks for 42 fixture tests; the delivery has 2.',
+  metrics: { criteria_graded: 2 },
+  findings: [
+    {
+      key: 'criterion/019e0000-0000-7000-8000-0000000000c1',
+      title: 'The criterion asks for 42 fixture tests; the delivery has 2',
+      detail: 'Counted the cases under tests/expiry/.',
+      locations: [
+        {
+          kind: 'acceptance-criterion',
+          criterion_id: '019e0000-0000-7000-8000-0000000000c1',
+        },
+        { kind: 'file', path: 'tests/expiry/session.test.ts', start_line: 1, end_line: 40 },
+      ],
+      conclusion: 'contradicted',
+    },
+    {
+      title: 'The rationale does not say why the cheaper option was rejected',
+    },
+  ],
 };

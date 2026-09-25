@@ -660,14 +660,16 @@ describe('Decision schemas (base / plan / checkpoint)', () => {
     );
     expect('evidence' in DecisionBaseSchema.parse({ ...base, evidence })).toBe(false);
     expect('evidence' in CheckpointDecisionSchema.parse({ ...base, evidence })).toBe(false);
-    const capture = CapturePlanInputSchema.parse({
+    const capture = CapturePlanInputSchema.safeParse({
       idempotency_key: 'capture-plan-evidence-boundary',
       task: 'choose a cache',
       label: 'Choose a cache',
       plan_steps: [{ text: 'Implement it', label: 'Implement it' }],
       decisions: [{ ...base, evidence }],
     });
-    expect(capture.decisions[0]).not.toHaveProperty('evidence');
+    expect(capture.error?.issues).toMatchObject([
+      { code: 'unrecognized_keys', keys: ['evidence'], path: ['decisions', 0] },
+    ]);
     expect(() =>
       PlanDecisionSchema.parse({
         ...base,

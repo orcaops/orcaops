@@ -28,6 +28,7 @@ This README is the API reference.
 | Subprocess helper                    | `runSubprocess`, `buildSubprocessEnv`                         |
 | Filter gates                         | `shouldSkipEvaluator`, `makeSkippedRun`                       |
 | Bounded parallel dispatch            | `dispatchEvaluators`, `dispatchOne`                           |
+| Findings handover for one run        | `packRunFindings`, `EvaluatorEngineRun`                       |
 | Soft-block fingerprint               | `computeEvaluatorFingerprint`, `combineEvaluatorFingerprints` |
 | Canonical JSON helper                | `canonicalJson`                                               |
 
@@ -65,19 +66,20 @@ once.
 Spawns a subprocess (argv array, never a shell string), writes the
 context JSON to BOTH stdin AND a temp file exposed via
 `$ORCAOPS_CONTEXT_PATH`, and parses stdout as the
-`orcaops.evaluator_result/v1` envelope. Every failure mode maps to
+`orcaops.evaluator_result/v2` envelope. Every failure mode maps to
 a structured EvaluatorRunPayload error:
 
-| Code                 | Trigger                                                     |
-| -------------------- | ----------------------------------------------------------- |
-| `TIMEOUT`            | exceeded `engine.timeout_ms` (SIGTERM → 1s grace → SIGKILL) |
-| `EXIT_CODE`          | non-zero exit                                               |
-| `JSON_PARSE`         | stdout is not JSON                                          |
-| `ENVELOPE_INVALID`   | JSON does not match `EvaluatorResultEnvelopeSchema`         |
-| `RAW_SCHEMA_INVALID` | `engine.output_schema` validation failed on `raw`           |
-| `OUTPUT_TOO_LARGE`   | stdout or stderr exceeded `engine.max_output_bytes`         |
-| `CANCELED`           | parent aborted via `AbortSignal`                            |
-| `SPAWN_ERROR`        | ENOENT on the executable, etc.                              |
+| Code                   | Trigger                                                     |
+| ---------------------- | ----------------------------------------------------------- |
+| `TIMEOUT`              | exceeded `engine.timeout_ms` (SIGTERM → 1s grace → SIGKILL) |
+| `EXIT_CODE`            | non-zero exit                                               |
+| `JSON_PARSE`           | stdout is not JSON                                          |
+| `UNSUPPORTED_PROTOCOL` | the `schema` literal is a superseded or unknown version     |
+| `ENVELOPE_INVALID`     | JSON does not match `EvaluatorResultEnvelopeV2Schema`       |
+| `RAW_SCHEMA_INVALID`   | `engine.output_schema` validation failed on `raw`           |
+| `OUTPUT_TOO_LARGE`     | stdout or stderr exceeded `engine.max_output_bytes`         |
+| `CANCELED`             | parent aborted via `AbortSignal`                            |
+| `SPAWN_ERROR`          | ENOENT on the executable, etc.                              |
 
 ### Subprocess env contract
 
@@ -108,7 +110,9 @@ the response per `output_format`:
 **markdown** (default) — reads the LAST ` ```orcaops-verdict `
 sentinel block, falling back to the LAST standalone
 `PASS` / `VIOLATION` / `INFO` line when no sentinel is present.
-Returns `NO_VERDICT_LINE` when neither tier finds a verdict.
+Returns `NO_VERDICT_LINE` when neither tier finds a verdict. An
+optional ` ```orcaops-findings ` block is read beside the verdict
+(`parseFindingsBlock`) and cannot disturb it.
 
 The context block's baseline always renders; the spec's
 `engine.additional_context_sections` selects the heavier opt-in
@@ -120,10 +124,44 @@ repository for the provider is the pack author's declaration.
 **json** — parses `result.body` as JSON. Validates the envelope's
 `raw` field against `engine.output_schema` via the injected
 `validateRaw` callback. Retries once with a `REMINDER` nudge on
-parse / schema failure (`json_mode_retries` default 1).
+parse / schema failure (`json_mode_retries` default 1). It does
+NOT spend that retry on `UNSUPPORTED_PROTOCOL`: a nudge cannot
+change which protocol version a pack was built against, so the
+retry would be a paid call that cannot succeed.
 
 Structured `LLMClient` errors (TIMEOUT / BUDGET / PARSE / etc.)
 surface as `LLM_ERROR`.
+
+## Protocol version and findings
+
+Both engines read the `schema` literal through
+`inspectResultEnvelopeProtocol` BEFORE any strict parse. A superseded
+or unknown literal is `UNSUPPORTED_PROTOCOL`, carrying the protocol
+package's one `unsupportedResultProtocolMessage` — which package to
+upgrade, which version line, and that the pack must be rebuilt. A
+result with no usable `schema` is a malformed envelope, not a
+negotiation failure, and gets the read's field-path message instead.
+
+**A new producer on an old runner is the documented unsupported
+combination.** A runner from before this release strict-parses
+`orcaops.evaluator_result/v1` and rejects a v2 envelope as
+`ENVELOPE_INVALID`, which for a `block`-severity evaluator blocks
+under the existing rules. That is why the release is coordinated:
+upgrade the pack and the runner together, and upgrade the pack first.
+
+Each engine returns an `EvaluatorEngineRun` — the unchanged
+`EvaluatorRunPayload` plus one `EvaluatorRunFindingsOutcome`
+(`none` / `established` / `unreadable`); `dispatchEvaluators` returns
+those outcomes in a `findings[]` parallel to `runs[]`. Findings never
+reach `orcaops.evaluator_run/v1`, which is strict, re-parsed on every
+thread rebuild and mirrored to an externally owned cloud shape.
+
+Findings never decide the gate. Every finding string is scrubbed with
+`scrubEvaluatorOutput` exactly as `body` is, and only then bounded by
+`boundEvaluatorFindings` — that order, so a secret straddling the cut
+cannot survive as a prefix. Findings that cannot be established leave
+the verdict, the run status and the gate exactly as they were, and an
+error run hands over no findings at all.
 
 ## Bounded parallel dispatch
 
@@ -134,7 +172,7 @@ dressed up as one. Filter-skipped evaluators (paths / scopes /
 when_llm gates) return `run_status: 'skipped'` without engine
 dispatch.
 
-`runs[]` is returned in the SAME order as the input
+`runs[]` and `findings[]` are returned in the SAME order as the input
 `evaluators[]`, regardless of completion order.
 
 Cancellation: an `AbortSignal` threads through to every in-flight

@@ -5,6 +5,7 @@ import {
   stringifyTerminalSafeJson,
   stripTerminalFormatting,
 } from '@orcaops/evaluator-protocol/terminal';
+import { HistoryScopeError } from '@orcaops/project-scope/history';
 import { CliAuthError } from '@orcaops/sdk';
 import { ArtifactLockLeaseLostError, ConfigValidationError } from '@orcaops/storage';
 import { HistoryError } from '@orcaops/storage/history/authority';
@@ -70,7 +71,9 @@ export function emitError(err: unknown, opts?: { exitCode?: number }): never {
 export function writeErrorLine(err: unknown): void {
   const { error } = toErrorEnvelope(err);
   const code =
-    err instanceof ProjectDatabaseError || isAuthorityFailure(err)
+    err instanceof ProjectDatabaseError ||
+    isAuthorityFailure(err) ||
+    err instanceof HistoryScopeError
       ? `[${error.code}${error.reason ? `; ${error.reason}` : ''}] `
       : '';
   process.stderr.write(stripTerminalFormatting(`Error: ${code}${error.message}\n`));
@@ -202,7 +205,7 @@ function buildErrorEnvelope(err: unknown): ErrorEnvelope {
       error: { code: err.code, message: err.message, ...(reason ? { reason } : {}) },
     };
   }
-  if (isAuthorityFailure(err)) {
+  if (isAuthorityFailure(err) || err instanceof HistoryScopeError) {
     return { ok: false, error: { code: err.code, message: err.message } };
   }
   if (err instanceof CliAuthError) {

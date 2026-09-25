@@ -22,6 +22,19 @@ const RangeDetailsSchema = HistoryMetadataDetailsSchema.pick({
   anchors: true,
   branchLineage: true,
 });
+// Only the latest anchor proves all the work landed. Anchors carry no timestamps,
+// so latest is the summary, else the highest checkpoint n, else the pre-PR check.
+function latestAnchor(anchors: ReadonlyArray<BetweenSha>): BetweenSha | undefined {
+  const checkpoints = anchors.filter((anchor) => anchor.source === 'checkpoint');
+  return (
+    anchors.find((anchor) => anchor.source === 'summary') ??
+    checkpoints.reduce<BetweenSha | undefined>(
+      (latest, anchor) => (latest && latest.n! >= anchor.n! ? latest : anchor),
+      undefined
+    ) ??
+    anchors.find((anchor) => anchor.source === 'pre_pr')
+  );
+}
 export async function readDatabaseRangeList(
   context: DatabaseListContext,
   input: DatabaseListOptions
@@ -132,6 +145,10 @@ export async function readDatabaseRangeList(
     reason: 'no_head_sha_in_range';
     origin: 'captured' | 'git-import';
   }> = [];
+  const lineageCandidates: Array<{
+    entry: (typeof collection.entries)[number];
+    latestSha: string | undefined;
+  }> = [];
   const matching = collection.entries.filter((entry) => {
     try {
       const raw = JSON.parse(entry.row.detailsJson!);
@@ -148,15 +165,7 @@ export async function readDatabaseRangeList(
         ref2LocalBranch !== null &&
         details.branchLineage.some((line) => line.branch === ref2LocalBranch)
       )
-        unmatched.push({
-          id: entry.row.artifactId,
-          artifact_id: entry.row.artifactId,
-          project_id: entry.projectId,
-          label: entry.row.label,
-          branch: entry.row.branch,
-          reason: 'no_head_sha_in_range',
-          origin: entry.row.origin,
-        });
+        lineageCandidates.push({ entry, latestSha: latestAnchor(details.anchors)?.head_sha });
     } catch {
       collection.completeness.complete = false;
       collection.completeness.issues.push({
@@ -169,6 +178,22 @@ export async function readDatabaseRangeList(
     }
     return false;
   });
+  const reachability = await repo.checkReachabilityFromTips(
+    [...new Set(lineageCandidates.flatMap(({ latestSha }) => (latestSha ? [latestSha] : [])))],
+    [to]
+  );
+  for (const { entry, latestSha } of lineageCandidates) {
+    if (latestSha !== undefined && reachability.get(latestSha) === 'reachable') continue;
+    unmatched.push({
+      id: entry.row.artifactId,
+      artifact_id: entry.row.artifactId,
+      project_id: entry.projectId,
+      label: entry.row.label,
+      branch: entry.row.branch,
+      reason: 'no_head_sha_in_range',
+      origin: entry.row.origin,
+    });
+  }
   collection.entries = matching.slice(
     prepared.filters.offset,
     prepared.filters.limit === undefined

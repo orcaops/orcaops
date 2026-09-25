@@ -3,6 +3,8 @@ import { execa } from 'execa';
 
 import { runBoundedSubprocess } from '@orcaops/evaluator-protocol/subprocess';
 
+import { resolvePreparedInputExecutable } from './prepared-input-executable.js';
+
 const PROBE_TIMEOUT_MS = 1500;
 const DEFAULT_PROVIDER_PROBE_TIMEOUT_MS = 5000;
 const PROVIDER_PROBE_MAX_OUTPUT_BYTES = 64 * 1024;
@@ -14,6 +16,8 @@ export interface ProviderProbeOptions {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   timeoutMs?: number;
+  /** Match the execution rules used by prepared-input calls, including launcher exclusion. */
+  execution?: 'default' | 'prepared-input';
 }
 
 export function providerBinPath(provider: LlmProvider, env?: NodeJS.ProcessEnv): string {
@@ -113,8 +117,13 @@ export function probeProviderAvailability(
 
     void Promise.all(
       LLM_TOOL_PREFERENCE.map(async (provider) => {
+        const executable =
+          options.execution === 'prepared-input'
+            ? await resolvePreparedInputExecutable(provider, sourceEnv, cwd)
+            : { argv: [providerBinPath(provider, sourceEnv)] };
+        if ('error' in executable) return [provider, 'absent'] as const;
         const result = await runBoundedSubprocess({
-          argv: [providerBinPath(provider, sourceEnv), '--version'],
+          argv: [...executable.argv, '--version'],
           cwd,
           env,
           timeoutMs,

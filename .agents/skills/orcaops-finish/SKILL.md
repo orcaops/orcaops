@@ -2,8 +2,8 @@
 name: "Orcaops: finish workflow"
 description: "Finalize completed work by running checks, handling warnings, saving the summary, syncing, and rendering the digest. Use for \"finish this work\", \"wrap this up\", or \"get this ready for a PR\"."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "b7e1dc371819"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "583ae46b7708"
 ---
 
 # When to use

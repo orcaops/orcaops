@@ -232,7 +232,8 @@ export function formatDatabaseList(result: ReturnType<typeof readDatabaseList>):
   );
   if (!result.completeness.complete)
     lines.push('Results are incomplete; missing history may change the order.');
-  for (const issue of result.completeness.issues) lines.push(`${issue.code}: ${issue.message}`);
+  for (const issue of result.completeness.issues)
+    lines.push(`${issue.project_id ?? 'scope'}: ${issue.code}: ${issue.message}`);
   if (result.page.next_offset !== null)
     lines.push(`Next page: --offset ${result.page.next_offset}`);
   if ('note' in result) lines.push(result.note!);

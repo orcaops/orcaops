@@ -2,8 +2,8 @@
 name: "Orcaops: render digest"
 description: "Render a reviewer-facing summary or PR body. Use for \"show me the digest\", \"draft the PR description\", or \"write the PR body\"."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "4a95db3b5e3a"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "22b4d6d28117"
 tags: ["orcaops", "read"]
 ---
 

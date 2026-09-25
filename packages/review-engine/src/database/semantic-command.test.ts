@@ -16,6 +16,7 @@ import { runReview } from '../run.js';
 import * as runtime from '../runtimeIdentity.js';
 import { SEMANTIC_ANCHOR_PROFILE } from '../semanticAnchors.js';
 import { readDatabaseReview } from './reviews.js';
+import { prepareDatabaseReviewRunInputs } from './run-inputs.js';
 import { type StartDatabaseReviewRun, startDatabaseReviewRun } from './runs.js';
 import {
   formatSemanticCommandOutput,
@@ -83,6 +84,18 @@ async function anotherRun(f: Awaited<ReturnType<typeof fixture>>) {
   const current = (
     await readDatabaseReview({ authority: f.authority, reviewId: f.original.reviewId })
   ).value!.selection;
+  // A new run prepares its own inputs from the retained floor, as the command does; the recorded
+  // run's pinned inputs predate the knowledge the projection now carries.
+  const run = JSON.parse(Buffer.from(original.runBytes).toString()) as { created_at: string };
+  const { currentRunId: _run, runSelectionVersion: _version, ...floorExpected } = original.expected;
+  const fresh = await prepareDatabaseReviewRunInputs({
+    authority: f.authority,
+    reviewId: f.original.reviewId,
+    expected: floorExpected,
+    policy: original.policy,
+    generatedAt: run.created_at,
+    secretAllow: original.secretAllow,
+  });
   return startDatabaseReviewRun({
     ...original,
     authority: f.authority,
@@ -90,11 +103,9 @@ async function anotherRun(f: Awaited<ReturnType<typeof fixture>>) {
     revisionId: uuidv7(),
     publicationId: uuidv7(),
     runBytes: Buffer.from(
-      JSON.stringify({
-        ...JSON.parse(Buffer.from(original.runBytes).toString()),
-        run_id: 'later-run',
-      }) + '\n'
+      JSON.stringify({ ...run, run_id: 'later-run', input_shas: fresh.inputShas }) + '\n'
     ),
+    inputs: fresh.members,
     expected: {
       ...original.expected,
       currentRunId: current.current_run_id,

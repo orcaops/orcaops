@@ -1,4 +1,4 @@
-import { Repo } from '@orcaops/core';
+import { Repo, resolveConfigSource } from '@orcaops/core';
 import { discoverEvaluators } from '@orcaops/evaluator-runner';
 import type { DatabaseHistoryScope } from '@orcaops/project-scope/history/database';
 import type { Config } from '@orcaops/storage';
@@ -21,12 +21,16 @@ export async function readTaskAdvisories(
   let acknowledgeByRef: (ref: string) => boolean = () => false;
   if (git) {
     try {
-      drift = await detectInstallDrift(
-        git.worktreeRoot,
-        context.config,
-        CLI_VERSION,
-        resolveSkillGates(env)
-      );
+      // Without a config, context.config is defaults and would recommend an `update` that refuses to run.
+      const source = await resolveConfigSource(git.worktreeRoot, { commonDir: git.commonDir });
+      if (source.kind !== 'none') {
+        drift = await detectInstallDrift(
+          git.worktreeRoot,
+          context.config,
+          CLI_VERSION,
+          resolveSkillGates(env)
+        );
+      }
     } catch {
       /* Installation hints do not establish task authority. */
     }

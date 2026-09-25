@@ -2,8 +2,8 @@
 name: "Orcaops: discover history gaps"
 description: "Report a history-coverage gap found during normal work: after a provenance lookup finds nothing, in a directory with no captured history, or when prior-art search is empty for old code. Reads cached coverage only."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "8a3fa5f6d6fe"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "d34292809953"
 ---
 
 # Read-only discovery

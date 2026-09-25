@@ -16,6 +16,8 @@ export type DetailTone =
   | 'reason'
   | 'alt'
   | 'guardrail'
+  | 'knowledge'
+  | 'knowledge-missed'
   | 'question'
   | 'ev-checkpoint'
   | 'ev-plan'
@@ -331,6 +333,55 @@ export function buildDetail(
     for (const nonGoal of thread.nonGoals) {
       pushWrapped(nonGoal, 'guardrail', null, '  – ', '    ');
     }
+  }
+
+  // The rules this thread is answerable to, beside its own guardrails and never merged with them:
+  // a non-goal is this plan's exclusion, and an adopted rule is not this plan's to exclude. The
+  // coverage line always prints, so a pane with no entries reads as what the coverage says rather
+  // than as "no requirements".
+  if (thread.knowledge === null && thread.knowledgeUnavailable !== null) {
+    // The section still prints. Leaving it out would make a locked or older-schema store
+    // byte-identical to a project that holds no continuing record at all.
+    if (lines.length > 0) push('', 'blank');
+    push('KNOWLEDGE', 'section');
+    pushWrapped(
+      `knowledge unavailable: ${thread.knowledgeUnavailable}`,
+      'knowledge-missed',
+      null,
+      '  ! ',
+      '    '
+    );
+  } else if (thread.knowledge !== null) {
+    const block = thread.knowledge;
+    if (lines.length > 0) push('', 'blank');
+    push(
+      `KNOWLEDGE · ${block.applicable.length} applicable · at write sequence ` +
+        `${block.basis.knowledge_boundary}`,
+      'section'
+    );
+    for (const key of block.applicable) {
+      const entry = block.entries.find((held) => held.key === key);
+      if (entry === undefined) continue;
+      const governing =
+        entry.governing_revision_ids.length === 0
+          ? 'nothing governs'
+          : `rev ${entry.governing_revision_ids.join(', ')}`;
+      pushWrapped(entry.statement ?? entry.key, 'knowledge', null, '  § ', '    ');
+      push(
+        `    ${governing} · ${entry.selected_with_plan.length} selected with the plan · ` +
+          `${entry.connected_later.length} connected later`,
+        'detail'
+      );
+    }
+    const missed = block.applicable_not_selected;
+    pushWrapped(missed.statement, 'knowledge-missed', null, '  ! ', '    ');
+    for (const entry of missed.entries)
+      pushWrapped(entry.key, 'knowledge-missed', null, '    - ', '      ');
+    pushWrapped(block.coverage.statement, 'detail', null, '  ⓘ ', '    ');
+    // What the block's own bounds left out. A pane that spent a bound and said nothing would let
+    // a cut rule read as a rule that does not exist.
+    for (const limit of block.limits)
+      pushWrapped(limit.detail, 'knowledge-missed', null, '  ⚠ ', '    ');
   }
 
   if (thread.recentEvents.length > 0) {

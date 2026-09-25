@@ -48,6 +48,17 @@ export type PreparedDatabaseSnapshotResult =
     }
   | { ok: false; error_reason: SnapshotFailureReason; error_message?: string };
 
+// Retention helpers throw fixed messages; the specific failure lives only in `cause`.
+function withCauseChain(error: Error): string {
+  const causes: string[] = [];
+  let current: unknown = error.cause;
+  while (current instanceof Error && causes.length < 3) {
+    causes.push(current.message);
+    current = current.cause;
+  }
+  return causes.length ? `${error.message} (cause: ${causes.join('; ')})` : error.message;
+}
+
 export async function prepareDatabaseSnapshot(
   expected: RegisteredDatabaseContext,
   raw: PrepareDatabaseSnapshot,
@@ -189,7 +200,7 @@ export async function prepareDatabaseSnapshot(
       error_message: deadline.signal.aborted
         ? 'Snapshot preparation exceeded its five-minute operation budget; inspect repository size and access before explicitly retrying'
         : cause instanceof Error
-          ? cause.message
+          ? withCauseChain(cause)
           : 'Snapshot object preparation is unavailable; inspect the original repository before explicitly retrying',
     };
   } finally {

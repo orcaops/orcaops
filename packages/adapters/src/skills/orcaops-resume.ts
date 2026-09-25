@@ -85,6 +85,26 @@ Output sections:
 - **Suggested prompt** — paste-ready text the user can hand back to you
   ("continue from step N: do X, Y") to re-anchor.
 
+A resumed plan also carries what it was drafted against, in \`--json\`:
+\`artifact.knowledge_uses\` for the plan events, and
+\`artifact.open_checkpoints[].knowledge_uses\` for what each open checkpoint
+opened against. \`selected_with_plan\` is what the plan itself selected;
+\`connected_later\` is what somebody connected afterwards, and the two stay
+apart.
+
+**Check what the plan did not select.** \`orcaops status --json\` carries a
+top-level \`applicable_not_selected\`: the adopted revisions that apply here
+minus the ones the plan in view recorded a use of, each with its \`reason\` and,
+where the plan selected a different revision of the same identity,
+\`selected_revision_ids\` beside it. Read it before continuing — it exists so a
+known rule cannot disappear from your view merely because the prior session did
+not select it. Its \`statement\` always says why the list is the length it is;
+an empty \`entries\` with no plan in view means something different from an
+empty one with a plan. It is \`null\` when no single active plan is in view or
+history is incomplete, which is not the same as nothing being missed. The field
+asks nothing and writes nothing; \`orcaops knowledge lookup\` is where to read
+the rules themselves.
+
 Surface any \`repo_state\` note before continuing. The current renderer may say
 that the working tree is dirty, that commits since \`artifact_head_sha\` touch
 the artifact's files and work may already be partly done, that HEAD moved with

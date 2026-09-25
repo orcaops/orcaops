@@ -13,7 +13,7 @@ import { fixture } from '../helpers/database-history.js';
 
 const execute = promisify(execFile);
 
-it('reports an unsupported database version without replacing or changing history', async () => {
+it('reports a database a newer build wrote without replacing or changing history', async () => {
   const f = await fixture();
   const artifactId = await f.capture();
   const raw = new Database(f.writer.databasePath, { fileMustExist: true });
@@ -86,7 +86,7 @@ it('reports an unsupported database version without replacing or changing histor
     ]) {
       await expect(run(args)).rejects.toMatchObject({
         code: 1,
-        stdout: expect.stringContaining('"code":"HISTORY_FORMAT_UNSUPPORTED"'),
+        stdout: expect.stringContaining('"code":"HISTORY_FORMAT_NEWER"'),
       });
       expect(await snapshot()).toEqual(before);
       expect(raw.pragma('user_version', { simple: true })).toBe(999);
@@ -96,9 +96,7 @@ it('reports an unsupported database version without replacing or changing histor
       ok: true,
       completeness: {
         complete: false,
-        issues: expect.arrayContaining([
-          expect.objectContaining({ code: 'HISTORY_FORMAT_UNSUPPORTED' }),
-        ]),
+        issues: expect.arrayContaining([expect.objectContaining({ code: 'HISTORY_FORMAT_NEWER' })]),
       },
     });
     expect(await snapshot()).toEqual(before);

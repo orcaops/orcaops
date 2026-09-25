@@ -70,6 +70,7 @@ export function databaseCloudClient(
         }),
       reviewPull: unexpected,
       reviewPush: unexpected,
+      reviewRequest: unexpected,
       reviewPropose: unexpected,
       reviewComment: unexpected,
       list: unexpected,

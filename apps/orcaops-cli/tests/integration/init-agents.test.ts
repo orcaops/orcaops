@@ -2,7 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { CONFIG_SCHEMA_VERSION } from '@orcaops/storage';
+import { FRESH_CONFIG_FILE_VERSION } from '@orcaops/storage';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -153,7 +153,10 @@ describe('orcaops init — install-set selection', () => {
     // Attribution is runtime-resolved per invocation — init never writes an
     // agent identity.
     expect('agent' in cfg).toBe(false);
-    expect(cfg.schema_version).toBe(CONFIG_SCHEMA_VERSION);
+    // A fresh file needs nothing from the current version, so it is stamped
+    // with the one teammates on a released build can still load.
+    expect(cfg.schema_version).toBe(FRESH_CONFIG_FILE_VERSION);
+    expect(cfg).not.toHaveProperty('knowledge_processing');
   });
 
   it('--yes reproduces the non-interactive default', async () => {

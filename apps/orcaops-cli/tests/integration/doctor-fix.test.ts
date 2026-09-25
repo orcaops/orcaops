@@ -85,8 +85,8 @@ describe('orcaops doctor --fix', () => {
     expect(r.overall).toBe('warn');
     expect(r.checks.filter((check) => check.status === 'warn').map((check) => check.name)).toEqual([
       'skipped-fingerprint-rate',
-      'lineage-orphan',
     ]);
+    expect(findCheck(r, 'lineage-orphan').status).toBe('pass');
     expect(findCheck(r, 'agent-skills').status).toBe('pass');
     expect(findCheck(r, 'seed').status).toBe('pass');
     const fix = findCheck(r, 'fix');
@@ -230,8 +230,8 @@ describe('orcaops doctor --fix', () => {
     expect(r.overall).toBe('warn');
     expect(r.checks.filter((check) => check.status === 'warn').map((check) => check.name)).toEqual([
       'skipped-fingerprint-rate',
-      'lineage-orphan',
     ]);
+    expect(findCheck(r, 'lineage-orphan').status).toBe('pass');
     expect(findCheck(r, 'fix').summary).toContain('resumed `orcaops seed --yes`');
     expect(findCheck(r, 'seed').status).toBe('pass');
   });
@@ -432,7 +432,6 @@ describe('orcaops doctor --fix', () => {
     expect(res.stdout).toContain('repaired');
     expect(res.stdout).toContain('resumed `orcaops seed --yes`');
     expect(res.stdout).toContain('skipped-fingerprint-rate');
-    expect(res.stdout).toContain('lineage-orphan');
     expect(res.stdout).toMatch(/^Overall: WARN/m);
   });
 });

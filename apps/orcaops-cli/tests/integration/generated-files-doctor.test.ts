@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -41,6 +41,17 @@ describe('orcaops doctor — generated-files recommendation', () => {
     expect(c.status).toBe('pass'); // advisory only — doesn't flip overall to warn
     expect(c.summary).toMatch(/consider switching to "ignore"/);
     expect((c.details ?? []).join(' ')).toMatch(/generated_files/);
+  });
+
+  it('does not count deleted generated files as committed-projection churn', async () => {
+    await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
+    await rm(path.join(repo.path, '.claude', 'skills'), { recursive: true, force: true });
+    await rm(path.join(repo.path, '.claude', 'commands'), { recursive: true, force: true });
+
+    const res = await agent.runRaw(['doctor', '--json']);
+    const c = check(res.stdout);
+    expect(c.summary).toMatch(/no committed-projection churn/);
+    expect(c.summary).not.toMatch(/consider switching to "ignore"/);
   });
 
   it('passes cleanly in ignore mode', async () => {

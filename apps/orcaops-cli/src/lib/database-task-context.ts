@@ -1,13 +1,29 @@
-import { computeUnresolvedBlocks, nextActions, sourcePlanView } from '@orcaops/core';
+import {
+  type ApplicableNotSelected,
+  applicableNotSelected,
+  computeUnresolvedBlocks,
+  knowledgeContextAnswer,
+  nextActions,
+  sourcePlanView,
+} from '@orcaops/core';
 import {
   HistoryScopeError,
   type HistorySelector,
   validateHistorySelector,
 } from '@orcaops/project-scope/history';
 import type { DatabaseHistoryScope } from '@orcaops/project-scope/history/database';
-import { redactSecretsInObject } from '@orcaops/storage';
 import {
+  type ArtifactThread,
+  rebuildPlanFromEvents,
+  redactSecretsInObject,
+} from '@orcaops/storage';
+import {
+  activeTaskSelectionAtBoundary,
+  knowledgeBoundaryAt,
+  type ProjectDatabase,
   ProjectDatabaseError,
+  projectTaskKnowledgeContext,
+  readProjectArtifact,
   readProjectCloudSyncStatus,
   readProjectTaskContext,
 } from '@orcaops/storage/history/database';
@@ -19,6 +35,14 @@ import {
 import { aggregateCanonicalUsage } from '@orcaops/storage/history/usage-accounting';
 
 import type { DatabaseListContext } from './database-list.js';
+import {
+  type KnowledgeAssignmentSummary,
+  knowledgeAssignmentSummary,
+} from './knowledge-assignment-view.js';
+import {
+  type KnowledgeReconsiderationSummary,
+  knowledgeReconsiderationSummary,
+} from './knowledge-reconsideration-view.js';
 import { renderNextActions } from './next-actions-render.js';
 import type { StatusAuthKind } from './status-auth.js';
 import { deriveThreadStatus } from './thread-status.js';
@@ -236,6 +260,82 @@ function cloudStatus(scope: DatabaseHistoryScope, now: number, authKind: StatusA
   }
 }
 
+/**
+ * How many adopted identities `status` resolves. It runs on every agent turn, so the answer is
+ * capped and says what the cap left out rather than growing without bound; `orcaops knowledge
+ * lookup --limit` is where a reader asks for more.
+ */
+const STATUS_ADOPTED_LIMIT = 50;
+/** Enough for a page of statements, as the lookup bounds it. */
+const STATUS_STATEMENT_BYTES = 65_536;
+
+/**
+ * What applies to the one active task on this branch that its plan records no use of.
+ *
+ * The candidates are the identities this store holds an adoption for, never the ones the plan's
+ * own wording happens to reach: a rule the plan never mentioned is exactly the rule this answer
+ * exists to surface. Nothing is asked and nothing is written.
+ *
+ * `null` — never an empty list — when there is no single active task to diff against or the
+ * history behind this status could not be read whole. A diff against the wrong plan would report
+ * another task's selections as missing, and an empty list would read as "nothing is missing",
+ * which is the one thing it must never say without having looked.
+ *
+ * The reconsideration summary beside it is null under exactly the same conditions and for the same
+ * reason: it is composed from this answer's identities, so where there is no answer there is
+ * nothing it could honestly say about what is open.
+ */
+function adoptedKnowledgeFor(
+  scope: DatabaseHistoryScope,
+  complete: boolean
+): {
+  applicableNotSelected: ApplicableNotSelected | null;
+  reconsideration: KnowledgeReconsiderationSummary | null;
+  assignments: KnowledgeAssignmentSummary | null;
+} {
+  const nothing = { applicableNotSelected: null, reconsideration: null, assignments: null };
+  if (!complete) return nothing;
+  const project = scope.projects.length === 1 ? scope.projects[0] : undefined;
+  const authority = project?.authority ?? null;
+  if (!project?.database || authority === null) return nothing;
+  const branch = scope.gitContext?.branch ?? null;
+  if (branch === null) return nothing;
+  const read = project.database.read((view) => {
+    const active = activeTaskSelectionAtBoundary(view, branch, knowledgeBoundaryAt(view));
+    if (active.kind !== 'selected') return null;
+    return projectTaskKnowledgeContext(view, {
+      projectId: authority.projectId,
+      artifactId: active.artifactId,
+      boundary: 'now',
+      plan: { kind: 'exact', planEventId: active.planEventId },
+      // The items open about those same identities, in the same snapshot, so the two answers
+      // cannot come from two readings of one store.
+      reconsideration: true,
+      // Who may already decide what about those identities, in the same snapshot.
+      assignments: true,
+    });
+  }).value;
+  if (read === null || read.selectedPlan === null) return nothing;
+  const composed = read.knowledge;
+  // Null processing coverage, because `status` reads no processing state here and a claim it has
+  // not earned is worse than none; `orcaops knowledge status` is where that claim is made.
+  //
+  // The cap is spent HERE, not in the composer's read bounds: those bound what bounded retrieval
+  // reaches, and an adopted subject reaches its candidates through the adoption index instead, so
+  // passing them there caps nothing at all.
+  return {
+    applicableNotSelected: applicableNotSelected(
+      knowledgeContextAnswer(composed, null, {
+        maxEntries: STATUS_ADOPTED_LIMIT,
+        maxStatementBytes: STATUS_STATEMENT_BYTES,
+      }),
+      { artifactId: read.artifactId, planEventId: read.selectedPlan.planEventId }
+    ),
+    reconsideration: knowledgeReconsiderationSummary(composed),
+    assignments: knowledgeAssignmentSummary(composed),
+  };
+}
+
 export function readDatabaseStatus(
   context: DatabaseListContext,
   env: NodeJS.ProcessEnv,
@@ -244,9 +344,13 @@ export function readDatabaseStatus(
   acknowledgeByRef?: (ref: string) => boolean
 ) {
   const inspection = inspectDatabaseTasks(context.scope, env);
+  const databases = new Map(
+    context.scope.projects.map((project) => [project.projectId, project.database])
+  );
   const artifacts = inspection.projects.flatMap(
     (project) =>
       project.snapshot?.artifacts.map((artifact) => {
+        const database = databases.get(project.project_id);
         const { row, details, lifecycles } = artifact;
         const thread = deriveThreadStatus({
           artifact: {
@@ -272,7 +376,10 @@ export function readDatabaseStatus(
           row.checkpointCount,
           details,
           context.scope.gitContext?.headOid ?? '',
-          acknowledgeByRef
+          acknowledgeByRef,
+          database && details.openCheckpoints.some((cp) => cp.declared_step_ids.length)
+            ? statusCriterionIds(database, row)
+            : undefined
         );
         const { status: _status, ...publicThread } = thread;
         return {
@@ -298,6 +405,7 @@ export function readDatabaseStatus(
         };
       }) ?? []
   );
+  const adopted = adoptedKnowledgeFor(context.scope, inspection.complete);
   const eligibilityAvailable =
     inspection.complete &&
     !!context.scope.gitContext?.branch &&
@@ -364,6 +472,9 @@ export function readDatabaseStatus(
       known_count: artifacts.filter((artifact) => artifact.origin === 'git-import').length,
       artifacts: artifacts.filter((artifact) => artifact.origin === 'git-import'),
     },
+    applicable_not_selected: adopted.applicableNotSelected,
+    reconsideration: adopted.reconsideration,
+    assignments: adopted.assignments,
     coding_sessions: inspection.projects.map((project) => ({
       project_id: project.project_id,
       accounting: project.snapshot ? aggregateCanonicalUsage([project.snapshot.usage]) : null,
@@ -371,6 +482,54 @@ export function readDatabaseStatus(
     cloud_sync: cloudStatus(context.scope, now, authKind),
   };
   return context.config.digest.redact_secrets ? redactSecretsInObject(output) : output;
+}
+
+// Uses each checkpoint's opening plan revision, not the latest: close validates against it.
+export function openCheckpointCriterionIds(thread: ArtifactThread): Map<number, string[]> {
+  const byCheckpoint = new Map<number, string[]>();
+  for (const cp of thread.checkpoints) {
+    if (cp.status !== 'open') continue;
+    const index = thread.events.findIndex(
+      (event) => event.record.event_id === cp.open_plan_revision_event_id
+    );
+    const plan = index < 0 ? null : rebuildPlanFromEvents(thread.events.slice(0, index + 1));
+    if (!plan) continue;
+    const declared = new Set(cp.declared_step_ids);
+    byCheckpoint.set(
+      cp.n,
+      plan.plan.plan_steps
+        .filter((step) => declared.has(step.step_id))
+        .flatMap((step) => step.acceptance_criteria.map((c) => c.criterion_id))
+    );
+  }
+  return byCheckpoint;
+}
+
+function statusCriterionIds(
+  database: ProjectDatabase,
+  row: {
+    artifactId: string;
+    generation: number;
+    orderedHash: string;
+    eventCount: number;
+    byteLength: number;
+    tailEventId: string;
+  }
+) {
+  try {
+    // Pinned to the status rows' revision so a concurrent capture cannot skew the ids.
+    const snapshot = readProjectArtifact(database, row.artifactId, {
+      generation: row.generation,
+      orderedHash: row.orderedHash,
+      eventCount: row.eventCount,
+      byteLength: row.byteLength,
+      tailEventId: row.tailEventId,
+    });
+    return snapshot ? openCheckpointCriterionIds(snapshot.thread) : undefined;
+  } catch (cause) {
+    if (cause instanceof ProjectDatabaseError) return undefined;
+    throw cause;
+  }
 }
 
 export function databaseTaskActions(
@@ -388,7 +547,8 @@ export function databaseTaskActions(
     | 'planStepIds'
   >,
   headSha: string,
-  acknowledgeByRef?: (ref: string) => boolean
+  acknowledgeByRef?: (ref: string) => boolean,
+  criterionIdsByCheckpoint?: ReadonlyMap<number, string[]>
 ) {
   const closed = new Set(details.closedCheckpoints.flatMap((cp) => cp.completed_step_ids));
   const claimed = new Set([
@@ -410,7 +570,10 @@ export function databaseTaskActions(
       digest_source_event_id: null,
       digest_usage_fingerprint: null,
       live_usage_fingerprint: '',
-      open_checkpoints: details.openCheckpoints,
+      open_checkpoints: details.openCheckpoints.map((cp) => {
+        const criterionIds = criterionIdsByCheckpoint?.get(cp.n);
+        return criterionIds === undefined ? cp : { ...cp, criterion_ids: criterionIds };
+      }),
       uncovered_step_ids: details.planStepIds.filter((id) => !claimed.has(id)),
       plan_coverage_complete:
         details.planStepIds.length > 0 && details.planStepIds.every((id) => closed.has(id)),

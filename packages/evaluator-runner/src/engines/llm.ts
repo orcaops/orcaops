@@ -4,12 +4,17 @@ import { readFile } from 'node:fs/promises';
 import {
   assertResolvedWithin,
   composeEvaluatorPrompt,
+  CURRENT_RESULT_ENVELOPE_SCHEMA,
   type EvaluatorContext,
-  EvaluatorResultEnvelopeSchema,
+  type EvaluatorRunFindingsOutcome,
   type EvaluatorRunPayload,
   type EvaluatorVerdict,
+  inspectResultEnvelopeProtocol,
+  parseFindingsBlock,
   parseMarkdownVerdict,
+  readResultEnvelope,
   type ResolvedEvaluator,
+  unsupportedResultProtocolMessage,
 } from '@orcaops/evaluator-protocol';
 import {
   scrubEvaluatorDiagnosticAndBound,
@@ -23,6 +28,8 @@ import {
   ORCAOPS_EVALUATOR_SYSTEM_PROMPT,
 } from '@orcaops/llm';
 
+import { type EvaluatorEngineRun, packRunFindings } from '../findings.js';
+
 /**
  * Structured-error codes the LLM engine can surface. Extends the
  * command-engine set with two LLM-specific cases:
@@ -33,6 +40,7 @@ import {
  */
 export type LlmEngineErrorCode =
   | 'JSON_PARSE'
+  | 'UNSUPPORTED_PROTOCOL'
   | 'ENVELOPE_INVALID'
   | 'RAW_SCHEMA_INVALID'
   | 'NO_VERDICT_LINE'
@@ -86,17 +94,18 @@ export interface RunLlmEngineOptions {
  * Markdown mode (default): reads the LAST ```orcaops-verdict sentinel
  * block, falling back to the LAST standalone PASS/VIOLATION/INFO line
  * when the response carries no sentinel. NO_VERDICT_LINE when neither
- * tier finds a verdict.
+ * tier finds a verdict. An optional `orcaops-findings` block is read
+ * beside the verdict and can never disturb it.
  *
- * JSON mode: parses the response as the
- * `orcaops.evaluator_result/v1` envelope. Validates `raw` against
+ * JSON mode: parses the response as the current
+ * `orcaops.evaluator_result` envelope. Validates `raw` against
  * `engine.output_schema` when both are set. Retries once on parse /
  * schema failure (default `json_mode_retries: 1`).
  *
  * Never throws on a user-correctable failure — every error mode
  * maps to `run_status: 'error'` with a structured `error.code`.
  */
-export async function runLlmEngine(opts: RunLlmEngineOptions): Promise<EvaluatorRunPayload> {
+export async function runLlmEngine(opts: RunLlmEngineOptions): Promise<EvaluatorEngineRun> {
   const { evaluator, context, run_id } = opts;
   if (evaluator.engine.kind !== 'llm') {
     throw new Error(
@@ -187,7 +196,7 @@ async function runMarkdownMode(
     ts: string;
     evaluateOpts: EvaluateOptions;
   }
-): Promise<EvaluatorRunPayload> {
+): Promise<EvaluatorEngineRun> {
   const { evaluator, context, run_id, provider, ts, evaluateOpts, llm } = opts;
   const result = await runEvaluateOperation(llm, evaluateOpts);
 
@@ -239,6 +248,13 @@ async function runMarkdownMode(
     model: result.model,
     tokens: result.tokens,
     cost_usd: result.costUsd,
+    // Parsed from the same response the verdict came from, and deliberately
+    // only once a verdict exists: an error run has no findings.
+    findings: packRunFindings({
+      run_id,
+      source: 'markdown-block',
+      read: parseFindingsBlock(result.body),
+    }),
   });
 }
 
@@ -253,7 +269,7 @@ async function runJsonMode(
     evaluateOpts: EvaluateOptions;
     retries: number;
   }
-): Promise<EvaluatorRunPayload> {
+): Promise<EvaluatorEngineRun> {
   const { evaluator, context, run_id, provider, ts, llm, retries, validateRaw } = opts;
   const engine = opts.engine;
 
@@ -300,13 +316,30 @@ async function runJsonMode(
       break;
     }
 
-    const envelopeResult = EvaluatorResultEnvelopeSchema.safeParse(parsed);
-    if (!envelopeResult.success) {
-      const issue = envelopeResult.error.issues[0];
-      lastError = {
-        code: 'ENVELOPE_INVALID',
-        message: `${issue.path.join('.') || '<root>'}: ${issue.message}`,
-      };
+    // A superseded or unknown protocol version ends the run here, without
+    // spending a retry: the nudge pushes a model toward well-formed JSON, and
+    // no nudge can change which protocol version a pack was built against, so
+    // the retry would be a paid call that cannot succeed.
+    const protocol = inspectResultEnvelopeProtocol(parsed);
+    if (protocol.status === 'superseded' || protocol.status === 'unknown') {
+      return packErrorRun({
+        evaluator,
+        run_id,
+        context,
+        ts,
+        code: 'UNSUPPORTED_PROTOCOL',
+        message: unsupportedResultProtocolMessage(protocol),
+        duration_ms: result.durationMs,
+        provider,
+        model: result.model,
+        tokens: result.tokens,
+        cost_usd: result.costUsd,
+      });
+    }
+
+    const read = readResultEnvelope(parsed);
+    if (read.status === 'invalid') {
+      lastError = { code: 'ENVELOPE_INVALID', message: read.issue };
       attempt += 1;
       if (attempt <= retries) {
         promptOpts = nudgeForJson(promptOpts);
@@ -314,7 +347,7 @@ async function runJsonMode(
       }
       break;
     }
-    const envelope = envelopeResult.data;
+    const envelope = read.envelope;
 
     if (validateRaw && engine.output_schema && envelope.raw !== undefined) {
       try {
@@ -347,6 +380,7 @@ async function runJsonMode(
       model: result.model,
       tokens: result.tokens,
       cost_usd: result.costUsd,
+      findings: packRunFindings({ run_id, source: 'envelope', read: read.findings }),
     });
   }
 
@@ -373,7 +407,8 @@ function nudgeForJson(opts: EvaluateOptions): EvaluateOptions {
   // (mirrors the existing core runner's nudge text). The retry
   // budget is bounded by json_mode_retries.
   const reminder =
-    '\n\nREMINDER: respond with ONLY valid JSON matching the orcaops.evaluator_result/v1 envelope. No prose, no markdown fences.';
+    `\n\nREMINDER: respond with ONLY valid JSON matching the ${CURRENT_RESULT_ENVELOPE_SCHEMA} ` +
+    'envelope. No prose, no markdown fences.';
   return { ...opts, prompt: opts.prompt + reminder };
 }
 
@@ -402,10 +437,11 @@ interface CompletedFields {
   model: string | null;
   tokens?: { in: number; out: number; cacheRead?: number; cacheWrite?: number };
   cost_usd?: number;
+  findings: EvaluatorRunFindingsOutcome;
 }
 
-function packCompletedRun(opts: CompletedFields): EvaluatorRunPayload {
-  return {
+function packCompletedRun(opts: CompletedFields): EvaluatorEngineRun {
+  const run: EvaluatorRunPayload = {
     schema: 'orcaops.evaluator_run/v1',
     run_id: opts.run_id,
     artifact_id: opts.context.artifact_id,
@@ -438,6 +474,7 @@ function packCompletedRun(opts: CompletedFields): EvaluatorRunPayload {
     ...(opts.context.checkpoint_n !== null ? { checkpoint_n: opts.context.checkpoint_n } : {}),
     ts: opts.ts,
   };
+  return { run, findings: opts.findings };
 }
 
 interface ErrorFields {
@@ -454,9 +491,9 @@ interface ErrorFields {
   cost_usd?: number;
 }
 
-function packErrorRun(opts: ErrorFields): EvaluatorRunPayload {
+function packErrorRun(opts: ErrorFields): EvaluatorEngineRun {
   const message = scrubEvaluatorDiagnosticAndBound(opts.message, MAX_PERSISTED_ERROR_MESSAGE_CHARS);
-  return {
+  const run: EvaluatorRunPayload = {
     schema: 'orcaops.evaluator_run/v1',
     run_id: opts.run_id,
     artifact_id: opts.context.artifact_id,
@@ -488,6 +525,7 @@ function packErrorRun(opts: ErrorFields): EvaluatorRunPayload {
     ...(opts.context.checkpoint_n !== null ? { checkpoint_n: opts.context.checkpoint_n } : {}),
     ts: opts.ts,
   };
+  return { run, findings: { status: 'none' } };
 }
 
 function scrubModel(model: string): string {

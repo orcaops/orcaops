@@ -91,6 +91,18 @@ describe('orcaops skills list|enable|disable', () => {
     return JSON.parse(r.stdout) as SkillsListOk;
   }
 
+  it('a toggle leaves a version 6 config on version 6', async () => {
+    const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
+    const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+    await writeFile(cfgPath, `${JSON.stringify({ ...cfg, schema_version: 6 }, null, 2)}\n`, 'utf8');
+
+    const toggle = await agent.runRaw(['skills', 'disable', 'digest', '--json']);
+    expect(toggle.exitCode).toBe(0);
+    const after = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+    expect(after.schema_version).toBe(6);
+    expect(after.skills).toEqual({ enabled: { digest: false } });
+  });
+
   it('list → disable → update prunes → enable → update restores', async () => {
     // Fresh init: every shipped skill effective + installed for claude-code.
     const fresh = await list();
@@ -208,9 +220,10 @@ describe('orcaops skills list|enable|disable', () => {
       ...((cfg.workflow ?? {}) as Record<string, unknown>),
       routing: { suppress: ['loose-ends'] },
     };
+    cfg.schema_version = 7;
     await writeFile(cfgPath, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
 
-    await agent.runRaw(['update', '--json']);
+    expect((await agent.runRaw(['update', '--json'])).exitCode).toBe(0);
     expect(await exists('.claude/skills/orcaops-loose-ends/SKILL.md')).toBe(true);
     expect(await readFile(path.join(repo.path, 'AGENTS.md'), 'utf8')).not.toContain(
       'orcaops-loose-ends'

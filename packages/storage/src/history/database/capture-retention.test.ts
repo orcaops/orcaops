@@ -21,6 +21,7 @@ import {
   type ProjectDatabase,
   projectDatabasePath,
 } from './connection.js';
+import { readProjectEvaluatorRunFindings } from './evaluator-findings.js';
 import { readProjectExecution } from './execution-records.js';
 import { type PendingCaptureInput, readProjectPendingCapture } from './pending-capture.js';
 import {
@@ -650,4 +651,85 @@ it('honors original cancellation before preparing a private source retry', async
   ).rejects.toMatchObject({ code: 'CANCELLED' });
   expect(prepared).toHaveBeenCalledTimes(1);
   expect(state(value.handle)).toEqual(before);
+});
+
+it('keeps an admitted handover for the next attempt when the settlement refuses', async () => {
+  const value = await fixture();
+  const runId = uuidv7();
+  const payload = {
+    schema: 'orcaops.evaluator_run/v1',
+    run_id: runId,
+    artifact_id: value.capture.artifactId,
+    evaluator_ref: 'core/step-coverage',
+    package_id: 'core',
+    evaluator_id: 'step-coverage',
+    phase: 'post-plan',
+    severity: 'info',
+    run_status: 'completed',
+    verdict: 'pass',
+    body: 'Every declared step is covered.',
+    ts: '2026-09-01T00:00:00.000Z',
+  };
+  const runRecord = {
+    event_id: uuidv7(),
+    type: 'evaluator_run_recorded',
+    ts: payload.ts,
+    schema_version: 1,
+    idempotency_key: uuidv7(),
+    payload,
+  };
+  value.capture = {
+    ...value.capture,
+    eventBytes: Buffer.concat([
+      Buffer.from(value.capture.eventBytes),
+      Buffer.from(`${JSON.stringify({ ...runRecord, checksum: recordChecksum(runRecord) })}\n`),
+    ]),
+    evaluatorEvidence: [
+      {
+        run_id: runId,
+        findings: {
+          status: 'established',
+          record: {
+            schema: 'orcaops.evaluator_run_findings/v1',
+            run_id: runId,
+            findings: [{ key: 'criterion/c1', title: 'The delivered tests cover criterion c1' }],
+          },
+        },
+        basis: {
+          context_sha256: 'd'.repeat(64),
+          base_sha: 'a'.repeat(40),
+          head_sha: 'b'.repeat(40),
+          evaluator_version: null,
+          producer_payload: null,
+        },
+      },
+    ],
+  };
+
+  await begin(value);
+  const admitted = value.handle.read((view) => ({
+    pending: view.all('SELECT run_id FROM pending_capture_evaluator_evidence'),
+    contexts: view.all('SELECT run_id FROM evaluator_run_contexts'),
+  })).value;
+  expect(admitted).toEqual({ pending: [{ run_id: runId }], contexts: [] });
+
+  await expect(
+    settleProjectCaptureRetention(value.handle, {
+      ...selection(value.retention),
+      expectedTransitionId: uuidv7(),
+    })
+  ).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
+  expect(
+    value.handle.read((view) => ({
+      pending: view.all('SELECT run_id FROM pending_capture_evaluator_evidence'),
+      contexts: view.all('SELECT run_id FROM evaluator_run_contexts'),
+      findings: view.all('SELECT run_id FROM evaluator_findings'),
+    })).value
+  ).toEqual({ pending: [{ run_id: runId }], contexts: [], findings: [] });
+
+  // The next attempt settles what the admission retained, with no allowlist to read it under.
+  await settleProjectCaptureRetention(value.handle, selection(value.retention));
+  const retained = readProjectEvaluatorRunFindings(value.handle, runId);
+  if (retained.status !== 'established') throw new Error(retained.status);
+  expect(retained.findings.map((finding) => finding.key)).toEqual(['criterion/c1']);
 });

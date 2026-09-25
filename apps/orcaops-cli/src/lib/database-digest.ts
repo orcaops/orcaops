@@ -8,7 +8,11 @@ import {
   type Repo,
 } from '@orcaops/core';
 import { discoverEvaluators } from '@orcaops/evaluator-runner';
-import { HistoryScopeError, validateHistorySelector } from '@orcaops/project-scope/history';
+import {
+  HistoryScopeError,
+  unavailableProjectError,
+  validateHistorySelector,
+} from '@orcaops/project-scope/history';
 import {
   collectDatabaseHistory,
   type DatabaseHistoryScope,
@@ -25,6 +29,12 @@ import {
   estimateArtifactUsage,
 } from '@orcaops/storage/history/usage-accounting';
 
+import {
+  artifactKnowledgeBlock,
+  knowledgeBoundaryOption,
+  knowledgeDigestSection,
+  planInView,
+} from './artifact-knowledge.js';
 import { renderCanonicalUsageLines } from './canonical-usage-display.js';
 import {
   branchSelectionScope,
@@ -37,6 +47,7 @@ import {
 import type { resolveDatabaseHistoryCommandContext } from './database-history-context.js';
 import { inspectDatabaseTasks } from './database-task-context.js';
 import { CLI_ROOT } from './evaluators-config.js';
+import { artifactKnowledgeUses } from './plan-knowledge-uses.js';
 import { ErrorCodes, OrcaopsError } from '../io/errors.js';
 
 export interface DatabaseDigestOptions {
@@ -51,6 +62,8 @@ export interface DatabaseDigestOptions {
   branchWide?: boolean;
   base?: string;
   primaryArtifact?: string;
+  /** The write sequence the continuing-knowledge answer is read at. Absent means now. */
+  atBoundary?: number;
 }
 
 const DIGEST_KEYS = [
@@ -64,6 +77,7 @@ const DIGEST_KEYS = [
   'branchWide',
   'base',
   'primaryArtifact',
+  'atBoundary',
 ] as const;
 
 export function validateDatabaseDigest(raw: DatabaseDigestOptions = {}) {
@@ -107,6 +121,15 @@ export function validateDatabaseDigest(raw: DatabaseDigestOptions = {}) {
     );
   if (options.format !== undefined && !['md', 'json'].includes(options.format))
     throw new OrcaopsError(ErrorCodes.INVALID_INPUT, 'Digest format must be md or json', 'format');
+  // A branch-wide digest spans many threads and takes no single boundary: one answer over several
+  // artifacts would name a boundary for a thread it was never read against.
+  if (options.branchWide === true && options.atBoundary !== undefined)
+    throw new OrcaopsError(
+      ErrorCodes.INVALID_INPUT,
+      '--at-boundary reads one artifact; it cannot be combined with --branch-wide.',
+      'at-boundary'
+    );
+  knowledgeBoundaryOption(options.atBoundary);
   if (options.artifact !== undefined && !/^[0-9a-f-]{1,36}$/iu.test(options.artifact))
     throw new OrcaopsError(
       ErrorCodes.INVALID_INPUT,
@@ -236,20 +259,22 @@ function selectDigestArtifact(
 ): DigestSelection {
   const scope = context.scope;
   if (scope.projects.length !== 1 || !scope.projects[0].authority)
-    throw new HistoryScopeError(
-      scope.completeness.issues[0]?.code ?? 'PROJECT_REQUIRED',
-      'Implicit digest selection requires one available original project',
-      { issues: scope.completeness.issues }
-    );
+    throw unavailableProjectError(scope.completeness.issues, {
+      code: 'PROJECT_REQUIRED',
+      message: 'Implicit digest selection requires one available original project',
+    });
   // The watch profile is the cheapest that carries label and task; the versions profile
   // nulls both, and the sibling disclosure names each artifact by its label.
   const collection = collectBranchHistory(scope, { branch, profile: 'watch' });
   const selectedBranch = branchSelectionScope(scope, branch).branch.value;
   if (!collection.completeness.complete && collection.entries.length === 0)
-    throw new HistoryScopeError(
-      collection.completeness.issues[0]?.code ?? 'HISTORY_INACCESSIBLE',
-      `Branch "${selectedBranch ?? 'HEAD'}" history is unavailable; preserve it for explicit repair`,
-      { issues: collection.completeness.issues, inputPath: 'branch' }
+    throw unavailableProjectError(
+      collection.completeness.issues,
+      {
+        code: 'HISTORY_INACCESSIBLE',
+        message: `Branch "${selectedBranch ?? 'HEAD'}" history is unavailable; preserve it for explicit repair`,
+      },
+      { inputPath: 'branch' }
     );
   const rows = collection.entries;
   if (rows.length === 0)
@@ -334,7 +359,9 @@ export async function readDatabaseArtifactDigest(
           otherArtifacts: [],
           otherArtifactCount: 0,
         };
-  const target = resolveDatabaseHistoryOverview(context.scope, selection.artifactId);
+  const target = resolveDatabaseHistoryOverview(context.scope, selection.artifactId, {
+    boundary: knowledgeBoundaryOption(prepared.options.atBoundary),
+  });
   const thread = target.artifact.thread;
   const built: DigestOutput = buildThreadDigest({
     thread,
@@ -342,6 +369,10 @@ export async function readDatabaseArtifactDigest(
     redactSecrets: context.config.digest.redact_secrets,
   });
   const usage = canonicalArtifactUsage(target);
+  const knowledge = artifactKnowledgeBlock({
+    context: target.knowledgeContext!,
+    plan: planInView(target.artifactId, artifactKnowledgeUses(target.knowledgeUses)),
+  });
   const result = {
     schema_version: 3 as const,
     project_id: target.projectId,
@@ -362,8 +393,9 @@ export async function readDatabaseArtifactDigest(
       execution: target.execution?.version ?? null,
     },
     data: built.data,
+    knowledge,
     usage: { accounting: usage.accounting, estimates: usage.estimates },
-    markdown: `${built.markdown.trimEnd()}\n\n${usageSection(usage)}`,
+    markdown: `${built.markdown.trimEnd()}\n\n${knowledgeDigestSection(knowledge)}\n${usageSection(usage)}`,
     sources: [{ project_id: target.projectId, counters: target.counters }],
     completeness: structuredClone(context.scope.completeness),
     integrity: { source_observation: 'read-transaction' as const },
@@ -554,11 +586,10 @@ export async function readDatabaseBranchDigest(
   // reporting that as "no recorded work" would hide both the healthy members and the
   // integrity problem behind an empty-range answer.
   if (!collection.completeness.complete && selected.length === 0)
-    throw new HistoryScopeError(
-      collection.completeness.issues[0]?.code ?? 'HISTORY_INACCESSIBLE',
-      'Branch-wide history is unavailable; preserve it for explicit repair',
-      { issues: collection.completeness.issues }
-    );
+    throw unavailableProjectError(collection.completeness.issues, {
+      code: 'HISTORY_INACCESSIBLE',
+      message: 'Branch-wide history is unavailable; preserve it for explicit repair',
+    });
   if (selected.length === 0)
     throw new OrcaopsError(
       'UNKNOWN_ARTIFACT',

@@ -26,7 +26,7 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
-    "@orcaops/diff-fingerprint": "0.0.8",
+    "@orcaops/diff-fingerprint": "0.0.9",
     "@orcaops/storage": "workspace:*",
     "better-sqlite3": "13.0.3",
     "yaml": "^2.8.2",

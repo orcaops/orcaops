@@ -23,6 +23,7 @@ concurrency:
 jobs:
   audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       # The only write grant in this workflow, scoped to this job alone.

@@ -4,10 +4,20 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 
-import { EvaluatorPackageSchema, EvaluatorSchema } from '@orcaops/evaluator-protocol';
+import {
+  EvaluatorPackageSchema,
+  EvaluatorResultEnvelopeV2Schema,
+  EvaluatorSchema,
+} from '@orcaops/evaluator-protocol';
 
-import { EXAMPLE_KINDS, SCHEMA_EXAMPLES } from './schema-examples.js';
-import { SCHEMA_KIND_NAMES, SCHEMA_KINDS, type SchemaKind, schemaProjection } from './schema.js';
+import { EXAMPLE_KINDS, RESULT_ENVELOPE_EXAMPLE, SCHEMA_EXAMPLES } from './schema-examples.js';
+import {
+  SCHEMA_KIND_NAMES,
+  SCHEMA_KINDS,
+  type SchemaKind,
+  schemaProjection,
+  STRUCTURAL_PROJECTION_COMMENT,
+} from './schema.js';
 
 const REPO_ROOT = path.resolve(
   fileURLToPath(new URL('.', import.meta.url)),
@@ -115,6 +125,45 @@ describe('eval schema projections', () => {
     expect(comment).toContain('on_block_message');
     expect(comment).toContain('checkpoint-open');
   });
+
+  it('the envelope carries the findings rules its shape cannot state', () => {
+    // The projection shows that `findings` exists and what it looks like. What
+    // it costs, and what it may never do, is what decides whether an author
+    // reaches for it correctly — and none of that is a structure.
+    const comment = schemaProjection('result').$comment as string;
+    expect(comment).toContain('never decides the gate');
+    expect(comment).toContain('`conclusion` requires at least one expectation location');
+    expect(comment).toContain('cost the findings and never the verdict');
+  });
+
+  it('the envelope carries a filled-in example that its own schema accepts', () => {
+    const examples = schemaProjection('result').examples as unknown[];
+    expect(examples).toEqual([RESULT_ENVELOPE_EXAMPLE]);
+    const parsed = EvaluatorResultEnvelopeV2Schema.safeParse(examples[0]);
+    if (!parsed.success) {
+      throw new Error(
+        `the result exemplar is invalid:\n${JSON.stringify(parsed.error.issues, null, 2)}`
+      );
+    }
+    // It has to show the distinction the shape allows and the prose describes:
+    // a graded expectation with an identity, and a plain observation with
+    // neither. One finding would leave the second half undemonstrated.
+    const findings = parsed.data.findings ?? [];
+    expect(findings).toHaveLength(2);
+    expect(findings[0]!.conclusion).toBe('contradicted');
+    expect(findings[0]!.key).toBeTypeOf('string');
+    expect(findings[0]!.locations?.some((l) => l.kind === 'acceptance-criterion')).toBe(true);
+    expect(findings[1]!.key).toBeUndefined();
+    expect(findings[1]!.conclusion).toBeUndefined();
+    expect(findings[1]!.locations).toBeUndefined();
+  });
+
+  it('the file shapes carry the disclaimer alone — no prose, no example', () => {
+    for (const kind of ['spec', 'manifest'] as const) {
+      expect(schemaProjection(kind).$comment, kind).toBe(STRUCTURAL_PROJECTION_COMMENT);
+      expect(schemaProjection(kind).examples, kind).toBeUndefined();
+    }
+  });
 });
 
 /**
@@ -130,6 +179,18 @@ describe('eval schema projections', () => {
 describe('every author-facing schema has a kind', () => {
   const AUTHOR_PARSED_DIRS = ['discovery', 'engines'];
   const SCHEMA_REF_RE = /\b(Evaluator[A-Za-z]*Schema)\.(?:safeParse|parse)\(/g;
+
+  /**
+   * Readers that validate author content without naming a schema at the call
+   * site, mapped to the schema they validate with. The result envelope stopped
+   * being a `Schema.parse(` call when the runner moved to `readResultEnvelope`,
+   * which reads the envelope and its findings in two steps — so a name-only
+   * scan silently stopped covering the one shape every producer emits.
+   */
+  const READER_SCHEMAS = new Map<string, string>([
+    ['readResultEnvelope', 'EvaluatorResultEnvelopeV2Schema'],
+  ]);
+  const READER_RE = new RegExp(`\\b(${[...READER_SCHEMAS.keys()].join('|')})\\(`, 'g');
 
   /** Schemas the scan reaches that are deliberately not author-facing. */
   const EXCLUDED = new Map<string, string>([
@@ -152,11 +213,14 @@ describe('every author-facing schema has a kind', () => {
         }
         const text = await readFile(path.join(abs, entry.name), 'utf8');
         for (const match of text.matchAll(SCHEMA_REF_RE)) found.add(match[1]);
+        for (const match of text.matchAll(READER_RE)) found.add(READER_SCHEMAS.get(match[1])!);
       }
     }
 
-    // The guard is worthless if the scan matched nothing.
+    // The guard is worthless if the scan matched nothing, and worth less than
+    // it looks if it missed the shape the readers hide.
     expect(found.size).toBeGreaterThan(0);
+    expect([...found]).toContain('EvaluatorResultEnvelopeV2Schema');
 
     const covered = new Set(SCHEMA_KIND_NAMES.map((kind: SchemaKind) => schemaIdentityName(kind)));
     const uncovered = [...found].filter((name) => !covered.has(name) && !EXCLUDED.has(name)).sort();
@@ -172,7 +236,7 @@ describe('every author-facing schema has a kind', () => {
     return {
       spec: 'EvaluatorSchema',
       manifest: 'EvaluatorPackageSchema',
-      result: 'EvaluatorResultEnvelopeSchema',
+      result: 'EvaluatorResultEnvelopeV2Schema',
     }[kind];
   }
 

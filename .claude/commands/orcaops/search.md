@@ -2,8 +2,8 @@
 name: "orcaops:search"
 description: "FTS5 search over plan / checkpoint / summary content across all captured artifacts."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "687a14acbbc3"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "fa5560168ecb"
 tags: ["orcaops", "read-only"]
 ---
 

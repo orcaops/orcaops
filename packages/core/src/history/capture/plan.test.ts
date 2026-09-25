@@ -7,7 +7,9 @@ import { CapturePlanInputSchema, PlanInputSchema, uuidv7 } from '@orcaops/storag
 import { normalizeHistoryRoot } from '@orcaops/storage/history/authority';
 import {
   beginProjectPlanCaptureRetention,
+  createProjectRequirement,
   initializeProjectDatabase,
+  listProjectTaskUses,
   planCaptureCommand,
   planCaptureInput,
   preparePlanCaptureCommand,
@@ -16,6 +18,7 @@ import {
   type ProjectDatabase,
   ProjectDatabaseError,
   projectDatabasePath,
+  publishProjectKnowledgeSource,
   readProjectArtifact,
   readProjectExecution,
   readProjectPendingCapture,
@@ -119,6 +122,78 @@ function input(enabled = false): DatabasePlanCaptureInput {
     secretAllow: [],
   };
 }
+/** The same capture input, saying it uses one exact revision. */
+function usingRevision(
+  authored: DatabasePlanCaptureInput,
+  use: Record<string, string>
+): DatabasePlanCaptureInput {
+  return {
+    ...authored,
+    authored: CapturePlanInputSchema.parse({ ...authored.authored, knowledge_uses: [use] }),
+  };
+}
+
+const AT = '2026-09-01T00:00:00.000Z';
+const OWNER = { identity: 'owner', basis: 'other_assertion' } as const;
+
+/** A retained requirement revision, which is all a task use needs its target to be. */
+async function retainedRequirement(handle: ProjectDatabase, statement: string) {
+  const bytes = Buffer.from(statement, 'utf8');
+  const published = await publishProjectKnowledgeSource(handle, {
+    operationId: uuidv7(),
+    source: {
+      source_id: uuidv7(),
+      occurrence: {
+        kind: 'user_instruction',
+        retention: { kind: 'bytes', content_sha256: digest(bytes) },
+        location: 'session transcript, turn 1',
+        source_time: AT,
+      },
+      source_author: OWNER,
+      interpreted_by: null,
+      access_restriction: null,
+    },
+    recordedBy: OWNER,
+    retainedBytes: bytes,
+    secretAllow: [],
+  });
+  const sourceId = published.value.sourceId;
+  const requirementId = uuidv7();
+  const revisionId = uuidv7();
+  const passage = {
+    source_id: sourceId,
+    location: `bytes:0-${bytes.byteLength}`,
+    passage_sha256: digest(bytes),
+  };
+  await createProjectRequirement(handle, {
+    operationId: uuidv7(),
+    identity: {
+      requirement_id: requirementId,
+      origin: { kind: 'promoted_source', passage, promoted_at: AT },
+    },
+    revision: {
+      requirement_id: requirementId,
+      revision_id: revisionId,
+      previous_revision_id: null,
+      statement,
+      rationale: 'Recorded so a plan can say it uses it.',
+      subject: null,
+      applicability: { all_of: [] },
+      duration: { kind: 'continuing' },
+      source_ids: [sourceId],
+      passages: [passage],
+      source_standing: 'explicit_instruction',
+      recorded_at: AT,
+    },
+    attributedTo: { kind: 'actor', actor: OWNER },
+    secretAllow: [],
+  });
+  return { requirementId, revisionId };
+}
+
+const retainedUses = (handle: ProjectDatabase, planEventId: string) =>
+  handle.read((view) => listProjectTaskUses(view, planEventId)).value;
+
 function state(handle: ProjectDatabase) {
   return handle.read((view) => ({
     commands: view.all('SELECT idempotency_key, artifact_id FROM plan_capture_commands'),
@@ -190,6 +265,67 @@ it('retains the original pending command before ref effects and resumes without 
   expect(replay.publication).toEqual({ ...recovered.publication, replayed: true });
   expect(f.publish).not.toHaveBeenCalled();
   expect(f.revalidate).not.toHaveBeenCalled();
+});
+
+it('settles the uses the staging invocation named when an interrupted capture is resumed', async () => {
+  const f = await fixture();
+  const rule = await retainedRequirement(f.handle, 'Local capture works with no Cloud connection.');
+  const authored = usingRevision(input(true), {
+    kind: 'requirement',
+    entity_id: rule.requirementId,
+    revision_id: rule.revisionId,
+    role: 'implement',
+  });
+  let planEventId: string | null = null;
+  let stagedOperationId: string | null = null;
+  f.publish.mockImplementationOnce(async () => {
+    const found = readProjectPlanCapture(
+      f.handle,
+      preparePlanCaptureInput({ authored: authored.authored, sourcePlan: authored.sourcePlan }, [])
+    );
+    if (found?.kind !== 'command') throw new Error('Original admission missing');
+    planEventId = planCaptureCommand(found.command).planEventId;
+    stagedOperationId = planCaptureCommand(found.command).originalOperationId;
+    // Nothing is written at admission: the plan event is not retained yet, so a use settled here
+    // could not be the plan's own selection.
+    expect(retainedUses(f.handle, planEventId)).toEqual([]);
+    throw new ProjectDatabaseError('HISTORY_INACCESSIBLE', 'Injected interrupted ref publication');
+  });
+  await expect(captureDatabasePlan(f.handle, f.context, authored)).rejects.toMatchObject({
+    code: 'HISTORY_INACCESSIBLE',
+  });
+  // The uses travel with the retained request, so the settlement writes what the interrupted
+  // invocation named and no later invocation's own input can reach them.
+  const staged = readProjectPendingCapture(f.handle, stagedOperationId!);
+  expect(staged.value?.planUses?.uses).toHaveLength(1);
+
+  const resumed = await captureDatabasePlan(f.handle, f.context, authored);
+
+  expect(resumed.replayed).toBe(true);
+  expect(resumed.planEventId).toBe(planEventId);
+  expect(
+    retainedUses(f.handle, resumed.planEventId).map((row) => [
+      row.target.revisionId,
+      row.selectionKind,
+    ])
+  ).toEqual([[rule.revisionId, 'selected_with_plan']]);
+});
+
+it('refuses a capture whose use names a revision this history does not hold', async () => {
+  const f = await fixture();
+  const authored = usingRevision(input(), {
+    kind: 'requirement',
+    entity_id: uuidv7(),
+    revision_id: uuidv7(),
+    role: 'implement',
+  });
+  const before = state(f.handle);
+
+  await expect(captureDatabasePlan(f.handle, f.context, authored)).rejects.toMatchObject({
+    code: 'HISTORY_MISSING',
+  });
+
+  expect(state(f.handle)).toEqual(before);
 });
 
 it('resumes an admitted pre-upgrade empty-rubric capture from its exact retained input', async () => {
@@ -361,7 +497,7 @@ it('publishes a degraded plan honestly when snapshot preparation is unavailable'
   });
   const result = await captureDatabasePlan(f.handle, f.context, input(true));
   expect(result.warnings).toEqual([
-    'Plan baseline snapshot is unavailable; empty-fence seed recovery has no baseline.',
+    'Plan baseline snapshot is unavailable (Injected unavailable snapshot); empty-fence seed recovery has no baseline.',
   ]);
   expect(
     readProjectArtifact(f.handle, result.artifactId)?.thread.artifactJson?.baseline_seed_tree_sha
@@ -611,12 +747,12 @@ it('refuses the same capture when acceptance_criteria is omitted entirely', asyn
   });
 });
 
-it('does not let authored origin input bypass the rubric requirement', async () => {
+it('refuses authored origin input instead of letting it bypass the rubric requirement', async () => {
   const f = await fixture();
   const authored = rubricFreeInput([]);
   const forged = {
     ...authored,
-    authored: CapturePlanInputSchema.parse({
+    authored: {
       ...authored.authored,
       origin: {
         kind: 'git-import',
@@ -626,11 +762,13 @@ it('does not let authored origin input bypass the rubric requirement', async () 
         authors: ['forged@example.test'],
         enriched_at: null,
       },
-    }),
+    },
   };
-  expect(forged.authored).not.toHaveProperty('origin');
+  expect(CapturePlanInputSchema.safeParse(forged.authored).error?.issues).toMatchObject([
+    { code: 'unrecognized_keys', keys: ['origin'] },
+  ]);
   await expect(captureDatabasePlan(f.handle, f.context, forged)).rejects.toMatchObject({
-    code: 'PLAN_ACCEPTANCE_CRITERIA_REQUIRED',
+    code: 'INVALID_INPUT',
   });
 });
 

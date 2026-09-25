@@ -1,11 +1,12 @@
 import {
+  type ProjectArtifactOverviewKnowledge,
   type ProjectDatabase,
   resolveProjectArtifactDetails,
   resolveProjectArtifactOverview,
 } from '@orcaops/storage/history/database';
 
 import type { DatabaseHistoryScope } from './database-scope.js';
-import { HistoryScopeError } from './history-types.js';
+import { HistoryScopeError, unavailableProjectError } from './history-types.js';
 
 function exactProjectDatabase(scope: DatabaseHistoryScope) {
   if (scope.kind === 'all-projects' || scope.projects.length !== 1)
@@ -15,12 +16,7 @@ function exactProjectDatabase(scope: DatabaseHistoryScope) {
     );
   const project = scope.projects[0];
   const { database, authority } = project;
-  if (!database || !authority)
-    throw new HistoryScopeError(
-      project.completeness.issues[0]?.code ?? 'HISTORY_INACCESSIBLE',
-      'Selected project history is unavailable',
-      { issues: project.completeness.issues }
-    );
+  if (!database || !authority) throw unavailableProjectError(project.completeness.issues);
   if (
     authority.projectId !== project.projectId ||
     database.authority.projectId !== project.projectId ||
@@ -82,12 +78,18 @@ export type DatabaseHistoryOverview = Omit<
   authority: ProjectDatabase['authority'];
   followup: string;
 };
+/**
+ * `knowledge` names the boundary the continuing-knowledge answer is read at, in the same snapshot
+ * as the thread. Omitted, no answer is read: a surface that prints none should not pay to resolve
+ * the project's adopted identities.
+ */
 export function resolveDatabaseHistoryOverview(
   scope: DatabaseHistoryScope,
-  requested: string
+  requested: string,
+  knowledge?: ProjectArtifactOverviewKnowledge
 ): DatabaseHistoryOverview {
   const database = exactProjectDatabase(scope);
-  const result = resolveProjectArtifactOverview(database, requested);
+  const result = resolveProjectArtifactOverview(database, requested, knowledge);
   requireArtifact(database.authority.projectId, result);
   return withProjectIdentity(database, result);
 }

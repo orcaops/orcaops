@@ -56,11 +56,59 @@ const examples = [
     path: ['digest'],
     flags: ['--out'],
   },
+  {
+    skill: 'plan-critique',
+    text: 'orcaops knowledge lookup --subject <subject-id> --json',
+    path: ['knowledge', 'lookup'],
+    flags: ['--subject', '--json'],
+  },
+  {
+    skill: 'plan-critique',
+    text: 'orcaops knowledge lookup --identity requirement:<id> --json',
+    path: ['knowledge', 'lookup'],
+    flags: ['--identity'],
+  },
+  {
+    skill: 'plan-critique',
+    text: 'orcaops list --touching <glob> --json',
+    path: ['list'],
+    flags: ['--touching'],
+  },
+  {
+    skill: 'plan-critique',
+    text: 'orcaops loose-ends --scope project --json',
+    path: ['loose-ends'],
+    flags: ['--scope', '--json'],
+  },
+  {
+    skill: 'search',
+    text: 'orcaops search redis --knowledge-bytes 8192 --json',
+    path: ['search'],
+    flags: ['--knowledge-bytes'],
+  },
+  {
+    skill: 'checkpoint',
+    text: 'orcaops show <artifact-id> --json',
+    path: ['show'],
+    flags: ['--json'],
+  },
+  {
+    skill: 'checkpoint',
+    text: 'orcaops resume --artifact <id> --json',
+    path: ['resume'],
+    flags: ['--artifact', '--json'],
+  },
+  {
+    skill: 'resume',
+    text: 'orcaops status --json',
+    path: ['status'],
+    flags: ['--json'],
+  },
 ] as const;
 
 describe('commands shown in skill guidance', () => {
   it.each(examples)(
-    '$skill uses the live $path command and flags',
+    '$skill shows "$text", which the live CLI accepts',
     ({ skill, text, path, flags }) => {
       const template = SKILL_TEMPLATES.find((candidate) => candidate.id === skill);
       expect(template).toBeDefined();

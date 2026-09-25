@@ -51,7 +51,6 @@ async function run(
   ]);
   return { raw, result: JSON.parse(raw.stdout) };
 }
-// `capture summary` runs no evaluators, so it registers no --no-llm flag.
 const revise = (f: Fixture, body: Record<string, unknown>) =>
   run(f, ['plan', 'revise'], body, SESSION, ['--no-llm']);
 const summary = (f: Fixture, body: Record<string, unknown>, session?: string) =>

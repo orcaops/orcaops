@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
+import { readArtifactExport } from '../support/artifact-export.js';
 import { makeAgent } from '../support/test-agent.js';
 
 const exists = async (p: string): Promise<boolean> => {
@@ -181,7 +182,7 @@ describe('multi-agent install (config.install.agents)', () => {
     expect(planRes.exitCode).toBe(0);
     const artifactId = (JSON.parse(planRes.stdout) as { artifact_id: string }).artifact_id;
 
-    const show = await agent.runRaw(['show', artifactId, '--json']);
+    const show = await readArtifactExport(agent, artifactId);
     expect(show.exitCode).toBe(0);
     const plan = (JSON.parse(show.stdout) as { artifact: { plan: { agent: unknown } } }).artifact
       .plan;

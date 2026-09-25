@@ -92,6 +92,40 @@ describe('orcaops update --prefix', () => {
     expect(await blockRefCheck()).toBe('pass');
   });
 
+  it('update --prefix leaves a version 6 config on version 6', async () => {
+    await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
+    const cfgPath = p('.orcaops/config.json');
+    const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+    await writeFile(cfgPath, `${JSON.stringify({ ...cfg, schema_version: 6 }, null, 2)}\n`, 'utf8');
+
+    const res = await agent.runRaw(['update', '--prefix', 'oo', '--json']);
+    expect(res.exitCode).toBe(0);
+    const after = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+    expect(after.schema_version).toBe(6);
+    expect(after.naming).toEqual({ prefix: 'oo' });
+  });
+
+  it.each([7, 8])(
+    'preserves version %i and its settings when changing the prefix',
+    async (version) => {
+      await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
+      const cfgPath = p('.orcaops/config.json');
+      const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+      const before = {
+        ...cfg,
+        schema_version: version,
+        workflow: { commit_inside_window: false, routing: { suppress: ['digest'] } },
+        ...(version === 8 ? { knowledge_processing: { enabled: false } } : {}),
+      };
+      await writeFile(cfgPath, `${JSON.stringify(before, null, 2)}\n`, 'utf8');
+
+      const result = await agent.runRaw(['update', '--prefix', 'oo', '--json']);
+      expect(result.exitCode).toBe(0);
+      const after = JSON.parse(await readFile(cfgPath, 'utf8')) as Record<string, unknown>;
+      expect(after).toEqual({ ...before, naming: { prefix: 'oo' } });
+    }
+  );
+
   it('a hand-edited config prefix + bare update yields the same residue-free rename', async () => {
     await agent.runRaw(['init', '--scope', 'project', '--no-llm']);
     const cfgPath = p('.orcaops/config.json');

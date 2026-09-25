@@ -2,6 +2,7 @@ import { action, type Operation } from 'effection';
 import { execa } from 'execa';
 import { randomUUID } from 'node:crypto';
 
+import { readJsonAnswer } from '../json-rescue.js';
 import type { EvaluateError, EvaluateOptions, EvaluateResult } from '../types.js';
 import { buildClaudeArgs, buildClaudeEnv } from './args.js';
 import {
@@ -125,7 +126,11 @@ function* runOneShot(cfg: OneShotConfig, opts: EvaluateOptions): Operation<Evalu
     };
     opts.signal?.addEventListener('abort', onAbort, { once: true });
 
-    const finish = (final: ClaudeResultEvent | null, errorOverride?: EvaluateError): void => {
+    const finish = (
+      final: ClaudeResultEvent | null,
+      errorOverride?: EvaluateError,
+      cleanExit = false
+    ): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -154,8 +159,17 @@ function* runOneShot(cfg: OneShotConfig, opts: EvaluateOptions): Operation<Evalu
       }
 
       const errorEnvelope = eventToEvaluateError(final);
+      const body = final.body || (errorEnvelope ? `ERROR\n\n${errorEnvelope.message}` : '');
+      const wholeAnswer =
+        final.stopReason === undefined ||
+        ['end_turn', 'stop_sequence', 'tool_use'].includes(final.stopReason);
+      const answer =
+        opts.outputSchema && cleanExit && !errorEnvelope && wholeAnswer
+          ? readJsonAnswer(body)
+          : null;
       resolve({
-        body: final.body || (errorEnvelope ? `ERROR\n\n${errorEnvelope.message}` : ''),
+        body: answer?.body ?? body,
+        ...(answer?.jsonRepair === undefined ? {} : { jsonRepair: answer.jsonRepair }),
         model: final.model ?? null,
         sessionId,
         durationMs,
@@ -197,7 +211,7 @@ function* runOneShot(cfg: OneShotConfig, opts: EvaluateOptions): Operation<Evalu
         return;
       }
       if (resultEvent) {
-        finish(resultEvent);
+        finish(resultEvent, undefined, code === 0);
         return;
       }
       finish(null, {

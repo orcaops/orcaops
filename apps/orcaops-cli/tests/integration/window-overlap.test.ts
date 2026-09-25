@@ -277,9 +277,12 @@ describe('window overlap — CLI end-to-end', { timeout: 20_000 }, () => {
     const whyPending = await agent.runRaw(['why', 'shared.ts:1', '--json']);
     expect(whyPending.exitCode).toBe(0);
     const pendingOut = JSON.parse(whyPending.stdout) as {
-      best: { reasons: string[] } | null;
+      best: string | null;
+      results: Array<{ id: string; reasons: string[] }>;
     };
-    expect(pendingOut.best?.reasons.join('\n')).toMatch(/provisional/i);
+    expect(
+      pendingOut.results.find((row) => row.id === pendingOut.best)?.reasons.join('\n')
+    ).toMatch(/provisional/i);
 
     const close2 = await closeCp(artifactId, 2, ['shared.ts'], stepIds[1]);
     expect((close2.warnings ?? []).some((w) => w.code === 'window-overlap-ambiguous')).toBe(true);
@@ -293,7 +296,7 @@ describe('window overlap — CLI end-to-end', { timeout: 20_000 }, () => {
     expect(whyAfter.exitCode).toBe(0);
     const afterOut = JSON.parse(whyAfter.stdout) as {
       best: null;
-      results: Array<{ checkpoint: { n: number } | null; reasons: string[] }>;
+      results: Array<{ checkpoint: number | null; reasons: string[] }>;
     };
     expect(afterOut.best).toBeNull();
     expect(
@@ -381,12 +384,12 @@ describe('window overlap — CLI end-to-end', { timeout: 20_000 }, () => {
     expect(why.exitCode).toBe(0);
     const whyOut = JSON.parse(why.stdout) as {
       results: Array<{
-        checkpoint: { n: number } | null;
+        checkpoint: number | null;
         confidence: string;
         reasons: string[];
       }>;
     };
-    const cp1Match = whyOut.results.find((match) => match.checkpoint?.n === 1);
+    const cp1Match = whyOut.results.find((match) => match.checkpoint === 1);
     expect(cp1Match).toBeDefined();
     expect(cp1Match?.confidence).toBe('weak');
     expect(cp1Match?.reasons.join('\n')).toMatch(/ambiguous/i);

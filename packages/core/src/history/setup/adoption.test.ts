@@ -353,16 +353,27 @@ describe('concurrent initializer adoption', () => {
     expect(loserOutcome.result).toEqual(winnerOutcome.result);
   }, 60000);
 
-  it('keeps the conversion path for an installed checkout marker', async () => {
+  it('keeps the conversion path for a checkout store holding legacy history', async () => {
     const f = await repository();
-    const occupied = path.join(f.cwd, '.orcaops/config.json');
+    const occupied = path.join(f.cwd, '.orcaops/artifacts/legacy/events.ndjson');
     await mkdir(path.dirname(occupied), { recursive: true });
     await writeFile(occupied, '{}');
+    await writeFile(path.join(f.cwd, '.orcaops/config.json'), '{}');
     await expect(setupProjectDatabase(f.input)).rejects.toMatchObject({
       code: 'CONVERSION_REQUIRED',
     });
     // Refusing before any write-capable step leaves the requested data root uncreated.
     await expect(readdir(f.root)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 30000);
+
+  it('starts history beside a committed project configuration', async () => {
+    const f = await repository();
+    await mkdir(path.join(f.cwd, '.orcaops'));
+    await writeFile(path.join(f.cwd, '.orcaops/config.json'), '{}');
+    await writeFile(path.join(f.cwd, '.orcaops/install.json'), '{}');
+    const result = await setupProjectDatabase(f.input);
+    expect(result.status).toBe('complete');
+    expect(await readdir(f.root)).toContain('projects');
   }, 30000);
 
   // The conversion gate protects legacy history; a file under .git/orcaops is

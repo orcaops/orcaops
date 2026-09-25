@@ -11,6 +11,7 @@ import {
 import { createTempRepo, inputFile, type TempRepo } from '@orcaops/test-harness';
 
 import { fixture } from '../helpers/database-history.js';
+import { readArtifactExport } from '../support/artifact-export.js';
 import { makeAgent } from '../support/test-agent.js';
 
 type DatabaseFixture = Awaited<ReturnType<typeof fixture>>;
@@ -200,7 +201,7 @@ describe('orcaops CLI (in-process)', () => {
     // The materialized projection shows the violation run with a
     // disposition of 'acknowledged' (synthesized from the paired
     // disposition event).
-    const showRes = await agent.runRaw(['show', artifactId, '--json']);
+    const showRes = await readArtifactExport(agent, artifactId);
     expect(showRes.exitCode).toBe(0);
     const show = JSON.parse(showRes.stdout) as {
       artifact: {

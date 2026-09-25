@@ -7,7 +7,7 @@ import {
   prepareDatabaseCheckout,
   requireDatabaseExecutionContext,
 } from '@orcaops/core/history/database-checkout';
-import { HistoryScopeError } from '@orcaops/project-scope/history';
+import { unavailableProjectError } from '@orcaops/project-scope/history';
 import { resolveDatabaseHistoryOverview } from '@orcaops/project-scope/history/database';
 import {
   type ProjectDatabaseAuthority,
@@ -87,10 +87,11 @@ export async function prepareDatabaseCheckoutCommand(
     const { scope } = context;
     const project = scope.projects[0];
     if (scope.projects.length !== 1 || !project?.authority || !project.database)
-      throw new HistoryScopeError(
-        project?.completeness.issues[0]?.code ?? 'HISTORY_MISSING',
-        'Select the original registered project and available history before checkout; do not initialize a replacement'
-      );
+      throw unavailableProjectError(project?.completeness.issues ?? [], {
+        code: 'HISTORY_MISSING',
+        message:
+          'Select the original registered project and available history before checkout; do not initialize a replacement',
+      });
     if (!scope.gitContext)
       throw new ProjectDatabaseError(
         'IDENTITY_RECOVERY_REQUIRED',

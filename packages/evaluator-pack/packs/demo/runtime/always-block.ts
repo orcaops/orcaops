@@ -7,10 +7,10 @@
  *   - retry the open with `policy_exceptions[]` naming `demo/always-block`
  *   - set `demo/always-block.enabled: false` in `.orcaops/evaluators.yaml`
  */
-import type { EvaluatorContext, EvaluatorResultEnvelope } from '@orcaops/evaluator-protocol';
+import type { EvaluatorContext, EvaluatorResultEnvelopeV2 } from '@orcaops/evaluator-protocol';
 import { runIfDispatched, violation } from '@orcaops/evaluator-sdk';
 
-export function check(_ctx: EvaluatorContext): EvaluatorResultEnvelope {
+export function check(_ctx: EvaluatorContext): EvaluatorResultEnvelopeV2 {
   return violation(
     'VIOLATION\n\nThis is the demo blocking evaluator. It always fires.\n\n' +
       'To stop it from blocking checkpoint-open, either:\n' +

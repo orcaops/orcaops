@@ -1,4 +1,8 @@
-import { HistoryScopeError, validateHistorySelector } from '@orcaops/project-scope/history';
+import {
+  HistoryScopeError,
+  unavailableProjectError,
+  validateHistorySelector,
+} from '@orcaops/project-scope/history';
 import {
   type DatabaseHistoryScope,
   hydrateDatabaseHistorySelection,
@@ -73,12 +77,7 @@ export function readDatabaseStepBrief(
       'Step brief options differ from the opened history scope'
     );
   const { database, authority } = project;
-  if (!database || !authority)
-    throw new HistoryScopeError(
-      project.completeness.issues[0]?.code ?? 'HISTORY_INACCESSIBLE',
-      'Selected project history is unavailable',
-      { issues: project.completeness.issues }
-    );
+  if (!database || !authority) throw unavailableProjectError(project.completeness.issues);
   if (
     database.authority.projectId !== project.projectId ||
     database.authority.storeInstanceId !== authority.storeInstanceId ||

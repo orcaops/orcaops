@@ -33,6 +33,72 @@ function checkpoint(overrides: Partial<WatchCheckpoint> = {}): WatchCheckpoint {
   };
 }
 
+const SCOPE = { kind: 'project', project_id: 'project-1' } as const;
+const BASIS = { scope: SCOPE, mode: 'current', knowledge_boundary: 42 } as const;
+
+/** One adopted rule that governs, selected by the plan in view. */
+function knowledgeBlock(): NonNullable<WatchThread['knowledge']> {
+  return {
+    basis: BASIS,
+    entries: [
+      {
+        key: 'requirement:requirement-offline',
+        target: { kind: 'requirement', entity_id: 'requirement-offline' },
+        placement: 'applicable',
+        reason: 'Adopted in the project, and its applicability holds here.',
+        governing_revision_ids: ['requirement-offline-r2'],
+        statement: 'Local capture works with no Cloud connection.',
+        revisions: [
+          {
+            revision_id: 'requirement-offline-r2',
+            standing: 'adopted',
+            applicability: 'applies',
+            statement: 'Local capture works with no Cloud connection.',
+            is_tip: true,
+          },
+        ],
+        selected_with_plan: [
+          {
+            artifact_id: 'artifact-a',
+            plan_event_id: 'plan-event-1',
+            revision_id: 'requirement-offline-r2',
+            role: 'implement',
+            step_id: null,
+            criterion_id: null,
+            discovered_at: null,
+          },
+        ],
+        connected_later: [],
+      },
+    ],
+    applicable: ['requirement:requirement-offline'],
+    background: [],
+    applicable_not_selected: {
+      basis: BASIS,
+      artifact_id: 'artifact-a',
+      plan_event_id: 'plan-event-1',
+      entries: [
+        {
+          key: 'requirement:requirement-offline',
+          target: { kind: 'requirement', entity_id: 'requirement-offline' },
+          revision_ids: ['requirement-offline-r2'],
+          selected_revision_ids: [],
+          statement: 'Local capture works with no Cloud connection.',
+          reason: 'This plan records no use of it.',
+        },
+      ],
+      limits: [],
+      statement: '1 of 1 applicable entr(y/ies) are not selected by plan event plan-event-1.',
+    },
+    later_annotations: [],
+    coverage: {
+      processing: null,
+      statement: 'The processing state was not read here, so this answer claims no completeness.',
+    },
+    limits: [],
+  };
+}
+
 function thread(id: string, overrides: Partial<WatchThread> = {}): WatchThread {
   return {
     artifactId: id,
@@ -76,6 +142,8 @@ function thread(id: string, overrides: Partial<WatchThread> = {}): WatchThread {
       },
     ],
     nonGoals: ['Do not replace capture, storage, or artifact lifecycle behavior'],
+    knowledge: null,
+    knowledgeUnavailable: null,
     recentEvents: [
       {
         tsMs: 1000,
@@ -171,6 +239,96 @@ describe('artifact detail presentation', () => {
     const rows = wrapDetailText(token, 7);
     expect(rows.every((row) => displayLen(row) <= 7)).toBe(true);
     expect(rows.join('')).toBe(token);
+  });
+
+  it('shows what stands beside the guardrails, with the boundary it was read at', () => {
+    const copy = buildDetail(thread('artifact-a', { knowledge: knowledgeBlock() }), new Set(), 96)
+      .lines.map((line) => line.text)
+      .join('\n');
+    expect(copy).toContain('KNOWLEDGE · 1 applicable · at write sequence 42');
+    expect(copy).toContain('Local capture works with no Cloud');
+    expect(copy).toContain('rev requirement-offline-r2');
+    expect(copy).toContain('1 selected with the plan');
+    expect(copy).toContain('1 of 1 applicable');
+  });
+
+  /**
+   * The coverage line is what keeps an empty answer from reading as "no rules bear on this work".
+   * A pane that dropped it would say nothing at all about processing that has interpreted nothing.
+   */
+  it('prints the coverage claim even when the answer carries no entry', () => {
+    const empty = knowledgeBlock();
+    const copy = buildDetail(
+      thread('artifact-a', {
+        knowledge: {
+          ...empty,
+          entries: [],
+          applicable: [],
+          applicable_not_selected: { ...empty.applicable_not_selected, entries: [] },
+        },
+      }),
+      new Set(),
+      96
+    )
+      .lines.map((line) => line.text)
+      .join('\n');
+    expect(copy).toContain('KNOWLEDGE · 0 applicable');
+    expect(copy).toContain('claims no completeness');
+    expect(copy).not.toContain('no requirements');
+  });
+
+  it('prints what the block left out, so a cut rule is never silent', () => {
+    const block = knowledgeBlock();
+    const copy = buildDetail(
+      thread('artifact-a', {
+        knowledge: {
+          ...block,
+          limits: [
+            {
+              kind: 'identity_count',
+              detail: '3 identit(y/ies) were left out: requirement:requirement-import.',
+            },
+          ],
+        },
+      }),
+      new Set(),
+      96
+    )
+      .lines.map((line) => line.text)
+      .join('\n');
+
+    expect(copy).toContain('3 identit(y/ies) were left out');
+    expect(copy).toContain('requirement:requirement-import');
+  });
+
+  /**
+   * A project holding no continuing record renders the section with a coverage line. A read that
+   * failed must not render as that: a locked or older-schema store would read as "nothing bears
+   * on this work".
+   */
+  it('says the knowledge read failed rather than dropping the section', () => {
+    const copy = buildDetail(
+      thread('artifact-a', { knowledge: null, knowledgeUnavailable: 'UPGRADE_REQUIRED' }),
+      new Set(),
+      96
+    )
+      .lines.map((line) => line.text)
+      .join('\n');
+
+    expect(copy).toContain('KNOWLEDGE');
+    expect(copy).toContain('knowledge unavailable: UPGRADE_REQUIRED');
+  });
+
+  it('leaves the section out for a thread whose knowledge was never read', () => {
+    const copy = buildDetail(
+      thread('artifact-a', { knowledge: null, knowledgeUnavailable: null }),
+      new Set(),
+      96
+    )
+      .lines.map((line) => line.text)
+      .join('\n');
+
+    expect(copy).not.toContain('KNOWLEDGE');
   });
 
   it('counts recent-activity sessions by agent and session id', () => {

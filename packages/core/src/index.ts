@@ -11,6 +11,7 @@ export * from './oauth/index.js';
 export * from './cloud/index.js';
 export * from './diff-fingerprint/index.js';
 export * from './attribution/index.js';
+export * from './knowledge/index.js';
 export * from './usage/session-usage-detail.js';
 
 export const PACKAGE_NAME = '@orcaops/core';

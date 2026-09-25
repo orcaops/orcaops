@@ -90,4 +90,66 @@ describe('recorded Git range listing', { timeout: 30_000 }, () => {
     expect(result.page.ranking_complete).toBe(false);
     expect(await inventory(f.temporary)).toEqual(before);
   });
+  it('lists only artifacts whose anchors ref2 cannot reach as possibly rebased away', async () => {
+    const f = await fixture();
+    const base = f.context.headOid!;
+    const landed = await f.capture(undefined, { ts: '2026-09-01T00:00:00.000Z' });
+    await f.recordFiles(landed, ['src/main.ts'], base);
+    const tree = (await git(f.main, ['rev-parse', 'HEAD^{tree}'])).stdout.trim();
+    const rewritten = (
+      await git(f.main, ['commit-tree', tree, '-p', base, '-m', 'Commit replaced by a rebase'])
+    ).stdout.trim();
+    const rebased = await f.capture(undefined, { ts: '2026-09-02T00:00:00.000Z' });
+    await f.recordFiles(rebased, ['src/main.ts'], rewritten);
+    const missing = await f.capture(undefined, { ts: '2026-09-03T00:00:00.000Z' });
+    await f.recordFiles(missing, ['src/main.ts'], 'f'.repeat(40));
+    await git(f.main, ['commit', '--allow-empty', '-qm', 'Range start']);
+    await git(f.main, ['tag', 'range-start']);
+    await git(f.main, ['commit', '--allow-empty', '-qm', 'Range end']);
+    const candidates = async (range: string) =>
+      (await list(f, range)).unmatched_candidates.map((row) => row.id).sort();
+    const expected = [rebased, missing].sort();
+    expect(await candidates('range-start..main')).toEqual(expected);
+    expect(await candidates('HEAD..main')).toEqual(expected);
+  });
+  it('decides a multi-anchor artifact by its latest anchor', async () => {
+    const f = await fixture();
+    const base = f.context.headOid!;
+    await git(f.main, ['commit', '--allow-empty', '-qm', 'Work that landed before the range']);
+    const landed = (await git(f.main, ['rev-parse', 'HEAD'])).stdout.trim();
+    const tree = (await git(f.main, ['rev-parse', 'HEAD^{tree}'])).stdout.trim();
+    const rewritten = (
+      await git(f.main, ['commit-tree', tree, '-p', landed, '-m', 'Commit replaced by a rebase'])
+    ).stdout.trim();
+    const straddling = await f.capture(undefined, { ts: '2026-09-01T00:00:00.000Z' });
+    await f.recordFiles(straddling, ['src/main.ts'], landed);
+    await f.recordFiles(straddling, ['src/main.ts'], rewritten);
+    const allBefore = await f.capture(undefined, { ts: '2026-09-02T00:00:00.000Z' });
+    await f.recordFiles(allBefore, ['src/main.ts'], base);
+    await f.recordFiles(allBefore, ['src/main.ts'], landed);
+    const latestLanded = await f.capture(undefined, { ts: '2026-09-03T00:00:00.000Z' });
+    await f.recordFiles(latestLanded, ['src/main.ts'], rewritten);
+    await f.recordFiles(latestLanded, ['src/main.ts'], landed);
+    const summarized = await f.capture(undefined, { ts: '2026-09-04T00:00:00.000Z' });
+    await f.recordFiles(summarized, ['src/main.ts'], rewritten);
+    await f.mutate(summarized, { outcome: 'Landed' }, (semantics) =>
+      semantics.writeSummary({
+        schema_version: 1,
+        artifact_id: summarized,
+        outcome: 'Landed',
+        tests_written: [],
+        tests_run: [],
+        open_items: [],
+        deferred_decisions: [],
+        head_sha: landed,
+        ts: '2026-09-04T00:00:00.000Z',
+      })
+    );
+    await git(f.main, ['commit', '--allow-empty', '-qm', 'Range start']);
+    await git(f.main, ['tag', 'range-start']);
+    await git(f.main, ['commit', '--allow-empty', '-qm', 'Range end']);
+    const result = await list(f, 'range-start..main');
+    expect(result.results).toEqual([]);
+    expect(result.unmatched_candidates.map((row) => row.id)).toEqual([straddling]);
+  });
 });

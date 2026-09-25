@@ -10,12 +10,14 @@
     "resolveJsonModule": true
   },
   "include": ["src/**/*"],
-  // plan/review/test-helpers.ts stays beside its colocated consumers but
-  // must never ship in dist.
+  // These stay beside their colocated consumers but must never ship in dist:
+  // they exist only for tests, and the worker fixture pulls in a dev-only
+  // workspace package.
   "exclude": [
     "node_modules",
     "dist",
     "src/**/*.test.ts",
-    "src/commands/plan/review/test-helpers.ts"
+    "src/commands/plan/review/test-helpers.ts",
+    "src/knowledge-worker/worker-fixture.test-support.ts"
   ]
 }

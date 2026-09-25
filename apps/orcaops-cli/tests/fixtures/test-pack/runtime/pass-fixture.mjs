@@ -12,9 +12,17 @@ if (contextPath) {
 }
 process.stdout.write(
   JSON.stringify({
-    schema: 'orcaops.evaluator_result/v1',
+    schema: 'orcaops.evaluator_result/v2',
     verdict: 'pass',
     body: 'PASS\n\nTest-fixture stub: pass-fixture emitted a deterministic pass envelope.',
     raw: { fixture: true },
+    // Findings never decide the gate; they are retained beside the run.
+    findings: [
+      {
+        key: 'fixture/plan-covered',
+        title: 'The captured plan states every step the fixture expects',
+      },
+      { title: 'The fixture found nothing it can name the same way twice' },
+    ],
   })
 );

@@ -18,6 +18,7 @@ import {
   ArtifactQueryDetailsSchema,
   type ProjectCounters,
   ProjectDatabaseError,
+  readProjectRationale,
   readProjectSeedState,
 } from '@orcaops/storage/history/database';
 import {
@@ -27,6 +28,7 @@ import {
 } from '@orcaops/storage/history/metadata-row';
 import { digest } from '@orcaops/storage/history/primitives';
 
+import { artifactKnowledgeBlock } from './artifact-knowledge.js';
 import {
   createContextRevalidator,
   historyGitEnvironment,
@@ -36,8 +38,17 @@ import {
 import type { resolveDatabaseHistoryCommandContext } from './database-history-context.js';
 import { type CanonicalWhyOptions, validateCanonicalWhy } from './history-provenance.js';
 import { getInvocationCwd } from './invocation-context.js';
+import {
+  inspectProvenanceCandidate,
+  provenanceInspectionAnchor,
+} from './provenance-candidate-inspection.js';
 import { projectProvenanceJson } from './provenance-json.js';
-import { detailedProvenanceCandidate, provenanceTargetFacts } from './provenance-output.js';
+import {
+  detailedProvenanceCandidate,
+  historicalProvenanceTask,
+  provenanceTargetFacts,
+} from './provenance-output.js';
+import { rationaleProvenanceJson } from './provenance-rationale.js';
 import { toRepoRelative } from './resolve-root.js';
 import { declinedSeedAreaForPath } from '../commands/seed/state.js';
 
@@ -367,6 +378,29 @@ export async function readDatabaseProvenance(
   const offset = options.filters.offset;
   const results = resolution.matches.slice(offset, offset + limit).map(detailedProvenanceCandidate);
   const best = !omitted && resolution.best ? detailedProvenanceCandidate(resolution.best) : null;
+  const hasCheckpointCandidates = resolution.matches.some(
+    (match) => match.candidate.checkpoint !== null
+  );
+  const rationaleRead = readProjectRationale(database, {
+    target: { file },
+    candidates: resolution.matches
+      .filter(({ candidate }) => !hasCheckpointCandidates || candidate.checkpoint !== null)
+      .map(({ candidate }) => ({
+        artifactId: candidate.artifact_id,
+        eventId: candidate.source_event_id,
+        planEventId: candidate.plan_support.source_event_id,
+      })),
+    boundary: options.boundary,
+    observation: baseline.writeSequence,
+    ...(best ? { authorityArtifactId: best.artifact_id } : {}),
+  });
+  assertSameSequence(rationaleRead.counters, baseline);
+  const knowledge = artifactKnowledgeBlock({
+    context: rationaleRead.value.context,
+    plan: best?.plan_support.source_event_id
+      ? { artifactId: best.artifact_id, planEventId: best.plan_support.source_event_id }
+      : null,
+  });
   const result = {
     schema_version: 3 as const,
     scope: databaseScopeEnvelope(context.scope),
@@ -381,6 +415,14 @@ export async function readDatabaseProvenance(
       results: results.map((row) => provenanceTargetFacts(row, file)),
     },
     results,
+    selected_candidate: input.candidate
+      ? (resolution.matches
+          .filter(
+            ({ candidate }) =>
+              `${candidate.artifact_id}:${candidate.source_event_id}` === input.candidate
+          )
+          .map(detailedProvenanceCandidate)[0] ?? null)
+      : null,
     completeness: {
       complete: resolution.completeness.complete,
       issues: [
@@ -421,6 +463,8 @@ export async function readDatabaseProvenance(
       seed_witness_token: seed?.revision.contentHash ?? null,
       issues: problems,
     },
+    knowledge,
+    rationale: rationaleRead.value,
     source_versions: resolution.source_versions,
     integrity: { selection: 'metadata', candidates: 'verified' },
     uncertainty: [
@@ -439,8 +483,18 @@ export async function readDatabaseCanonicalWhy(
   budgets: { maxArtifacts?: number; maxSupportArtifacts?: number } = {}
 ) {
   const options = { ...input };
-  return projectProvenanceJson(
-    await readDatabaseProvenance(context, raw, options, budgets),
-    options.details === true
+  const result = await readDatabaseProvenance(context, raw, options, budgets);
+  if (options.candidate) return inspectProvenanceCandidate(result, options);
+  return rationaleProvenanceJson(
+    projectProvenanceJson(result, true),
+    result.rationale,
+    options,
+    new Map(
+      [...(result.best ? [result.best] : []), ...result.results].map((row) => [
+        `${row.artifact_id}:${row.source_event_id}`,
+        historicalProvenanceTask(row),
+      ])
+    ),
+    { anchor: provenanceInspectionAnchor(result) }
   );
 }

@@ -1,13 +1,17 @@
 import Database from 'better-sqlite3';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
-import { buildDiffFingerprintManifest } from '@orcaops/core';
+import { buildDiffFingerprintManifest, EMPTY_TREE_SHA } from '@orcaops/core';
+import {
+  captureDatabasePlan,
+  type DatabasePlanCaptureInput,
+} from '@orcaops/core/history/database-capture';
 import type { DatabaseMaintenanceInspection } from '@orcaops/core/history/database-retention';
-import { type Pin, uuidv7 } from '@orcaops/storage';
+import { CapturePlanInputSchema, type Pin, uuidv7 } from '@orcaops/storage';
 import {
   ProjectDatabaseError,
   publishProjectSourcePlanLocator,
@@ -176,6 +180,56 @@ describe('database doctor history', () => {
     expect(await inventory(f.temporary)).toEqual(before);
   });
 
+  it('passes plan-idempotency after a committed plan capture and warns on an unsettled one', async () => {
+    const f = await fixture();
+    const plan = (key: string): DatabasePlanCaptureInput => ({
+      authored: CapturePlanInputSchema.parse({
+        idempotency_key: key,
+        task: 'Retain plan ownership',
+        label: 'Retain plan ownership',
+        plan_steps: [
+          {
+            text: 'Record the plan',
+            label: 'Record the plan',
+            acceptance_criteria: [{ text: 'The plan is retained' }],
+          },
+        ],
+      }),
+      sourcePlan: null,
+      agent: 'claude-code',
+      snapshot: { enabled: true, excludePatterns: [] },
+      secretAllow: [],
+    });
+    const inspect = async () =>
+      check(
+        await inspectDatabaseDoctorHistory({
+          database: f.writer,
+          context: f.registeredContext,
+          pins: [],
+          shellKey: { kind: 'none' },
+          historyCommitCount: 1,
+          dispositionTtlDays: 30,
+        }),
+        'plan-idempotency'
+      );
+
+    await captureDatabasePlan(f.writer, f.registeredContext, plan('committed'));
+    expect(await inspect()).toMatchObject({ status: 'pass' });
+
+    const baselines = path.join(f.main, '.git', 'refs', 'orcaops', 'baseline');
+    await chmod(baselines, 0o555);
+    try {
+      await expect(
+        captureDatabasePlan(f.writer, f.registeredContext, plan('interrupted'))
+      ).rejects.toThrow();
+    } finally {
+      await chmod(baselines, 0o755);
+    }
+    const unsettled = await inspect();
+    expect(unsettled).toMatchObject({ status: 'warn' });
+    expect(unsettled.details).toHaveLength(2);
+  });
+
   it('reports every retained publication state and pending admission identity', () => {
     const projectId = uuidv7();
     const storeInstanceId = uuidv7();
@@ -298,6 +352,38 @@ describe('database doctor history', () => {
     expect(failure.details).toEqual([
       'Preserve the registration, SQLite companion files and retained evidence. Restore the original registered database from a verified backup if available; otherwise report this Doctor output for investigation. Setup cannot replace missing history.',
     ]);
+  });
+
+  it('names the upgrade command for a released database and starts nothing', () => {
+    const failure = databaseHistoryFailure(
+      new ProjectDatabaseError('HISTORY_UPGRADE_REQUIRED', 'This database is schema 29')
+    );
+
+    expect(failure.summary).toBe('HISTORY_UPGRADE_REQUIRED: This database is schema 29');
+    expect(failure.details).toEqual([
+      'This database holds the released schema and this build writes a newer one. Preview the explicit upgrade with `orcaops history upgrade`, then perform it with `orcaops history upgrade --apply`, which takes and verifies a backup first. Doctor upgraded nothing and changed nothing.',
+    ]);
+  });
+
+  it('sends a database a newer build wrote to that build or its upgrade backup', () => {
+    const failure = databaseHistoryFailure(
+      new ProjectDatabaseError('HISTORY_FORMAT_NEWER', 'This database is schema 99')
+    );
+
+    expect(failure.details).toEqual([
+      'A newer build wrote this database, and this one cannot read it. Use that build, or restore the backup its upgrade took with `orcaops history backups` and `orcaops history restore`. Doctor changed nothing.',
+    ]);
+  });
+
+  it('preserves a development-version database instead of offering a rebuild', () => {
+    const failure = databaseHistoryFailure(
+      new ProjectDatabaseError('HISTORY_FORMAT_UNSUPPORTED', 'Schema 12 was never released')
+    );
+
+    expect(failure.details).toEqual([
+      'This build cannot open this database format and no upgrade leads from it. Preserve the database, SQLite companion files, registration and retained evidence, and use the build that wrote it or report this Doctor output for investigation. Doctor changed nothing.',
+    ]);
+    expect(failure.details![0]).not.toMatch(/rebuild|reinitializ|delete/i);
   });
 
   it('validates ephemeral pin targets against database execution state', async () => {
@@ -592,6 +678,39 @@ describe('database doctor history', () => {
     expect(check(result, 'skipped-run-analytics').details?.join('\n')).toContain('test/skippy');
   });
 
+  it('clears an unresolved block once a later run of the same evaluator passes', async () => {
+    const f = await fixture();
+    const artifactId = await f.capture();
+    for (const [index, verdict] of (['violation', 'pass'] as const).entries())
+      await f.mutate(artifactId, { evaluator: 'test/superseded', index }, (semantics) =>
+        semantics.writeEvaluatorRunPayload(artifactId, {
+          schema: 'orcaops.evaluator_run/v1',
+          run_id: uuidv7(),
+          artifact_id: artifactId,
+          evaluator_ref: 'test/superseded',
+          package_id: 'test',
+          evaluator_id: 'superseded',
+          phase: 'post-plan-revision',
+          severity: 'block',
+          run_status: 'completed',
+          verdict,
+          body: verdict.toUpperCase(),
+          ts: `2026-09-01T0${index}:00:00.000Z`,
+        })
+      );
+
+    const result = await inspectDatabaseDoctorHistory({
+      database: f.writer,
+      context: f.registeredContext,
+      pins: [],
+      shellKey: { kind: 'none' },
+      historyCommitCount: 1,
+      dispositionTtlDays: 30,
+    });
+
+    expect(check(result, 'unresolved-blocks')).toMatchObject({ status: 'pass' });
+  });
+
   it('passes skipped fingerprint checks with no checkpoints and at the twenty-percent boundary', async () => {
     const empty = await fixture();
     await empty.capture();
@@ -837,6 +956,18 @@ describe('database doctor history', () => {
       )
     ).toBe(true);
     expect(await readFile(log, 'utf8')).toBe('for-each-ref\nrev-list\ncat-file\n-C\n');
+  });
+
+  it('passes a root-commit import whose latest lineage head is the empty tree', async () => {
+    const f = await fixture();
+    await f.capture();
+    const imported = await f.capture(undefined, { reason: 'imported' });
+    await recordLineage(f, imported, EMPTY_TREE_SHA);
+
+    expect(await inspectLineage(f)).toMatchObject({
+      status: 'pass',
+      summary: '2 artifact(s); all latest lineage SHAs reach a local branch',
+    });
   });
 
   it.each(['for-each-ref', 'rev-list', 'cat-file'])(

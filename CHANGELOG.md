@@ -5,6 +5,181 @@ Notable changes to the Orcaops CLI. Format follows
 [SemVer](https://semver.org/spec/v2.0.0.html). Below 1.0.0, minor releases
 may change behaviour. Anything needing action on upgrade is called out.
 
+## [0.3.0] - 2026-09-24
+
+### Breaking changes
+
+- The evaluator result protocol moved to `orcaops.evaluator_result/v2`, and a
+  pack that still emits `orcaops.evaluator_result/v1` no longer runs. Every run
+  of one becomes an `UNSUPPORTED_PROTOCOL` error naming the package, the version
+  line and that the pack must be rebuilt. `@orcaops/evaluator-protocol` and
+  `@orcaops/evaluator-sdk` go out together as `0.2.0`, and the bundled `core`,
+  `js` and `demo` packs are `2.0.0`.
+
+  **On upgrade:** upgrade your pack before you upgrade Orcaops. Update
+  `@orcaops/evaluator-sdk` to `0.2.x` and rebuild — if you use the
+  `pass` / `violation` / `info` constructors, that is the whole change; a
+  hand-written envelope needs only its `schema` value changed. An error run from
+  a `block`-severity evaluator cannot be acknowledged, dismissed or
+  policy-excepted, so a stale pack stops the next capture until it is rebuilt.
+  If you are already stuck, lower the severity or disable the evaluator in
+  `.orcaops/evaluators.yaml`, rebuild, then put it back. LLM evaluators with
+  `output_format: markdown` need no change. Retained evaluator history keeps its
+  original content: nothing is migrated, reinterpreted or rerun.
+
+  The bundled pack's manifest and every shipped prompt changed, so the pack's
+  consent fingerprint moves and `orcaops eval add-pack` asks for trust again.
+
+### Added
+
+- Evaluators can attach **structured findings** to their result: a statement,
+  optional detail, what it points at (a file, a plan step, an acceptance
+  criterion), an optional conclusion about the expectation it names, and an
+  optional recurrence key. Findings are optional under every verdict and never
+  decide the gate — a `pass` may carry them and a `violation` may carry none.
+  Bounds truncate with a notice, and findings that cannot be read cost the
+  findings and never the verdict.
+
+  The seven core LLM evaluators now document an optional `orcaops-findings`
+  block, and `core/step-coverage` reports each criterion it graded as
+  `supported`, `contradicted` or `unresolved`. `orcaops eval test` shows an
+  author what their evaluator established — the findings, or that they were
+  unreadable with the reason, or that a bound cut them — in both the human and
+  `--json` output, without changing the verdict output or the exit codes.
+  `orcaops eval schema result` carries a filled-in envelope and the rules its
+  shape cannot state, and the authoring guide and `orcaops-author-evaluator`
+  skill cover the envelope, findings and the upgrade.
+
+- Every eligible capture now queues one background knowledge-processing job, in
+  the same transaction that saves the capture: a plan, a plan revision, a closed
+  or abandoned checkpoint, and a summary. Opening a checkpoint queues nothing,
+  and neither does anything seeded, imported, converted, restored or replayed.
+  Restoring a backup brings back the jobs it held, as they were when it was
+  taken. A capture made with `--no-llm` keeps that choice on its job.
+  Ordinary retry or resume does not lift it; an explicit terminal
+  `knowledge resume --model` requires informed confirmation for the selected
+  job's model processing.
+  Queuing happens whether or not
+  processing is enabled or consented, adds no model wait to a capture, and
+  cannot make one fail. An opt-in, consented background worker processes eligible
+  new captures and exits when idle. Its extracted records and relationships are
+  suggestions, not automatically adopted rules. Restricted Codex processing is
+  explicitly opt-in, may include global Codex instructions, and is not a universal
+  guarantee that the model cannot use tools.
+- `orcaops knowledge pause --reason <text>`, `orcaops knowledge resume` and
+  `orcaops knowledge retry [<job>]` carry the project-wide stop and the
+  operator's retry. Pausing and resuming change no job; a retry makes a waiting
+  job due now without resetting its attempt allowance or reopening a finished
+  one. The pause records who asked from what the command line knows — the
+  account the process runs as, never as an authenticated identity, because
+  nothing local verifies who typed it.
+
+  ```
+  orcaops knowledge pause --reason "the model is down"
+  orcaops knowledge resume
+  orcaops knowledge retry
+  ```
+
+- `orcaops knowledge reopen <job>` gives a job that gave up a fresh attempt
+  allowance. Like `resume --model` it is a person's act at a terminal: it shows
+  why the job gave up and the terms it would run under, takes a typed
+  confirmation, and records who reopened it and the allowance shown, which
+  configuration can later lower but never raise. Earlier attempts, the reason
+  it gave up and finished units are kept. `orcaops knowledge status` lists the
+  jobs that gave up and why, and `--limit <n>` lists more than five.
+
+- `orcaops doctor` reports background processing: off, unavailable, enabled but
+  not consented, paused by a person, caught up, pending, or failing, with the
+  provider and model in force and what to run about it. It makes no model call,
+  starts no worker and repairs nothing.
+- `orcaops history upgrade` upgrades a project database an earlier release wrote
+  to the schema this build uses. It previews by default and changes nothing;
+  `--apply` takes and verifies a backup before making the whole transition in one
+  transaction. `orcaops history backups` lists those backups and
+  `orcaops history restore <backup>` puts one back, previewing by default and
+  keeping the replaced database whole. Upgrading is never automatic.
+
+  ```
+  orcaops history upgrade
+  orcaops history upgrade --apply
+  orcaops history backups
+  orcaops history restore <backup> --apply
+  ```
+
+- `orcaops plan review request <ref> --reviewer <identifier>` adds 1–25 distinct
+  reviewer identifiers of 1–200 characters to an existing in-review plan
+  without publishing another body version. Results distinguish added,
+  already-requested, unresolved, and unconfirmed identifiers; unresolved or
+  unconfirmed input exits nonzero after preserving any successful additions.
+  Identical commands replay their recorded result without dispatch; pass
+  `--resend` to send the same request again with a fresh journal key.
+
+### Changed
+
+- `orcaops knowledge status` reports the real queue — counts by state, what each
+  group of waiting jobs waits on and when its next retry is due, how many were
+  captured with no model, whether the project is paused and by whom, any worker
+  lease, and the calls and spend used against the limits in force. It reads
+  read-only: a project with no database, one an earlier release wrote, and one
+  that cannot be read each get a truthful answer and no write or upgrade. A
+  grant that covers captures from now on is bounded by the sequence the database
+  reports, and `enable` refuses rather than bound one it could not read.
+- The processor contract a consent grant covers is now
+  `knowledge-interpretation@1`, defined once in `@orcaops/core`, so a grant and a
+  job can never name two different contracts. No grant existed under the old
+  value, so nothing is invalidated.
+- Opening a project database this build cannot read now says which of three
+  things is true instead of one "unsupported format": `HISTORY_UPGRADE_REQUIRED`
+  when an earlier release wrote it, naming `orcaops history upgrade`;
+  `HISTORY_FORMAT_NEWER` when a newer build wrote it; and
+  `HISTORY_FORMAT_UNSUPPORTED` only for a development version that was never
+  released. No read, `doctor` run, `status`, search or hook upgrades anything,
+  and nothing offers rebuilding or reinitializing as a recovery. A consumer that
+  branched on `HISTORY_FORMAT_UNSUPPORTED` to recognize an older or newer
+  database has to branch on the new codes too.
+- An edited or unverifiable skill file in your home directory now stops
+  `orcaops update` with an error that names the file, where an upgrade used to
+  skip the home-directory files and exit successfully. Nothing is written when
+  this happens. If orcaops recorded the file, the error offers
+  `orcaops update --force` to overwrite it. A file orcaops never recorded cannot
+  be taken over with `--force`: inspect it, then move or remove it and retry.
+
+### Fixed
+
+- After an upgrade, `orcaops update` refreshes the skills in your home directory
+  (personal and global scope) without `--force`. It used to refuse any change of
+  CLI version, and `--force` also overwrites edited files and allows downgrades.
+  Only two versions that cannot be ordered, such as two builds of one release,
+  still need `--force`. The advice to use `--scope project` is gone, because
+  following it hit the same refusal. `orcaops doctor` now suggests
+  `orcaops update` when the home-directory files are older than the CLI.
+- Symlinked home-directory skills that another repository's upgrade left at an
+  older version are recognised as orcaops's own again. They no longer block the
+  next update in the repositories that still use them.
+- `orcaops update` reports every file it writes. A scope change is printed, and
+  writes to the config, `.gitignore`, install manifests, `.git/info/exclude` and
+  git hooks appear under "Other files". Switching scope no longer ends with
+  "Everything is already up to date". `--json` adds `scope_changed` and
+  `other_changes`.
+- Personal scope, and global scope with `--session-hook-entries none`, no longer
+  warn on every update that settings-file hook entries are project-scope only.
+  The warning remains when global scope still asks for project entries, and it
+  now says how to silence it.
+- Switching from global to personal scope deletes a `.gitignore` that held only
+  the orcaops section and that git does not track, instead of leaving an empty
+  file. A tracked `.gitignore` is kept.
+- Switching to personal scope removes the `.orcaops/install.local.json` that
+  project or global scope left in the worktree, and a later personal update
+  removes one left by an earlier switch. A file git tracks, or one that is not a
+  valid install manifest, is kept with a warning. A corrupt leftover no longer
+  fails personal updates.
+- Switching from global to personal scope now warns that committed orcaops files
+  were modified or removed, as switching from project scope already did.
+- The scope prompt in `orcaops init` and `orcaops configure` no longer says
+  global scope adds nothing to the repository. It names the `.orcaops/` folder,
+  the `.gitignore` section and the AGENTS.md / CLAUDE.md section, which is
+  skipped when you keep those files hands off.
+
 ## [0.2.2] - 2026-09-18
 
 This patch release contains breaking changes: `^0.2.1` and `~0.2.1` both pick

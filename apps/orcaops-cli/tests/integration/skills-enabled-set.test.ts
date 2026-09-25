@@ -155,8 +155,10 @@ describe('enabled skill set → install pipeline', () => {
     const cfgPath = path.join(repo.path, '.orcaops', 'config.json');
     const cfg = JSON.parse(await readFile(cfgPath, 'utf8')) as {
       workflow?: Record<string, unknown>;
+      schema_version: number;
     };
     cfg.workflow = { ...(cfg.workflow ?? {}), routing: { suppress: ids } };
+    cfg.schema_version = 7;
     await writeFile(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
   }
 

@@ -4,8 +4,10 @@ import path from 'node:path';
 
 import {
   type EvaluatorContext,
-  type EvaluatorResultEnvelope,
-  EvaluatorResultEnvelopeSchema,
+  type EvaluatorResultEnvelopeV2,
+  EvaluatorResultEnvelopeV2Schema,
+  inspectResultEnvelopeProtocol,
+  unsupportedResultProtocolMessage,
 } from '@orcaops/evaluator-protocol';
 import { runBoundedSubprocess } from '@orcaops/evaluator-protocol/subprocess';
 
@@ -59,8 +61,12 @@ export interface RunFixtureOptions {
 }
 
 export interface RunFixtureResult {
-  /** Parsed + schema-validated envelope from the subprocess stdout. */
-  envelope: EvaluatorResultEnvelope;
+  /**
+   * Parsed + schema-validated envelope from the subprocess stdout, findings
+   * included. Validated strictly, as `writeResult` validates on the way out:
+   * a fixture is where a malformed finding should be caught.
+   */
+  envelope: EvaluatorResultEnvelopeV2;
   /** Raw stdout the subprocess produced (for debugging). */
   stdout: string;
   /** Raw stderr. */
@@ -173,7 +179,16 @@ export async function runFixture(opts: RunFixtureOptions): Promise<RunFixtureRes
       `runFixture stdout is not valid JSON: ${(err as Error).message}; got: ${truncate(trimmed, 256)}`
     );
   }
-  const parseResult = EvaluatorResultEnvelopeSchema.safeParse(parsed);
+  // The version literal is read before the strict parse, exactly as the
+  // runner reads it, so a pack built against an older SDK is told to upgrade
+  // instead of being handed a field-path complaint about its `schema` value.
+  const protocol = inspectResultEnvelopeProtocol(parsed);
+  if (protocol.status === 'superseded' || protocol.status === 'unknown') {
+    fail(
+      `runFixture envelope uses an unsupported protocol: ${unsupportedResultProtocolMessage(protocol)}`
+    );
+  }
+  const parseResult = EvaluatorResultEnvelopeV2Schema.safeParse(parsed);
   if (!parseResult.success) {
     const issue = parseResult.error.issues[0];
     fail(

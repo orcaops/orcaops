@@ -3,6 +3,7 @@ import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
+import type { KnowledgeBlock } from '@orcaops/core';
 import {
   type DatabaseHistoryProject,
   type DatabaseHistoryScope,
@@ -32,6 +33,7 @@ import {
 
 import { AgentActivityReader, type AgentActivityReaderLike } from './agent-activity.js';
 import { readCurrentBranch } from './current-branch.js';
+import { readThreadsKnowledge } from './history-knowledge.js';
 import {
   artifactStatus,
   parseWatchMetadata,
@@ -103,6 +105,10 @@ interface ThreadBase {
   storedLastWriteMs: number | null;
   sessions: SessionTokens[];
   detail: ThreadDetail;
+  /** Null when the project's continuing knowledge could not be read this tick. */
+  knowledge: KnowledgeBlock | null;
+  /** The code that read failed with, so a pane can say so rather than print nothing. */
+  knowledgeUnavailable: string | null;
 }
 
 interface ProjectDisplay {
@@ -697,6 +703,22 @@ export class HistoryWatchEngine extends EventEmitter {
     }
     timings.usageMs += performance.now() - usageStarted;
 
+    // One read for the tick, so every pane of a refresh answers at one boundary. A failure here
+    // leaves the panes without the block and is reported as an issue: a thread rendered as though
+    // no rule bears on it would be the one answer this must never give.
+    let knowledge: Map<string, KnowledgeBlock> | null = null;
+    let knowledgeUnavailable: string | null = null;
+    try {
+      const composed = database.read((view) => readThreadsKnowledge(view, project.projectId, ids));
+      sameSequence(composed.counters);
+      knowledge = new Map(composed.value.map((entry) => [entry.artifactId, entry.block]));
+    } catch (cause) {
+      if (cause instanceof RefreshMoved) throw cause;
+      const issue = issueFrom(project.projectId, cause);
+      knowledgeUnavailable = issue.code;
+      issues.push(issue);
+    }
+
     const reviewStarted = performance.now();
     let comments: Map<string, number> | null = null;
     try {
@@ -732,6 +754,8 @@ export class HistoryWatchEngine extends EventEmitter {
           tokens: sessionTotal(session),
         })),
         detail: cache.get(row.artifactId)!.detail,
+        knowledge: knowledge?.get(row.artifactId) ?? null,
+        knowledgeUnavailable,
       };
     });
     const creation = readProjectRepositoryCreation(database);
@@ -790,6 +814,8 @@ export class HistoryWatchEngine extends EventEmitter {
       startedAtMs: row.startedMs ?? timestampMs(row.startedAt),
       planDecisions: structuredClone(base.detail.planDecisions),
       nonGoals: [...base.detail.nonGoals],
+      knowledge: base.knowledge === null ? null : structuredClone(base.knowledge),
+      knowledgeUnavailable: base.knowledgeUnavailable,
       // Oldest-first for the classification pass; the pass reverses and caps it.
       recentEvents: events,
       omittedEvents: base.omittedEvents,

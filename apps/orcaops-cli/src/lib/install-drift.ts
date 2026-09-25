@@ -30,6 +30,10 @@ export interface InstallDrift {
   staleSkills: string[];
   /** Repo-relative command files that are missing, version-stale, or body-drifted at the same version. */
   staleCommands: string[];
+  /** The subset of `staleSkills` that is absent on disk rather than out of date. */
+  missingSkills: string[];
+  /** The subset of `staleCommands` that is absent on disk rather than out of date. */
+  missingCommands: string[];
   /**
    * Repo-relative instruction files whose managed block is missing, or whose
    * body differs from the current render — including at an UNCHANGED CLI
@@ -158,6 +162,8 @@ export async function detectInstallDrift(
   // dir). A Set keeps each stale surface listed once.
   const staleSkills = new Set<string>();
   const staleCommands = new Set<string>();
+  const missingSkills = new Set<string>();
+  const missingCommands = new Set<string>();
   const aheadSkills = new Set<string>();
   const aheadCommands = new Set<string>();
   const unverifiableSkills = new Set<string>();
@@ -183,6 +189,7 @@ export async function detectInstallDrift(
         if (cls.status === 'ahead-version') aheadSkills.add(rel);
         else if (cls.status === 'unverifiable') unverifiableSkills.add(rel);
         else if (cls.status !== 'current') staleSkills.add(rel);
+        if (cls.status === 'missing') missingSkills.add(rel);
       }
     }
     if (adapter.commands && projectTrees) {
@@ -198,6 +205,7 @@ export async function detectInstallDrift(
         if (cls.status === 'ahead-version') aheadCommands.add(rel);
         else if (cls.status === 'unverifiable') unverifiableCommands.add(rel);
         else if (cls.status !== 'current') staleCommands.add(rel);
+        if (cls.status === 'missing') missingCommands.add(rel);
       }
     }
     if (adapter.agentsFiles) for (const rel of adapter.agentsFiles) instructionFiles.add(rel);
@@ -364,6 +372,8 @@ export async function detectInstallDrift(
   return {
     staleSkills: [...staleSkills],
     staleCommands: [...staleCommands],
+    missingSkills: [...missingSkills],
+    missingCommands: [...missingCommands],
     staleBlock,
     staleSessionHooks,
     staleInfoExclude,

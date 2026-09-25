@@ -343,7 +343,7 @@ it('retains pending authored bytes without publishing effective artifact history
   const eventId = uuidv7(),
     original = Buffer.from('  {"authored":"original input"}\n');
   db.prepare(
-    "INSERT INTO pending_capture_requests VALUES (?, 'create', ?, ?, 'main', NULL, '2026-09-01T00:00:00.000Z', NULL)"
+    "INSERT INTO pending_capture_requests VALUES (?, 'create', ?, ?, 'main', NULL, '2026-09-01T00:00:00.000Z', NULL, 0)"
   ).run(value.operationId, value.repositoryId, uuidv7());
   db.prepare(
     "INSERT INTO pending_capture_events VALUES (?, 1, ?, 'plan_captured', ?, NULL, 'checksum', 'hash', NULL)"
@@ -379,12 +379,12 @@ it('refuses partial pending context and mismatched sidecar presence', () => {
   expect(() =>
     db
       .prepare(
-        "INSERT INTO pending_capture_requests VALUES (?, 'task', ?, ?, 'main', NULL, NULL, 1)"
+        "INSERT INTO pending_capture_requests VALUES (?, 'task', ?, ?, 'main', NULL, NULL, 1, 0)"
       )
       .run(value.operationId, value.repositoryId, uuidv7())
   ).toThrow('creation');
   db.prepare(
-    "INSERT INTO pending_capture_requests VALUES (?, 'create', ?, ?, 'main', NULL, 'time', NULL)"
+    "INSERT INTO pending_capture_requests VALUES (?, 'create', ?, ?, 'main', NULL, 'time', NULL, 0)"
   ).run(value.operationId, value.repositoryId, uuidv7());
   expect(() =>
     db

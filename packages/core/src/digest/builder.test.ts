@@ -170,13 +170,24 @@ async function recordRun(
     evaluator: string;
     phase: EvaluatorRunPayload['phase'];
     severity: EvaluatorRunPayload['severity'];
-    verdict: 'pass' | 'info' | 'violation';
+    verdict: 'pass' | 'info' | 'violation' | 'skipped' | 'error';
     body: string;
     ts?: string;
+    checkpointN?: number;
   }
 ) {
   const [packageId = 'test-pack', evaluatorId = 'check'] = input.evaluator.split('/');
   const runId = uuidv7();
+  const outcome =
+    input.verdict === 'error'
+      ? ({
+          run_status: 'error',
+          verdict: null,
+          error: { code: 'LLM_ERROR', message: input.body },
+        } as const)
+      : input.verdict === 'skipped'
+        ? ({ run_status: 'skipped', verdict: null } as const)
+        : ({ run_status: 'completed', verdict: input.verdict } as const);
   await context.semantics.writeEvaluatorRunPayload(
     context.artifactId,
     {
@@ -188,10 +199,10 @@ async function recordRun(
       evaluator_id: evaluatorId,
       phase: input.phase,
       severity: input.severity,
-      run_status: 'completed',
-      verdict: input.verdict,
+      ...outcome,
       body: input.body,
       ts: input.ts ?? '2026-04-25T12:30:00.000Z',
+      ...(input.checkpointN === undefined ? {} : { checkpoint_n: input.checkpointN }),
     },
     { idempotencyKey: `run-${runId}` }
   );
@@ -554,6 +565,8 @@ describe('buildThreadDigest', () => {
     });
     expect(missing.data.plan_conformance).toBeNull();
     expect(missing.markdown).toContain('plan-conformance` did not run');
+    expect(missing.markdown).toContain('`orcaops eval add-pack @orcaops/evaluator-pack core`');
+    expect(missing.markdown).toContain('`core/plan-conformance-*` is disabled');
 
     const errored = buildThreadDigest({
       thread: await prepareThread(recordErroredConformance, { sourcePlan: sourcePin }),
@@ -647,6 +660,62 @@ describe('buildThreadDigest', () => {
     expect(mixed.markdown).toContain('_Passed: test-pack/passed (post-plan, warn)._');
   });
 
+  it('lists skipped process checks as not run instead of as concerns', async () => {
+    const out = buildThreadDigest({
+      thread: await prepareThread(async (context) => {
+        await recordRun(context, {
+          evaluator: 'test-pack/passed',
+          phase: 'checkpoint-close',
+          severity: 'warn',
+          verdict: 'pass',
+          body: 'PASS',
+        });
+        await recordRun(context, {
+          evaluator: 'test-pack/deterministic-only',
+          phase: 'checkpoint-close',
+          severity: 'info',
+          verdict: 'skipped',
+          body: 'SKIPPED\n\nfilters.when_llm=absent but an LLM provider is configured',
+          ts: '2026-04-25T12:40:00.000Z',
+        });
+      }),
+    });
+    expect(out.markdown).not.toContain('flagged a concern');
+    expect(out.markdown).not.toContain('### test-pack/deterministic-only');
+    expect(out.markdown).toContain('_1 of 2 process checks passed; 1 skipped._');
+    expect(out.markdown).toContain(
+      '_Skipped (did not run): test-pack/deterministic-only (checkpoint-close) — ' +
+        'filters.when_llm=absent but an LLM provider is configured._'
+    );
+  });
+
+  it('counts only non-skipped results in the process concern headline', async () => {
+    const out = buildThreadDigest({
+      thread: await prepareThread(async (context) => {
+        await recordRun(context, {
+          evaluator: 'test-pack/problem',
+          phase: 'post-plan',
+          severity: 'warn',
+          verdict: 'violation',
+          body: 'VIOLATION\n\nMissing a control',
+        });
+        await recordRun(context, {
+          evaluator: 'test-pack/deterministic-only',
+          phase: 'checkpoint-close',
+          severity: 'info',
+          verdict: 'skipped',
+          body: 'SKIPPED',
+          ts: '2026-04-25T12:40:00.000Z',
+        });
+      }),
+    });
+    expect(out.markdown).toContain('⚠ 1 of 2 process checks flagged a concern.');
+    expect(out.markdown).toContain('### test-pack/problem (violation, post-plan)');
+    expect(out.markdown).toContain(
+      '_Skipped (did not run): test-pack/deterministic-only (checkpoint-close)._'
+    );
+  });
+
   it('uses the latest evaluator run and records prior resolutions', async () => {
     const thread = await prepareThread(async (context) => {
       const first = await recordRun(context, {
@@ -685,6 +754,207 @@ describe('buildThreadDigest', () => {
       },
     });
     expect(out.markdown).toContain('previously resolved 2 time(s)');
+  });
+
+  it('reports an earlier checkpoint violation that a later checkpoint pass does not re-judge', async () => {
+    const thread = await prepareThread(async (context) => {
+      await recordRun(context, {
+        evaluator: 'core/non-goals-violated',
+        phase: 'checkpoint-close',
+        severity: 'warn',
+        verdict: 'violation',
+        body: 'VIOLATION non-goal crossed at checkpoint 3',
+        checkpointN: 3,
+      });
+      await recordRun(context, {
+        evaluator: 'core/non-goals-violated',
+        phase: 'checkpoint-close',
+        severity: 'warn',
+        verdict: 'pass',
+        body: 'PASS checkpoint 4',
+        ts: '2026-04-25T12:40:00.000Z',
+        checkpointN: 4,
+      });
+      await recordRun(context, {
+        evaluator: 'test-pack/other',
+        phase: 'post-plan',
+        severity: 'warn',
+        verdict: 'pass',
+        body: 'PASS',
+      });
+    });
+    const out = buildThreadDigest({ thread });
+    const row = out.data.process_notes.find((r) => r.evaluator_ref === 'core/non-goals-violated');
+    expect(row).toMatchObject({
+      status: 'violation',
+      violation_checkpoints: [3],
+      body: 'VIOLATION non-goal crossed at checkpoint 3',
+    });
+    expect(JSON.parse(JSON.stringify(out.data)).process_notes).toContainEqual(
+      expect.objectContaining({
+        evaluator_ref: 'core/non-goals-violated',
+        status: 'violation',
+        violation_checkpoints: [3],
+      })
+    );
+    expect(out.markdown).toContain(
+      '### core/non-goals-violated (violation, checkpoint-close)\n\n_Unresolved violation at checkpoint 3._'
+    );
+    expect(out.markdown).toContain('VIOLATION non-goal crossed at checkpoint 3');
+    expect(out.markdown).toContain('_Passed: test-pack/other (post-plan, warn)._');
+    expect(out.markdown).not.toMatch(/_Passed:[^\n]*core\/non-goals-violated/);
+  });
+
+  it('names every checkpoint whose latest run is an unresolved violation', async () => {
+    const thread = await prepareThread(async (context) => {
+      for (const [n, verdict] of [
+        [3, 'violation'],
+        [4, 'pass'],
+        [5, 'violation'],
+        [6, 'pass'],
+      ] as const) {
+        await recordRun(context, {
+          evaluator: 'test-pack/scoped',
+          phase: 'checkpoint-close',
+          severity: 'block',
+          verdict,
+          body: `${verdict.toUpperCase()} checkpoint ${n}`,
+          ts: `2026-04-25T12:3${n}:00.000Z`,
+          checkpointN: n,
+        });
+      }
+    });
+    const out = buildThreadDigest({ thread });
+    expect(out.data.release_checks[0]).toMatchObject({
+      status: 'violation',
+      violation_checkpoints: [3, 5],
+      body: 'VIOLATION checkpoint 5',
+    });
+    expect(out.markdown).toContain(
+      '| test-pack/scoped | checkpoint-close | block | violation at checkpoints 3, 5 |'
+    );
+    expect(out.markdown).toContain(
+      '### test-pack/scoped (violation)\n\n_Unresolved violation at checkpoints 3, 5._'
+    );
+  });
+
+  it('does not count a checkpoint violation that was resolved or re-run clean at that checkpoint', async () => {
+    const thread = await prepareThread(async (context) => {
+      const dismissed = await recordRun(context, {
+        evaluator: 'test-pack/scoped',
+        phase: 'checkpoint-close',
+        severity: 'block',
+        verdict: 'violation',
+        body: 'VIOLATION checkpoint 2',
+        checkpointN: 2,
+      });
+      await recordDisposition(context, dismissed, 'test-pack/scoped', 'dismissed');
+      await recordRun(context, {
+        evaluator: 'test-pack/scoped',
+        phase: 'checkpoint-close',
+        severity: 'block',
+        verdict: 'violation',
+        body: 'VIOLATION checkpoint 3',
+        ts: '2026-04-25T12:33:00.000Z',
+        checkpointN: 3,
+      });
+      await recordRun(context, {
+        evaluator: 'test-pack/scoped',
+        phase: 'checkpoint-close',
+        severity: 'block',
+        verdict: 'pass',
+        body: 'PASS checkpoint 3 re-run',
+        ts: '2026-04-25T12:34:00.000Z',
+        checkpointN: 3,
+      });
+      await recordRun(context, {
+        evaluator: 'test-pack/scoped',
+        phase: 'checkpoint-close',
+        severity: 'block',
+        verdict: 'pass',
+        body: 'PASS checkpoint 4',
+        ts: '2026-04-25T12:35:00.000Z',
+        checkpointN: 4,
+      });
+    });
+    const out = buildThreadDigest({ thread });
+    expect(out.data.release_checks[0]).toMatchObject({
+      status: 'pass',
+      body: 'PASS checkpoint 4',
+    });
+    expect(out.data.release_checks[0]).not.toHaveProperty('violation_checkpoints');
+  });
+
+  it('keeps a later checkpoint error beside an earlier unresolved violation', async () => {
+    const thread = await prepareThread(async (context) => {
+      await recordRun(context, {
+        evaluator: 'test-pack/scoped',
+        phase: 'checkpoint-close',
+        severity: 'block',
+        verdict: 'violation',
+        body: 'VIOLATION checkpoint 1',
+        checkpointN: 1,
+      });
+      await recordRun(context, {
+        evaluator: 'test-pack/scoped',
+        phase: 'checkpoint-close',
+        severity: 'block',
+        verdict: 'error',
+        body: 'ERROR (LLM_ERROR)\n\nTIMEOUT: provider timed out at checkpoint 2',
+        ts: '2026-04-25T12:32:00.000Z',
+        checkpointN: 2,
+      });
+    });
+    const out = buildThreadDigest({ thread });
+    expect(out.data.release_checks[0]).toMatchObject({
+      status: 'violation',
+      violation_checkpoints: [1],
+      body: 'VIOLATION checkpoint 1',
+      latest_error: {
+        checkpoint_n: 2,
+        body: 'ERROR (LLM_ERROR)\n\nTIMEOUT: provider timed out at checkpoint 2',
+        ts: '2026-04-25T12:32:00.000Z',
+      },
+    });
+    expect(JSON.parse(JSON.stringify(out.data)).release_checks[0].latest_error).toMatchObject({
+      checkpoint_n: 2,
+    });
+    expect(out.markdown).toContain(
+      '| test-pack/scoped | checkpoint-close | block | violation at checkpoint 1; error at checkpoint 2 |'
+    );
+    expect(out.markdown).toContain(
+      'VIOLATION checkpoint 1\n\n**Latest run errored at checkpoint 2:**\n\nERROR (LLM_ERROR)\n\nTIMEOUT: provider timed out at checkpoint 2'
+    );
+  });
+
+  it('reports the latest error once the earlier violation is acknowledged', async () => {
+    const thread = await prepareThread(async (context) => {
+      const violation = await recordRun(context, {
+        evaluator: 'test-pack/scoped',
+        phase: 'checkpoint-close',
+        severity: 'block',
+        verdict: 'violation',
+        body: 'VIOLATION checkpoint 1',
+        checkpointN: 1,
+      });
+      await recordDisposition(context, violation, 'test-pack/scoped', 'acknowledged');
+      await recordRun(context, {
+        evaluator: 'test-pack/scoped',
+        phase: 'checkpoint-close',
+        severity: 'block',
+        verdict: 'error',
+        body: 'ERROR (LLM_ERROR)\n\nTIMEOUT: provider timed out at checkpoint 2',
+        ts: '2026-04-25T12:32:00.000Z',
+        checkpointN: 2,
+      });
+    });
+    const out = buildThreadDigest({ thread });
+    expect(out.data.release_checks[0]).toMatchObject({
+      status: 'error',
+      body: 'ERROR (LLM_ERROR)\n\nTIMEOUT: provider timed out at checkpoint 2',
+    });
+    expect(out.data.release_checks[0]).not.toHaveProperty('violation_checkpoints');
+    expect(out.data.release_checks[0]).not.toHaveProperty('latest_error');
   });
 
   it('retains earlier criterion narrowing after a later clean revision', async () => {

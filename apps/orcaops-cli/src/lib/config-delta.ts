@@ -1,4 +1,4 @@
-import { type Config, getDefaultConfig } from '@orcaops/storage';
+import { type Config, configVersionForWrite, getDefaultConfig } from '@orcaops/storage';
 
 /**
  * Returns `undefined` when `actual` deep-equals `defaults`; otherwise the
@@ -33,12 +33,19 @@ function diffValue(actual: unknown, defaults: unknown): unknown | undefined {
  * Everything else rides zod defaults, so the document a team later commits
  * is a ~10-line file portable across CLI versions instead of a pin of every
  * default value at install time.
+ *
+ * `existingVersion` is the `schema_version` of the file being re-minimized;
+ * omit it for a fresh file. A preserved file keeps its version unless the
+ * delta carries a key that version cannot read, so re-initializing with a newer
+ * CLI does not lock teammates on an older one out of a committed config.
  */
-export function buildConfigDelta(config: Config): Record<string, unknown> {
+export function buildConfigDelta(
+  config: Config,
+  existingVersion?: unknown
+): Record<string, unknown> {
   const delta = (diffValue(config, getDefaultConfig()) ?? {}) as Record<string, unknown>;
   const { schema_version: _sv, install: deltaInstall, bootstrap: _b, ...rest } = delta;
-  return {
-    schema_version: config.schema_version,
+  const document = {
     install: {
       agents: config.install.agents,
       scope: config.install.scope,
@@ -47,4 +54,5 @@ export function buildConfigDelta(config: Config): Record<string, unknown> {
     bootstrap: config.bootstrap,
     ...rest,
   };
+  return { schema_version: configVersionForWrite(document, existingVersion), ...document };
 }

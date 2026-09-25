@@ -36,13 +36,13 @@
   "prettier": "@orcaops/prettier-config",
   "dependencies": {
     "@orcaops/agent-activity": "workspace:*",
+    "@orcaops/core": "workspace:*",
     "@orcaops/project-scope": "workspace:*",
     "@orcaops/review-core": "workspace:*",
     "@orcaops/review-engine": "workspace:*",
     "@orcaops/storage": "workspace:*"
   },
   "devDependencies": {
-    "@orcaops/core": "workspace:*",
     "@orcaops/eslint-config": "workspace:*",
     "@orcaops/prettier-config": "workspace:*",
     "@orcaops/typescript-config": "workspace:*",

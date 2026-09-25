@@ -495,7 +495,6 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
       const git = gitClient(f.main);
       await git.add('targeted.ts');
       await git.commit('add targeted file');
-      const headSha = (await git.revparse(['HEAD'])).trim();
       await agent.runRaw([
         'capture',
         'checkpoint',
@@ -521,22 +520,23 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
             n: 1,
             summary: `cp quoting ${FAKE_JWT}`,
             files_changed: ['targeted.ts'],
-            head_sha: headSha,
           })
         ),
       ]);
 
-      const wRes = await agent.runRaw(['why', 'targeted.ts:1', '--json', '--details']);
+      const wRes = await agent.runRaw(['why', 'targeted.ts:1', '--json', '--details', '--audit']);
       expect(wRes.exitCode).toBe(0);
       const w = JSON.parse(wRes.stdout) as {
-        results: Array<{
-          plan_support: { plan: { task: string } };
-          checkpoint: { summary: string };
-        }>;
+        audit: {
+          candidates: Array<{
+            plan_support: { plan: { task: string } };
+            checkpoint: { summary: string };
+          }>;
+        };
       };
-      expect(w.results).not.toHaveLength(0);
-      expect(w.results[0].plan_support.plan.task).not.toContain(FAKE_JWT);
-      expect(w.results[0].checkpoint.summary).not.toContain(FAKE_JWT);
+      expect(w.audit.candidates).not.toHaveLength(0);
+      expect(w.audit.candidates[0].plan_support.plan.task).not.toContain(FAKE_JWT);
+      expect(w.audit.candidates[0].checkpoint.summary).not.toContain(FAKE_JWT);
 
       const human = await agent.runRaw(['why', 'targeted.ts:1']);
       expect(human.exitCode).toBe(0);
@@ -553,7 +553,7 @@ describe('output redaction: digest / resume / why / search', { timeout: 60_000 }
       expect(wholeFileHuman.exitCode).toBe(0);
       expect(wholeFileHuman.stdout).not.toContain(FAKE_JWT);
       expect(wholeFileHuman.stdout).not.toContain('\r');
-      expect(wholeFileHuman.stdout).toContain('cp quoting [REDACTED_SECRET]');
+      expect(wholeFileHuman.stdout).toContain('task with [REDACTED_SECRET]');
     });
   });
 });

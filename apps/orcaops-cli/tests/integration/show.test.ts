@@ -10,6 +10,7 @@ import { projectDatabasePath } from '@orcaops/storage/history/database';
 import { appendProjectUsageEvents } from '../../../../packages/storage/dist/history/database/usage.js';
 import { deriveUsageLedgerRecord } from '../../../../packages/storage/dist/usage/record.js';
 import { fixture, git, inventory } from '../helpers/database-history.js';
+import { readArtifactExport } from '../support/artifact-export.js';
 import { cloudRecord } from '../support/source-plan-test-helpers.js';
 import { makeAgent } from '../support/test-agent.js';
 
@@ -24,7 +25,9 @@ describe('registered database show', { timeout: 30_000 }, () => {
     });
   });
   async function show(id: string, flags: string[] = []) {
-    const result = await agent.runRaw(['show', id, ...flags]);
+    const result = flags.includes('--json')
+      ? await readArtifactExport(agent, id, flags)
+      : await agent.runRaw(['show', id, ...flags]);
     expect(result.exitCode, result.stderr || result.stdout).toBe(0);
     return result;
   }
@@ -61,12 +64,27 @@ describe('registered database show', { timeout: 30_000 }, () => {
       ],
     });
     const res = await show(id);
-    expect(res.stdout).toContain('Decisions:');
+    expect(res.stdout).toContain('Decisions: 1 of 1 shown (recorded)');
     expect(res.stdout).toContain('use a sliding-window limiter  (plan rev 0)');
     expect(res.stdout).toContain('smooths burst-at-boundary');
     expect(res.stdout).toContain(
       'considered fixed-window counter — rejected because allows a boundary burst'
     );
+  });
+  it('reports bounded decision coverage and the exact follow-up for remaining decisions', async () => {
+    const id = await f.capture(undefined, {
+      task: 'record several choices',
+      decisions: Array.from({ length: 5 }, (_, index) => ({
+        decision: `choice ${index + 1}`,
+        revision_n: 0,
+        reason: `reason ${index + 1}`,
+      })),
+    });
+    const res = await show(id);
+    expect(res.stdout).toContain('Decisions: 3 of 5 shown (recorded)');
+    expect(res.stdout).toContain('2 more; inspect exactly with');
+    expect(res.stdout).toContain('--decision <n> --json (n=4–5)');
+    expect(res.stdout).not.toContain('choice 4');
   });
   it('renders command reports separately from the later checkpoint snapshot', async () => {
     const id = await f.capture(undefined, { task: 'Label reported evidence' });
@@ -111,11 +129,11 @@ describe('registered database show', { timeout: 30_000 }, () => {
         }
       );
     });
-    const res = await show(id);
-    expect(res.stdout).toContain('Agent-reported: A defect exists');
-    expect(res.stdout).toContain(
-      'irrelevant successful command — Agent reports command exited 0. Checkpoint subsequently closed at snapshot'
-    );
+    const res = await show(id, ['--checkpoint', '1']);
+    expect(res.stdout).toContain('verification is agent-reported');
+    expect(res.stdout).toContain('A defect exists');
+    expect(res.stdout).toContain('irrelevant successful command');
+    expect(res.stdout).toContain(snapshotRef);
     expect(res.stdout).not.toContain('ran against snapshot');
   });
   it('omits the Decisions block when the plan has no decisions', async () => {
@@ -187,7 +205,7 @@ describe('registered database show', { timeout: 30_000 }, () => {
       (await show(id.slice(0, -1), ['--project', f.authority.projectId, '--json'])).stdout
     );
     expect(out).toMatchObject({
-      schema_version: 3,
+      schema_version: 4,
       artifact: {
         id,
         project_id: f.authority.projectId,
@@ -246,9 +264,7 @@ describe('registered database show', { timeout: 30_000 }, () => {
       cwd: outside,
       env: { ORCAOPS_DATA_DIR: f.root, ORCAOPS_DISABLE_DRAIN: '1' },
     });
-    const result = await external.runRaw([
-      'show',
-      id,
+    const result = await readArtifactExport(external, id, [
       '--project',
       f.authority.projectId,
       '--json',

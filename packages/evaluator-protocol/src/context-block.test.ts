@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildContextBlock } from './context-block.js';
+import { buildContextBlock, unreportedChangedPaths } from './context-block.js';
 import type { ContextSection } from './schemas/common.js';
 import type { EvaluatorContext } from './schemas/context.js';
 
@@ -133,7 +133,57 @@ describe('buildContextBlock — baseline', () => {
     expect(block).toContain('Plan task:');
     expect(block).toContain('Non-goals');
     expect(block).toContain('Plan steps:');
-    expect(block).toContain('Changed files (since plan.base_sha):');
+    expect(block).toContain('Changed files reported by the agent at this checkpoint');
+  });
+
+  it('labels checkpoint-close changed files as agent-reported, not as the diff since base', () => {
+    const block = buildContextBlock(makeContext({ phase: 'checkpoint-close' }), []);
+    expect(block).toContain(
+      'Changed files reported by the agent at this checkpoint (self-reported files_changed, not verified against git):'
+    );
+    expect(block).not.toContain('since plan.base_sha');
+    expect(block).not.toMatch(/authoritative/i);
+  });
+
+  it('labels pre-pr changed files as reported across closed checkpoints', () => {
+    const block = buildContextBlock(makeContext({ phase: 'pre-pr' }), []);
+    expect(block).toContain(
+      'Changed files reported by the agent across closed checkpoints (self-reported files_changed, not verified against git):'
+    );
+    expect(block).not.toContain('since plan.base_sha');
+  });
+
+  it('renders observed changed files and names the paths the agent did not report', () => {
+    const block = buildContextBlock(
+      makeContext({
+        changed_files: ['README.md'],
+        observed_changed_files: ['README.md', 'scripts/camera/free_camera.gd'],
+      }),
+      []
+    );
+    expect(block).toContain(
+      "Changed files observed by git between this checkpoint's open and close snapshots:\n" +
+        '  - README.md\n' +
+        '  - scripts/camera/free_camera.gd'
+    );
+    expect(block).toContain(
+      'Observed but NOT reported by the agent:\n  - scripts/camera/free_camera.gd'
+    );
+  });
+
+  it('says the snapshot diff was empty when observed_changed_files is an empty list', () => {
+    const block = buildContextBlock(makeContext({ observed_changed_files: [] }), []);
+    expect(block).toContain(
+      "Changed files observed by git between this checkpoint's open and close snapshots:\n" +
+        '  (none)'
+    );
+    expect(block).not.toContain('Observed but NOT reported');
+  });
+
+  it('omits the observed section when observed_changed_files is absent', () => {
+    const block = buildContextBlock(makeContext(), []);
+    expect(block).not.toContain('observed by git');
+    expect(block).not.toContain('Observed but NOT reported');
   });
 
   it('is deterministic (same inputs → same string)', () => {
@@ -230,6 +280,14 @@ describe('buildContextBlock — additional sections', () => {
     expect(block).toContain('base_sha: abc123');
     expect(block).toContain('head_sha: def456');
     expect(block).toContain('git ls-files --others');
+  });
+
+  it('labels the diff-boundary changed files as agent-reported rather than authoritative', () => {
+    const block = buildContextBlock(stepCoverageContext(), ['diff-boundary']);
+    expect(block).toContain(
+      "Changed files reported by the agent's checkpoints (the attribution boundary; self-reported, so confirm against git):"
+    );
+    expect(block).not.toMatch(/authoritative/i);
   });
 
   it('renders the pinned source plan under source-plan', () => {
@@ -356,7 +414,7 @@ describe('buildContextBlock — conformance input', () => {
     // Conformance compares plan text to plan text; the diff boundary and the
     // inspection-command guidance belong to evaluators that read the worktree.
     expect(block).not.toContain('## Diff boundary');
-    expect(block).not.toContain('Changed files (the authoritative attribution boundary)');
+    expect(block).not.toContain("Changed files reported by the agent's checkpoints");
     expect(block).not.toContain('## Inspection');
   });
 
@@ -373,5 +431,33 @@ describe('buildContextBlock — conformance input', () => {
     const block = buildContextBlock(ctx, ['acceptance-criteria']);
     expect(block).toContain('no step records any acceptance criteria');
     expect(block).not.toMatch(/nothing to grade/);
+  });
+});
+
+describe('unreportedChangedPaths', () => {
+  it('treats an exactly reported path as covered', () => {
+    expect(unreportedChangedPaths(['src/a.ts', 'src/b.ts'], ['src/a.ts'])).toEqual(['src/b.ts']);
+  });
+
+  it('treats a path under a reported directory as covered', () => {
+    expect(unreportedChangedPaths(['src/deep/a.ts', 'lib/b.ts'], ['src'])).toEqual(['lib/b.ts']);
+  });
+
+  it('ignores a leading ./ and a trailing / on reported entries', () => {
+    expect(unreportedChangedPaths(['README.md', 'src/a.ts'], ['./README.md', 'src/'])).toEqual([]);
+  });
+
+  it('does not let a directory cover a sibling that only shares its prefix', () => {
+    expect(unreportedChangedPaths(['srcfoo/x.ts', 'src.ts'], ['src'])).toEqual([
+      'srcfoo/x.ts',
+      'src.ts',
+    ]);
+  });
+
+  it('never treats an empty or whitespace-only reported entry as covering everything', () => {
+    expect(unreportedChangedPaths(['a.ts', 'b/c.ts'], ['', '   ', './'])).toEqual([
+      'a.ts',
+      'b/c.ts',
+    ]);
   });
 });

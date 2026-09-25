@@ -114,6 +114,8 @@ function richThread(index: number): WatchThread {
         : [],
     nonGoals:
       index === 0 ? ['Do not replace storage, capture, or artifact lifecycle behavior'] : [],
+    knowledge: null,
+    knowledgeUnavailable: null,
     recentEvents:
       index === 0
         ? [

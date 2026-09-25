@@ -12,5 +12,6 @@ engine:
   kind: llm
   prompt_file: prompts/scope-creep-detect.prompt.md
   output_format: markdown
-  # The baseline block already carries plan steps and changed files.
+  # The baseline block already carries plan steps and the reported and
+  # observed changed files.
   additional_context_sections: []

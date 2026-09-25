@@ -35,7 +35,7 @@ describe('the emitted exemplars form a runnable pack', () => {
    * parsing.
    */
   const RUNTIME = `process.stdout.write(JSON.stringify({
-  schema: 'orcaops.evaluator_result/v1',
+  schema: 'orcaops.evaluator_result/v2',
   verdict: 'pass',
   body: 'PASS\\n\\nthe exemplar pack dispatched',
 }));

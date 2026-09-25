@@ -12,7 +12,8 @@ import {
   translateDatabaseCaptureError,
 } from '../../lib/database-capture-response.js';
 import { syncDatabaseCapture } from '../../lib/database-capture-sync.js';
-import { runDatabasePrePrPass } from '../../lib/database-pre-pr-pass.js';
+import { retainedFindings } from '../../lib/database-evaluators.js';
+import { authorityReport, runDatabasePrePrPass } from '../../lib/database-pre-pr-pass.js';
 import { stampDatabaseUsage } from '../../lib/database-usage-stamp.js';
 import { closeFailedHistoryRead } from '../../lib/history-reader-close.js';
 import { getInvocationCwd } from '../../lib/invocation-context.js';
@@ -46,7 +47,7 @@ async function prePrCheck(opts: CapturePrePrCheckOptions, signal: AbortSignal) {
         branch: context.registered.git.branch,
       });
       const options = { signal };
-      const { evaluated, marker } = await runDatabasePrePrPass({
+      const { evaluated, marker, authority } = await runDatabasePrePrPass({
         context,
         handle: writer,
         artifactId,
@@ -78,12 +79,16 @@ async function prePrCheck(opts: CapturePrePrCheckOptions, signal: AbortSignal) {
       return {
         artifact_id: artifactId,
         evaluator_results: evaluated.evaluator_results,
+        ...retainedFindings(evaluated.findings_retained),
         blocking: evaluated.blocking,
         ...(evaluated.pre_pr_review === undefined
           ? {}
           : { pre_pr_review: evaluated.pre_pr_review }),
         review_id: marker?.event_id ?? null,
         pre_pr_outcome: marker?.outcome ?? null,
+        // Null, never an empty answer, for an artifact this store holds no plan event of: there is
+        // then no selection to compare, and `{ moved: [] }` would read as "nothing moved".
+        authority: authority === null ? null : authorityReport(authority),
         usage,
         cloud_sync: await syncDatabaseCapture(context, writer, artifactId, {
           ...options,

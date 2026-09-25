@@ -2,11 +2,14 @@ import path from 'node:path';
 
 import {
   type EvaluatorContext,
-  EvaluatorResultEnvelopeSchema,
+  type EvaluatorRunFindingsOutcome,
   type EvaluatorRunPayload,
   type EvaluatorRunStatus,
   type EvaluatorVerdict,
+  inspectResultEnvelopeProtocol,
+  readResultEnvelope,
   type ResolvedEvaluator,
+  unsupportedResultProtocolMessage,
 } from '@orcaops/evaluator-protocol';
 import {
   scrubEvaluatorDiagnostic,
@@ -15,6 +18,7 @@ import {
   scrubEvaluatorOutputInValue,
 } from '@orcaops/evaluator-protocol/secrets';
 
+import { type EvaluatorEngineRun, packRunFindings } from '../findings.js';
 import { buildSubprocessEnv, runSubprocess, type SubprocessResult } from './subprocess.js';
 
 /**
@@ -27,6 +31,7 @@ export type CommandEngineErrorCode =
   | 'TIMEOUT'
   | 'EXIT_CODE'
   | 'JSON_PARSE'
+  | 'UNSUPPORTED_PROTOCOL'
   | 'ENVELOPE_INVALID'
   | 'RAW_SCHEMA_INVALID'
   | 'OUTPUT_TOO_LARGE'
@@ -60,24 +65,27 @@ export interface RunCommandEngineOptions {
 
 /**
  * Dispatch a single command-engine evaluator and produce an
- * `EvaluatorRunPayload`. Never throws — every failure mode maps to
- * `run_status: 'error'` with a structured `error.code`.
+ * `EvaluatorRunPayload` plus its findings handover. Never throws — every
+ * failure mode maps to `run_status: 'error'` with a structured `error.code`.
  *
  * Outcome model:
  *   - exit 0 + valid envelope                → run_status: completed
+ *   - exit 0 + valid envelope, bad findings  → run_status: completed, findings unreadable
  *   - exit 0 + valid envelope, raw fails     → run_status: error, RAW_SCHEMA_INVALID
  *     output_schema validation
  *   - exit 0 + non-JSON stdout               → run_status: error, JSON_PARSE
+ *   - exit 0 + a superseded/unknown `schema` → run_status: error, UNSUPPORTED_PROTOCOL
  *   - exit 0 + JSON not matching envelope    → run_status: error, ENVELOPE_INVALID
  *   - non-zero exit                          → run_status: error, EXIT_CODE
  *   - timeout                                → run_status: error, TIMEOUT
  *   - output too large                       → run_status: error, OUTPUT_TOO_LARGE
  *   - parent aborted                         → run_status: error, CANCELED
  *   - spawn error (e.g. ENOENT)              → run_status: error, SPAWN_ERROR
+ *
+ * An error run hands over no findings: the producer did not complete, so
+ * there is nothing it established.
  */
-export async function runCommandEngine(
-  opts: RunCommandEngineOptions
-): Promise<EvaluatorRunPayload> {
+export async function runCommandEngine(opts: RunCommandEngineOptions): Promise<EvaluatorEngineRun> {
   const { evaluator, context, run_id } = opts;
   if (evaluator.engine.kind !== 'command') {
     throw new Error(
@@ -219,20 +227,36 @@ export async function runCommandEngine(
       result,
     });
   }
-  const envelopeResult = EvaluatorResultEnvelopeSchema.safeParse(parsedEnvelope);
-  if (!envelopeResult.success) {
-    const issue = envelopeResult.error.issues[0];
+  // The version literal is read BEFORE the strict parse: a producer built
+  // against an older release must be told to upgrade, not handed a field-path
+  // complaint about its `schema` value. `undeclared` is not a negotiation
+  // failure — it falls through, and the read's message is the diagnostic.
+  const protocol = inspectResultEnvelopeProtocol(parsedEnvelope);
+  if (protocol.status === 'superseded' || protocol.status === 'unknown') {
+    return makeErrorRun({
+      evaluator,
+      run_id,
+      context,
+      ts,
+      code: 'UNSUPPORTED_PROTOCOL',
+      message: unsupportedResultProtocolMessage(protocol),
+      result,
+    });
+  }
+
+  const read = readResultEnvelope(parsedEnvelope);
+  if (read.status === 'invalid') {
     return makeErrorRun({
       evaluator,
       run_id,
       context,
       ts,
       code: 'ENVELOPE_INVALID',
-      message: `${issue.path.join('.') || '<root>'}: ${issue.message}`,
+      message: read.issue,
       result,
     });
   }
-  const envelope = envelopeResult.data;
+  const envelope = read.envelope;
 
   if (opts.validateRaw && engine.output_schema && envelope.raw !== undefined) {
     try {
@@ -257,6 +281,7 @@ export async function runCommandEngine(
     ts,
     envelope,
     result,
+    findings: packRunFindings({ run_id, source: 'envelope', read: read.findings }),
   });
 }
 
@@ -324,8 +349,9 @@ function packCompletedRun(
       raw?: unknown;
       metrics?: Record<string, number>;
     };
+    findings: EvaluatorRunFindingsOutcome;
   }
-): EvaluatorRunPayload {
+): EvaluatorEngineRun {
   const payload: EvaluatorRunPayload = {
     ...commonFields(opts),
     run_status: 'completed' as EvaluatorRunStatus,
@@ -339,7 +365,7 @@ function packCompletedRun(
       : {}),
     ...(opts.context.checkpoint_n !== null ? { checkpoint_n: opts.context.checkpoint_n } : {}),
   };
-  return payload;
+  return { run: payload, findings: opts.findings };
 }
 
 function makeErrorRun(
@@ -347,7 +373,7 @@ function makeErrorRun(
     code: CommandEngineErrorCode;
     message: string;
   }
-): EvaluatorRunPayload {
+): EvaluatorEngineRun {
   // Body folds in stderr + a tail of stdout for diagnostics. Both are RAW
   // evaluator output — a stack trace, an env dump, an upstream error body —
   // and this body is PERSISTED into the artifact and shown to reviewers, so
@@ -370,12 +396,15 @@ function makeErrorRun(
     .join('\n\n');
   const message = scrubEvaluatorDiagnosticAndBound(opts.message, MAX_PERSISTED_ERROR_MESSAGE_CHARS);
   return {
-    ...commonFields(opts),
-    run_status: 'error',
-    verdict: null,
-    body: `ERROR (${opts.code})\n\n${message}${tail ? `\n\n${tail}` : ''}`,
-    error: { code: opts.code, message },
-    ...(opts.context.checkpoint_n !== null ? { checkpoint_n: opts.context.checkpoint_n } : {}),
+    run: {
+      ...commonFields(opts),
+      run_status: 'error',
+      verdict: null,
+      body: `ERROR (${opts.code})\n\n${message}${tail ? `\n\n${tail}` : ''}`,
+      error: { code: opts.code, message },
+      ...(opts.context.checkpoint_n !== null ? { checkpoint_n: opts.context.checkpoint_n } : {}),
+    },
+    findings: { status: 'none' },
   };
 }
 

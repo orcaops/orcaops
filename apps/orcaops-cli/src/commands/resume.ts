@@ -55,6 +55,8 @@ export function createDatabaseResumeAction(dependencies: {
         if (json) emitOk(result);
         else {
           const lines = [`No task selected: ${result.reason}.`];
+          for (const issue of result.history.issues)
+            lines.push(`  ${issue.project_id ?? 'scope'}: ${issue.code}: ${issue.message}`);
           for (const candidate of result.candidates)
             lines.push(
               `  ${candidate.artifact_id}  ${candidate.label}  (${candidate.eligibility.reason ?? 'eligible'})`,

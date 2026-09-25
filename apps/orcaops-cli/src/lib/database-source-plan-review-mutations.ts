@@ -5,6 +5,7 @@ import type {
   SourcePlanReviewDeclineResponse,
   SourcePlanReviewProposeResponse,
   SourcePlanReviewPushResponse,
+  SourcePlanReviewRequestResponse,
   SourcePlanReviewVerdictResponse,
 } from '@orcaops/sdk';
 import {
@@ -13,6 +14,7 @@ import {
   OssSourcePlanReviewDecline,
   OssSourcePlanReviewPropose,
   OssSourcePlanReviewPush,
+  OssSourcePlanReviewRequest,
   OssSourcePlanReviewVerdict,
   TrpcRequestError,
 } from '@orcaops/sdk';
@@ -62,6 +64,15 @@ const proposeResponse = z
   .object({ externalId: text, proposalId: text, baseVersionId: text, needsRebase: z.boolean() })
   .passthrough();
 const commentResponse = z.object({ externalId: text, commentId: text }).passthrough();
+const requestReviewer = z.object({ userId: text, rawTag: z.string() }).passthrough();
+const requestResponse = z
+  .object({
+    externalId: text,
+    added: z.array(requestReviewer),
+    alreadyRequested: z.array(requestReviewer),
+    unresolved: z.array(z.string()),
+  })
+  .passthrough();
 const verdictResponse = z
   .object({
     externalId: text,
@@ -97,6 +108,7 @@ export interface DatabaseSourcePlanReviewMutationOptions {
 export interface SourcePlanReviewMutationCloudClient {
   sourcePlan: {
     reviewPush(input: OssSourcePlanReviewPush): Promise<SourcePlanReviewPushResponse>;
+    reviewRequest(input: OssSourcePlanReviewRequest): Promise<SourcePlanReviewRequestResponse>;
     reviewPropose(input: OssSourcePlanReviewPropose): Promise<SourcePlanReviewProposeResponse>;
     reviewComment(input: OssSourcePlanReviewComment): Promise<SourcePlanReviewCommentResponse>;
     setReviewerVerdict(input: OssSourcePlanReviewVerdict): Promise<SourcePlanReviewVerdictResponse>;
@@ -435,6 +447,19 @@ export function createDatabaseSourcePlanReviewMutationClient(
     didDispatch: () => dispatched,
     publicationAdmission: () => publicationAdmission,
     sourcePlan: {
+      reviewRequest: (
+        raw: OssSourcePlanReviewRequest
+      ): Promise<SourcePlanReviewRequestResponse> => {
+        const payload = OssSourcePlanReviewRequest.parse(raw);
+        return dispatch({
+          method: 'sourcePlan.reviewRequest',
+          externalId: payload.external_id,
+          payload,
+          requestSchema: OssSourcePlanReviewRequest,
+          responseSchema: requestResponse,
+          send: (original) => input.client.sourcePlan.reviewRequest(original),
+        });
+      },
       reviewPush: (raw: OssSourcePlanReviewPush): Promise<SourcePlanReviewPushResponse> => {
         const payload = OssSourcePlanReviewPush.parse(raw);
         return dispatch({

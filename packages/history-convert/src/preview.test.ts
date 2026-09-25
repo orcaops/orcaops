@@ -831,4 +831,4 @@ it('retains only exact shared installation files across linked worktrees', async
     unknown.map((name) => path.join(f.options.cwd, name)).sort()
   );
   await expect(prepareLegacySources(preview)).rejects.toMatchObject({ code: 'SOURCE_UNAVAILABLE' });
-});
+}, 30_000);

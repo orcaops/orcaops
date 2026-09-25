@@ -1124,11 +1124,48 @@ describe('init --session-hooks settings installation', () => {
       { agent: 'claude-code', path: '.claude/settings.json', action: 'skipped-scope' },
     ]);
     expect(out.restart_required).toBe(false);
-    expect(out.warnings.some((w) => w.includes('project-scope only'))).toBe(true);
+    const scopeWarning = out.warnings.find((w) => w.includes('project-scope only'));
+    expect(scopeWarning).toContain('orcaops update --session-hook-entries none');
     await expect(access(path.join(repo.path, '.claude/settings.json'))).rejects.toMatchObject({
       code: 'ENOENT',
     });
   });
+
+  it.each([
+    ['personal', []],
+    ['global', ['--session-hook-entries', 'none']],
+  ] as const)(
+    'entries none under %s scope reports skipped-entries without a scope warning',
+    async (scope, entriesFlags) => {
+      const globalRoot = await mkdtemp(path.join(tmpdir(), 'orcaops-global-'));
+      scratch.push(globalRoot);
+      const scoped = makeAgent({
+        cwd: repo.path,
+        env: { ...agentHomes, ORCAOPS_GLOBAL_ROOT: globalRoot },
+      });
+      const init = await scoped.runRaw([
+        'init',
+        '--json',
+        '--no-llm',
+        '--session-hooks',
+        '--scope',
+        scope,
+        ...entriesFlags,
+        '--agents',
+        'claude-code',
+      ]);
+      const update = await scoped.runRaw(['update', '--json']);
+
+      for (const res of [init, update]) {
+        expect(res.exitCode).toBe(0);
+        const out = JSON.parse(res.stdout) as SessionHookJson;
+        expect(out.session_hooks).toEqual([
+          { agent: 'claude-code', path: '.claude/settings.json', action: 'skipped-entries' },
+        ]);
+        expect(out.warnings.some((w) => w.includes('project-scope only'))).toBe(false);
+      }
+    }
+  );
 });
 
 describe('session hooks under non-project scopes (strip is scope-agnostic)', () => {

@@ -248,6 +248,7 @@ export async function planUploadAction(file: string, opts: PlanUploadOptions = {
         out += `    did you mean (for ${s.tag}): ${s.matches.map((m) => `${m.handle} (${m.name})`).join(', ')}\n`;
       }
       out += '    full roster: orcaops plan review reviewers\n';
+      out += `    add corrected reviewers: orcaops plan review request ${result.external_id} --reviewer <email>\n`;
     }
     out += `  pull it after approval with: orcaops plan pull ${result.external_id}\n`;
     out += '  Next: orcaops plan review status   (watch for feedback)\n';

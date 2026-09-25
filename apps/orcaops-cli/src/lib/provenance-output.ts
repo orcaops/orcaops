@@ -28,6 +28,15 @@ export type DetailedProvenanceCandidate = Omit<ProvenanceCandidate, 'fingerprint
     };
   };
 
+export function historicalProvenanceTask(row: DetailedProvenanceCandidate): string | null {
+  const plan = row.plan_support.plan;
+  if (!plan) return null;
+  const members = plan.origin?.member_shas?.length;
+  return row.origin === 'imported' && !plan.origin?.enriched_at && members
+    ? `${plan.task.split('\n')[0]} … (${members} commits)`
+    : plan.task;
+}
+
 export function compactSourceVersions(
   versions: readonly { artifact_id: string; version_token: string }[]
 ) {
@@ -47,13 +56,22 @@ function preview<T, U>(values: readonly T[], project: (value: T) => U): Evidence
 }
 
 // Redact the complete evidence before calling these projections; a clipped secret may not match.
-function textPreview(value: string): TextPreview {
+export function textPreview(value: string): TextPreview {
   const characters = Array.from(value);
   return {
     text: characters.slice(0, PROVENANCE_PREVIEW_CHARACTERS).join(''),
     length: characters.length,
     truncated: characters.length > PROVENANCE_PREVIEW_CHARACTERS,
   };
+}
+
+export function conciseText(value: string) {
+  const preview = textPreview(value);
+  return preview.truncated ? preview : value;
+}
+
+export function previewText(value: string | TextPreview) {
+  return typeof value === 'string' ? value : `${value.text}${value.truncated ? ' …' : ''}`;
 }
 
 type Diagnostic = Pick<HistoryIssue, 'code' | 'message'> &
@@ -79,6 +97,51 @@ export function compactProvenanceIssues(issues: readonly Diagnostic[]) {
         code,
         count,
       })),
+  };
+}
+
+export function summarizeProvenanceIssues(issues: readonly Diagnostic[]) {
+  const groups = new Map<string, { issue: Diagnostic; occurrences: number }>();
+  const counts = new Map<string, number>();
+  for (const issue of issues) {
+    const key = JSON.stringify([issue.code, issue.message, issue.resource, issue.count]);
+    const group = groups.get(key) ?? { issue, occurrences: 0 };
+    group.occurrences++;
+    groups.set(key, group);
+    counts.set(issue.code, (counts.get(issue.code) ?? 0) + 1);
+  }
+  const selected = [...groups.values()].slice(0, PROVENANCE_PREVIEW_ITEMS);
+  return {
+    items: selected.map(({ issue, occurrences }) => ({
+      code: issue.code,
+      message: textPreview(issue.message),
+      occurrences,
+      ...(issue.count === undefined ? {} : { count: issue.count }),
+      ...(issue.resource === undefined ? {} : { resource: textPreview(issue.resource) }),
+    })),
+    total: issues.length,
+    omitted: issues.length - selected.reduce((sum, group) => sum + group.occurrences, 0),
+    distinct_codes: counts.size,
+    code_counts: [...counts]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([code, count]) => ({ code, count })),
+    source_details: issues.length ? ('inspect_audit' as const) : null,
+  };
+}
+
+export function rationaleIssueSummary(issues: readonly Diagnostic[]) {
+  const summary = summarizeProvenanceIssues(issues);
+  return {
+    items: summary.items.map((item) => ({
+      ...item,
+      message: item.message.truncated ? item.message : item.message.text,
+      resource: item.resource
+        ? item.resource.truncated
+          ? item.resource
+          : item.resource.text
+        : undefined,
+    })),
+    omitted: summary.omitted,
   };
 }
 

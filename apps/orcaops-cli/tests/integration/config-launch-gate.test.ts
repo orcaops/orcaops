@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { CONFIG_SCHEMA_VERSION } from '@orcaops/storage';
+import { CONFIG_SCHEMA_VERSION, FRESH_CONFIG_FILE_VERSION } from '@orcaops/storage';
 import { createTempRepo, type TempRepo } from '@orcaops/test-harness';
 
 import { makeAgent } from '../support/test-agent.js';
@@ -80,6 +80,63 @@ describe('current config gate', () => {
       results: Array<{ id: string }>;
     };
     expect(list.results.map((row) => row.id)).toContain(artifactId);
+  });
+
+  it.each([5, 6])(
+    'init --force leaves a version %i config on its version while changing another key',
+    async (version) => {
+      await writeFile(
+        configPath(),
+        JSON.stringify({
+          schema_version: version,
+          install: { agents: ['codex'], scope: 'project' },
+          naming: { prefix: 'oo' },
+        }),
+        'utf8'
+      );
+      const res = await agent.runRaw(['init', '--force', '--prefix', 'revised', '--json']);
+      expect(res.exitCode).toBe(0);
+      const after = JSON.parse(await readFile(configPath(), 'utf8')) as Record<string, unknown>;
+      expect(after.schema_version).toBe(version);
+      expect(after.naming).toEqual({ prefix: 'revised' });
+      expect(after).not.toHaveProperty('knowledge_processing');
+    }
+  );
+
+  it('init --force --reset-config stamps the version released builds read, even over a newer file', async () => {
+    await writeFile(
+      configPath(),
+      JSON.stringify({
+        schema_version: CONFIG_SCHEMA_VERSION,
+        install: { agents: ['codex'], scope: 'project' },
+        knowledge_processing: { enabled: true },
+      }),
+      'utf8'
+    );
+    const res = await agent.runRaw(['init', '--force', '--reset-config', '--no-llm', '--json']);
+    expect(res.exitCode).toBe(0);
+    const after = JSON.parse(
+      await readFile(await effectiveConfigPath(repo.path), 'utf8')
+    ) as Record<string, unknown>;
+    expect(after.schema_version).toBe(FRESH_CONFIG_FILE_VERSION);
+    expect(after).not.toHaveProperty('knowledge_processing');
+  });
+
+  it('init --force keeps the current version of a config that enables knowledge processing', async () => {
+    await writeFile(
+      configPath(),
+      JSON.stringify({
+        schema_version: CONFIG_SCHEMA_VERSION,
+        install: { agents: ['codex'], scope: 'project' },
+        knowledge_processing: { enabled: true },
+      }),
+      'utf8'
+    );
+    const res = await agent.runRaw(['init', '--force', '--json']);
+    expect(res.exitCode).toBe(0);
+    const after = JSON.parse(await readFile(configPath(), 'utf8')) as Record<string, unknown>;
+    expect(after.schema_version).toBe(CONFIG_SCHEMA_VERSION);
+    expect(after.knowledge_processing).toEqual({ enabled: true });
   });
 
   it('explicit config flags override only their setting during forced reconciliation', async () => {
@@ -177,7 +234,7 @@ describe('current config gate', () => {
     const after = JSON.parse(
       await readFile(await effectiveConfigPath(repo.path), 'utf8')
     ) as Record<string, unknown>;
-    expect(after.schema_version).toBe(CONFIG_SCHEMA_VERSION);
+    expect(after.schema_version).toBe(FRESH_CONFIG_FILE_VERSION);
     expect(after).not.toHaveProperty('unexpected_setting');
   });
 
@@ -205,7 +262,7 @@ describe('current config gate', () => {
     const after = JSON.parse(await readFile(await effectiveConfigPath(repo.path), 'utf8')) as {
       schema_version: number;
     };
-    expect(after.schema_version).toBe(CONFIG_SCHEMA_VERSION);
+    expect(after.schema_version).toBe(FRESH_CONFIG_FILE_VERSION);
   });
 
   it('--reset-config requires --force', async () => {

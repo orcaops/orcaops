@@ -12,7 +12,9 @@ const exec = promisify(execFile);
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const cliRoot = path.join(repository, 'apps/orcaops-cli');
 const vitest = path.join(repository, 'node_modules/vitest/vitest.mjs');
-const { jobs } = parse(await readFile(path.join(repository, '.github/workflows/ci.yml'), 'utf8'));
+const workflow = parse(await readFile(path.join(repository, '.github/workflows/ci.yml'), 'utf8'));
+const { jobs } = workflow;
+const skipOnDraft = '${{ !github.event.pull_request.draft }}';
 const shards = jobs['test-cli'].strategy.matrix.shard;
 const reportCheck = jobs.coverage.steps.find(
   (step) => step.name === 'Verify every CLI shard report'
@@ -108,7 +110,7 @@ describe('CI test distribution', () => {
     expect(jobs.check.needs).toEqual(
       expect.arrayContaining(['test', 'test-heavy', 'test-cli', 'coverage'])
     );
-    expect(jobs.check.if).toBe('always()');
+    expect(jobs.check.if).toBe('${{ always() && !github.event.pull_request.draft }}');
     const gate = jobs.check.steps[0];
     const env = Object.fromEntries(Object.keys(gate.env).map((key) => [key, 'success']));
     const run = (overrides = {}) =>
@@ -117,6 +119,41 @@ describe('CI test distribution', () => {
     for (const name of Object.keys(env)) {
       for (const status of ['failure', 'cancelled', 'skipped'])
         expect(run({ [name]: status })).toBe(1);
+    }
+  });
+
+  it('skips only the expensive legs on a draft and runs them once it is ready', () => {
+    expect(workflow.on.pull_request.types).toContain('ready_for_review');
+    for (const name of ['changes', 'test', 'test-heavy', 'test-cli']) {
+      expect(jobs[name].if, name).toBe(skipOnDraft);
+    }
+    // These skip through their dependency on a skipped job.
+    expect(jobs.coverage.needs).toBe('test-cli');
+    expect(jobs['watch-compile'].needs).toBe('changes');
+    expect(jobs['install-smoke'].needs).toEqual(['changes', 'watch-compile']);
+    for (const name of ['lint', 'typecheck', 'audit']) {
+      expect(jobs[name].if, name).toBeUndefined();
+    }
+  });
+
+  it('takes the release runner and smoke matrix from the gate', () => {
+    expect(jobs.check.needs).toContain('changes');
+    expect(jobs['watch-compile']['runs-on']).toBe('${{ needs.changes.outputs.compile-runner }}');
+    expect(jobs['install-smoke'].strategy.matrix).toBe(
+      '${{ fromJSON(needs.changes.outputs.smoke-matrix) }}'
+    );
+    const gate = jobs.changes.steps.find((step) => step.id === 'gate');
+    expect(gate.run).toContain('node scripts/ci-gate.mjs');
+    for (const output of ['compile-runner', 'smoke-matrix']) {
+      expect(jobs.changes.outputs[output]).toBe(`\${{ steps.gate.outputs.${output} }}`);
+    }
+  });
+
+  it('bounds every job with a timeout', () => {
+    // The platform default is six hours, which a hung macOS leg bills at ten
+    // times the Linux rate.
+    for (const [name, job] of Object.entries(jobs)) {
+      expect(job['timeout-minutes'], name).toBeGreaterThan(0);
     }
   });
 

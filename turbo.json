@@ -60,6 +60,7 @@
     "test": {
       "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/run-vitest.mjs"],
       "env": ["ORCAOPS_TEST_ARGS"],
+      "passThroughEnv": ["TMPDIR", "TMP", "TEMP"],
       "outputs": [".vitest-reports/**"],
       "dependsOn": ["^build", "build"]
     },

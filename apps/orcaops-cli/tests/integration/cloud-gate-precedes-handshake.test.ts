@@ -34,6 +34,7 @@ const { reviewCommentAction } = await import('../../src/commands/plan/review/com
 const { reviewDeclineAction } = await import('../../src/commands/plan/review/decline.js');
 const { reviewProposeAction } = await import('../../src/commands/plan/review/propose.js');
 const { reviewPushAction } = await import('../../src/commands/plan/review/push.js');
+const { reviewRequestAction } = await import('../../src/commands/plan/review/request.js');
 const { reviewVerdictAction } = await import('../../src/commands/plan/review/verdict.js');
 const { planUploadAction } = await import('../../src/commands/plan/upload.js');
 const { reviewFeedbackReplyAction } = await import('../../src/commands/review/reply.js');
@@ -68,6 +69,7 @@ describe('the outbound gate precedes the cloud handshake', () => {
   const ACTIONS: ReadonlyArray<readonly [string, () => Promise<void>]> = [
     ['plan upload', () => planUploadAction(bodyFile, { title: 'a plan', json: true })],
     ['plan review push', () => reviewPushAction('ext-1', { input: bodyFile, json: true })],
+    ['plan review request', () => reviewRequestAction('ext-1', { reviewer: [DIRTY], json: true })],
     ['plan review propose', () => reviewProposeAction('ext-1', { input: bodyFile, json: true })],
     ['plan review comment', () => reviewCommentAction('ext-1', { input: bodyFile, json: true })],
     [

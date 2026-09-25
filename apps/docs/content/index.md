@@ -28,6 +28,6 @@ features:
     linkText: Understand evaluators
   - title: Make every task compound
     details: Each completed task leaves behind decisions, constraints, rejected approaches, and evidence that future agents can use. They build on what was already learned instead of rediscovering it—or undoing deliberate choices.
-    link: /skills
-    linkText: See what captured work enables
+    link: /project-knowledge
+    linkText: Understand project knowledge
 ---

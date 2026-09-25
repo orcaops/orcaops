@@ -95,7 +95,7 @@ describe('canonical search action', { timeout: 30_000 }, () => {
     const result = JSON.parse(chunks.join(''));
     expect(result).toMatchObject({
       ok: true,
-      schema_version: 3,
+      schema_version: 4,
       count: 1,
       scope: { kind: 'project', selection: 'default', branch: { source: 'all', value: null } },
       page: { ranking_complete: true, source_complete: true, candidate_complete: true },

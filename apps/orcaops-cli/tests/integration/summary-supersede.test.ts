@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { gitClient, inputFile } from '@orcaops/test-harness';
 
 import { fixture, inventory } from '../helpers/database-history.js';
+import { readArtifactExport } from '../support/artifact-export.js';
 import { makeAgent } from '../support/test-agent.js';
 import { commitFile } from '../support/test-helpers.js';
 
@@ -234,7 +235,7 @@ describe('capture summary supersession', { timeout: 60_000 }, () => {
       ok: true,
       finalization_status: 'finalized',
     });
-    const shown = JSON.parse((await agent.runRaw(['show', artifactId, '--json'])).stdout) as {
+    const shown = JSON.parse((await readArtifactExport(agent, artifactId)).stdout) as {
       artifact: { summary: { outcome: string; accepted_warnings: unknown[] } };
     };
     expect(shown.artifact.summary.outcome).toBe('amended wording');
@@ -244,7 +245,7 @@ describe('capture summary supersession', { timeout: 60_000 }, () => {
   it('an amendment taken after a later commit keeps the original head_sha', async () => {
     const { artifactId, summaryEventId } = await planAndSummary();
 
-    const headAtSummary = (await agent.runRaw(['show', artifactId, '--json'])).stdout;
+    const headAtSummary = (await readArtifactExport(agent, artifactId)).stdout;
     const originalHead = (
       JSON.parse(headAtSummary) as { artifact: { summary: { head_sha: string } } }
     ).artifact.summary.head_sha;
@@ -260,7 +261,7 @@ describe('capture summary supersession', { timeout: 60_000 }, () => {
     });
     expect(amend.exitCode, amend.stdout).toBe(0);
 
-    const after = JSON.parse((await agent.runRaw(['show', artifactId, '--json'])).stdout) as {
+    const after = JSON.parse((await readArtifactExport(agent, artifactId)).stdout) as {
       artifact: { summary: { head_sha: string; outcome: string } };
     };
     expect(after.artifact.summary.outcome).toBe('amended after a later commit');

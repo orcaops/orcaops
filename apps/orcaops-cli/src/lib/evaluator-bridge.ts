@@ -1,4 +1,5 @@
 import { run } from 'effection';
+import { createHash } from 'node:crypto';
 
 import type { Repo } from '@orcaops/core';
 import {
@@ -12,6 +13,7 @@ import {
   type OpenCheckpointContext,
   type PlanContext,
   type RepoContext,
+  type ResolvedEvaluator,
   type SourcePlanContext,
   type SummaryContext,
 } from '@orcaops/evaluator-protocol';
@@ -20,6 +22,7 @@ import { buildLLMClient } from '@orcaops/llm';
 import {
   type AbandonedCheckpoint,
   type ArtifactJson,
+  canonicalJson,
   type Checkpoint,
   type ClosedCheckpoint,
   type Config,
@@ -31,7 +34,9 @@ import {
   type Summary,
   uuidv7,
 } from '@orcaops/storage';
+import type { EvaluatorRunEvidence } from '@orcaops/storage/history/database';
 
+import { observedCheckpointPaths } from './checkpoint-observed-paths.js';
 import { discoverEvaluatorsForCli } from './evaluator-discovery.js';
 import { computePackTrustDecisions } from './evaluator-grants.js';
 import { reconcileLifecycleEvaluatorInventory } from './evaluator-inventory.js';
@@ -79,8 +84,54 @@ export interface RunLifecycleOptions {
 
 export interface RunLifecycleResult {
   evaluator_results: EvaluatorRunPayload[];
+  /**
+   * What each dispatched run established beside itself, for the settlement that retains the runs.
+   * A run the inventory synthesized rather than dispatched hands nothing over: nothing produced it.
+   */
+  evaluator_evidence: EvaluatorRunEvidence[];
   blocking: boolean;
   pre_pr_review?: PrePrReviewFingerprints;
+}
+
+/**
+ * Whether this run's producer was asked at all. A consent refusal and a filter skip both record a
+ * run so the refusal stays loud and the lifecycle inventory is satisfied, but neither ran anything
+ * — so neither has a basis, and neither hands anything over. Such a run reads as "nothing was
+ * retained", which is what it is; its `run_status` keeps saying why.
+ */
+export function producerRan(run: EvaluatorRunPayload): boolean {
+  return run.run_status !== 'skipped' && run.error?.code !== 'CONSENT_DENIED';
+}
+
+/**
+ * What a run was given, as far as the bridge can name it. The digest covers the context handed to
+ * the runner together with this evaluator's own resolved parameters; the run id and the evaluator
+ * reference the runner specialized into it are columns of the retained row.
+ *
+ * They are also left out of the digest, and not only because the row carries them: the base
+ * context arrives from `buildBaseContext` carrying a freshly minted `run_id` and the literal
+ * `evaluator_ref: '<base>'`, neither of which any evaluator ever saw. Digesting them would make
+ * the same inputs hash differently on every invocation.
+ *
+ * `evaluator_version` is unknown: a pack's `package.yaml` carries one, but `ResolvedEvaluator` —
+ * the runner's shape, which this slice does not change — does not. `producer_payload` is unknown
+ * for the same kind of reason: the engines copy `body`, `raw` and `metrics` into the run payload
+ * and hand the bytes they came from to nobody.
+ */
+export function evaluatorRunBasis(
+  context: EvaluatorContext,
+  evaluator: Pick<ResolvedEvaluator, 'params'>
+): EvaluatorRunEvidence['basis'] {
+  const { run_id: _run, evaluator_ref: _ref, ...inputs } = context;
+  return {
+    context_sha256: createHash('sha256')
+      .update(canonicalJson({ context: inputs, params: evaluator.params }))
+      .digest('hex'),
+    base_sha: context.repo.base_sha,
+    head_sha: context.repo.head_sha,
+    evaluator_version: null,
+    producer_payload: null,
+  };
 }
 
 /**
@@ -159,11 +210,13 @@ export async function runLifecycleEvaluators(
   if (eligible.length === 0 && config === null) {
     return {
       evaluator_results: [],
+      evaluator_evidence: [],
       blocking: false,
       ...(prePrReview === undefined ? {} : { pre_pr_review: prePrReview }),
     };
   }
   let dispatchedRuns: EvaluatorRunPayload[] = [];
+  const evidence: EvaluatorRunEvidence[] = [];
   if (eligible.length > 0) {
     if (baseContext === null) {
       throw new Error(`missing evaluator context for ${firesAt}`);
@@ -190,6 +243,21 @@ export async function runLifecycleEvaluators(
       validateRaw: (raw, schema) => validator(raw as Record<string, unknown>, schema),
     });
     dispatchedRuns = dispatched.runs;
+    // Beside each run, never inside it: the run payload is strict, is re-parsed on every thread
+    // rebuild and is mirrored to a cloud shape this repository does not own.
+    evidence.push(
+      ...dispatched.runs.flatMap((runPayload, index) =>
+        producerRan(runPayload)
+          ? [
+              {
+                run_id: runPayload.run_id,
+                findings: dispatched.findings[index]!,
+                basis: evaluatorRunBasis(baseContext, eligible[index]!),
+              },
+            ]
+          : []
+      )
+    );
   }
 
   const inventory = reconcileLifecycleEvaluatorInventory({
@@ -222,6 +290,7 @@ export async function runLifecycleEvaluators(
   if (dryRun) {
     return {
       evaluator_results: stampedRuns,
+      evaluator_evidence: evidence,
       blocking: computeDryRunBlocking(stampedRuns),
       ...(prePrReview === undefined ? {} : { pre_pr_review: prePrReview }),
     };
@@ -242,6 +311,7 @@ export async function runLifecycleEvaluators(
 
   return {
     evaluator_results: stampedRuns,
+    evaluator_evidence: evidence,
     blocking,
     ...(prePrReview === undefined ? {} : { pre_pr_review: prePrReview }),
   };
@@ -345,8 +415,17 @@ async function buildBaseContext(opts: {
   }
 
   let changedFiles: string[] = [];
+  let observedChangedFiles: string[] | null = null;
   if (firesAt === 'checkpoint-close' && currentCheckpoint?.status === 'closed') {
     changedFiles = [...currentCheckpoint.files_changed];
+    const closed = closedCheckpoints.find((c) => c.n === checkpointN);
+    if (closed) {
+      observedChangedFiles = await observedCheckpointPaths(
+        ctx.repo,
+        closed.open_snapshot.tree_sha,
+        closed.close_snapshot.tree_sha
+      );
+    }
   } else if (firesAt === 'pre-pr') {
     const seen = new Set<string>();
     for (const cp of closedCheckpoints) {
@@ -383,6 +462,7 @@ async function buildBaseContext(opts: {
     abandoned_checkpoints: abandonedCheckpoints.map(toCheckpointContext),
     summary: summary !== null ? toSummaryContext(summary) : null,
     changed_files: changedFiles,
+    ...(observedChangedFiles !== null ? { observed_changed_files: observedChangedFiles } : {}),
     params: {},
   };
 }

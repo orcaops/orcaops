@@ -6,7 +6,7 @@ import {
   requireDatabaseExecutionContext,
   setupProjectDatabase,
 } from '@orcaops/core/history/database-capture';
-import { HistoryScopeError } from '@orcaops/project-scope/history';
+import { HistoryScopeError, unavailableProjectError } from '@orcaops/project-scope/history';
 import type { Config } from '@orcaops/storage';
 import {
   type DatabaseJson,
@@ -101,10 +101,10 @@ export async function resolveDatabaseSeedCommandContext(options: {
       !selected.database ||
       !scope.gitContext
     )
-      throw new HistoryScopeError(
-        selected?.completeness.issues[0]?.code ?? 'HISTORY_MISSING',
-        'Seed requires one registered repository and available project history'
-      );
+      throw unavailableProjectError(selected?.completeness.issues ?? [], {
+        code: 'HISTORY_MISSING',
+        message: 'Seed requires one registered repository and available project history',
+      });
     const repo = new Repo(scope.gitContext.worktreeRoot, {
       env: {
         ...Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('GIT_'))),

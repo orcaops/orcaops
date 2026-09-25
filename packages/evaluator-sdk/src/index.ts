@@ -18,12 +18,16 @@ export const PACKAGE_NAME = '@orcaops/evaluator-sdk';
 export type {
   ContextSection,
   EvaluatorContext,
+  EvaluatorFinding,
+  EvaluatorFindingConclusion,
+  EvaluatorFindingLocation,
   EvaluatorPhase,
   EvaluatorRef,
-  EvaluatorResultEnvelope,
+  EvaluatorResultEnvelopeV2,
   EvaluatorRunStatus,
   EvaluatorSeverity,
   EvaluatorVerdict,
+  FindingsRead,
   PlanContext,
   CheckpointContext,
   SummaryContext,
@@ -34,6 +38,14 @@ export { ORCAOPS_CONTEXT_PATH_ENV, readEvaluatorContext } from './context.js';
 export type { ReadEvaluatorContextOptions } from './context.js';
 export { info, pass, violation, writeResult } from './result.js';
 export type { EnvelopeExtras } from './result.js';
+export {
+  acceptanceCriterionLocation,
+  fileLocation,
+  finding,
+  findingKey,
+  planStepLocation,
+} from './finding.js';
+export type { FileLocationOptions, FindingInput } from './finding.js';
 export { safeExecute } from './errors.js';
 export { runFixture, RunFixtureError } from './fixture.js';
 export type { RunFixtureOptions, RunFixtureResult } from './fixture.js';

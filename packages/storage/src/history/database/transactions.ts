@@ -22,6 +22,11 @@ import { assertCheckoutChildOperation } from './execution-checkout-identity.js';
 import { type DatabaseJson, serializeDatabaseValue } from './values.js';
 import { isUuidV7 } from '../../ids/uuidv7.js';
 
+// Matched anywhere in a settlement statement, so no domain table or column may carry one of
+// these names as a whole word.
+export const STORAGE_OWNED_TABLES =
+  /\b(store_identity|activation|repository_creation|project_counters|operations)\b/i;
+
 export interface ProjectOperation {
   readonly operationId: string;
   readonly kind: string;
@@ -214,12 +219,7 @@ export async function runProjectOperation<T extends DatabaseJson>(
                 'INVALID_INPUT',
                 'The settlement transaction ended; start a new operation'
               );
-            if (
-              !/^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql) ||
-              /\b(store_identity|activation|repository_creation|project_counters|operations)\b/i.test(
-                sql
-              )
-            ) {
+            if (!/^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql) || STORAGE_OWNED_TABLES.test(sql)) {
               throw new ProjectDatabaseError(
                 'INVALID_INPUT',
                 'Settlement writes must target domain rows; connection, schema, counters and operation results belong to storage'

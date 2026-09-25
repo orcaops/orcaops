@@ -2,8 +2,8 @@
 name: "Orcaops: review feedback loop (PR review collaboration)"
 description: "Handle human feedback on a cloud PR review: check comments, reply to reviewer threads, push fixes, or wait for the reviewer. Use for \"address the review feedback on my PR\"."
 metadata:
-  generatedBy: "orcaops@0.2.0-rc.2"
-  contentHash: "05bec7582d15"
+  generatedBy: "orcaops@0.3.0"
+  contentHash: "47f07aa1ddef"
 ---
 
 # When to use

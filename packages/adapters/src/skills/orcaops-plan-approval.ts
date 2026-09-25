@@ -12,7 +12,7 @@ export const orcaopsPlanApprovalSkill: SkillTemplate = {
   requires: ['cloud'],
   name: 'Orcaops: plan approval (cloud source plan)',
   description:
-    'Upload, read, download, approve, or pin a plan through the Orcaops cloud approval flow. Use for "get this plan approved", "is my plan approved yet?", "read or download the plan body", or "pull the approved plan".',
+    'Upload, request reviewers, read, download, approve, or pin a plan through the Orcaops cloud approval flow. Use for "get this plan approved", "is my plan approved yet?", "read or download the plan body", or "pull the approved plan".',
   tags: ['orcaops', 'capture'],
   body: `# When to use
 
@@ -66,13 +66,11 @@ The plan is uploaded, approved by a human in the cloud, then pulled and pinned.
    replays onto the same draft; an edit mints a new immutable draft and the
    prior id is reported). Note the printed \`external_id\`.
 
-   **Check \`unresolved\` in the output.** Non-empty means those reviewer tags
-   matched NOBODY — the plan is in review with no reviewer requested for them
-   and no one notified. The CLI prints did-you-mean matches under the warning;
-   confirm the full email with the user (v1 handles are full emails) or run
-   \`orcaops plan review reviewers\` for the addressable roster, then re-run the
-   upload with the corrected \`--reviewer\` (changed reviewers mint a new draft;
-   the prior id is reported — that is expected).
+   **Check \`unresolved\` in the output.** Unknown or ambiguous identifiers
+   have no reviewer requested and no notification queued. Use
+   \`orcaops plan review reviewers\` to find an exact email, then add them to
+   the existing plan with \`orcaops plan review request <external_id> --reviewer
+   <email>\`. This preserves the plan and its review history.
 
 2. **Approve** the plan in the cloud web UI (out of band).
 
@@ -161,7 +159,22 @@ it returns. The other verbs take a slug freely; the cloud resolves it for them.
   diffs).
 - **"Who can I request as a reviewer?"** → \`orcaops plan review reviewers\`
   (the org roster + a scope note; repo-aware once per-repo lists exist).
-  Use it to resolve \`--reviewer\` handles before an upload.
+  Use it to resolve \`--reviewer\` identifiers before an upload or request.
+- **"Request reviewers on an existing plan" (author):**
+  \`orcaops plan review request <ref> --reviewer ben@example.com --reviewer
+  alice@example.com [--json] [--resend]\`. The plan must still be in review. This adds
+  reviewers without publishing a body version or changing review history.
+  Supply 1–25 distinct identifiers of 1–200 characters after trimming and
+  case-insensitive deduplication.
+  Already-requested reviewers are unchanged and receive no repeat invitation.
+  The output separates \`added\`, \`already_requested\`, \`unresolved\`, and
+  \`not_confirmed\` identifiers when several aliases fold to fewer cloud results.
+  Any unresolved or unconfirmed identifier exits nonzero, even when other
+  reviewers were added. Correct those identifiers and request those people again. An
+  identical command normally replays its recorded result and sends nothing.
+  Use \`--resend\` only when the cloud must receive that identical request
+  again, such as after a reviewer was removed or a pending member became
+  available. A queued notification does not confirm delivery.
 - **Get it approved:** \`orcaops plan review approve <ref> --wait\` opens the
   web approval page (\`--no-open\` prints the URL) and polls until a human
   approves, then prints the pin ref. **Exit 0 without \`--wait\` means
@@ -229,7 +242,7 @@ ack, NOT a 409** — that is expected, not a bug.
   (\`plan pull\` reports \`NO_INPUT\` before approval or after pinning). A read verb that seems
   "missing" is usually on the other track: \`orcaops plan review --help\` lists
   the review-track verbs (pull/propose/push/comment/view/list/status/
-  reviewers/verdict/decline/approve/diff).
+  request/reviewers/verdict/decline/approve/diff).
 - **Ambiguous \`cloud:\` ref at capture** — the same id is cached under multiple
   cloud sessions; re-run \`plan pull\` for the intended cloud, or clear the stale
   namespace under \`.orcaops/cache/source-plan\`.

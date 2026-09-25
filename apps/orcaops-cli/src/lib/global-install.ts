@@ -95,6 +95,8 @@ export interface GlobalInstallManifest {
 
 export type LinkMode = 'copy' | 'symlink';
 
+type StoreOwnershipCheck = (content: string) => boolean;
+
 const trimmedEnv = (v: string | undefined): string | null => {
   const t = v?.trim();
   return t && t.length > 0 ? t : null;
@@ -755,8 +757,11 @@ export interface PlanGlobalInstallInput {
    */
   heldPrefixes?: ReadonlyArray<string>;
   /**
-   * Override the per-user-current skip for a BEHIND/differing global version
-   * (proceed with the rewrite). Does NOT bypass the ahead guard below.
+   * Proceed when the recorded global version cannot be ordered against this
+   * CLI's, and overwrite paths the manifest records even when their bytes no
+   * longer match. Never claims an unrecorded path and never bypasses the
+   * ahead guard — that is `overrideAhead`, so `update --force` alone is the
+   * deliberate-downgrade path.
    */
   force?: boolean;
   /**
@@ -899,28 +904,35 @@ export async function planGlobalInstall(
     return refuseUntouched(true);
   }
 
-  // Enforce per-user-current: a global tree materialized by a DIFFERENT CLI version is
-  // not rewritten by this one (prevents two repos on different binaries ping-ponging
-  // the shared bytes). Refcounts are part of that tree's ownership state, so a refusal
-  // must leave them unchanged too.
-  if (prev !== null && prev.materialized_by !== input.cliVersion && !input.force) {
+  // A tree from an OLDER CLI is refreshed like a same-version one: the ahead
+  // guard above already stops the older CLI rewriting it back, so two binaries
+  // cannot ping-pong the shared bytes. Only a version pair with no order is
+  // refused, and refcounts are part of that tree's ownership state, so the
+  // refusal leaves them unchanged too.
+  if (
+    prev !== null &&
+    prev.materialized_by !== input.cliVersion &&
+    !isVersionAhead(input.cliVersion, prev.materialized_by) &&
+    !input.force
+  ) {
     warnings.push(
-      `global orcaops was materialized by CLI v${prev.materialized_by}; you are on v${input.cliVersion}. ` +
-        `No global state was changed (run that CLI, use --scope project, or pass --force).`
+      `global orcaops was materialized by CLI v${prev.materialized_by}; you are on v${input.cliVersion}, ` +
+        `and the two versions cannot be ordered. No global state was changed (run that CLI, or ` +
+        `pass --force to take ownership with this one).`
     );
     return refuseUntouched(false);
   }
 
   const renderedHashes = new Map<string, Map<string, string>>();
-  const expectedSymlinkStoreHash = (entry: GlobalInstallEntry): string | null => {
-    const renderKey = `${entry.agent}\u0000${entry.prefix}`;
+  const renderedStoreHash = (entry: GlobalInstallEntry, version: string): string | null => {
+    const renderKey = `${entry.agent}\u0000${entry.prefix}\u0000${version}`;
     let hashes = renderedHashes.get(renderKey);
     if (hashes === undefined) {
       hashes = new Map<string, string>();
       const rendered = desiredArtifacts(
         [entry.agent],
         entry.prefix,
-        prev?.materialized_by ?? input.generatedBy,
+        version,
         SKILL_TEMPLATES
       ).artifacts;
       for (const artifact of rendered) {
@@ -936,6 +948,23 @@ export async function planGlobalInstall(
     const { safeEntryPath } = assertEntryWithinRoots(entry);
     return hashes.get(safeEntryPath) ?? null;
   };
+  // A symlink entry records no content hash, so its store is owned only when
+  // every byte equals this CLI's render. The render version is the recorded
+  // one first, then the store's own stamp: another repo's upgrade advances
+  // `materialized_by` without rewriting stores only this repo references. The
+  // stamp only picks which render to compare against — an edited body never
+  // matches, whatever its embedded fingerprint says.
+  const recordedGeneration = prev?.materialized_by ?? input.generatedBy;
+  const symlinkStoreOwnership =
+    (entry: GlobalInstallEntry): StoreOwnershipCheck =>
+    (content) => {
+      const hash = sha256Hex(content);
+      if (renderedStoreHash(entry, recordedGeneration) === hash) return true;
+      const stamped = extractStamp(content).version;
+      if (stamped === null || stamped === recordedGeneration) return false;
+      if (input.overrideAhead !== true && isVersionAhead(stamped, input.cliVersion)) return false;
+      return renderedStoreHash(entry, stamped) === hash;
+    };
 
   // Build the next manifest entry set from the prior one (ref-count
   // bookkeeping). Prior entries are re-keyed through the SAME canonicalization
@@ -955,7 +984,7 @@ export async function planGlobalInstall(
       safeStore: string | null;
       ownershipStore: string;
       priorEntry: GlobalInstallEntry | null;
-      priorStoreHash: string | null;
+      ownsPriorStore: StoreOwnershipCheck | null;
     }
   >();
   // Carried through untouched and re-appended below: dropping them would strand
@@ -1024,8 +1053,8 @@ export async function planGlobalInstall(
       );
     }
     const priorEntry = prior?.entry ?? byKey.get(key) ?? null;
-    const priorStoreHash =
-      priorEntry?.materialization === 'symlink' ? expectedSymlinkStoreHash(priorEntry) : null;
+    const ownsPriorStore =
+      priorEntry?.materialization === 'symlink' ? symlinkStoreOwnership(priorEntry) : null;
     const ownershipStore = containedMutationPath(
       canonicalStore(a),
       canonicalStoreRoot(),
@@ -1044,7 +1073,7 @@ export async function planGlobalInstall(
     const decidedMaterialization: 'copy' | 'symlink' = input.link;
     let decidedStore: string | null = null;
     if (decidedMaterialization === 'symlink' || priorEntry?.materialization === 'symlink') {
-      await assertDesiredStoreOwnership(a, ownershipStore, priorEntry, priorStoreHash, input);
+      await assertDesiredStoreOwnership(a, ownershipStore, priorEntry, ownsPriorStore, input);
     }
     if (decidedMaterialization === 'symlink') {
       decidedStore = ownershipStore;
@@ -1062,7 +1091,7 @@ export async function planGlobalInstall(
       safeStore: decidedStore,
       ownershipStore,
       priorEntry,
-      priorStoreHash,
+      ownsPriorStore,
     });
   }
 
@@ -1176,7 +1205,7 @@ export async function planGlobalInstall(
             a,
             safeStore,
             planned.priorEntry,
-            planned.priorStoreHash,
+            planned.ownsPriorStore,
             input
           );
         });
@@ -1203,7 +1232,7 @@ export async function planGlobalInstall(
               a,
               planned.ownershipStore,
               planned.priorEntry,
-              planned.priorStoreHash,
+              planned.ownsPriorStore,
               input
             );
           }
@@ -1226,7 +1255,7 @@ export async function planGlobalInstall(
           } else if (priorStore !== null) {
             const removedStore = await removeStoreIfOwned(
               priorStore,
-              planned.priorStoreHash,
+              planned.ownsPriorStore,
               () => lockScope?.assert() ?? Promise.resolve()
             );
             if (!removedStore) {
@@ -1284,7 +1313,7 @@ export async function planGlobalInstall(
       if (mode === 'apply') await lockScope?.assert();
       removal = await removeIfOwned(
         entry,
-        entry.materialization === 'symlink' ? expectedSymlinkStoreHash(entry) : null,
+        entry.materialization === 'symlink' ? symlinkStoreOwnership(entry) : null,
         mode,
         () => lockScope?.assert() ?? Promise.resolve(),
         retainedStorePaths
@@ -1444,6 +1473,12 @@ async function assertDesiredArtifactOwnership(
 ): Promise<void> {
   const current = await lstatOrNull(safePath, 'global artifact');
   if (current === null) return;
+  if (current.isDirectory()) {
+    throw globalInstallRefusal(
+      `the global artifact "${artifact.filePath}" is a directory — ` +
+        'inspect it, move or remove it, then retry'
+    );
+  }
   // `force` bypasses ownership conflicts only in the non-ahead direction:
   // state stamped NEWER than this CLI (e.g. appearing between the preflight
   // scan and this assertion) yields only to the explicit downgrade override.
@@ -1472,9 +1507,17 @@ async function assertDesiredArtifactOwnership(
         `deliberately downgrade`
     );
   }
+  // Force can only overwrite a path the manifest records, so only then is it
+  // the remedy; an unrecorded path needs a person to decide what it is.
+  if (priorEntry !== null) {
+    throw globalInstallRefusal(
+      `the global artifact "${artifact.filePath}" no longer matches what orcaops recorded for it ` +
+        '(it was edited or replaced) — run `orcaops update --force` to overwrite it'
+    );
+  }
   throw globalInstallRefusal(
-    `the global artifact "${artifact.filePath}" is unowned or modified — ` +
-      `the existing path has neither current manifest ownership nor the exact generated identity`
+    `the global artifact "${artifact.filePath}" is not owned by orcaops — no manifest entry ` +
+      'records it and it differs from the generated file; inspect it, move or remove it, then retry'
   );
 }
 
@@ -1518,11 +1561,17 @@ async function assertDesiredStoreOwnership(
   artifact: DesiredArtifact,
   safeStore: string,
   priorEntry: GlobalInstallEntry | null,
-  priorStoreHash: string | null,
+  ownsPriorStore: StoreOwnershipCheck | null,
   input: { force?: boolean; overrideAhead?: boolean; cliVersion: string }
 ): Promise<void> {
   const current = await lstatOrNull(safeStore, 'global store artifact');
   if (current === null) return;
+  if (current.isDirectory()) {
+    throw globalInstallRefusal(
+      `the global store artifact "${safeStore}" is a directory — ` +
+        'inspect it, move or remove it, then retry'
+    );
+  }
   const raw = current.isFile() ? await readFile(safeStore, 'utf8') : null;
   const currentHash = raw === null ? null : sha256Hex(raw);
   if (currentHash === artifact.hash) return;
@@ -1535,7 +1584,7 @@ async function assertDesiredStoreOwnership(
       : null;
   if (
     priorStore === safeStore &&
-    ((priorStoreHash !== null && currentHash === priorStoreHash) ||
+    ((raw !== null && ownsPriorStore !== null && ownsPriorStore(raw)) ||
       (input.force === true && (input.overrideAhead === true || !currentAhead)))
   ) {
     return;
@@ -1547,7 +1596,17 @@ async function assertDesiredStoreOwnership(
         `deliberately downgrade`
     );
   }
-  throw globalInstallRefusal(`the global store artifact "${safeStore}" is unowned or modified`);
+  if (priorStore === safeStore) {
+    throw globalInstallRefusal(
+      `the global store artifact "${safeStore}" can't be verified as unmodified orcaops output ` +
+        '(it was edited, or rendered from templates this CLI no longer ships) — run ' +
+        '`orcaops update --force` to overwrite it'
+    );
+  }
+  throw globalInstallRefusal(
+    `the global store artifact "${safeStore}" is not owned by orcaops — no manifest entry ` +
+      'records it; inspect it, move or remove it, then retry'
+  );
 }
 
 async function atomicSymlinkFile(
@@ -1632,7 +1691,7 @@ async function rmdirIfEmpty(dir: string): Promise<void> {
  */
 async function removeIfOwned(
   entry: GlobalInstallEntry,
-  expectedStoreHash: string | null,
+  ownsStore: StoreOwnershipCheck | null,
   mode: 'apply' | 'preview',
   assertLease: () => Promise<void>,
   /** Store blobs an entry under ANOTHER agent root still points at — never deleted. */
@@ -1647,8 +1706,8 @@ async function removeIfOwned(
       safeStorePath === null ? null : await lstatOrNull(safeStorePath, 'global store artifact');
     const storeOwned =
       store?.isFile() === true &&
-      expectedStoreHash !== null &&
-      sha256Hex(await readFile(safeStorePath!, 'utf8')) === expectedStoreHash;
+      ownsStore !== null &&
+      ownsStore(await readFile(safeStorePath!, 'utf8'));
     // Left in place: breaking links under a root we cannot repair is worse than
     // leaking a blob, which is this file's documented safe direction.
     const storeShared = safeStorePath !== null && retainedStorePaths.has(safeStorePath);
@@ -1732,16 +1791,12 @@ async function removeIfOwned(
 
 async function removeStoreIfOwned(
   storePath: string,
-  expectedHash: string | null,
+  ownsStore: StoreOwnershipCheck | null,
   assertLease: () => Promise<void>
 ): Promise<boolean> {
   const store = await lstatOrNull(storePath, 'global store artifact');
   if (store === null) return true;
-  if (
-    !store.isFile() ||
-    expectedHash === null ||
-    sha256Hex(await readFile(storePath, 'utf8')) !== expectedHash
-  ) {
+  if (!store.isFile() || ownsStore === null || !ownsStore(await readFile(storePath, 'utf8'))) {
     return false;
   }
   await removeFileIfPresent(storePath, assertLease);

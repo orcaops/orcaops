@@ -13,6 +13,30 @@ import {
   CaptureSummaryInputSchema,
 } from './capture-input.js';
 import {
+  ApprovalBindingSchema,
+  AssessmentSchema,
+  AssignmentSchema,
+  AuthorizationRecordSchema,
+  ClaimRevisionSchema,
+  ConflictAnswerSchema,
+  CorrectionActionSchema,
+  DecisionRevisionSchema,
+  ExceptionSchema,
+  ObservationSchema,
+  PassageRestatementSchema,
+  ProcessingJobIdentitySchema,
+  PromotedCriterionEditSchema,
+  RelationshipSchema,
+  RequirementIdentitySchema,
+  RequirementRevisionSchema,
+  RevocationSchema,
+  SelectionSchema,
+  SelectorResolutionSchema,
+  SourceOccurrenceSchema,
+  SubjectRevisionSchema,
+  TaskUseSchema,
+} from './knowledge-contract.js';
+import {
   AgentUsageSnapshotPayloadSchema,
   InlineUsageRecordSchema,
   SidecarUsageRecordSchema,
@@ -50,6 +74,12 @@ function findBareStringLeaves(schema: z.ZodType, path: string, out: string[]): v
     findBareStringLeaves(schema.valueType as z.ZodType, `${path}{value}`, out);
     return;
   }
+  if (schema instanceof z.ZodUnion) {
+    schema.options.forEach((option, index) =>
+      findBareStringLeaves(option as z.ZodType, `${path}|${index}`, out)
+    );
+    return;
+  }
   if (schema instanceof z.ZodObject) {
     for (const [key, child] of Object.entries(schema.shape)) {
       findBareStringLeaves(child as z.ZodType, path === '' ? key : `${path}.${key}`, out);
@@ -81,6 +111,53 @@ const USAGE_PAYLOAD_SCHEMAS: Record<string, z.ZodType> = {
   InlineUsageRecordSchema,
   SidecarUsageRecordSchema,
 };
+
+// Knowledge records carry authored statements and rationale that are stored
+// and later transported, so they hold the same structural invariant.
+const KNOWLEDGE_SCHEMAS: Record<string, z.ZodType> = {
+  SourceOccurrenceSchema,
+  SubjectRevisionSchema,
+  RequirementIdentitySchema,
+  RequirementRevisionSchema,
+  DecisionRevisionSchema,
+  ClaimRevisionSchema,
+  TaskUseSchema,
+  PromotedCriterionEditSchema,
+  SelectionSchema,
+  ApprovalBindingSchema,
+  SelectorResolutionSchema,
+  ExceptionSchema,
+  CorrectionActionSchema,
+  RelationshipSchema,
+  PassageRestatementSchema,
+  ObservationSchema,
+  AssessmentSchema,
+  AssignmentSchema,
+  AuthorizationRecordSchema,
+  ConflictAnswerSchema,
+  RevocationSchema,
+  ProcessingJobIdentitySchema,
+};
+
+describe('knowledge-contract control-char policy completeness (structural)', () => {
+  for (const [name, schema] of Object.entries(KNOWLEDGE_SCHEMAS)) {
+    it(`${name}: every string field is proseText or identifierText (no bare z.string())`, () => {
+      const bare: string[] = [];
+      findBareStringLeaves(schema, '', bare);
+      expect(bare).toEqual([]);
+    });
+  }
+
+  it('NEGATIVE CONTROL: the walker descends into union members', () => {
+    const bad = z.discriminatedUnion('kind', [
+      z.strictObject({ kind: z.literal('a'), oops: z.string() }),
+      z.strictObject({ kind: z.literal('b'), fine: proseText() }),
+    ]);
+    const bare: string[] = [];
+    findBareStringLeaves(bad, 'edit', bare);
+    expect(bare).toEqual(['edit|0.oops']);
+  });
+});
 
 describe('usage-ledger control-char policy completeness (structural)', () => {
   for (const [name, schema] of Object.entries(USAGE_PAYLOAD_SCHEMAS)) {

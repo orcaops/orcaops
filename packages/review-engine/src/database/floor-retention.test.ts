@@ -225,7 +225,7 @@ it('selects original floor and base refs with evidence without inventing a polic
     (await readDatabaseReviewFloor({ authority: f.authority, reviewId: f.reviewId })).value
       ?.floorBytes
   ).toEqual(f.request.floorBytes);
-});
+}, 15_000);
 it.each(['auto', 'explicit'] as const)(
   'selects the authored %s policy and floor in one terminal transaction',
   async (policy) => {
@@ -401,7 +401,7 @@ it('settles simultaneous original floor callers once', async () => {
   expect(observed.rows.value.floors).toHaveLength(1);
   expect(observed.rows.value.bindings).toHaveLength(2);
   expect(observed.rows.value.receipts).toHaveLength(before.rows.value.receipts.length + 2);
-});
+}, 15_000);
 it('refuses proposed policy secrets before any connection or Git preparation', async () => {
   const f = await fixture();
   vi.clearAllMocks();

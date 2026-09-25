@@ -84,7 +84,7 @@ export function dependencyFilesChanged({ base, head, runGitDiff }) {
       };
 }
 
-function gitDiff(base, head) {
+export function gitDiff(base, head) {
   const result = spawnSync('git', ['diff', '--name-only', '-z', `${base}`, `${head}`], {
     encoding: 'utf8',
     cwd: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'),

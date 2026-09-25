@@ -34,6 +34,8 @@ function thread(id: string, state: AgentState, lastWriteMs = 1000): WatchThread 
     startedAtMs: null,
     planDecisions: [],
     nonGoals: [],
+    knowledge: null,
+    knowledgeUnavailable: null,
     recentEvents: [],
     version: '1:retained',
     omittedEvents: 0,

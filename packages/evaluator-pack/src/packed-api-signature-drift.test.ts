@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { EvaluatorContext, EvaluatorResultEnvelope } from '@orcaops/evaluator-protocol';
+import type { EvaluatorContext, EvaluatorResultEnvelopeV2 } from '@orcaops/evaluator-protocol';
 
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const packages = [
@@ -136,7 +136,7 @@ describe('packed api-signature-drift runtime', () => {
       ...process.env,
       ORCAOPS_CONTEXT_PATH: contextPath,
     });
-    const envelope = JSON.parse(stdout.trim()) as EvaluatorResultEnvelope;
+    const envelope = JSON.parse(stdout.trim()) as EvaluatorResultEnvelopeV2;
     expect(envelope.verdict).toBe('pass');
     expect(envelope.body).toMatch(/No TS\/JS files in scope changed/);
 

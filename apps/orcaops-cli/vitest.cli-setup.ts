@@ -36,6 +36,16 @@ for (const key of Object.keys(process.env)) {
 }
 process.env.ORCAOPS_CONFIG_HOME = makeFixtureTempDir('orcaops-test-cfg-');
 
+// Worker hermeticity: the CLI suite runs commands IN PROCESS, so
+// `process.argv[1]` is a vitest script, not `bin/orcaops.js`. A capture that
+// woke a worker would re-run that script as `knowledge worker` and spawn
+// garbage into every test run. The starter already refuses an entry that is not
+// the CLI's own; this is the belt to that brace, and it is set after the
+// ORCAOPS_* scrub above so the scrub cannot remove it. A test that wants a real
+// detached worker (tests/smoke/knowledge-worker.test.ts) clears it and names
+// the entry explicitly.
+process.env.ORCAOPS_KNOWLEDGE_WORKER_START = '0';
+
 // Same hermeticity rule for ambient coding-session identity: a dev running the
 // suite from inside a live Claude Code session carries CLAUDE_CODE_SESSION_ID,
 // which `InProcessAgent` merges over `process.env` — so `stampUsage` resolves

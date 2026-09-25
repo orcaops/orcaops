@@ -82,6 +82,11 @@ export function toneColor(theme: CockpitTheme, tone: DetailTone): string {
       return theme.FAINT;
     case 'guardrail':
       return theme.DIM;
+    case 'knowledge':
+      return theme.ACCENT;
+    // An applicable rule this plan records no use of is the one line a reader must not scan past.
+    case 'knowledge-missed':
+      return theme.AMBER;
     case 'question':
       return theme.AMBER;
     case 'detail':

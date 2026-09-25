@@ -217,6 +217,37 @@ describe('history Watch engine', { timeout: 60_000 }, () => {
     expect(project(f.engine, f.authority.projectId).writeSequence).toBe(shown.writeSequence);
   });
 
+  /**
+   * The block is read for the tick, not cached with the thread detail: a requirement adopted or
+   * withdrawn elsewhere moves the project's write sequence and leaves every artifact revision
+   * alone, so a block cached against a revision would go on showing a rule that no longer stands.
+   */
+  it('carries what stands beside each thread, re-read whenever the write sequence moves', async () => {
+    const f = await fixture();
+    const first = await f.add();
+    const sibling = await f.add();
+    await f.engine.start(now);
+
+    const before = project(f.engine, f.authority.projectId);
+    const boundary = before.threads.find((thread) => thread.artifactId === first)!.knowledge!.basis
+      .knowledge_boundary;
+    expect(boundary).toBe(before.writeSequence);
+    for (const thread of before.threads) {
+      // No processing state is read here, so the pane says so rather than claiming completeness.
+      expect(thread.knowledge!.coverage.processing).toBeNull();
+      expect(thread.knowledge!.coverage.statement).toContain('claims no completeness');
+      expect(thread.knowledge!.applicable_not_selected.statement.length).toBeGreaterThan(0);
+    }
+
+    await f.checkpoint(sibling, { summary: 'Closed', open: false });
+    await f.engine.tick(now + 2000);
+
+    const after = project(f.engine, f.authority.projectId);
+    const moved = after.threads.find((thread) => thread.artifactId === first)!;
+    expect(after.writeSequence).toBeGreaterThan(boundary);
+    expect(moved.knowledge!.basis.knowledge_boundary).toBe(after.writeSequence);
+  });
+
   it('hydrates only the changed artifact after a checkpoint and retains the sibling detail', async () => {
     const f = await fixture();
     const changed = await f.add();

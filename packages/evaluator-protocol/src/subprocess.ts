@@ -96,6 +96,16 @@ export interface BoundedSubprocessRequest {
    * settlement. Every production caller takes the default.
    */
   killGraceMs?: number;
+  /**
+   * The child's pid, as soon as it exists. On POSIX the child leads its own
+   * process group, so the pid is also the group id a caller signals with
+   * `-pid`. It is reported so a caller that must survive its own death — a
+   * caller that retains what it spawned, and terminates it after a crash —
+   * can record the group before the call finishes. Called at most once, and
+   * never for a spawn that failed. A throw here must not derail the run, so
+   * it is swallowed.
+   */
+  onSpawn?: (pid: number) => void;
 }
 
 export interface BoundedSubprocessResult {
@@ -440,6 +450,13 @@ export async function runBoundedSubprocess(
 
     child.once('spawn', () => {
       spawned = true;
+      if (child.pid !== undefined && req.onSpawn) {
+        try {
+          req.onSpawn(child.pid);
+        } catch {
+          // A caller's bookkeeping failure is not this process's to raise.
+        }
+      }
       if (pendingKillReason !== null) {
         const reason = pendingKillReason;
         pendingKillReason = null;

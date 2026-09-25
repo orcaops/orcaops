@@ -182,6 +182,8 @@ export async function recordDatabaseBlockDisposition(
     const appended = await appendDatabaseCaptureEvents({
       handle: writer,
       binding: context.binding,
+      processing: context.processing,
+      processingEnabled: context.config.knowledge_processing.enabled,
       artifactId: input.artifact,
       operationId: artifactOperationId(input.artifact, key, 'evaluator_disposition'),
       authoredPayload: payload,

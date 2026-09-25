@@ -2,7 +2,8 @@ import type Database from 'better-sqlite3';
 
 import { loadDatabase } from './driver.js';
 import { ProjectDatabaseError } from './errors.js';
-import { PROJECT_DATABASE_SCHEMA, PROJECT_DATABASE_SCHEMA_VERSION } from './schema.js';
+import { projectSchemaVersionRefusal } from './schema-version.js';
+import { PROJECT_DATABASE_SCHEMA } from './schema.js';
 
 interface SchemaObject {
   type: string;
@@ -29,11 +30,8 @@ export function validateProjectSchemaDefinition(
   database: Database.Database,
   version: number
 ): void {
-  if (version !== PROJECT_DATABASE_SCHEMA_VERSION)
-    throw new ProjectDatabaseError(
-      'HISTORY_FORMAT_UNSUPPORTED',
-      'This build cannot open this database format; preserve it and use a build that supports its original format'
-    );
+  const refusal = projectSchemaVersionRefusal(version);
+  if (refusal) throw refusal;
   const observed = new Map(
     (database.prepare(schemaQueries).all() as SchemaObject[]).map((entry) => [entry.name, entry])
   );

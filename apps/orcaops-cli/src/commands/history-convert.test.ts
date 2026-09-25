@@ -315,3 +315,34 @@ it.each(
     }
   }
 );
+
+it.each([
+  ['a preview', ['history', 'convert', '--json']],
+  ['an apply', ['history', 'convert', '--apply', '--offline', '--json']],
+])(
+  'points a repository with no legacy identity at capturing instead of converting on %s',
+  { timeout: 120_000 },
+  async (_mode, argv) => {
+    const directory = await fs.realpath(
+      await fs.mkdtemp(path.join(tmpdir(), 'orcaops-cli-convert-'))
+    );
+    directories.push(directory);
+    const cwd = path.join(directory, 'repo');
+    const root = path.join(directory, 'data');
+    await fs.mkdir(cwd, { recursive: true });
+    await promisify(execFile)('git', ['-C', cwd, 'init', '-qb', 'main']);
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))
+    ) as NodeJS.ProcessEnv;
+    const result = await run(
+      { cwd, root, env } as unknown as Awaited<ReturnType<typeof legacyRepository>>,
+      argv
+    );
+    expect(result.exitCode).toBe(1);
+    const error = (result.envelope as { error: { code: string; message: string } }).error;
+    expect(error.code).toBe('INVALID_INPUT');
+    expect(error.message).toContain('nothing to convert');
+    expect(error.message).toContain('orcaops capture plan');
+    await expect(fs.readdir(root)).rejects.toMatchObject({ code: 'ENOENT' });
+  }
+);

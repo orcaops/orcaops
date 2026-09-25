@@ -35,7 +35,7 @@ it('reads existing database history through the executable without changing appl
   );
   expect(JSON.parse(result.stdout)).toMatchObject({
     ok: true,
-    schema_version: 3,
+    schema_version: 4,
     count: 1,
     results: [expect.objectContaining({ artifact_id: id, source_kind: 'plan' })],
     completeness: { complete: true },

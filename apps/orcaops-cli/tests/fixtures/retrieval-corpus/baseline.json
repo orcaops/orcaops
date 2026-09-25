@@ -1,0 +1,895 @@
+{
+  "corpus": {
+    "artifacts": 10,
+    "events": 46,
+    "searchSourceRows": 56,
+    "cases": 51,
+    "queries": 67,
+    "queryEventPairs": 80,
+    "distinctExpectedEvents": 26
+  },
+  "summaries": {
+    "default": {
+      "limit": 25,
+      "overall": {
+        "queries": 67,
+        "fullyAnswered": 31,
+        "partlyAnswered": 3,
+        "unanswered": 33,
+        "expectedEvents": 80,
+        "foundEvents": 40,
+        "recall": 0.5,
+        "foundThroughOwnText": 33,
+        "ownTextRecall": 0.412,
+        "cases": 51,
+        "caseExpectedEvents": 61,
+        "caseFoundEvents": 39,
+        "caseRecall": 0.639,
+        "caseFoundThroughOwnText": 33
+      },
+      "byPhrasing": {
+        "exact wording": {
+          "queries": 14,
+          "fullyAnswered": 14,
+          "partlyAnswered": 0,
+          "unanswered": 0,
+          "expectedEvents": 15,
+          "foundEvents": 15,
+          "recall": 1,
+          "foundThroughOwnText": 14,
+          "ownTextRecall": 0.933,
+          "cases": 14,
+          "caseExpectedEvents": 15,
+          "caseFoundEvents": 15,
+          "caseRecall": 1,
+          "caseFoundThroughOwnText": 14
+        },
+        "single keyword": {
+          "queries": 4,
+          "fullyAnswered": 2,
+          "partlyAnswered": 2,
+          "unanswered": 0,
+          "expectedEvents": 11,
+          "foundEvents": 9,
+          "recall": 0.818,
+          "foundThroughOwnText": 9,
+          "ownTextRecall": 0.818,
+          "cases": 3,
+          "caseExpectedEvents": 9,
+          "caseFoundEvents": 9,
+          "caseRecall": 1,
+          "caseFoundThroughOwnText": 9
+        },
+        "partial wording": {
+          "queries": 18,
+          "fullyAnswered": 11,
+          "partlyAnswered": 1,
+          "unanswered": 6,
+          "expectedEvents": 19,
+          "foundEvents": 12,
+          "recall": 0.632,
+          "foundThroughOwnText": 10,
+          "ownTextRecall": 0.526,
+          "cases": 14,
+          "caseExpectedEvents": 15,
+          "caseFoundEvents": 12,
+          "caseRecall": 0.8,
+          "caseFoundThroughOwnText": 10
+        },
+        "paraphrase": {
+          "queries": 21,
+          "fullyAnswered": 1,
+          "partlyAnswered": 0,
+          "unanswered": 20,
+          "expectedEvents": 25,
+          "foundEvents": 1,
+          "recall": 0.04,
+          "foundThroughOwnText": 0,
+          "ownTextRecall": 0,
+          "cases": 14,
+          "caseExpectedEvents": 16,
+          "caseFoundEvents": 1,
+          "caseRecall": 0.063,
+          "caseFoundThroughOwnText": 0
+        },
+        "obsolete wording": {
+          "queries": 10,
+          "fullyAnswered": 3,
+          "partlyAnswered": 0,
+          "unanswered": 7,
+          "expectedEvents": 10,
+          "foundEvents": 3,
+          "recall": 0.3,
+          "foundThroughOwnText": 0,
+          "ownTextRecall": 0,
+          "cases": 6,
+          "caseExpectedEvents": 6,
+          "caseFoundEvents": 2,
+          "caseRecall": 0.333,
+          "caseFoundThroughOwnText": 0
+        }
+      },
+      "byFamily": {
+        "decisions and alternatives": {
+          "queries": 19,
+          "fullyAnswered": 9,
+          "partlyAnswered": 1,
+          "unanswered": 9,
+          "expectedEvents": 25,
+          "foundEvents": 15,
+          "recall": 0.6,
+          "foundThroughOwnText": 14,
+          "ownTextRecall": 0.56,
+          "cases": 15,
+          "caseExpectedEvents": 21,
+          "caseFoundEvents": 15,
+          "caseRecall": 0.714,
+          "caseFoundThroughOwnText": 14
+        },
+        "acceptance criteria and lineage": {
+          "queries": 19,
+          "fullyAnswered": 10,
+          "partlyAnswered": 0,
+          "unanswered": 9,
+          "expectedEvents": 19,
+          "foundEvents": 10,
+          "recall": 0.526,
+          "foundThroughOwnText": 5,
+          "ownTextRecall": 0.263,
+          "cases": 13,
+          "caseExpectedEvents": 13,
+          "caseFoundEvents": 9,
+          "caseRecall": 0.692,
+          "caseFoundThroughOwnText": 5
+        },
+        "uncertainty": {
+          "queries": 10,
+          "fullyAnswered": 5,
+          "partlyAnswered": 0,
+          "unanswered": 5,
+          "expectedEvents": 15,
+          "foundEvents": 6,
+          "recall": 0.4,
+          "foundThroughOwnText": 6,
+          "ownTextRecall": 0.4,
+          "cases": 8,
+          "caseExpectedEvents": 11,
+          "caseFoundEvents": 6,
+          "caseRecall": 0.545,
+          "caseFoundThroughOwnText": 6
+        },
+        "deferred decisions": {
+          "queries": 10,
+          "fullyAnswered": 3,
+          "partlyAnswered": 2,
+          "unanswered": 5,
+          "expectedEvents": 12,
+          "foundEvents": 5,
+          "recall": 0.417,
+          "foundThroughOwnText": 5,
+          "ownTextRecall": 0.417,
+          "cases": 7,
+          "caseExpectedEvents": 8,
+          "caseFoundEvents": 5,
+          "caseRecall": 0.625,
+          "caseFoundThroughOwnText": 5
+        },
+        "non-goals": {
+          "queries": 9,
+          "fullyAnswered": 4,
+          "partlyAnswered": 0,
+          "unanswered": 5,
+          "expectedEvents": 9,
+          "foundEvents": 4,
+          "recall": 0.444,
+          "foundThroughOwnText": 3,
+          "ownTextRecall": 0.333,
+          "cases": 8,
+          "caseExpectedEvents": 8,
+          "caseFoundEvents": 4,
+          "caseRecall": 0.5,
+          "caseFoundThroughOwnText": 3
+        }
+      },
+      "staleGuidanceOnly": 6,
+      "supersededOutranksStanding": 2,
+      "supersededWithoutSuccessor": 7,
+      "digestOnlyAnswers": 2,
+      "rows": {
+        "returned": 106,
+        "digest": 43,
+        "events": 63,
+        "supersededEvents": 15
+      },
+      "scannedPerQuery": {
+        "min": 56,
+        "max": 56
+      }
+    },
+    "tight": {
+      "limit": 3,
+      "overall": {
+        "queries": 67,
+        "fullyAnswered": 29,
+        "partlyAnswered": 4,
+        "unanswered": 34,
+        "expectedEvents": 80,
+        "foundEvents": 36,
+        "recall": 0.45,
+        "foundThroughOwnText": 29,
+        "ownTextRecall": 0.362,
+        "cases": 51,
+        "caseExpectedEvents": 61,
+        "caseFoundEvents": 35,
+        "caseRecall": 0.574,
+        "caseFoundThroughOwnText": 29
+      },
+      "byPhrasing": {
+        "exact wording": {
+          "queries": 14,
+          "fullyAnswered": 14,
+          "partlyAnswered": 0,
+          "unanswered": 0,
+          "expectedEvents": 15,
+          "foundEvents": 15,
+          "recall": 1,
+          "foundThroughOwnText": 14,
+          "ownTextRecall": 0.933,
+          "cases": 14,
+          "caseExpectedEvents": 15,
+          "caseFoundEvents": 15,
+          "caseRecall": 1,
+          "caseFoundThroughOwnText": 14
+        },
+        "single keyword": {
+          "queries": 4,
+          "fullyAnswered": 0,
+          "partlyAnswered": 3,
+          "unanswered": 1,
+          "expectedEvents": 11,
+          "foundEvents": 5,
+          "recall": 0.455,
+          "foundThroughOwnText": 5,
+          "ownTextRecall": 0.455,
+          "cases": 3,
+          "caseExpectedEvents": 9,
+          "caseFoundEvents": 5,
+          "caseRecall": 0.556,
+          "caseFoundThroughOwnText": 5
+        },
+        "partial wording": {
+          "queries": 18,
+          "fullyAnswered": 11,
+          "partlyAnswered": 1,
+          "unanswered": 6,
+          "expectedEvents": 19,
+          "foundEvents": 12,
+          "recall": 0.632,
+          "foundThroughOwnText": 10,
+          "ownTextRecall": 0.526,
+          "cases": 14,
+          "caseExpectedEvents": 15,
+          "caseFoundEvents": 12,
+          "caseRecall": 0.8,
+          "caseFoundThroughOwnText": 10
+        },
+        "paraphrase": {
+          "queries": 21,
+          "fullyAnswered": 1,
+          "partlyAnswered": 0,
+          "unanswered": 20,
+          "expectedEvents": 25,
+          "foundEvents": 1,
+          "recall": 0.04,
+          "foundThroughOwnText": 0,
+          "ownTextRecall": 0,
+          "cases": 14,
+          "caseExpectedEvents": 16,
+          "caseFoundEvents": 1,
+          "caseRecall": 0.063,
+          "caseFoundThroughOwnText": 0
+        },
+        "obsolete wording": {
+          "queries": 10,
+          "fullyAnswered": 3,
+          "partlyAnswered": 0,
+          "unanswered": 7,
+          "expectedEvents": 10,
+          "foundEvents": 3,
+          "recall": 0.3,
+          "foundThroughOwnText": 0,
+          "ownTextRecall": 0,
+          "cases": 6,
+          "caseExpectedEvents": 6,
+          "caseFoundEvents": 2,
+          "caseRecall": 0.333,
+          "caseFoundThroughOwnText": 0
+        }
+      },
+      "byFamily": {
+        "decisions and alternatives": {
+          "queries": 19,
+          "fullyAnswered": 8,
+          "partlyAnswered": 2,
+          "unanswered": 9,
+          "expectedEvents": 25,
+          "foundEvents": 13,
+          "recall": 0.52,
+          "foundThroughOwnText": 12,
+          "ownTextRecall": 0.48,
+          "cases": 15,
+          "caseExpectedEvents": 21,
+          "caseFoundEvents": 13,
+          "caseRecall": 0.619,
+          "caseFoundThroughOwnText": 12
+        },
+        "acceptance criteria and lineage": {
+          "queries": 19,
+          "fullyAnswered": 10,
+          "partlyAnswered": 0,
+          "unanswered": 9,
+          "expectedEvents": 19,
+          "foundEvents": 10,
+          "recall": 0.526,
+          "foundThroughOwnText": 5,
+          "ownTextRecall": 0.263,
+          "cases": 13,
+          "caseExpectedEvents": 13,
+          "caseFoundEvents": 9,
+          "caseRecall": 0.692,
+          "caseFoundThroughOwnText": 5
+        },
+        "uncertainty": {
+          "queries": 10,
+          "fullyAnswered": 4,
+          "partlyAnswered": 0,
+          "unanswered": 6,
+          "expectedEvents": 15,
+          "foundEvents": 4,
+          "recall": 0.267,
+          "foundThroughOwnText": 4,
+          "ownTextRecall": 0.267,
+          "cases": 8,
+          "caseExpectedEvents": 11,
+          "caseFoundEvents": 4,
+          "caseRecall": 0.364,
+          "caseFoundThroughOwnText": 4
+        },
+        "deferred decisions": {
+          "queries": 10,
+          "fullyAnswered": 3,
+          "partlyAnswered": 2,
+          "unanswered": 5,
+          "expectedEvents": 12,
+          "foundEvents": 5,
+          "recall": 0.417,
+          "foundThroughOwnText": 5,
+          "ownTextRecall": 0.417,
+          "cases": 7,
+          "caseExpectedEvents": 8,
+          "caseFoundEvents": 5,
+          "caseRecall": 0.625,
+          "caseFoundThroughOwnText": 5
+        },
+        "non-goals": {
+          "queries": 9,
+          "fullyAnswered": 4,
+          "partlyAnswered": 0,
+          "unanswered": 5,
+          "expectedEvents": 9,
+          "foundEvents": 4,
+          "recall": 0.444,
+          "foundThroughOwnText": 3,
+          "ownTextRecall": 0.333,
+          "cases": 8,
+          "caseExpectedEvents": 8,
+          "caseFoundEvents": 4,
+          "caseRecall": 0.5,
+          "caseFoundThroughOwnText": 3
+        }
+      },
+      "staleGuidanceOnly": 6,
+      "supersededOutranksStanding": 2,
+      "supersededWithoutSuccessor": 7,
+      "digestOnlyAnswers": 2,
+      "rows": {
+        "returned": 92,
+        "digest": 35,
+        "events": 57,
+        "supersededEvents": 15
+      },
+      "scannedPerQuery": {
+        "min": 56,
+        "max": 56
+      }
+    }
+  },
+  "tightPage": {
+    "queriesCutShort": 4,
+    "cutShortAndReportedTruncated": 4
+  },
+  "hitFields": [
+    "artifact_commit_generation",
+    "artifact_id",
+    "content_event_id",
+    "decision_provenance",
+    "enriched_at",
+    "evidence_time",
+    "evidence_time_basis",
+    "evidence_time_unknown_reason",
+    "imported_at",
+    "knowledge",
+    "match_class",
+    "origin",
+    "project",
+    "project_id",
+    "recorded_at",
+    "snippet",
+    "snippet_field",
+    "source_event_id",
+    "source_id",
+    "source_kind",
+    "source_locator",
+    "source_ownership"
+  ],
+  "structuredReads": {
+    "volume": {
+      "decisions": {
+        "calls": 1,
+        "texts": 95
+      },
+      "loose-ends": {
+        "calls": 1,
+        "texts": 25
+      },
+      "step brief": {
+        "calls": 17,
+        "texts": 58
+      }
+    },
+    "coverage": {
+      "decisions and alternatives": {
+        "expectedRecords": 21,
+        "present": {
+          "decisions": 21,
+          "loose-ends": 0,
+          "step brief": 0
+        }
+      },
+      "acceptance criteria and lineage": {
+        "expectedRecords": 13,
+        "present": {
+          "decisions": 0,
+          "loose-ends": 0,
+          "step brief": 9
+        }
+      },
+      "uncertainty": {
+        "expectedRecords": 8,
+        "present": {
+          "decisions": 0,
+          "loose-ends": 8,
+          "step brief": 0
+        }
+      },
+      "deferred decisions": {
+        "expectedRecords": 7,
+        "present": {
+          "decisions": 7,
+          "loose-ends": 7,
+          "step brief": 0
+        }
+      },
+      "non-goals": {
+        "expectedRecords": 8,
+        "present": {
+          "decisions": 0,
+          "loose-ends": 0,
+          "step brief": 8
+        }
+      }
+    }
+  },
+  "continuingRecords": {
+    "published": {
+      "requirements": 4,
+      "decisions": 1,
+      "decisionRevisions": 2
+    },
+    "limit": 25,
+    "bareSuperseded": 7,
+    "carryingStanding": 5,
+    "namingTheReplacement": 5,
+    "bare": {
+      "banner while uploads are throttled": {
+        "banner throttled": "1 bare superseded hit(s) citing 3 record(s): superseded, with the wording that stands beside it; withdrawn, with nothing standing in its place"
+      },
+      "throttling banner requirement, since removed": {
+        "A throttled upload shows a banner": "1 bare superseded hit(s) citing 3 record(s): superseded, with the wording that stands beside it; withdrawn, with nothing standing in its place",
+        "banner sync is slowed": "1 bare superseded hit(s) citing 3 record(s): superseded, with the wording that stands beside it; withdrawn, with nothing standing in its place"
+      },
+      "declining consent signs out, since removed": {
+        "Declining consent signs the inspector out": "1 bare superseded hit(s) citing 2 record(s): superseded, with the wording that stands beside it; withdrawn, with nothing standing in its place"
+      },
+      "retry exhaustion, since amended": {
+        "What to do with a note that still fails after the maximum number of attempts": "1 bare superseded hit(s); no continuing record cites them",
+        "note still fails maximum attempts": "1 bare superseded hit(s); no continuing record cites them"
+      },
+      "telemetry consent, since reworded": {
+        "Consent for crash reporting and analytics": "1 bare superseded hit(s) citing 2 record(s): superseded, with the wording that stands beside it; withdrawn, with nothing standing in its place"
+      }
+    }
+  },
+  "cases": {
+    "storage engine choice": {
+      "Use SQLite for on-device storage": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "rejected key-value store": {
+      "LevelDB key-value store": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "why server-side deduplication lost": {
+      "Two inspectors can legitimately file identical notes": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "where the consent gate is enforced": {
+      "Enforce the gate in the transport layer": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "decisions that assume SQLite": {
+      "SQLite": {
+        "default": "found 5 of 5 (ranks 6, 5, 3, 2, 1), 5 through own text",
+        "tight": "found 3 of 5 (ranks -, -, 3, 2, 1), 3 through own text; 2 matched but fell outside the page"
+      }
+    },
+    "token bucket over a fixed window": {
+      "token bucket fixed window": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "banner while uploads are throttled, one decision quoted": {
+      "throttling banner": {
+        "default": "found 2 of 2 (ranks 1, 3), 1 through own text",
+        "tight": "found 2 of 2 (ranks 1, 3), 1 through own text"
+      }
+    },
+    "banner while uploads are throttled": {
+      "banner throttled": {
+        "default": "found 1 of 2 (ranks -, 1), 1 through own text; unmatched lack: throttled; superseded event at rank 2 without its successor",
+        "tight": "found 1 of 2 (ranks -, 1), 1 through own text; unmatched lack: throttled; superseded event at rank 2 without its successor"
+      }
+    },
+    "making retries safe to repeat": {
+      "idempotency key retries": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "no down migrations": {
+      "migrations forward only": {
+        "default": "found 1 of 1 (ranks 2), 1 through own text",
+        "tight": "found 1 of 1 (ranks 2), 1 through own text"
+      },
+      "down migration": {
+        "default": "found 0 of 1; unmatched lack: migration; digest of an expected artifact at rank 1",
+        "tight": "found 0 of 1; unmatched lack: migration; digest of an expected artifact at rank 1"
+      }
+    },
+    "preventing duplicate notes": {
+      "prevent duplicate notes when resending": {
+        "default": "found 0 of 1; unmatched lack: prevent, when, resending",
+        "tight": "found 0 of 1; unmatched lack: prevent, when, resending"
+      },
+      "dedupe repeated submissions": {
+        "default": "found 0 of 1; unmatched lack: dedupe, repeated, submissions",
+        "tight": "found 0 of 1; unmatched lack: dedupe, repeated, submissions"
+      }
+    },
+    "newest edit wins": {
+      "newest edit wins": {
+        "default": "found 0 of 1; unmatched lack: newest",
+        "tight": "found 0 of 1; unmatched lack: newest"
+      }
+    },
+    "most recent change overrides": {
+      "most recent change overrides": {
+        "default": "found 0 of 1; unmatched lack: most, recent, change, overrides",
+        "tight": "found 0 of 1; unmatched lack: most, recent, change, overrides"
+      }
+    },
+    "images inside the database": {
+      "images inside the database": {
+        "default": "found 0 of 1; unmatched lack: images, database; digest of an expected artifact at rank 1",
+        "tight": "found 0 of 1; unmatched lack: images, database; digest of an expected artifact at rank 1"
+      },
+      "pictures stored as binary data": {
+        "default": "found 0 of 1; unmatched lack: pictures, stored, binary, data",
+        "tight": "found 0 of 1; unmatched lack: pictures, stored, binary, data"
+      }
+    },
+    "terms of service as consent": {
+      "agreeing to the terms counts as permission": {
+        "default": "found 0 of 1; unmatched lack: agreeing, counts, permission",
+        "tight": "found 0 of 1; unmatched lack: agreeing, counts, permission"
+      },
+      "implied consent at signup": {
+        "default": "found 0 of 1; unmatched lack: implied, at, signup",
+        "tight": "found 0 of 1; unmatched lack: implied, at, signup"
+      }
+    },
+    "saving with the network off": {
+      "succeeds with the network interface disabled": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "current request ceiling": {
+      "at most 20 upload requests per minute per device": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "queue pause on a 429, carried across the revision": {
+      "A 429 response pauses the queue": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "longest retry delay": {
+      "retry delay ceiling": {
+        "default": "found 0 of 1; unmatched lack: delay",
+        "tight": "found 0 of 1; unmatched lack: delay"
+      },
+      "backoff five minute": {
+        "default": "found 1 of 1 (ranks 1), 0 through own text",
+        "tight": "found 1 of 1 (ranks 1), 0 through own text"
+      }
+    },
+    "queued uploads after consent is revoked": {
+      "revoking consent queued uploads": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "restoring an export": {
+      "export restored factory reset": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "database survives a kill mid-write": {
+      "database survives app killed during write": {
+        "default": "found 0 of 1; unmatched lack: survives, killed, during",
+        "tight": "found 0 of 1; unmatched lack: survives, killed, during"
+      },
+      "crash safety": {
+        "default": "found 1 of 1 (ranks 1), 0 through own text",
+        "tight": "found 1 of 1 (ranks 1), 0 through own text"
+      }
+    },
+    "uploads keep their order": {
+      "notes sent in the sequence they were created": {
+        "default": "found 0 of 1; unmatched lack: sent, sequence, created",
+        "tight": "found 0 of 1; unmatched lack: sent, sequence, created"
+      }
+    },
+    "audit entries are immutable": {
+      "immutable audit records": {
+        "default": "found 0 of 1; unmatched lack: immutable, records",
+        "tight": "found 0 of 1; unmatched lack: immutable, records"
+      },
+      "tamper proof consent history": {
+        "default": "found 0 of 1; unmatched lack: proof",
+        "tight": "found 0 of 1; unmatched lack: proof"
+      }
+    },
+    "first request ceiling, since rewritten": {
+      "at most 100 upload requests per minute per device": {
+        "default": "found 1 of 1 (ranks 2), 0 through own text; superseded source at rank 1, above the standing event",
+        "tight": "found 1 of 1 (ranks 2), 0 through own text; superseded source at rank 1, above the standing event"
+      },
+      "100 requests per minute": {
+        "default": "found 1 of 1 (ranks 1), 0 through own text; superseded source at rank 2, below the standing event",
+        "tight": "found 1 of 1 (ranks 1), 0 through own text; superseded source at rank 2, below the standing event"
+      }
+    },
+    "throttling banner requirement, since removed": {
+      "A throttled upload shows a banner": {
+        "default": "found 0 of 1; unmatched lack: throttled; superseded source at rank 1, returned without its standing",
+        "tight": "found 0 of 1; unmatched lack: throttled; superseded source at rank 1, returned without its standing"
+      },
+      "banner sync is slowed": {
+        "default": "found 0 of 1; unmatched lack: slowed; superseded source at rank 1, returned without its standing",
+        "tight": "found 0 of 1; unmatched lack: slowed; superseded source at rank 1, returned without its standing"
+      }
+    },
+    "consent once per device, since rewritten": {
+      "Consent is requested once per device": {
+        "default": "found 1 of 1 (ranks 2), 0 through own text; superseded source at rank 1, above the standing event",
+        "tight": "found 1 of 1 (ranks 2), 0 through own text; superseded source at rank 1, above the standing event"
+      }
+    },
+    "declining consent signs out, since removed": {
+      "Declining consent signs the inspector out": {
+        "default": "found 0 of 1; unmatched lack: signs; superseded source at rank 1, returned without its standing",
+        "tight": "found 0 of 1; unmatched lack: signs; superseded source at rank 1, returned without its standing"
+      },
+      "decline consent sign out": {
+        "default": "found 0 of 1; unmatched lack: decline, sign; superseded source not returned",
+        "tight": "found 0 of 1; unmatched lack: decline, sign; superseded source not returned"
+      }
+    },
+    "idempotency key retention": {
+      "Whether the server keeps idempotency keys for longer than 24 hours": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "guardian consent for minors": {
+      "inspectors under 18 need a guardian": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "write-ahead log growth": {
+      "write-ahead log grow": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "battery cost of flushing": {
+      "battery flush": {
+        "default": "found 0 of 1; unmatched lack: flush",
+        "tight": "found 0 of 1; unmatched lack: flush"
+      },
+      "flushing battery": {
+        "default": "found 1 of 1 (ranks 2), 1 through own text",
+        "tight": "found 1 of 1 (ranks 2), 1 through own text"
+      }
+    },
+    "doubts about consent": {
+      "consent": {
+        "default": "found 2 of 2 (ranks 6, 5), 2 through own text",
+        "tight": "found 0 of 2; 2 matched but fell outside the page"
+      }
+    },
+    "unresolved legal questions": {
+      "open legal questions": {
+        "default": "found 0 of 3; unmatched lack: open, questions / open, legal, questions / open, legal, questions",
+        "tight": "found 0 of 3; unmatched lack: open, questions / open, legal, questions / open, legal, questions"
+      },
+      "unresolved compliance concerns": {
+        "default": "found 0 of 3; unmatched lack: unresolved, compliance, concerns / unresolved, compliance, concerns / unresolved, compliance, concerns",
+        "tight": "found 0 of 3; unmatched lack: unresolved, compliance, concerns / unresolved, compliance, concerns / unresolved, compliance, concerns"
+      }
+    },
+    "stale consent on a long-offline tablet": {
+      "stale consent on a disconnected tablet": {
+        "default": "found 0 of 1; unmatched lack: stale, on, a, disconnected, tablet",
+        "tight": "found 0 of 1; unmatched lack: stale, on, a, disconnected, tablet"
+      }
+    },
+    "slow launch with a large backlog": {
+      "slow launch with a big backlog": {
+        "default": "found 0 of 1; unmatched lack: slow, launch, with, big, backlog",
+        "tight": "found 0 of 1; unmatched lack: slow, launch, with, big, backlog"
+      }
+    },
+    "cap on unsent notes": {
+      "cap how many unsent notes a device may hold": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "asking for consent again": {
+      "How often to ask again when the privacy policy text changes": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "vacuuming the database": {
+      "vacuum database": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "postponed encryption choices": {
+      "encryption": {
+        "default": "found 1 of 2 (ranks 1, -), 1 through own text; unmatched lack: encryption",
+        "tight": "found 1 of 2 (ranks 1, -), 1 through own text; unmatched lack: encryption"
+      },
+      "encrypted": {
+        "default": "found 1 of 2 (ranks -, 1), 1 through own text; unmatched lack: encrypted",
+        "tight": "found 1 of 2 (ranks -, 1), 1 through own text; unmatched lack: encrypted"
+      }
+    },
+    "uploads that never succeed": {
+      "permanently failing uploads": {
+        "default": "found 0 of 1; unmatched lack: permanently, failing",
+        "tight": "found 0 of 1; unmatched lack: permanently, failing"
+      },
+      "give up after too many failures": {
+        "default": "found 0 of 1; unmatched lack: give, up, after, too, many, failures",
+        "tight": "found 0 of 1; unmatched lack: give, up, after, too, many, failures"
+      }
+    },
+    "reclaiming space from uploaded photos": {
+      "free up space after photos are synced": {
+        "default": "found 0 of 1; unmatched lack: free, up, space, synced",
+        "tight": "found 0 of 1; unmatched lack: free, up, space, synced"
+      }
+    },
+    "retry exhaustion, since amended": {
+      "What to do with a note that still fails after the maximum number of attempts": {
+        "default": "found 0 of 1; unmatched lack: what, to, do, still, fails, after, maximum, number, of, attempts; superseded source at rank 1, returned without its standing",
+        "tight": "found 0 of 1; unmatched lack: what, to, do, still, fails, after, maximum, number, of, attempts; superseded source at rank 1, returned without its standing"
+      },
+      "note still fails maximum attempts": {
+        "default": "found 0 of 1; unmatched lack: still, fails, maximum, attempts; superseded source at rank 1, returned without its standing",
+        "tight": "found 0 of 1; unmatched lack: still, fails, maximum, attempts; superseded source at rank 1, returned without its standing"
+      }
+    },
+    "no live collaboration": {
+      "Real-time collaboration on a shared note": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "why video is excluded": {
+      "Video files are too large for the cellular plans inspectors use": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "server quotas": {
+      "server quota": {
+        "default": "found 1 of 1 (ranks 1), 1 through own text",
+        "tight": "found 1 of 1 (ranks 1), 1 through own text"
+      }
+    },
+    "automatic merge": {
+      "automatic merge": {
+        "default": "found 1 of 1 (ranks 1), 0 through own text",
+        "tight": "found 1 of 1 (ranks 1), 0 through own text"
+      }
+    },
+    "encrypting the local database": {
+      "encrypt local database": {
+        "default": "found 0 of 1; unmatched lack: encrypt, local",
+        "tight": "found 0 of 1; unmatched lack: encrypt, local"
+      },
+      "database encryption on the tablet": {
+        "default": "found 0 of 1; unmatched lack: tablet",
+        "tight": "found 0 of 1; unmatched lack: tablet"
+      }
+    },
+    "browser version": {
+      "browser version of the app": {
+        "default": "found 0 of 1; unmatched lack: version",
+        "tight": "found 0 of 1; unmatched lack: version"
+      }
+    },
+    "admin dashboard for consent history": {
+      "admin dashboard for consent history": {
+        "default": "found 0 of 1; unmatched lack: admin, dashboard",
+        "tight": "found 0 of 1; unmatched lack: admin, dashboard"
+      }
+    },
+    "telemetry consent, since reworded": {
+      "Consent for crash reporting and analytics": {
+        "default": "found 0 of 1; unmatched lack: reporting; superseded source at rank 1, returned without its standing",
+        "tight": "found 0 of 1; unmatched lack: reporting; superseded source at rank 1, returned without its standing"
+      }
+    }
+  }
+}

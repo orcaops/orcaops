@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import type { EvaluatorContext, EvaluatorResultEnvelope } from '@orcaops/evaluator-protocol';
+import type { EvaluatorContext, EvaluatorResultEnvelopeV2 } from '@orcaops/evaluator-protocol';
 import { pass, runIfDispatched, violation } from '@orcaops/evaluator-sdk';
 
-export function check(ctx: EvaluatorContext): EvaluatorResultEnvelope {
+export function check(ctx: EvaluatorContext): EvaluatorResultEnvelopeV2 {
   const rawArgs = ctx.params;
   const maxDiff =
     typeof rawArgs.max_diff_fraction === 'number' &&

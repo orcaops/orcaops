@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import type { EvaluatorContext, EvaluatorResultEnvelope } from '@orcaops/evaluator-protocol';
-import { pass, runIfDispatched, violation } from '@orcaops/evaluator-sdk';
+import type { EvaluatorContext, EvaluatorResultEnvelopeV2 } from '@orcaops/evaluator-protocol';
+import { finding, findingKey, pass, runIfDispatched, violation } from '@orcaops/evaluator-sdk';
 
-export function check(ctx: EvaluatorContext): EvaluatorResultEnvelope {
+export function check(ctx: EvaluatorContext): EvaluatorResultEnvelopeV2 {
   if (ctx.plan.revision_n === 0) {
     return pass('PASS\n\nInitial plan capture has no prior revision to compare.', {
       raw: { revision_n: 0 },
@@ -35,7 +35,20 @@ export function check(ctx: EvaluatorContext): EvaluatorResultEnvelope {
     `VIOLATION\n\nRevision n=${ctx.plan.revision_n} added ${added.length} touched_scope ` +
       `tag(s): ${list}. Sensitive-scope additions trigger evaluator gates the prior plan didn't ` +
       `see; reviewers should re-look at the new scopes.`,
-    { raw: { revision_n: ctx.plan.revision_n, added, removed } }
+    {
+      raw: { revision_n: ctx.plan.revision_n, added, removed },
+      // One finding per added tag, keyed on the tag: the same tag added again
+      // in a later revision of this artifact is the same statement. A tag that
+      // cannot spell a key (a space, an accent) simply has none.
+      findings: added.map((scope) =>
+        finding({
+          key: findingKey('scope', scope),
+          title: `Revision n=${ctx.plan.revision_n} added the touched_scope tag "${scope}"`,
+          detail:
+            'The prior plan did not declare it, so any evaluator gated on that scope is new to this revision.',
+        })
+      ),
+    }
   );
 }
 

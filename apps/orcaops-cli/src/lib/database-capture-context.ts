@@ -1,11 +1,11 @@
 import { isDeepStrictEqual } from 'node:util';
 
-import { Repo } from '@orcaops/core';
+import { PROCESSING_PROCESSOR_CONTRACT, Repo } from '@orcaops/core';
 import {
   requireDatabaseExecutionContext,
   setupProjectDatabase,
 } from '@orcaops/core/history/database-capture';
-import { HistoryScopeError } from '@orcaops/project-scope/history';
+import { unavailableProjectError } from '@orcaops/project-scope/history';
 import type { DatabaseHistoryProject } from '@orcaops/project-scope/history/database';
 import {
   assertNoSecretsInPayload,
@@ -13,8 +13,9 @@ import {
   isUuidV7,
   type SecretFinding,
 } from '@orcaops/storage';
-import type { DatabaseJson } from '@orcaops/storage/history/database';
 import {
+  type CaptureProcessingAdmission,
+  type DatabaseJson,
   openProjectDatabase,
   type ProjectDatabase,
   ProjectDatabaseError,
@@ -43,6 +44,12 @@ export interface DatabaseCaptureCommandContext {
   repo: Repo;
   invokingAgent: InvokingAgentResolution;
   shellKey: ShellKey;
+  /**
+   * What every capture settled under this context admits for background
+   * processing. It carries this invocation's no-LLM choice, so a later
+   * invocation can never turn a `--no-llm` capture's job into a paid call.
+   */
+  processing: CaptureProcessingAdmission;
   close(): void;
 }
 
@@ -61,6 +68,12 @@ export interface ResolveDatabaseCaptureContext {
   project?: string;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /**
+   * This invocation's `--no-llm`. It is retained on every job the captures
+   * under this context admit, so the verbs that offer the flag pass it; a verb
+   * that has no such flag leaves it absent, which is the choice it made.
+   */
+  noLlm?: boolean;
   /**
    * Supplied only by `capture plan`, the one verb that creates history from nothing. It
    * refuses the authored payload and returns it for the setup to refuse again, so nothing
@@ -111,10 +124,11 @@ export async function resolveDatabaseCaptureContext(
       return resolveDatabaseCaptureContext(rest);
     }
     if (scope.projects.length !== 1 || !selected?.authority || !selected.database)
-      throw new HistoryScopeError(
-        selected?.completeness.issues[0]?.code ?? 'HISTORY_MISSING',
-        'Select the original registered project and available history before capturing; do not initialize a replacement'
-      );
+      throw unavailableProjectError(selected?.completeness.issues ?? [], {
+        code: 'HISTORY_MISSING',
+        message:
+          'Select the original registered project and available history before capturing; do not initialize a replacement',
+      });
     if (!scope.gitContext)
       throw new ProjectDatabaseError(
         'IDENTITY_RECOVERY_REQUIRED',
@@ -189,6 +203,14 @@ export async function resolveDatabaseCaptureContext(
       repo,
       invokingAgent,
       shellKey,
+      processing: {
+        processorContract: PROCESSING_PROCESSOR_CONTRACT,
+        withoutModel: options.noLlm === true,
+        // The registered worktree, not the invocation's cwd: dispatch re-reads
+        // the configuration that governs this checkout, and a capture made from
+        // a subdirectory governs the same file its worktree root does.
+        origin: { worktreeRoot: registered.git.worktreeRoot },
+      },
       close: () => scope.close(),
     };
   } catch (cause) {
@@ -233,6 +255,8 @@ export async function prepareDatabaseCapture<TRaw, TInput = TRaw>(input: {
   project?: string;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** See ResolveDatabaseCaptureContext.noLlm. */
+  noLlm?: boolean;
   /** Only `capture plan` passes this; see ResolveDatabaseCaptureContext.initialize. */
   initialize?: (raw: TRaw, repository: FreshCaptureRepository) => Promise<readonly unknown[]>;
 }): Promise<PreparedDatabaseCapture<TRaw, TInput>> {
@@ -245,6 +269,7 @@ export async function prepareDatabaseCapture<TRaw, TInput = TRaw>(input: {
     project: input.project,
     env: input.env,
     signal: input.signal,
+    noLlm: input.noLlm,
     ...(initialize
       ? { initialize: (repository) => initialize(structuredClone(raw), repository) }
       : {}),

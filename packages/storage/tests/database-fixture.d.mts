@@ -18,7 +18,13 @@ export function snapshot(driver: typeof Database, file: string): FixtureSnapshot
 export function restoreFixture(
   candidate: string,
   fixture: string,
-  expectedVersion?: number
+  expectedVersion?: number,
+  options?: {
+    validateSchema?(
+      database: Database.Database,
+      saved: { schemaVersion: number; definitions: FixtureSnapshot['definitions'] }
+    ): void;
+  }
 ): Promise<RestoredFixture>;
 export function encode(value: unknown): unknown;
 export function decode(value: unknown): unknown;

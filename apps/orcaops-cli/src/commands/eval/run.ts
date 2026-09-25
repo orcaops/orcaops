@@ -13,6 +13,7 @@ import {
 } from '@orcaops/storage';
 import {
   appendProjectArtifactEvents,
+  type EvaluatorRunEvidence,
   openProjectDatabase,
   type ProjectDatabaseAuthority,
   ProjectDatabaseError,
@@ -38,7 +39,9 @@ import { databaseEvaluatorStore } from '../../lib/database-evaluators.js';
 import { resolveDatabaseHistoryCommandContext } from '../../lib/database-history-context.js';
 import {
   buildEvaluatorContext,
+  evaluatorRunBasis,
   type LifecycleEvaluatorContext,
+  producerRan,
 } from '../../lib/evaluator-bridge.js';
 import { discoverEvaluatorsForCli, evaluatorNotFound } from '../../lib/evaluator-discovery.js';
 import { computePackTrustDecisions } from '../../lib/evaluator-grants.js';
@@ -64,6 +67,7 @@ interface PreparedEvalRun {
   sidecarPayloads: Array<{ eventId: string; bytes: Buffer }>;
   expectedRevision: ReturnType<typeof resolveDatabaseHistoryArtifact>['artifact']['revision'];
   secretAllow: readonly string[];
+  evaluatorEvidence: EvaluatorRunEvidence[];
   stamped: EvaluatorRunPayload;
 }
 
@@ -156,7 +160,10 @@ async function prepareDatabaseEvalRun(
       });
     });
     const validator = createParamsValidator();
-    const runPayload = await dependencies.dispatch(
+    // The findings stay beside the run rather than inside it: the run payload is strict, is
+    // re-parsed on every thread rebuild and is mirrored to a cloud shape this repository does not
+    // own. They are retained in the same append as the event, by their own rows.
+    const { run: runPayload, findings } = await dependencies.dispatch(
       evaluator,
       baseContext,
       llm,
@@ -208,6 +215,9 @@ async function prepareDatabaseEvalRun(
       ),
       expectedRevision: { ...selected.artifact.revision },
       secretAllow: [...context.config.redact.allow],
+      evaluatorEvidence: producerRan(stamped)
+        ? [{ run_id: stamped.run_id, findings, basis: evaluatorRunBasis(baseContext, evaluator) }]
+        : [],
       stamped,
     };
   } catch (cause) {
@@ -267,6 +277,7 @@ export function createDatabaseEvalRunAction(dependencies: EvalRunDependencies) {
             eventBytes: prepared.eventBytes,
             sidecarPayloads: prepared.sidecarPayloads,
             secretAllow: prepared.secretAllow,
+            evaluatorEvidence: prepared.evaluatorEvidence,
           },
           operationOptions
         );
@@ -279,10 +290,14 @@ export function createDatabaseEvalRunAction(dependencies: EvalRunDependencies) {
       }
 
       const blocking = isBlockingEvaluatorFailure(prepared.stamped);
+      const established = prepared.evaluatorEvidence[0]?.findings;
       const output = {
         artifact_id: prepared.artifactId,
         evaluator_ref: prepared.stamped.evaluator_ref,
         run: prepared.stamped,
+        ...(established?.status === 'established'
+          ? { findings_retained: established.record.findings.length }
+          : {}),
         blocking,
       };
       if (json) {

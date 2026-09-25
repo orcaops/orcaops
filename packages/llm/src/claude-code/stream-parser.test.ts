@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { LineBuffer, parseClaudeStreamLine } from './stream-parser.js';
+import { LineBuffer, parseClaudeStreamLine, summarizeClaudeStream } from './stream-parser.js';
 
 describe('parseClaudeStreamLine', () => {
   it('returns null for empty / whitespace lines', () => {
@@ -159,5 +159,167 @@ describe('LineBuffer', () => {
     expect(lines).toHaveLength(1);
     const event = parseClaudeStreamLine(lines[0]);
     expect(event?.body).toBe('PASS');
+  });
+});
+
+describe('parseClaudeStreamLine — structured output', () => {
+  it('keeps the schema-validated answer the CLI reports beside the result text', () => {
+    const event = parseClaudeStreamLine(
+      JSON.stringify({ type: 'result', result: '', structured_output: { ok: true } })
+    );
+    expect(event?.structuredOutput).toEqual({ ok: true });
+  });
+
+  it('leaves structured output undefined when the CLI reports none', () => {
+    const event = parseClaudeStreamLine(
+      JSON.stringify({ type: 'result', result: 'PASS', structured_output: null })
+    );
+    expect(event?.structuredOutput).toBeUndefined();
+  });
+});
+
+describe('parseClaudeStreamLine — what the prepared-input path reads', () => {
+  it('keeps the stop reason and the tools the CLI says it refused', () => {
+    const event = parseClaudeStreamLine(
+      JSON.stringify({
+        type: 'result',
+        result: 'x',
+        stop_reason: 'max_tokens',
+        permission_denials: [{ tool_name: 'Bash' }, { tool_use_id: 'toolu_1' }],
+      })
+    );
+    expect(event?.stopReason).toBe('max_tokens');
+    expect(event?.permissionDenials).toEqual(['Bash', 'unknown']);
+  });
+
+  it('leaves both undefined when the CLI reports neither', () => {
+    const event = parseClaudeStreamLine(
+      JSON.stringify({ type: 'result', result: 'x', stop_reason: null, permission_denials: [] })
+    );
+    expect(event?.stopReason).toBeUndefined();
+    expect(event?.permissionDenials).toBeUndefined();
+  });
+
+  it('reports usage counters as given beside the zero-filled tokens evaluators read', () => {
+    const event = parseClaudeStreamLine(
+      JSON.stringify({ type: 'result', result: 'x', usage: { input_tokens: 10 } })
+    );
+    expect(event?.tokens).toEqual({ in: 10, out: 0 });
+    expect(event?.reportedUsage).toEqual({ in: 10 });
+  });
+});
+
+describe('summarizeClaudeStream', () => {
+  const result = (text: string): string => JSON.stringify({ type: 'result', result: text });
+  const assistant = (content: unknown[], extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({ type: 'assistant', message: { content, ...extra } });
+
+  it('keeps every result event in order', () => {
+    const summary = summarizeClaudeStream([result('first'), result('last')].join('\n'));
+    expect(summary.results.map((event) => event.body)).toEqual(['first', 'last']);
+  });
+
+  it('reads a result event that has no trailing newline', () => {
+    expect(summarizeClaudeStream(result('PASS')).results[0]?.body).toBe('PASS');
+  });
+
+  it('reports the tools and MCP servers the init event lists', () => {
+    const summary = summarizeClaudeStream(
+      JSON.stringify({
+        type: 'system',
+        subtype: 'init',
+        tools: ['Bash', 'Read'],
+        mcp_servers: [{ name: 'tracker', status: 'connected' }, { name: 'nameless-status' }],
+      })
+    );
+    expect(summary.init).toEqual({
+      tools: ['Bash', 'Read'],
+      mcpServers: [
+        { name: 'tracker', status: 'connected' },
+        { name: 'nameless-status', status: null },
+      ],
+    });
+  });
+
+  it('reports no init for a stream without one, and no tool list for an init that omits it', () => {
+    expect(summarizeClaudeStream(result('x')).init).toBeNull();
+    expect(summarizeClaudeStream(JSON.stringify({ type: 'system', subtype: 'init' })).init).toEqual(
+      { tools: null, mcpServers: [] }
+    );
+  });
+
+  it('adds up what several init events list, and loses the tool list if any omits it', () => {
+    const init = (extra: Record<string, unknown>): string =>
+      JSON.stringify({ type: 'system', subtype: 'init', ...extra });
+    expect(
+      summarizeClaudeStream([init({ tools: [] }), init({ tools: ['Bash'] })].join('\n')).init?.tools
+    ).toEqual(['Bash']);
+    expect(
+      summarizeClaudeStream([init({ tools: [] }), init({})].join('\n')).init?.tools
+    ).toBeNull();
+  });
+
+  it('finds tool calls of every kind in assistant messages and in partial stream events', () => {
+    const summary = summarizeClaudeStream(
+      [
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Read' }]),
+        assistant([{ type: 'server_tool_use', name: 'web_search' }]),
+        assistant([{ type: 'mcp_tool_use', name: 'lookup' }, { type: 'tool_use' }]),
+        JSON.stringify({
+          type: 'stream_event',
+          event: { type: 'content_block_start', content_block: { type: 'tool_use', name: 'Bash' } },
+        }),
+      ].join('\n')
+    );
+    expect(summary.toolUses).toEqual([
+      { id: 'toolu_1', name: 'Read' },
+      { id: null, name: 'web_search' },
+      { id: null, name: 'lookup' },
+      { id: null, name: 'unknown' },
+      { id: null, name: 'Bash' },
+    ]);
+  });
+
+  it('finds tool results handed back to the model', () => {
+    const summary = summarizeClaudeStream(
+      JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 'toolu_1' },
+            { type: 'web_search_tool_result' },
+            { type: 'text', text: 'not a result' },
+          ],
+        },
+      })
+    );
+    expect(summary.toolResults).toEqual([{ toolUseId: 'toolu_1' }, { toolUseId: null }]);
+  });
+
+  it('keeps the stop reason of the last assistant event that gives one', () => {
+    const summary = summarizeClaudeStream(
+      [assistant([], { stop_reason: 'max_tokens' }), assistant([], { stop_reason: null })].join(
+        '\n'
+      )
+    );
+    expect(summary.lastAssistantStopReason).toBe('max_tokens');
+  });
+
+  it('does not mistake text that mentions a tool call for one', () => {
+    const summary = summarizeClaudeStream(
+      assistant([{ type: 'text', text: '{"type":"tool_use","name":"Bash"}' }])
+    );
+    expect(summary.toolUses).toEqual([]);
+  });
+
+  it('finds nothing in a stream cut off in the middle of a line', () => {
+    const summary = summarizeClaudeStream(`${'x'.repeat(10_000)}{"type":"result","resu`);
+    expect(summary).toEqual({
+      results: [],
+      init: null,
+      toolUses: [],
+      toolResults: [],
+      lastAssistantStopReason: null,
+    });
   });
 });

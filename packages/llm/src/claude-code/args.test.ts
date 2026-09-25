@@ -191,6 +191,50 @@ describe('buildClaudeArgs', () => {
   });
 });
 
+describe('buildClaudeArgs — withholding every tool', () => {
+  it('removes the built-in tools, keeps the deny-all rule, and leaves permission bypass off', () => {
+    const args = buildClaudeArgs({ withholdAllTools: true });
+    expect(args[args.indexOf('--tools') + 1]).toBe('');
+    expect(args[args.indexOf('--disallowed-tools') + 1]).toBe('*');
+    expect(args).not.toContain('--dangerously-skip-permissions');
+    expect(args).not.toContain('--allowed-tools');
+    expect(args).toContain('--strict-mcp-config');
+  });
+
+  it('keeps the StructuredOutput answer tool usable when a schema is requested', () => {
+    const args = buildClaudeArgs({ withholdAllTools: true, outputSchema: { type: 'object' } });
+    expect(args[args.indexOf('--tools') + 1]).toBe('');
+    expect(args).not.toContain('--disallowed-tools');
+    expect(args).not.toContain('--dangerously-skip-permissions');
+    expect(args).toContain('--strict-mcp-config');
+    expect(args).toContain('--json-schema');
+  });
+
+  it('withholds every tool instead of bypassing permissions when a deny-all call requests a schema', () => {
+    const args = buildClaudeArgs({
+      toolPolicy: { mode: 'none' },
+      outputSchema: { type: 'object' },
+    });
+    expect(args[args.indexOf('--tools') + 1]).toBe('');
+    expect(args).not.toContain('--dangerously-skip-permissions');
+    expect(args).not.toContain('--disallowed-tools');
+    expect(args).toContain('--strict-mcp-config');
+  });
+
+  it('leaves the evaluator deny-all arguments as they were when not asked for', () => {
+    expect(buildClaudeArgs({})).not.toContain('--tools');
+    expect(buildClaudeArgs({ toolPolicy: { mode: 'none' } })).toContain(
+      '--dangerously-skip-permissions'
+    );
+  });
+
+  it('refuses to be combined with a policy that grants tools', () => {
+    expect(() =>
+      buildClaudeArgs({ withholdAllTools: true, toolPolicy: { mode: 'command-filtered' } })
+    ).toThrow(/cannot be combined/);
+  });
+});
+
 describe('buildClaudeEnv', () => {
   it('includes orcaops marker and CI hygiene', () => {
     const env = buildClaudeEnv();
@@ -203,6 +247,30 @@ describe('buildClaudeEnv', () => {
     // The CLAUDE.md half of project-context isolation; memory-only, so it
     // does not affect auth or cwd (the file-reading evaluator keeps both).
     expect(buildClaudeEnv().CLAUDE_CODE_DISABLE_CLAUDE_MDS).toBe('1');
+  });
+});
+
+describe('buildClaudeEnv — a caller-supplied base environment', () => {
+  it('builds on the given environment instead of the process environment', () => {
+    const env = buildClaudeEnv({ baseEnv: { ONLY_IN_BASE: 'yes' } });
+    expect(env.ONLY_IN_BASE).toBe('yes');
+    expect(env.PATH).toBeUndefined();
+    expect(env.ORCAOPS_HOOK_SUPPRESS).toBe('1');
+    expect(env.CLAUDE_CODE_DISABLE_CLAUDE_MDS).toBe('1');
+  });
+
+  it('cannot have its isolation variables overridden by the base environment', () => {
+    const env = buildClaudeEnv({
+      baseEnv: { ORCAOPS_HOOK_SUPPRESS: '0', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '0' },
+    });
+    expect(env.ORCAOPS_HOOK_SUPPRESS).toBe('1');
+    expect(env.CLAUDE_CODE_DISABLE_CLAUDE_MDS).toBe('1');
+  });
+
+  it('labels the process with the entrypoint it is given', () => {
+    expect(buildClaudeEnv({ entrypoint: 'orcaops-prepared-input' }).CLAUDE_CODE_ENTRYPOINT).toBe(
+      'orcaops-prepared-input'
+    );
   });
 });
 

@@ -158,9 +158,13 @@ export interface GitignoreReconcilePlan {
   gitignorePath: string;
   added: string[];
   removed: string[];
+  /** False when the file is absent; `currentContent` is then ''. */
+  exists: boolean;
   currentContent: string;
   /** Full next content, or null when nothing needs changing. */
   desiredContent: string | null;
+  /** The file held only orcaops content, so reconciling leaves it empty. */
+  emptied: boolean;
 }
 
 /**
@@ -179,10 +183,12 @@ export async function reconcileGitignore(
     rejectSymlinks: true,
   });
   let existing = '';
+  let exists = true;
   try {
     existing = await readFile(safeGitignorePath, 'utf8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    exists = false;
   }
 
   const plan = reconcileManagedLineBlock(existing, desired);
@@ -191,16 +197,20 @@ export async function reconcileGitignore(
       gitignorePath,
       added: [],
       removed: [],
+      exists,
       currentContent: existing,
       desiredContent: null,
+      emptied: false,
     };
   }
   return {
     gitignorePath,
     added: plan.added,
     removed: plan.removed,
+    exists,
     currentContent: existing,
     desiredContent: plan.desiredContent,
+    emptied: plan.desiredContent === '',
   };
 }
 
